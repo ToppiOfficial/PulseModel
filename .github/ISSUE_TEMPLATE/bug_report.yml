@@ -1,0 +1,98 @@
+name: Compile bug report
+description: A model fails to compile, or compiles but is wrong in-game.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. PulseMDL2 is beta - most bugs are fixable, but
+        only if they can be reproduced. **The full compile log and the compile
+        script are the two things always worth having.** Most issues can be
+        solved from those alone.
+
+        Source assets are optional - only send them if I ask. If they are
+        copyrighted, commissioned, or otherwise cannot be posted publicly, say
+        so and we will arrange it privately at that point. Never upload
+        anything you do not have the right to share.
+
+  - type: input
+    id: version
+    attributes:
+      label: PulseMDL2 version
+      description: The `version:` line printed in the header when the compiler starts.
+      placeholder: "0.1.0 (model version 49)"
+    validations:
+      required: true
+
+  - type: input
+    id: game
+    attributes:
+      label: Target game
+      description: Which game or branch is the model being compiled for?
+      placeholder: "Team Fortress 2 / Half-Life 2 / Garry's Mod / SFM / ..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: vtxformat
+    attributes:
+      label: .vtx format
+      description: From `$vtxformat` or the `-vtxformat` switch. Leave blank if you did not set it.
+      options:
+        - "0 - legacy (TF2/L4D2/GMod/HL2)"
+        - "1 - full (SFM/CS:GO/ASW)"
+        - "Not set / don't know"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What went wrong, and what you expected instead. If it is a visual problem, screenshots help.
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Full compile log
+      description: >
+        The **entire** console output, start to finish - not just the error line.
+        The header, the warnings before the failure and the stage it died in all
+        matter. Paste it here or attach it as a `.txt` if it is long.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: script
+    attributes:
+      label: Compile script
+      description: The `.pulseqc` script, plus any files it `$include`s.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sources
+    attributes:
+      label: Source files
+      description: >
+        Do **not** attach these up front - most issues are solved from the log
+        and script. This just tells me what is available if I need to ask.
+      options:
+        - "Can be shared publicly if needed"
+        - "Cannot be shared publicly - private only, on request"
+        - "No longer available"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not already reported.
+          required: true
+        - label: I am using the latest release.
+          required: true
+        - label: The same source compiles (or fails) as expected in another compiler - if you tried one.

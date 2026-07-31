@@ -1,0 +1,44 @@
+name: Dev build
+
+# Manual only. Overwrites the single rolling "dev" release with the current
+# commit's build; the release body is that commit's message.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        # no -G: use whatever Visual Studio the runner image ships
+        run: cmake -B build -A x64 -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath "pulsemdl2-dev-${{ github.sha }}.zip"
+
+      - name: Publish dev release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git log -1 --pretty=%B > notes.txt
+          # replace the old dev release and its tag, so "dev" is always latest
+          gh release delete dev --yes --cleanup-tag || true
+          gh release create dev "pulsemdl2-dev-${{ github.sha }}.zip" \
+            --target "${{ github.sha }}" \
+            --title "Dev build (${GITHUB_SHA:0:7})" \
+            --notes-file notes.txt \
+            --prerelease \
+            --latest=false

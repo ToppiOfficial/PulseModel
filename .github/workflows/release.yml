@@ -1,0 +1,50 @@
+name: Release
+
+# Manual only. Tags with the version from CMakeLists.txt and creates a DRAFT
+# release seeded with the commit message - nothing is published until you edit
+# the notes and hit publish yourself.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path CMakeLists.txt -Pattern 'project\(PulseMDL2 VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Configure
+        # no -G: use whatever Visual Studio the runner image ships
+        run: cmake -B build -A x64 -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath "pulsemdl2-v${{ steps.ver.outputs.version }}.zip"
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git log -1 --pretty=%B > notes.txt
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            "pulsemdl2-v${{ steps.ver.outputs.version }}.zip" \
+            --target "${{ github.sha }}" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --notes-file notes.txt \
+            --draft

@@ -1,0 +1,71 @@
+name: Feature request
+description: Suggest a new compile-script command, format support, or behavior.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Requests are welcome. Two things worth knowing before you write one:
+
+        - **Not everything missing is an oversight.** Some studiomdl features
+          are deliberately left out because they are obscure, broken in the
+          engines this targets, or replaced by a different command here. Saying
+          *what you are trying to do* matters more than naming the command you
+          expected to find.
+        - **This is a Source model compiler for `.mdl` version 49.** Anything
+          that would require a different model format or a different engine
+          generation is out of scope.
+
+  - type: textarea
+    id: request
+    attributes:
+      label: What should it be able to do?
+      description: Describe the feature or command you want, and what it would produce.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: What are you trying to make?
+      description: >
+        The actual model or workflow behind the request - a jiggling cape, a
+        ragdoll that keeps snapping, an import step you are doing by hand.
+        This is the part that decides whether the feature gets built, and
+        sometimes it turns out an existing command already covers it.
+    validations:
+      required: true
+
+  - type: input
+    id: prior-art
+    attributes:
+      label: Equivalent elsewhere
+      description: >
+        Optional. If another compiler does this, name it - the stock QC command,
+        a studiomdl fork, or a different tool entirely.
+      placeholder: "$jigglebone, Crowbar's ..., Blender Source Tools ..."
+
+  - type: input
+    id: game
+    attributes:
+      label: Target game
+      description: Optional. Which game or branch you need this for.
+      placeholder: "Team Fortress 2 / Half-Life 2 / Garry's Mod / SFM / ..."
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: >
+        Optional. How you are getting by today - editing the source asset,
+        compiling with another tool, patching the output. Helps rank how badly
+        it is needed.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not already requested.
+          required: true
+        - label: I checked the current commands in `pulsemdl2/qcloader.cpp` (the `kCommands` table) and this is not already supported.
