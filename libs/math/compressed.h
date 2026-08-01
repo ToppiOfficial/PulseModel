@@ -216,6 +216,23 @@ struct Quaternion48S {
         w1 = static_cast<uint16_t>((b & 0x7FFF) | ((offset & 1) << 15));
         w2 = static_cast<uint16_t>((c & 0x7FFF) | (dneg << 15));
     }
+
+    // the two top bits carry `offset` split high/low, and the dropped component
+    // is the largest one, so it comes back off the unit-length constraint
+    Quaternion Get() const {
+        const int offset = ((w0 >> 15) << 1) | (w1 >> 15);
+        Quaternion q;
+        float* p = &q.x;
+        p[offset] = (static_cast<int>(w0 & 0x7FFF) - kShift48S) / kScale48S;
+        p[(offset + 1) % 4] = (static_cast<int>(w1 & 0x7FFF) - kShift48S) / kScale48S;
+        p[(offset + 2) % 4] = (static_cast<int>(w2 & 0x7FFF) - kShift48S) / kScale48S;
+        const double rest = static_cast<double>(p[offset]) * p[offset] +
+                            static_cast<double>(p[(offset + 1) % 4]) * p[(offset + 1) % 4] +
+                            static_cast<double>(p[(offset + 2) % 4]) * p[(offset + 2) % 4];
+        float d = static_cast<float>(sqrt(rest < 1.0 ? 1.0 - rest : 0.0));
+        p[(offset + 3) % 4] = (w2 & 0x8000) ? -d : d;
+        return q;
+    }
 };
 static_assert(sizeof(Quaternion48S) == 6, "Quaternion48S layout");
 

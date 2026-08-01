@@ -1075,6 +1075,11 @@ struct CompileInput {
     // start empty instead of at the bone origin
     bool skipBoneInBBox = false;
 
+    // $modelbudget: per-model ceilings. Default to the format limits, and only
+    // ever lower them - a budget above pulselimits.h is rejected at parse time.
+    int budgetBones = lim::kMaxBones;
+    int budgetMaterials = lim::kMaxSkins;
+
     // $bbox / $cbox, raw script values - no scale or rotation is applied
     // (Cmd_BBox/Cmd_CBox just read six floats). Unset leaves the writer's
     // defaults: the hull comes from sequence 0, the view box stays zero.

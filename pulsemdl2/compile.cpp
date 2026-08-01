@@ -9553,8 +9553,10 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             return false;
     }
 
-    if (out.bones.size() > static_cast<size_t>(lim::kMaxBones)) {
-        if (err) *err = "too many bones";
+    if (out.bones.size() > static_cast<size_t>(input.budgetBones)) {
+        if (err)
+            *err = "too many bones (" + std::to_string(out.bones.size()) + ", max " +
+                   std::to_string(input.budgetBones) + ")";
         return false;
     }
 
@@ -9942,10 +9944,10 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // reference SetSkinValues: the row is one entry per MATERIAL, and every
     // family starts as the identity so an unlisted material keeps its own.
     const int nummaterials = static_cast<int>(input.mats.materialToTexture.size());
-    if (nummaterials > lim::kMaxSkins) {
+    if (nummaterials > input.budgetMaterials) {
         if (err)
             *err = "too many materials (" + std::to_string(nummaterials) + ", max " +
-                   std::to_string(lim::kMaxSkins) + ")";
+                   std::to_string(input.budgetMaterials) + ")";
         return false;
     }
     out.numskinref = nummaterials;

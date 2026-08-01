@@ -25,5 +25,7 @@ add_compile_definitions(${PLATFORM_DEFINES} _CRT_SECURE_NO_WARNINGS)
 # Layout (kept shallow):
 #   libs/     - C++ libraries (pulselimits.h lives here), vendored OSS
 #   pulsemdl2/ - the app: .pulsemdl loader, compile stage, writers, main()
+#   mdldecompile/ - the reverse tool: .mdl -> .pulseqc
 add_subdirectory(libs)
 add_subdirectory(pulsemdl2)
+add_subdirectory(mdldecompile)

@@ -2889,6 +2889,47 @@ bool CmdVtxFormat(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $modelbudget { bones <n> materials <n> } - lower the compile ceilings for
+// this model. Braces are optional for a single field. Budgets only ever lower:
+// the pulselimits.h value is both the default and the cap.
+bool CmdModelBudget(Ctx& c, const Token& cmd) {
+    const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
+    if (braced)
+        c.pos++;
+
+    do {
+        if (c.Eof())
+            return c.Fail(cmd.line, cmd.text + (braced ? ": missing '}'"
+                                                       : ": expects a budget name"));
+        const Token t = c.toks[c.pos++];
+        if (braced && !t.quoted && t.text == "}")
+            break;
+        const std::string o = t.quoted ? std::string() : Lower(t.text);
+        const Token sub{cmd.text + " " + t.text, t.line, false};
+
+        int* dst = nullptr;
+        int hard = 0;
+        if (o == "bones") {
+            dst = &c.in.budgetBones;
+            hard = lim::kMaxBones;
+        } else if (o == "materials") {
+            dst = &c.in.budgetMaterials;
+            hard = lim::kMaxSkins;
+        } else {
+            return c.Fail(t.line, cmd.text + ": invalid syntax \"" + t.text + "\"");
+        }
+
+        int value = 0;
+        if (!c.WantInt("a count", sub, value))
+            return false;
+        if (value < 1 || value > hard)
+            return c.Fail(t.line, cmd.text + " " + o + ": " + std::to_string(value) +
+                                  " is out of range (1-" + std::to_string(hard) + ")");
+        *dst = value;
+    } while (braced);
+    return true;
+}
+
 // $renderpass <name> - replaces QC's $opaque / $mostlyopaque flags. "none" is
 // authorable, so the no-flag default can be written down explicitly.
 bool CmdRenderPass(Ctx& c, const Token& cmd) {
@@ -5087,16 +5128,21 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
 // $physicsjoint <bone> { x limit <min> <max> [friction <f>] / y free / z fixed }
 // An omitted axis is LOCKED, not free - the compile stage zero-fills and only
 // the axes named here move.
+//
+// Braces are optional for a single axis: $physicsjoint <bone> x fixed. More than
+// one axis needs either a block or one $physicsjoint per axis.
 bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
     const std::string where = "$physicsjoint \"" + joint.bonename + "\"";
-    if (!WantOpenBrace(c, cmd, where))
-        return false;
+    const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
+    if (braced)
+        c.pos++;
 
-    while (true) {
+    do {
         if (c.Eof())
-            return c.Fail(cmd.line, where + ": missing '}'");
+            return c.Fail(cmd.line, where + (braced ? ": missing '}'"
+                                                    : ": expected x, y or z"));
         const Token t = c.toks[c.pos++];
-        if (!t.quoted && t.text == "}")
+        if (braced && !t.quoted && t.text == "}")
             break;
 
         cm::PhysicsJointAxis a;
@@ -5104,7 +5150,8 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
         if      (ax == "x") a.axis = 0;
         else if (ax == "y") a.axis = 1;
         else if (ax == "z") a.axis = 2;
-        else return c.Fail(t.line, where + ": expected x, y, z or '}', got \"" +
+        else return c.Fail(t.line, where + ": expected x, y" +
+                                   (braced ? ", z or '}'" : " or z") + ", got \"" +
                                    t.text + "\"");
 
         const Token sub{where + " " + t.text, t.line, false};
@@ -5129,23 +5176,28 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
                 return false;
         }
         joint.axes.push_back(a);
-    }
+    } while (braced);
     return true;
 }
 
 // $physicsmarkup <bone> { ... } - the per-body override. Every field falls back
 // to the $physicsmodel setting of the same name, so presence is what counts and
 // an authored 0 has to beat a nonzero default.
+//
+// Braces are optional for a single field: $physicsmarkup <bone> massbias 7. More
+// than one field needs either a block or one $physicsmarkup per field.
 bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
     const std::string where = "$physicsmarkup \"" + mk.bonename + "\"";
-    if (!WantOpenBrace(c, cmd, where))
-        return false;
+    const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
+    if (braced)
+        c.pos++;
 
-    while (true) {
+    do {
         if (c.Eof())
-            return c.Fail(cmd.line, where + ": missing '}'");
+            return c.Fail(cmd.line, where + (braced ? ": missing '}'"
+                                                    : ": expects a field name"));
         const Token t = c.toks[c.pos++];
-        if (!t.quoted && t.text == "}")
+        if (braced && !t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
         const Token sub{where + " " + t.text, t.line, false};
@@ -5169,7 +5221,7 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
         } else {
             return c.Fail(t.line, where + ": invalid syntax \"" + t.text + "\"");
         }
-    }
+    } while (braced);
 
     if (mk.skip && !mk.mergeInto.empty())
         return c.Fail(cmd.line, where + ": sets both skip and mergeinto - pick one");
@@ -6046,6 +6098,7 @@ constexpr Command kCommands[] = {
     {"$defaultweightlist", CmdDefaultWeightList},
     {"$modelarchetype", CmdModelArchetype},
     {"$vtxformat", CmdVtxFormat},
+    {"$modelbudget", CmdModelBudget},
     {"$setbindpose", CmdSetBindPose},
     {"$setflex", CmdSetFlex},
     {"$renderpass", CmdRenderPass},

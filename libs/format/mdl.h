@@ -120,6 +120,8 @@ inline constexpr int32_t STUDIO_EVENT = 0x2000;
 inline constexpr int32_t STUDIO_WORLD = 0x4000;
 inline constexpr int32_t STUDIO_NOFORCELOOP = 0x8000;
 inline constexpr int32_t STUDIO_EVENT_CLIENT = 0x10000;
+inline constexpr int32_t STUDIO_WORLD_AND_RELATIVE = 0x20000;
+inline constexpr int32_t STUDIO_ROOTXFORM = 0x40000;
 
 // motion type flags (movement / bone controllers)
 inline constexpr int32_t STUDIO_X = 0x00000001;
