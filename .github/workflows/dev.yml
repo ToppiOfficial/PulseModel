@@ -10,23 +10,47 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            plat: win64
+            ext: .exe
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        # no -G: use whatever Visual Studio the runner image ships
-        run: cmake -B build -A x64 -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist"
+        # no -G: use whatever toolchain the runner image ships
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist" -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="${{ github.workspace }}/dist"
 
       - name: Build
         run: cmake --build build --config Release
 
       - name: Package
-        shell: pwsh
+        shell: bash
         run: |
-          Copy-Item LICENSE dist/
-          Copy-Item README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath "pulsemdl2-dev-${{ github.sha }}.zip"
+          sha=$(echo "${{ github.sha }}" | cut -c1-7)
+          for tool in pulsemdl2 mdldecompile; do
+            mkdir -p "pkg/$tool"
+            cp "dist/$tool${{ matrix.ext }}" LICENSE README.md "pkg/$tool/"
+            (cd "pkg/$tool" && 7z a -tzip "$GITHUB_WORKSPACE/cli-$tool-${{ matrix.plat }}-$sha.zip" .)
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dev-${{ matrix.plat }}
+          path: cli-*.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dev-*
+          merge-multiple: true
 
       - name: Publish dev release
         shell: bash
@@ -36,7 +60,7 @@ jobs:
           git log -1 --pretty=%B > notes.txt
           # replace the old dev release and its tag, so "dev" is always latest
           gh release delete dev --yes --cleanup-tag || true
-          gh release create dev "pulsemdl2-dev-${{ github.sha }}.zip" \
+          gh release create dev cli-*.zip \
             --target "${{ github.sha }}" \
             --title "Dev build (${GITHUB_SHA:0:7})" \
             --notes-file notes.txt \

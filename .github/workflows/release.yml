@@ -1,8 +1,8 @@
 name: Release
 
-# Manual only. Tags with the version from CMakeLists.txt and creates a DRAFT
-# release seeded with the commit message - nothing is published until you edit
-# the notes and hit publish yourself.
+# Manual only. Tags with pulsemdl2's TOOL_VERSION and creates a DRAFT release
+# seeded with the commit message - nothing is published until you edit the notes
+# and hit publish yourself.
 on:
   workflow_dispatch:
 
@@ -11,30 +11,54 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            plat: win64
+            ext: .exe
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read version
-        id: ver
-        shell: pwsh
-        run: |
-          $v = (Select-String -Path CMakeLists.txt -Pattern 'project\(PulseMDL2 VERSION ([0-9.]+)').Matches[0].Groups[1].Value
-          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
       - name: Configure
-        # no -G: use whatever Visual Studio the runner image ships
-        run: cmake -B build -A x64 -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist"
+        # no -G: use whatever toolchain the runner image ships
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist" -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="${{ github.workspace }}/dist"
 
       - name: Build
         run: cmake --build build --config Release
 
       - name: Package
-        shell: pwsh
+        shell: bash
         run: |
-          Copy-Item LICENSE dist/
-          Copy-Item README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath "pulsemdl2-v${{ steps.ver.outputs.version }}.zip"
+          for tool in pulsemdl2 mdldecompile; do
+            mkdir -p "pkg/$tool"
+            cp "dist/$tool${{ matrix.ext }}" LICENSE README.md "pkg/$tool/"
+            (cd "pkg/$tool" && 7z a -tzip "$GITHUB_WORKSPACE/cli-$tool-${{ matrix.plat }}.zip" .)
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.plat }}
+          path: cli-*.zip
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          # each tool owns its version; the repo release tracks pulsemdl2's
+          v=$(sed -n 's/^set(TOOL_VERSION \([0-9.]*\)).*/\1/p' pulsemdl2/CMakeLists.txt)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Create draft release
         shell: bash
@@ -42,8 +66,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git log -1 --pretty=%B > notes.txt
-          gh release create "v${{ steps.ver.outputs.version }}" \
-            "pulsemdl2-v${{ steps.ver.outputs.version }}.zip" \
+          gh release create "v${{ steps.ver.outputs.version }}" cli-*.zip \
             --target "${{ github.sha }}" \
             --title "v${{ steps.ver.outputs.version }}" \
             --notes-file notes.txt \
