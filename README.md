@@ -32,7 +32,7 @@ very difficult to maintain and update. PulseMDL2 starts over from a scratch.
 - Flex/morph, flex controllers and rules, face markup, eyeballs, eyelids.
 - Physics: convex hulls, ragdoll joints, hitboxes, automatic convex
   decomposition of a render mesh.
-- A script preprocessor: `$include`, variables, macros, `$if`/`$switch`
+- A script preprocessor: `$include`, variables, macros, `$if`/`$ifdef`/`$switch`
   conditionals.
 - Both `.vtx` layouts - legacy (`-vtxformat 0`, TF2/L4D2/GMod/HL2) and full
   (`-vtxformat 1`, SFM/CS:GO/ASW).

@@ -2,7 +2,10 @@
 
 add_executable(mdldecompile main.cpp dmxwrite.cpp smdwrite.cpp)
 target_include_directories(mdldecompile PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(mdldecompile PRIVATE PULSEMDL2_VERSION="${PROJECT_VERSION}")
+# Each tool owns its own version; there is no project-wide one.
+set(TOOL_VERSION 0.1.0)
+string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
+target_compile_definitions(mdldecompile PRIVATE PULSEMDL2_VERSION="${TOOL_VERSION}")
 
 # Explorer's Details tab (file description, product name/version, copyright).
 if(WIN32)

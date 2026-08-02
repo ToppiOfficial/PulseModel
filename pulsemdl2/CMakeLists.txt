@@ -3,7 +3,10 @@
 add_executable(pulsemdl2 main.cpp dmxloader.cpp dmxrig.cpp smdloader.cpp
                meshedit.cpp compile.cpp facemarkup.cpp flexreg.cpp qcloader.cpp
                writemdl.cpp writevtx.cpp writephy.cpp)
-target_compile_definitions(pulsemdl2 PRIVATE PULSEMDL2_VERSION="${PROJECT_VERSION}")
+# Each tool owns its own version; there is no project-wide one.
+set(TOOL_VERSION 0.2.0)
+string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
+target_compile_definitions(pulsemdl2 PRIVATE PULSEMDL2_VERSION="${TOOL_VERSION}")
 
 # Explorer's Details tab (file description, product name/version, copyright).
 if(WIN32)

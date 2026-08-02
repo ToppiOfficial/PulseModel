@@ -35,7 +35,7 @@ using pulse::fatal::Fail;
 // Name the writer in the crash footer without repeating its name as a string.
 #define STAGE(fn, ...) (pulse::fatal::g_stage = #fn, fn(__VA_ARGS__))
 
-// Defined by CMake from PROJECT_VERSION, same value the .exe version resource gets.
+// Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMDL2_VERSION;
 
 namespace {
@@ -708,8 +708,7 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
     q.Line("$physicsmodel {");
     if (!phys.written)
         q.Line("    // the .phy's hulls could not be read - this file has to be supplied");
-    q.Line("    $physicsshape fromfile {");
-    q.Line("        file \"meshes/" + meshName + ".dmx\"");
+    q.Line("    $physicsshape fromfile \"meshes/" + meshName + ".dmx\" {");
     q.Line("        importtype perjoint");
     if (phys.concave || (edit && edit->Get("concave") == "1"))
         q.Line("        concave");

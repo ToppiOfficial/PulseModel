@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
-# PROJECT_VERSION is the single source: it feeds both the -version printout and
-# the Win32 version resource (pulsemdl2/version.rc.in).
-project(PulseMDL2 VERSION 0.1.0 LANGUAGES CXX)
+# No project-wide version: each tool sets TOOL_VERSION in its own CMakeLists,
+# feeding both its -version printout and its Win32 version resource.
+project(PulseMDL2 LANGUAGES CXX)
 
 # C++17: inline constexpr + nested namespaces (used by libs/pulselimits.h).
 set(CMAKE_CXX_STANDARD 17)

@@ -729,17 +729,26 @@ source::Source* MergeRenderMeshes(Ctx& c, const std::vector<source::Source*>& re
     return c.in.sources.back().get();
 }
 
-// $modelgroup <name> { mesh [name "<studio>"] <rendermesh>... | blank ... }
+// $modelgroup <name> { mesh [<display>] <rendermesh>... [name <display>] | blank ... }
+//
+// `studio` is an accepted spelling of `mesh`, for $bodygroup muscle memory.
 //
 // One `mesh` line is one bodygroup choice. Listing several $rendermesh names
 // draws them as ONE model, so a script mixes and matches meshes it already has
 // instead of exporting a combined file per combination. The choice's studio name
-// - what SFM shows - is the quoted `name`, or the render-mesh names joined with
-// '_' when there is none (compile::ChoiceName).
+// - what SFM shows - is `name <display>` (anywhere on the line) or a leading
+// word that is not a $rendermesh, else the render-mesh names joined with '_'
+// (compile::ChoiceName). A display name that collides with a $rendermesh name
+// has to use `name`.
 bool CmdModelGroup(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
         return false;
+    // duplicates are ambiguous for $modelgrouppreset and for a decompile, so
+    // they are a hard error rather than two groups the tools pick between
+    for (const auto& b : c.in.bodyparts)
+        if (b.name == name)
+            return c.Fail(cmd.line, "$modelgroup \"" + name + "\" already exists");
     const Token* brace = c.Next();
     if (!brace || brace->text != "{")
         return c.Fail(cmd.line, "$modelgroup expects '{' after the name");
@@ -761,35 +770,48 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
             part.models.push_back(std::move(model));
             continue;
         }
-        if (!t->quoted && _stricmp(t->text.c_str(), "mesh") == 0) {
+        if (!t->quoted && (_stricmp(t->text.c_str(), "mesh") == 0 ||
+                           _stricmp(t->text.c_str(), "studio") == 0)) {
             const int line = t->line;
             std::string studio;
             bool named = false;
-            if (!c.Eof() && !c.Cur().quoted && c.Cur().line == line &&
-                _stricmp(c.Cur().text.c_str(), "name") == 0) {
-                ++c.pos;
-                if (c.Eof() || (!c.Cur().quoted && c.Cur().text == "}"))
-                    return c.Fail(line, where + ": mesh name expects a display name");
-                if (!c.Want("a display name", *t, studio))
-                    return false;
-                named = true;
-            }
 
             // the render meshes this choice draws, to the end of the line - the
-            // next `mesh`/`blank`/'}' still ends the list, so an old one-per-word
-            // line keeps parsing the way it always did
+            // next `mesh`/`studio`/`blank`/'}' still ends the list, so an old
+            // one-per-word line keeps parsing the way it always did
             std::vector<source::Source*> refs;
             std::vector<std::string> refNames;
             while (!c.Eof() && c.Cur().line == line) {
                 const Token& r = c.Cur();
                 if (!r.quoted && (r.text == "}" || _stricmp(r.text.c_str(), "mesh") == 0 ||
+                                  _stricmp(r.text.c_str(), "studio") == 0 ||
                                   _stricmp(r.text.c_str(), "blank") == 0))
                     break;
                 ++c.pos;
+                // `name <display>`, anywhere on the line
+                if (!r.quoted && _stricmp(r.text.c_str(), "name") == 0) {
+                    if (named)
+                        return c.Fail(r.line, where + ": mesh is named twice");
+                    if (c.Eof() || c.Cur().line != line ||
+                        (!c.Cur().quoted && c.Cur().text == "}"))
+                        return c.Fail(r.line, where + ": mesh name expects a display name");
+                    if (!c.Want("a display name", r, studio))
+                        return false;
+                    named = true;
+                    continue;
+                }
                 auto it = c.rendermeshes.find(r.text);
-                if (it == c.rendermeshes.end())
+                if (it == c.rendermeshes.end()) {
+                    // a leading word that is not a $rendermesh is the display
+                    // name; a name that collides with one needs `name`
+                    if (!named && refs.empty()) {
+                        studio = r.text;
+                        named = true;
+                        continue;
+                    }
                     return c.Fail(r.line,
                                   where + " references unknown rendermesh \"" + r.text + "\"");
+                }
                 if (std::find(refs.begin(), refs.end(), it->second) != refs.end())
                     return c.Fail(r.line, where + ": mesh \"" + r.text + "\" is listed twice");
                 refs.push_back(it->second);
@@ -802,6 +824,14 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
             model.name = named ? studio : cm::ChoiceName(refNames);
             if (model.name.empty())
                 return c.Fail(line, where + ": mesh name is empty");
+            // mstudiomodel_t::name is a 64-byte inline field, so the writer cuts
+            // anything longer - say so here, where the line number is known
+            if (model.name.size() > 63)
+                std::fprintf(stderr,
+                             "warning: %s line %d: model name \"%s\" is %zu chars, "
+                             "truncated to \"%.63s\" - use `name <display>` to shorten it\n",
+                             c.file.c_str(), line, model.name.c_str(), model.name.size(),
+                             model.name.c_str());
             // one render mesh is drawn as it loaded; several are fused into a
             // private Source of their own (meshedit.h)
             model.source = refs.size() == 1 ? refs[0]
@@ -811,7 +841,8 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
             part.models.push_back(std::move(model));
             continue;
         }
-        return c.Fail(t->line, where + ": expected mesh, blank or '}', got \"" + t->text + "\"");
+        return c.Fail(t->line,
+                      where + ": expected mesh, studio, blank or '}', got \"" + t->text + "\"");
     }
     c.in.bodyparts.push_back(std::move(part));
     return true;
@@ -4972,24 +5003,30 @@ bool WantVec3(Ctx& c, const Token& cmd, pm::Vector3& v) {
            c.WantFloat("a Z value", cmd, v.z);
 }
 
-// $physicsshape <fromfile|fromrender> { ... }. `kind` is set by the caller.
+// $physicsshape fromfile <file> { }, fromrendermesh <$rendermesh> { }, or
+// fromrender { }. `kind` and `ref` are set by the caller; fromfile and
+// fromrendermesh differ only in where the authored geometry comes from (disk vs
+// a $rendermesh), so both are kind FromFile.
 //
 // The shape name is not authored - a body is named by its BONE everywhere in
 // the .phy, so the name is only ever a diagnostic label and is taken from
 // whatever identifies the shape (its bone, its rendermesh, its file).
-bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
-    const bool fromRender = sh.kind == cm::PhysicsShapeKind::FromRender;
-    const std::string where =
-        std::string("$physicsshape ") + (fromRender ? "fromrender" : "fromfile");
-    if (!WantOpenBrace(c, cmd, where))
-        return false;
+bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
+                    const std::string& ref, cm::PhysicsShape& sh) {
+    const bool fromRender = mode == "fromrender";
+    const bool fromMesh   = mode == "fromrendermesh";
+    const std::string where = "$physicsshape " + mode;
+    // the block is optional - every option in it has a default, so
+    // `$physicsshape fromfile "phys.dmx"` alone is a whole shape
+    const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
+    if (braced)
+        c.pos++;
 
-    std::string meshRef, fileRef;
     // importtype is named rather than numbered here (the .pulsemdl element
     // still takes the 0/1/2 the enum is built on)
     std::string importType = "perjoint";
 
-    while (true) {
+    while (braced) {
         if (c.Eof())
             return c.Fail(cmd.line, where + ": missing '}'");
         const Token t = c.toks[c.pos++];
@@ -5010,10 +5047,6 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
             if (!c.Want("a bone name", sub, sh.parentBone)) return false;
         } else if (o == "maxconvex") {
             if (!c.WantInt("a piece count", sub, sh.maxConvex)) return false;
-        } else if (!fromRender && o == "mesh") {
-            if (!c.Want("a $rendermesh name", sub, meshRef)) return false;
-        } else if (!fromRender && o == "file") {
-            if (!c.Want("a source filename", sub, fileRef)) return false;
         } else if (!fromRender && o == "importtype") {
             if (!c.Want("perjoint, singlejoint or singlehull", sub, importType))
                 return false;
@@ -5022,7 +5055,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
             sh.concave = true;
         } else if (!fromRender && o == "remove2d") {
             sh.remove2d = true;
-        } else if (fromRender && o == "decimationfactor") {
+        } else if (fromRender && (o == "decimationfactor" || o == "decimatefactor")) {
             if (!c.WantFloat("a factor", sub, sh.decimationFactor)) return false;
         } else if (fromRender && o == "cullweight") {
             if (!c.WantFloat("a weight", sub, sh.cullWeight)) return false;
@@ -5030,11 +5063,11 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
             if (!c.WantFloat("a concavity", sub, sh.concavity)) return false;
         } else if (fromRender && o == "maxhulls") {
             if (!c.WantInt("a hull count", sub, sh.maxHulls)) return false;
-        } else if (fromRender && o == "extra_skinned_bone") {
+        } else if (fromRender && o == "extrabone") {
             std::string bone;
             if (!c.Want("a bone name", sub, bone)) return false;
             sh.extraSkinnedBones.push_back(std::move(bone));
-        } else if (fromRender && o == "exception_render_mesh") {
+        } else if (fromRender && o == "excludemesh") {
             std::string mesh;
             if (!c.Want("a $rendermesh name", sub, mesh)) return false;
             sh.exceptionMeshNames.push_back(std::move(mesh));
@@ -5049,7 +5082,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
     if (fromRender) {
         // parentbone carves ONE body out of a skinned character. A prop has no
         // bone to cull against, so omitting it means "the whole render mesh",
-        // bound to the root - and extra_skinned_bone/cull_weight go unused.
+        // bound to the root - and extrabone/cullweight go unused.
         sh.name = sh.parentBone.empty() ? "generated" : sh.parentBone;
         if (sh.decimationFactor > 1.0f) sh.decimationFactor = 1.0f;
         if (sh.decimationFactor > 0.0f && sh.decimationFactor < 0.1f)
@@ -5068,7 +5101,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
         }
         if (sh.extraSkinnedBones.size() >
             static_cast<size_t>(pulse::limits::kMaxExtraSkinnedBones))
-            return c.Fail(cmd.line, where + ": too many extra_skinned_bone entries (max " +
+            return c.Fail(cmd.line, where + ": too many extrabone entries (max " +
                                     std::to_string(pulse::limits::kMaxExtraSkinnedBones) + ")");
         // the filter excludes rather than selects, so a name that resolves to
         // nothing would silently fail to exclude anything
@@ -5081,16 +5114,14 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
         return true;
     }
 
-    if (!meshRef.empty() && !fileRef.empty())
-        return c.Fail(cmd.line, where + ": takes either mesh or file, not both");
-    if (!meshRef.empty()) {
-        auto it = c.rendermeshes.find(meshRef);
+    if (fromMesh) {
+        auto it = c.rendermeshes.find(ref);
         if (it == c.rendermeshes.end())
             return c.Fail(cmd.line, where + ": references unknown rendermesh \"" +
-                                    meshRef + "\"");
+                                    ref + "\"");
         sh.source = it->second;
-        sh.name = meshRef;
-    } else if (!fileRef.empty()) {
+        sh.name = ref;
+    } else {
         // a collision-only source, loaded straight from disk with no
         // $rendermesh in front of it. Same loader as everything else, so .smd
         // and .dmx both work; morphSource stays off, so its delta shapes are
@@ -5099,14 +5130,12 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
         // hull needs the geometry, but only its shape: the physics stage flattens
         // the per-material mesh grouping away (compile.cpp CollectSourceFaces)
         // and surfaceprop comes from the script, never from a mesh material.
-        const std::string file = WithSourceExtension(c, fileRef);
+        const std::string file = WithSourceExtension(c, ref);
         sh.source = LoadSource(c, file, cmd.line, /*morphSource=*/false, /*edit=*/nullptr,
                                source::LoadKind::Collision);
         if (!sh.source)
             return false;
         sh.name = fs::path(file).stem().string();
-    } else {
-        return c.Fail(cmd.line, where + ": no mesh or file");
     }
 
     // perjoint = keep the source's own rigging (the only mode that can produce
@@ -5243,16 +5272,27 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
 
         if (o == "$physicsshape") {
             std::string mode;
-            if (!c.Want("fromfile or fromrender", sub, mode))
+            if (!c.Want("fromfile, fromrendermesh or fromrender", sub, mode))
                 return false;
             mode = Lower(mode);
-            if (mode != "fromfile" && mode != "fromrender")
-                return c.Fail(t.line, "$physicsshape: expected fromfile or fromrender, "
-                                      "got \"" + mode + "\"");
+            if (mode != "fromfile" && mode != "fromrendermesh" && mode != "fromrender")
+                return c.Fail(t.line, "$physicsshape: expected fromfile, fromrendermesh "
+                                      "or fromrender, got \"" + mode + "\"");
+            // the geometry reference rides on the command line, not inside the
+            // block - fromrender has nothing to name, it takes the whole model
+            std::string ref;
+            if (mode != "fromrender") {
+                if (!c.Want(mode == "fromfile" ? "a source filename" : "a $rendermesh name",
+                            sub, ref))
+                    return false;
+                if (ref == "{") // else the missing ref reports as a missing brace
+                    return c.Fail(t.line, "$physicsshape " + mode +
+                                          ": expected a name before '{'");
+            }
             cm::PhysicsShape sh;
             sh.kind = mode == "fromrender" ? cm::PhysicsShapeKind::FromRender
                                            : cm::PhysicsShapeKind::FromFile;
-            if (!ParsePhysShape(c, t, sh))
+            if (!ParsePhysShape(c, t, mode, ref, sh))
                 return false;
             c.in.physShapes.push_back(std::move(sh));
             if (c.in.physShapes.size() > static_cast<size_t>(pulse::limits::kMaxPhysShapes))
@@ -5615,7 +5655,7 @@ size_t CommandExtent(const Ctx& c) {
 bool ExpandCommandVars(Ctx& c) {
     const char* cmd = c.toks[c.pos].text.c_str();
     if (_stricmp(cmd, "$definemacro") == 0 || _stricmp(cmd, "$if") == 0 ||
-        _stricmp(cmd, "$switch") == 0)
+        _stricmp(cmd, "$ifdef") == 0 || _stricmp(cmd, "$switch") == 0)
         return true;
     const size_t end = CommandExtent(c);
     for (size_t i = c.pos; i < end; i++)
@@ -5773,9 +5813,10 @@ bool CondNumeric(const std::string& s) {
     return digits && i == s.size();
 }
 
+// Reversed spellings ("=!", "=>", "=<") are accepted as the same operator.
 bool IsCondOp(const std::string& s) {
     return s == "==" || s == "!=" || s == "=!" || s == ">" || s == "<" ||
-           s == ">=" || s == "<=";
+           s == ">=" || s == "=>" || s == "<=" || s == "=<";
 }
 
 // Numeric when both sides are numbers, otherwise a case-SENSITIVE string
@@ -5788,7 +5829,7 @@ bool CondCompare(const std::string& lhs, const std::string& op, const std::strin
         if (op == "!=" || op == "=!") return l != r;
         if (op == ">") return l > r;
         if (op == "<") return l < r;
-        if (op == ">=") return l >= r;
+        if (op == ">=" || op == "=>") return l >= r;
         return l <= r;
     }
     const int c = lhs.compare(rhs);
@@ -5796,7 +5837,7 @@ bool CondCompare(const std::string& lhs, const std::string& op, const std::strin
     if (op == "!=" || op == "=!") return c != 0;
     if (op == ">") return c > 0;
     if (op == "<") return c < 0;
-    if (op == ">=") return c >= 0;
+    if (op == ">=" || op == "=>") return c >= 0;
     return c <= 0;
 }
 
@@ -5938,18 +5979,40 @@ bool EvalCondition(Ctx& c, const Token& cmd, const std::vector<CondTok>& toks,
     return true;
 }
 
-// $if <cond> { ... } [$elif <cond> { ... }]... [$else { ... }]. Every clause's
-// condition is evaluated even once one has won, so a typo in a later $elif is
-// still reported; only the BODIES of the losers go unread.
-bool CmdIf(Ctx& c, const Token& cmd) {
+// $ifdef <variable> - true when the name has a value, whatever that value is.
+// The name is taken bare and unexpanded; anything past it means a comparison
+// was written, which belongs under $if.
+bool ReadDefName(Ctx& c, const Token& cmd, bool& result) {
+    if (c.Eof() || c.Cur().quoted || c.Cur().text == "{" || c.Cur().text == "}")
+        return c.Fail(cmd.line, cmd.text + " expects a variable name");
+    const Token name = c.toks[c.pos++];
+    if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
+        return c.Fail(name.line, cmd.text + " takes one bare variable name - a "
+                                 "condition belongs under $if, not $ifdef");
+    c.pos++;
+    result = c.variables.find(name.text) != c.variables.end();
+    return true;
+}
+
+// $if <cond> { ... } [$elif <cond> { ... }]... [$else { ... }], and $ifdef with
+// the same shape but a name check in every clause. Every clause's condition is
+// evaluated even once one has won, so a typo in a later $elif is still
+// reported; only the BODIES of the losers go unread.
+bool IfChain(Ctx& c, const Token& cmd, bool ifdef) {
     std::vector<Token> chosen;
     bool taken = false;
     for (Token clause = cmd;;) {
-        std::vector<CondTok> cond;
         bool val = false;
         std::vector<Token> body;
-        if (!ReadCondition(c, clause, cond) || !EvalCondition(c, clause, cond, val) ||
-            !CollectBlock(c, clause, body))
+        if (ifdef) {
+            if (!ReadDefName(c, clause, val))
+                return false;
+        } else {
+            std::vector<CondTok> cond;
+            if (!ReadCondition(c, clause, cond) || !EvalCondition(c, clause, cond, val))
+                return false;
+        }
+        if (!CollectBlock(c, clause, body))
             return false;
         if (val && !taken) {
             taken = true;
@@ -5970,6 +6033,9 @@ bool CmdIf(Ctx& c, const Token& cmd) {
     c.toks.insert(c.toks.begin() + c.pos, chosen.begin(), chosen.end());
     return true;
 }
+
+bool CmdIf(Ctx& c, const Token& cmd) { return IfChain(c, cmd, false); }
+bool CmdIfdef(Ctx& c, const Token& cmd) { return IfChain(c, cmd, true); }
 
 // $switch <variable> { $case <value> { ... } ... $default { ... } }. The value
 // compare is exact - a $case is a label, not a condition.
@@ -6059,6 +6125,7 @@ constexpr Command kCommands[] = {
     {"$definemacro", CmdDefineMacro},
     {"$endmacro", CmdEndMacroOutside},
     {"$if", CmdIf},
+    {"$ifdef", CmdIfdef},
     {"$elif", CmdElifOutside},
     {"$else", CmdElifOutside},
     {"$switch", CmdSwitch},

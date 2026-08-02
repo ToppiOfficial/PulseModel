@@ -4081,7 +4081,7 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
             int gb = FindGlobalBone(m, extra);
             if (gb < 0) {
                 std::printf("WARNING: PhysicsShapeFromRender \"%s\" lists unknown "
-                            "extra_skinned_bone \"%s\" - ignored\n",
+                            "extrabone \"%s\" - ignored\n",
                             shape.name.c_str(), extra.c_str());
                 continue;
             }
@@ -4098,7 +4098,7 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
                             "\" - every face needs all three verts weighted at least " +
                             std::to_string(shape.cullWeight) + " to it, so a smooth-skinned "
                             "mesh may need a lower cull_weight (or "
-                            "exception_render_mesh excluded too much)";
+                            "excludemesh excluded too much)";
             return false;
         }
 
@@ -7576,6 +7576,43 @@ private:
     std::unordered_map<Cell, std::vector<int>, CellHash> m_cells;
 };
 
+// Pin the root LOD's vertices to the source vertex they were actually built
+// from. The spatial search below cannot tell two coincident vertices apart: it
+// awards both to whichever source vertex it reached first and drops the other's
+// delta entirely, so a flex that should pull the pair apart moves them together
+// (the reference BuildModelToVAnimMap has the same hole). A negative pinned
+// distance keeps the search off them; verts only a lower LOD introduced have no
+// root-LOD counterpart and are left to it.
+bool PinRootLodVertices(const src::Source* pVSource, const Model& lodModel,
+                        std::vector<int>& pModelToVAnim, std::vector<float>& imapdist) {
+    if (lodModel.lodSources.empty() || lodModel.lodSources[0] != pVSource)
+        return false;
+    if (lodModel.meshVertIndexMaps.empty())
+        return false;
+    const std::vector<int>& srcToMesh = lodModel.meshVertIndexMaps[0];
+    if (srcToMesh.size() != pVSource->globalVertices.size())
+        return false;
+
+    for (int mi = 0; mi < pVSource->nummeshes; ++mi) {
+        const int matID = pVSource->meshindex[mi];
+        if (matID < 0 || matID >= static_cast<int>(lodModel.meshes.size()))
+            continue;
+        const src::SrcMesh& srcMesh = pVSource->mesh[matID];
+        const int base = lodModel.meshes[matID].vertexoffset;
+        for (int v = 0; v < srcMesh.numvertices; ++v) {
+            const int nSrcID = srcMesh.vertexoffset + v;
+            if (nSrcID < 0 || nSrcID >= static_cast<int>(srcToMesh.size()))
+                continue;
+            const int modelVert = base + srcToMesh[nSrcID];
+            if (modelVert < 0 || modelVert >= static_cast<int>(pModelToVAnim.size()))
+                continue;
+            pModelToVAnim[modelVert] = nSrcID;
+            imapdist[modelVert] = -1.0f; // no candidate can beat this
+        }
+    }
+    return true;
+}
+
 // reference BuildModelToVAnimMap, new-style path
 // (positions/normals from m_GlobalVertices)
 void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
@@ -7584,6 +7621,8 @@ void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
     std::vector<float> imapdist(nModelVerts, 1E30f);
     std::vector<float> imapdot(nModelVerts, -1.0f);
     pModelToVAnim.assign(nModelVerts, -1);
+
+    PinRootLodVertices(pVSource, lodModel, pModelToVAnim, imapdist);
 
     int nError = 0;
     float flErrorDist = 0.0f;
