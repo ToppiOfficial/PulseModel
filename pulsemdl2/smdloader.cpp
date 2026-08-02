@@ -349,10 +349,10 @@ int LookupIndex(TriState& st, int material, const pm::Vector3& pos, const pm::Ve
     return numvlist;
 }
 
-// reference ParseFaceData: read the 3 corner lines of one triangle.
+// reference ParseFaceData: read the 3 corner lines of one triangle. The unify
+// itself is deferred to BuildUnifiedMeshes, which the FBX loader shares.
 bool ParseFaceData(LineReader& r, int numbones, int version, float scale, int material,
-                   TriState& st, TriFace& out, std::string* err) {
-    uint32_t idx[3];
+                   TriInput& out, std::string* err) {
     for (int j = 0; j < 3; ++j) {
         const std::string* line = r.Next();
         if (!line) {
@@ -423,13 +423,10 @@ bool ParseFaceData(LineReader& r, int numbones, int version, float scale, int ma
             }
         }
 
-        idx[j] = static_cast<uint32_t>(LookupIndex(st, material, pos, nrm, tc, bw));
+        out.v[j] = TriCorner{pos, nrm, tc, bw};
     }
 
     out.material = material;
-    out.a = idx[0];
-    out.b = idx[2]; // reference winding: a, c, b
-    out.c = idx[1];
     return true;
 }
 
@@ -485,7 +482,7 @@ void SkipBlock(LineReader& r) {
 
 bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats, Source& out,
                    std::string* err) {
-    TriState st;
+    std::vector<TriInput> tris;
 
     for (;;) {
         const std::string* line = r.Next();
@@ -509,14 +506,40 @@ bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
         const int texture = mats.LookupTexture(tex.c_str(), version == 2);
         const int material = mats.UseTextureAsMaterial(texture);
 
-        TriFace f;
-        if (!ParseFaceData(r, out.numbones, version, scale, material, st, f, err))
+        TriInput f;
+        if (!ParseFaceData(r, out.numbones, version, scale, material, f, err))
             return false;
 
-        if (f.a == f.b || f.b == f.c || f.a == f.c)
-            continue; // degenerate
+        tris.push_back(f);
+    }
 
-        st.faces.push_back(f);
+    BuildUnifiedMeshes(tris, out);
+    return true;
+}
+
+} // namespace
+
+void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
+                        std::vector<std::vector<int>>* srcToUnified) {
+    TriState st;
+    std::vector<std::pair<int, int>> srcPairs; // (srcVertex, creation-order unified)
+    int maxSrc = -1;
+    for (const TriInput& t : tris) {
+        uint32_t idx[3];
+        for (int j = 0; j < 3; ++j) {
+            idx[j] = static_cast<uint32_t>(
+                LookupIndex(st, t.material, t.v[j].position, t.v[j].normal, t.v[j].texcoord,
+                            t.v[j].boneweight));
+            // recorded per corner, not per new vertex: two source vertices that
+            // unify into one must both reach it
+            if (srcToUnified && t.v[j].srcVertex >= 0) {
+                srcPairs.emplace_back(t.v[j].srcVertex, static_cast<int>(idx[j]));
+                if (t.v[j].srcVertex > maxSrc) maxSrc = t.v[j].srcVertex;
+            }
+        }
+        if (idx[0] == idx[1] || idx[1] == idx[2] || idx[0] == idx[2])
+            continue; // degenerate - dropped only after the lookups, which set lastref
+        st.faces.push_back(TriFace{t.material, idx[0], idx[2], idx[1]}); // winding: a, c, b
     }
 
     // ---- sort + build (reference BuildIndividualMeshes) --------------------
@@ -580,11 +603,24 @@ bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
         }
     }
 
-    CalcModelTangentSpaces(out);
-    return true;
-}
+    // creation-order unified indices -> sorted order, same remap faces take
+    if (srcToUnified) {
+        srcToUnified->assign(maxSrc + 1, {});
+        for (const std::pair<int, int>& p : srcPairs) {
+            if (p.second < 0 || p.second >= numvlist)
+                continue;
+            std::vector<int>& list = (*srcToUnified)[p.first];
+            const int mapped = v_ilistsort[p.second];
+            bool seen = false;
+            for (int v : list)
+                if (v == mapped) { seen = true; break; }
+            if (!seen)
+                list.push_back(mapped);
+        }
+    }
 
-} // namespace
+    CalcModelTangentSpaces(out);
+}
 
 bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, float scale,
                    std::string* err, bool /*morphSource*/, bool animOnly) {

@@ -44,23 +44,6 @@ std::string G(float v) {
 std::string G3(const pm::Vector3& v) { return G(v.x) + " " + G(v.y) + " " + G(v.z); }
 std::string G2(const pm::Vector2& v) { return G(v.x) + " " + G(v.y); }
 
-bool ReadWhole(const std::string& path, std::vector<char>& out) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f)
-        return false;
-    std::fseek(f, 0, SEEK_END);
-    const long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    if (size <= 0) {
-        std::fclose(f);
-        return false;
-    }
-    out.resize(static_cast<size_t>(size));
-    const size_t got = std::fread(out.data(), 1, out.size(), f);
-    std::fclose(f);
-    return got == out.size();
-}
-
 // --- .vvd -------------------------------------------------------------------
 
 // The vertex array for one LOD. With fixups the on-disk block is grouped by

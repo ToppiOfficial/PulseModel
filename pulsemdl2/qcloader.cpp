@@ -23,6 +23,7 @@
 #include "facemarkup.h"
 #include "flexreg.h"
 #include "meshedit.h"
+#include "fbxloader.h"
 #include "smdloader.h"
 
 namespace pulse::loader {
@@ -374,13 +375,13 @@ std::string WithDmxExtension(const std::string& s) {
 }
 
 // keyvalues1 scripts conventionally drop the source extension. Resolve it by
-// probing the search dirs in preference order - .dmx wins over a .smd of the
-// same name. Nothing found falls back to .dmx so the not-found error names the
-// primary format.
+// probing the search dirs in preference order - .dmx wins over a .smd or .fbx
+// of the same name. Nothing found falls back to .dmx so the not-found error
+// names the primary format.
 std::string WithSourceExtension(const Ctx& c, const std::string& s) {
     if (HasExtension(s))
         return s;
-    for (const char* ext : {".dmx", ".smd"})
+    for (const char* ext : {".dmx", ".smd", ".fbx"})
         if (!FindSourceFile(c, s + ext, nullptr).empty())
             return s + ext;
     return s + ".dmx";
@@ -397,6 +398,10 @@ bool IsSmdPath(const std::string& s) {
         return _stricmp(s.c_str() + s.size() - n, ext) == 0;
     };
     return ends(".smd") || ends(".sma") || ends(".phys");
+}
+
+bool IsFbxPath(const std::string& s) {
+    return s.size() >= 4 && _stricmp(s.c_str() + s.size() - 4, ".fbx") == 0;
 }
 
 // The edits one $rendermesh { } body asks for (meshedit.h).
@@ -446,16 +451,15 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
 
     // one line per file actually read - a cache reuse above prints nothing.
     // a render mesh names its alias and prints the basename only (the same file
-    // loads once per $rendermesh); errors keep the full path.
-    if (priv)
-        std::printf("loading rendermesh \"%s\": %s\n", edit->name.c_str(),
-                    full.filename().string().c_str());
-    else
-        std::printf("loading %s: %s\n",
-                    kind == source::LoadKind::Animation   ? "animation"
-                    : kind == source::LoadKind::Collision ? "collision"
-                                                          : "model",
-                    full.string().c_str());
+    // loads once per $rendermesh); errors keep the full path. A DMX prints after
+    // the read so the line can carry its "<format> <ver>, <encoding> <ver>".
+    const std::string head =
+        priv ? "loading rendermesh \"" + edit->name + "\": " + full.filename().string()
+             : std::string("loading ") +
+                   (kind == source::LoadKind::Animation     ? "animation"
+                    : kind == source::LoadKind::Collision   ? "collision"
+                                                            : "model") +
+                   ": " + full.string();
 
     auto src = std::make_unique<source::Source>();
     // the name AS WRITTEN, not where it was found - it is the cache key above,
@@ -464,6 +468,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     src->kind = kind;
 
     if (IsSmdPath(filename)) {
+        std::printf("%s\n", head.c_str());
         // SMD triangles are grouped by material, not by named mesh - there is
         // nothing for an $exceptionlist to name
         if (edit && !edit->filter.empty()) {
@@ -475,12 +480,30 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
             return nullptr;
         }
+    } else if (IsFbxPath(filename)) {
+        std::printf("%s\n", head.c_str());
+        if (!source::LoadFbxSource(full.string(), *src, mats, c.in.scale, &loadErr, morphSource,
+                                   edit ? &edit->filter : nullptr, animOnly)) {
+            c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
+            return nullptr;
+        }
+        // an inclusive filter naming a mesh the file does not have would silently
+        // drop the geometry it was written to keep
+        if (edit) {
+            if (const std::string* miss = edit->filter.Unmatched()) {
+                c.Fail(line, "$exceptionlist names \"" + *miss + "\", which is not a mesh in \"" +
+                                 filename + "\"");
+                return nullptr;
+            }
+        }
     } else {
         auto dm = pulse::dmx::Datamodel::Load(full.string().c_str(), &loadErr);
         if (!dm) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
             return nullptr;
         }
+        std::printf("%s (%s %d, %s %d)\n", head.c_str(), dm->format.c_str(), dm->format_version,
+                    dm->encoding.c_str(), dm->encoding_version);
         if (!source::LoadDmxSource(*dm, *src, mats, c.in.scale, &loadErr, morphSource,
                                    edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot parse \"" + full.string() + "\": " + loadErr);
@@ -730,6 +753,10 @@ source::Source* MergeRenderMeshes(Ctx& c, const std::vector<source::Source*>& re
 }
 
 // $modelgroup <name> { mesh [<display>] <rendermesh>... [name <display>] | blank ... }
+// $modelgroup <name> <rendermesh>... [name <display>]
+//
+// The second form is the shorthand for a single, non-swappable bodypart: one
+// choice, drawn from the meshes on the line, named after the group by default.
 //
 // `studio` is an accepted spelling of `mesh`, for $bodygroup muscle memory.
 //
@@ -749,13 +776,100 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
     for (const auto& b : c.in.bodyparts)
         if (b.name == name)
             return c.Fail(cmd.line, "$modelgroup \"" + name + "\" already exists");
-    const Token* brace = c.Next();
-    if (!brace || brace->text != "{")
-        return c.Fail(cmd.line, "$modelgroup expects '{' after the name");
-
     const std::string where = "$modelgroup \"" + name + "\"";
     cm::CompileInput::InBodyPart part;
     part.name = name;
+
+    // One choice: the $rendermesh names to the end of `line`, plus the optional
+    // `name <display>`. `defName` is the display name when the line gives none.
+    auto meshLine = [&](int line, const std::vector<std::string>& defName) -> bool {
+        std::string studio;
+        bool named = false;
+
+        // the render meshes this choice draws, to the end of the line - the
+        // next `mesh`/`studio`/`blank`/'}' still ends the list, so an old
+        // one-per-word line keeps parsing the way it always did
+        std::vector<source::Source*> refs;
+        std::vector<std::string> refNames;
+        while (!c.Eof() && c.Cur().line == line) {
+            const Token& r = c.Cur();
+            // a one-choice group with nothing to draw is meaningless, so `blank`
+            // is an error inline instead of the terminator it is in the block
+            if (!r.quoted && !defName.empty() && _stricmp(r.text.c_str(), "blank") == 0)
+                return c.Fail(r.line, where + ": blank needs the { } form - an inline "
+                                              "$modelgroup is a single choice");
+            if (!r.quoted && (r.text == "}" || _stricmp(r.text.c_str(), "mesh") == 0 ||
+                              _stricmp(r.text.c_str(), "studio") == 0 ||
+                              _stricmp(r.text.c_str(), "blank") == 0))
+                break;
+            ++c.pos;
+            // `name <display>`, anywhere on the line
+            if (!r.quoted && _stricmp(r.text.c_str(), "name") == 0) {
+                if (named)
+                    return c.Fail(r.line, where + ": mesh is named twice");
+                if (c.Eof() || c.Cur().line != line ||
+                    (!c.Cur().quoted && c.Cur().text == "}"))
+                    return c.Fail(r.line, where + ": mesh name expects a display name");
+                if (!c.Want("a display name", r, studio))
+                    return false;
+                named = true;
+                continue;
+            }
+            auto it = c.rendermeshes.find(r.text);
+            if (it == c.rendermeshes.end()) {
+                // a leading word that is not a $rendermesh is the display
+                // name; a name that collides with one needs `name`
+                if (!named && refs.empty() && defName.empty()) {
+                    studio = r.text;
+                    named = true;
+                    continue;
+                }
+                return c.Fail(r.line,
+                              where + " references unknown rendermesh \"" + r.text + "\"");
+            }
+            if (std::find(refs.begin(), refs.end(), it->second) != refs.end())
+                return c.Fail(r.line, where + ": mesh \"" + r.text + "\" is listed twice");
+            refs.push_back(it->second);
+            refNames.push_back(r.text);
+        }
+        if (refs.empty())
+            return c.Fail(line, where + ": mesh expects at least one $rendermesh name");
+
+        cm::CompileInput::InModel model;
+        model.name = named ? studio
+                           : cm::ChoiceName(defName.empty() ? refNames : defName);
+        if (model.name.empty())
+            return c.Fail(line, where + ": mesh name is empty");
+        // mstudiomodel_t::name is a 64-byte inline field, so the writer cuts
+        // anything longer - say so here, where the line number is known
+        if (model.name.size() > 63)
+            std::fprintf(stderr,
+                         "warning: %s line %d: model name \"%s\" is %zu chars, "
+                         "truncated to \"%.63s\" - use `name <display>` to shorten it\n",
+                         c.file.c_str(), line, model.name.c_str(), model.name.size(),
+                         model.name.c_str());
+        // one render mesh is drawn as it loaded; several are fused into a
+        // private Source of their own (meshedit.h)
+        model.source = refs.size() == 1 ? refs[0]
+                                        : MergeRenderMeshes(c, refs, model.name, line);
+        if (!model.source)
+            return false;
+        part.models.push_back(std::move(model));
+        return true;
+    };
+
+    const Token* brace = c.Next();
+    if (!brace)
+        return c.Fail(cmd.line, "$modelgroup expects '{' or a $rendermesh name after the name");
+    if (brace->text != "{") {
+        // inline form - one choice on the command's own line, named after the group
+        --c.pos;
+        if (!meshLine(brace->line, {name}))
+            return false;
+        c.in.bodyparts.push_back(std::move(part));
+        return true;
+    }
+
     for (;;) {
         const Token* t = c.Next();
         if (!t)
@@ -772,73 +886,8 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
         }
         if (!t->quoted && (_stricmp(t->text.c_str(), "mesh") == 0 ||
                            _stricmp(t->text.c_str(), "studio") == 0)) {
-            const int line = t->line;
-            std::string studio;
-            bool named = false;
-
-            // the render meshes this choice draws, to the end of the line - the
-            // next `mesh`/`studio`/`blank`/'}' still ends the list, so an old
-            // one-per-word line keeps parsing the way it always did
-            std::vector<source::Source*> refs;
-            std::vector<std::string> refNames;
-            while (!c.Eof() && c.Cur().line == line) {
-                const Token& r = c.Cur();
-                if (!r.quoted && (r.text == "}" || _stricmp(r.text.c_str(), "mesh") == 0 ||
-                                  _stricmp(r.text.c_str(), "studio") == 0 ||
-                                  _stricmp(r.text.c_str(), "blank") == 0))
-                    break;
-                ++c.pos;
-                // `name <display>`, anywhere on the line
-                if (!r.quoted && _stricmp(r.text.c_str(), "name") == 0) {
-                    if (named)
-                        return c.Fail(r.line, where + ": mesh is named twice");
-                    if (c.Eof() || c.Cur().line != line ||
-                        (!c.Cur().quoted && c.Cur().text == "}"))
-                        return c.Fail(r.line, where + ": mesh name expects a display name");
-                    if (!c.Want("a display name", r, studio))
-                        return false;
-                    named = true;
-                    continue;
-                }
-                auto it = c.rendermeshes.find(r.text);
-                if (it == c.rendermeshes.end()) {
-                    // a leading word that is not a $rendermesh is the display
-                    // name; a name that collides with one needs `name`
-                    if (!named && refs.empty()) {
-                        studio = r.text;
-                        named = true;
-                        continue;
-                    }
-                    return c.Fail(r.line,
-                                  where + " references unknown rendermesh \"" + r.text + "\"");
-                }
-                if (std::find(refs.begin(), refs.end(), it->second) != refs.end())
-                    return c.Fail(r.line, where + ": mesh \"" + r.text + "\" is listed twice");
-                refs.push_back(it->second);
-                refNames.push_back(r.text);
-            }
-            if (refs.empty())
-                return c.Fail(line, where + ": mesh expects at least one $rendermesh name");
-
-            cm::CompileInput::InModel model;
-            model.name = named ? studio : cm::ChoiceName(refNames);
-            if (model.name.empty())
-                return c.Fail(line, where + ": mesh name is empty");
-            // mstudiomodel_t::name is a 64-byte inline field, so the writer cuts
-            // anything longer - say so here, where the line number is known
-            if (model.name.size() > 63)
-                std::fprintf(stderr,
-                             "warning: %s line %d: model name \"%s\" is %zu chars, "
-                             "truncated to \"%.63s\" - use `name <display>` to shorten it\n",
-                             c.file.c_str(), line, model.name.c_str(), model.name.size(),
-                             model.name.c_str());
-            // one render mesh is drawn as it loaded; several are fused into a
-            // private Source of their own (meshedit.h)
-            model.source = refs.size() == 1 ? refs[0]
-                                            : MergeRenderMeshes(c, refs, model.name, line);
-            if (!model.source)
+            if (!meshLine(t->line, {}))
                 return false;
-            part.models.push_back(std::move(model));
             continue;
         }
         return c.Fail(t->line,
@@ -906,22 +955,33 @@ std::string RigImportList(std::initializer_list<std::pair<bool, const char*>> op
     return s;
 }
 
+// Locate a rig file for a $datamodel* command. Empty = not found (already
+// reported).
+fs::path FindRigFile(Ctx& c, const Token& cmd, const std::string& filename) {
+    std::vector<fs::path> tried;
+    const fs::path full = FindSourceFile(c, filename, &tried);
+    if (full.empty())
+        c.Fail(cmd.line, "cannot find \"" + filename + "\" - looked in:" + LookedIn(tried));
+    return full;
+}
+
 // Open a DMX for its rig alone. It never becomes a Source, so nothing in it
 // reaches the skeleton, the bodygroups or the material table.
 std::unique_ptr<pulse::dmx::Datamodel> LoadRigDmx(Ctx& c, const Token& cmd,
                                                   const std::string& filename,
                                                   const std::string& what) {
-    std::vector<fs::path> tried;
-    const fs::path full = FindSourceFile(c, filename, &tried);
-    if (full.empty()) {
-        c.Fail(cmd.line, "cannot find \"" + filename + "\" - looked in:" + LookedIn(tried));
+    const fs::path full = FindRigFile(c, cmd, filename);
+    if (full.empty())
+        return nullptr;
+    std::string loadErr;
+    auto dm = pulse::dmx::Datamodel::Load(full.string().c_str(), &loadErr);
+    if (!dm) {
+        c.Fail(cmd.line, "cannot load \"" + full.string() + "\": " + loadErr);
         return nullptr;
     }
-    std::string loadErr;
-    std::printf("loading %s: %s\n", what.c_str(), full.filename().string().c_str());
-    auto dm = pulse::dmx::Datamodel::Load(full.string().c_str(), &loadErr);
-    if (!dm)
-        c.Fail(cmd.line, "cannot load \"" + full.string() + "\": " + loadErr);
+    std::printf("loading %s: %s (%s %d, %s %d)\n", what.c_str(), full.filename().string().c_str(),
+                dm->format.c_str(), dm->format_version, dm->encoding.c_str(),
+                dm->encoding_version);
     return dm;
 }
 
@@ -951,14 +1011,15 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     if (!jiggle && !procedural && !hitboxes && !attachments)
         jiggle = procedural = hitboxes = attachments = true; // no list = the whole rig
 
-    auto dm = LoadRigDmx(c, cmd, WithDmxExtension(file),
-                         "joints (" + RigImportList({{jiggle, "jigglebones"},
-                                                     {procedural, "proceduralbones"},
-                                                     {hitboxes, "hitboxes"},
-                                                     {attachments, "attachments"}}) + ")");
+    const std::string resolved = WithDmxExtension(file);
+    const std::string what = "joints (" + RigImportList({{jiggle, "jigglebones"},
+                                                         {procedural, "proceduralbones"},
+                                                         {hitboxes, "hitboxes"},
+                                                         {attachments, "attachments"}}) + ")";
+    std::string err;
+    auto dm = LoadRigDmx(c, cmd, resolved, what);
     if (!dm)
         return false;
-    std::string err;
     if (!LoadDmxJoints(*dm, c.in, jiggle, procedural, hitboxes, attachments, &err))
         return c.Fail(cmd.line, "$datamodeljoints \"" + file + "\": " + err);
     return true;
@@ -1061,15 +1122,16 @@ bool CmdDataModelFlexes(Ctx& c, const Token& cmd) {
         return c.Fail(cmd.line, "$datamodelflexes: flexdominator needs flexcorrective - a "
                                 "domination is a tail on a corrective's rule");
 
-    auto dm = LoadRigDmx(c, cmd, WithDmxExtension(file),
-                         "flexes (" + RigImportList({{controllers, "flexcontroller"},
-                                                     {correctives, "flexcorrective"},
-                                                     {dominators, "flexdominator"},
-                                                     {rules, "flexrule"}}) + ")");
-    if (!dm)
-        return false;
+    const std::string resolved = WithDmxExtension(file);
+    const std::string what = "flexes (" + RigImportList({{controllers, "flexcontroller"},
+                                                         {correctives, "flexcorrective"},
+                                                         {dominators, "flexdominator"},
+                                                         {rules, "flexrule"}}) + ")";
     source::FlexRig rig;
     std::string err;
+    auto dm = LoadRigDmx(c, cmd, resolved, what);
+    if (!dm)
+        return false;
     if (!source::LoadDmxFlexRig(*dm, rig, &err))
         return c.Fail(cmd.line, "$datamodelflexes \"" + file + "\": " + err);
     MergeFlexRig(c.manual.datamodel, rig, controllers, correctives, dominators, rules);
@@ -2178,9 +2240,12 @@ bool CmdFlexRule(Ctx& c, const Token& cmd) {
 // ---------------------------------------------------------------------------
 
 // $eyeball <name> bone <b> origin <x y z> material <m> [diameter <d>]
-//          [angle <deg>] [pupilscale <s>] (Option_Eyeball). Named clauses,
-// unlike QC's positional form. Binds to every body whose mesh uses `material`;
-// matching no body at all is a hard error, same as stock.
+//          [angle <deg>] [pupilscale <s>] [center] (Option_Eyeball). Named
+// clauses, unlike QC's positional form. Binds to every body whose mesh uses
+// `material`; matching no body at all is a hard error, same as stock.
+// `center` puts the eyeball at the bbox center of the material's verts and
+// makes `origin` an offset from it, in final (post-$translatemodel, post-90-Z)
+// axes - so it is optional there.
 bool CmdEyeball(Ctx& c, const Token& cmd) {
     FaceMarkup::Entry entry;
     entry.kind = FaceMarkup::Kind::Eyeball;
@@ -2209,17 +2274,19 @@ bool CmdEyeball(Ctx& c, const Token& cmd) {
             if (!c.WantFloat("an angle in degrees", cmd, entry.eyeball.angle)) return false;
         } else if (o == "pupilscale") {
             if (!c.WantFloat("a pupil scale", cmd, entry.eyeball.pupilscale)) return false;
+        } else if (o == "center") {
+            entry.eyeball.center = true;
         } else {
             return c.Fail(t.line, "$eyeball: unknown option \"" + t.text +
                                   "\" (expected bone/origin/material/diameter/angle/"
-                                  "pupilscale)");
+                                  "pupilscale/center)");
         }
     }
     if (!haveBone)
         return c.Fail(cmd.line, "$eyeball \"" + entry.eyeball.name + "\": missing `bone`");
     if (!haveMaterial)
         return c.Fail(cmd.line, "$eyeball \"" + entry.eyeball.name + "\": missing `material`");
-    if (!haveOrigin)
+    if (!haveOrigin && !entry.eyeball.center)
         return c.Fail(cmd.line, "$eyeball \"" + entry.eyeball.name + "\": missing `origin`");
 
     c.face.entries.push_back(std::move(entry));
@@ -6338,10 +6405,9 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
         if (err) *err = c.file + ": no $modelname";
         return false;
     }
-    if (out.bodyparts.empty()) {
-        if (err) *err = c.file + ": no $modelgroup";
-        return false;
-    }
+    // animation-only models (.mdl + .ani, no geometry) are legal
+    if (out.bodyparts.empty())
+        printf("WARNING: %s: no $modelgroup\n", c.file.c_str());
 
     // set once every source has been read (the DMX loader latches it on the
     // first model carrying an upAxis attribute)

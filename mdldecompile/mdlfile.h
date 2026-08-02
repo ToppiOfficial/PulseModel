@@ -53,6 +53,23 @@ struct Mdl {
     }
 };
 
+inline bool ReadWhole(const std::string& path, std::vector<char>& out) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (size <= 0) {
+        std::fclose(f);
+        return false;
+    }
+    out.resize(static_cast<size_t>(size));
+    const size_t got = std::fread(out.data(), 1, out.size(), f);
+    std::fclose(f);
+    return got == out.size();
+}
+
 // Plain decimal, never an exponent - a QC reads better without 1.0488e-15.
 // Trailing zeros are trimmed, and float noise below the last place lands on "0".
 inline std::string F(float v) {

@@ -48,23 +48,6 @@ struct Block {
     }
 };
 
-bool ReadWhole(const std::string& path, std::vector<char>& out) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f)
-        return false;
-    std::fseek(f, 0, SEEK_END);
-    const long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    if (size <= 0) {
-        std::fclose(f);
-        return false;
-    }
-    out.resize(static_cast<size_t>(size));
-    const size_t got = std::fread(out.data(), 1, out.size(), f);
-    std::fclose(f);
-    return got == out.size();
-}
-
 // studio.h ExtractAnimValue: the stream is (valid, total) headers each followed
 // by `valid` int16s. A frame past `valid` but inside `total` holds the last
 // value; a frame past `total` moves on to the next header.
@@ -271,6 +254,67 @@ bool DecodeAnim(const Mdl& m, const fm::mstudioanimdesc_t& a, const fm::mstudiob
     return true;
 }
 
+// Undo motion extraction. `walkframe` strips the root's travel out of the frames
+// and banks it as a piecewise path, so the SMD has to walk again or a recompile
+// re-extracts nothing. Movement key k stores the CUMULATIVE pose at its end
+// frame, so the segment's own step is prev^-1 * cur, replayed across the segment
+// on the stored velocity ramp. Estimated, not exact: the `LQ` quadratic path
+// replays as that same ramp, which matches at the ends and drifts in the middle.
+void RestoreMotion(const Mdl& m, const fm::mstudioanimdesc_t& a, const fm::mstudiobone_t* bones,
+                   int numbones, std::vector<std::vector<Pose>>& frames) {
+    const fm::mstudiomovement_t* mv =
+        m.At<fm::mstudiomovement_t>(&a, a.movementindex, a.nummovements);
+    if (!mv || a.nummovements <= 0 || frames.empty())
+        return;
+    const int last = static_cast<int>(frames.size()) - 1;
+
+    pm::matrix3x4 prev, ident;
+    pm::AngleMatrix(pm::RadianEuler{0.0f, 0.0f, 0.0f}, pm::Vector3{0.0f, 0.0f, 0.0f}, ident);
+    prev = ident;
+    std::vector<pm::matrix3x4> adj(frames.size(), ident);
+
+    int start = 0;
+    for (int k = 0; k < a.nummovements; ++k) {
+        pm::matrix3x4 cur;
+        pm::AngleMatrix(pm::RadianEuler{0.0f, 0.0f, mv[k].angle * pm::kPiF / 180.0f},
+                        mv[k].position, cur);
+        pm::RadianEuler srot;
+        pm::Vector3 spos;
+        pm::MatrixAngles(pm::ConcatTransforms(pm::MatrixInvert(prev), cur), srot, spos);
+        const float slen = std::sqrt(spos.x * spos.x + spos.y * spos.y + spos.z * spos.z);
+        const pm::Vector3 dir =
+            slen > 0.0f ? pm::Vector3{spos.x / slen, spos.y / slen, spos.z / slen}
+                        : pm::Vector3{0.0f, 0.0f, 0.0f};
+
+        const int end = std::min(mv[k].endframe, last);
+        const float n = static_cast<float>(end - start);
+        for (int f = start; n > 0.0f && f <= end; ++f) {
+            const float t = (f - start) / n;
+            const float d = mv[k].v0 * t + 0.5f * (mv[k].v1 - mv[k].v0) * t * t;
+            pm::matrix3x4 step;
+            pm::AngleMatrix(pm::RadianEuler{srot.x * t, srot.y * t, srot.z * t},
+                            pm::Vector3{dir.x * d, dir.y * d, dir.z * d}, step);
+            adj[static_cast<size_t>(f)] = pm::ConcatTransforms(prev, step);
+        }
+        prev = cur;
+        start = std::min(mv[k].endframe, last);
+    }
+    // the tail past the last key keeps the final adjustment, as the extractor did
+    for (int f = start + 1; f <= last; ++f)
+        adj[static_cast<size_t>(f)] = prev;
+
+    for (int f = 0; f <= last; ++f) {
+        for (int j = 0; j < numbones; ++j) {
+            if (bones[j].parent >= 0)
+                continue;
+            pm::matrix3x4 bm;
+            pm::AngleMatrix(frames[f][j].rot, frames[f][j].pos, bm);
+            pm::MatrixAngles(pm::ConcatTransforms(adj[static_cast<size_t>(f)], bm),
+                             frames[f][j].rot, frames[f][j].pos);
+        }
+    }
+}
+
 } // namespace
 
 void WriteAnimationSmds(const Mdl& m, const std::string& mdlPath, const std::string& dir) {
@@ -401,6 +445,10 @@ void WriteAnimationSmds(const Mdl& m, const std::string& mdlPath, const std::str
                 }
             }
         }
+
+        // motion was extracted in the yawed compile space, so it goes back on
+        // before the yaw comes off
+        RestoreMotion(m, a, bones, h.numbones, frames);
 
         for (std::vector<Pose>& fr : frames)
             unyawRoots(fr);

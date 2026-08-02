@@ -2822,27 +2822,32 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         std::fflush(stdout);
     };
 
+    // the reference gates the vertex/strip write on numbodyparts != 0: an
+    // animation-only model gets no .vvd/.vtx. Build them anyway for the fixup
+    // pass, just don't save two empty files.
+    const bool hasGeometry = !m.bodyparts.empty();
+
     // .vvd first pass
-    stage("vertex data (.vvd)");
+    if (hasGeometry) stage("vertex data (.vvd)");
     std::vector<uint8_t> vvdBuf =
         BuildVvd(m, reinterpret_cast<fmt::studiohdr_t*>(mdlBuf.data())->checksum);
     auto wtVvd = WClock::now();
     wlog("BuildVvd", wt0, wtVvd);
 
     // .vtx
-    stage("strip data (.vtx)");
+    if (hasGeometry) stage("strip data (.vtx)");
     std::vector<uint8_t> vtxBuf = BuildVtx(m, mdlBuf, vvdBuf, legacyVtx);
     auto wtVtx = WClock::now();
     wlog("BuildVtx", wtVvd, wtVtx);
 
     // fixup pass (mutates all three buffers)
-    stage("vertex fixups");
+    if (hasGeometry) stage("vertex fixups");
     if (!FixupBuffers(m, mdlBuf, vvdBuf, vtxBuf, legacyVtx, err))
         return false;
     wlog("FixupBuffers", wtVtx, WClock::now());
 
     // .phy - empty when the model has no collision data
-    stage("collision data (.phy)");
+    if (!m.physSolids.empty()) stage("collision data (.phy)");
     std::vector<uint8_t> phyBuf =
         BuildPhy(m, reinterpret_cast<fmt::studiohdr_t*>(mdlBuf.data())->checksum);
 
@@ -2869,18 +2874,21 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     std::printf("total      %7zu\n", mdlBuf.size());
     if (!SaveFile(mdlPath, mdlBuf.data(), mdlBuf.size(), err)) return false;
 
-    std::string vvdPath = announce(".vvd");
-    FlushReport(g_vvdReport);
-    if (!SaveFile(vvdPath, vvdBuf.data(), vvdBuf.size(), err)) return false;
+    std::string vvdPath, vtxPath;
+    if (hasGeometry) {
+        vvdPath = announce(".vvd");
+        FlushReport(g_vvdReport);
+        if (!SaveFile(vvdPath, vvdBuf.data(), vvdBuf.size(), err)) return false;
 
-    // which strip layout went out. SFM reads the Alien Swarm/CS:GO 35-byte
-    // strips and crashes on the legacy ones, so make the format explicit.
-    std::printf("VTX format: %s\n", legacyVtx ? "0 - TF2/L4D2/GMod/HL2 (legacy 27-byte strips)"
-                                              : "1 - Alien Swarm/CS:GO/SFM (35-byte strips)");
-    std::string vtxPath = announce(".dx90.vtx");
-    FlushReport(g_vtxReport);
-    std::printf("everything (%zu bytes)\n", vtxBuf.size());
-    if (!SaveFile(vtxPath, vtxBuf.data(), vtxBuf.size(), err)) return false;
+        // which strip layout went out. SFM reads the Alien Swarm/CS:GO 35-byte
+        // strips and crashes on the legacy ones, so make the format explicit.
+        std::printf("VTX format: %s\n", legacyVtx ? "0 - TF2/L4D2/GMod/HL2 (legacy 27-byte strips)"
+                                                  : "1 - Alien Swarm/CS:GO/SFM (35-byte strips)");
+        vtxPath = announce(".dx90.vtx");
+        FlushReport(g_vtxReport);
+        std::printf("everything (%zu bytes)\n", vtxBuf.size());
+        if (!SaveFile(vtxPath, vtxBuf.data(), vtxBuf.size(), err)) return false;
+    }
 
     std::string aniPath, phyPath;
 
@@ -2931,8 +2939,12 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     std::printf("---------------------\n");
     std::printf("output directory: %s\n", stem.parent_path().string().c_str());
     std::printf("  %-20s 0x%08X  %10zu bytes\n", name(mdlPath).c_str(), checksum, mdlBuf.size());
-    std::printf("  %-20s 0x%08X  %10zu bytes\n", name(vvdPath).c_str(), checksum, vvdBuf.size());
-    std::printf("  %-20s 0x%08X  %10zu bytes\n", name(vtxPath).c_str(), checksum, vtxBuf.size());
+    if (hasGeometry) {
+        std::printf("  %-20s 0x%08X  %10zu bytes\n", name(vvdPath).c_str(), checksum,
+                    vvdBuf.size());
+        std::printf("  %-20s 0x%08X  %10zu bytes\n", name(vtxPath).c_str(), checksum,
+                    vtxBuf.size());
+    }
     if (!aniPath.empty())
         std::printf("  %-20s %-10s  %10zu bytes\n", name(aniPath).c_str(), "unchecksummed",
                     blockBuf->pos);

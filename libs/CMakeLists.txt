@@ -41,6 +41,13 @@ add_library(pulse_phys STATIC
 target_include_directories(pulse_phys PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/minicollision)
 target_link_libraries(pulse_phys PRIVATE pulse_vhacd PUBLIC pulse_libs)
 
+# ufbx (ufbx/ufbx, MIT) - vendored single-file FBX reader, v0.23.0. Feeds the
+# FBX mesh/skeleton loader; DMX stays the primary format.
+add_library(pulse_ufbx STATIC
+    ufbx/ufbx.c
+)
+target_include_directories(pulse_ufbx PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ufbx)
+
 # DMX reader (clean-room port of Datamodel.NET's format logic).
 add_library(pulse_dmx STATIC
     dmx/dmx.cpp

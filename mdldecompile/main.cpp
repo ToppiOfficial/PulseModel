@@ -1401,8 +1401,184 @@ void WriteWeightLists(Qc& q, const Mdl& m) {
     }
 }
 
+// Where one clip's data ended up. Only the leading sections can stay in the
+// .mdl - that is what `nostallframes` buys - so counting them is enough.
+struct BlockUse {
+    bool external = false;
+    int localSections = 0;
+};
+BlockUse AnimBlockUse(const Mdl& m, const fm::mstudioanimdesc_t& a) {
+    BlockUse u;
+    const int frames = a.numframes > 0 ? a.numframes : 1;
+    const int n = a.sectionframes > 0 ? frames / a.sectionframes + 2 : 0;
+    const fm::mstudioanimsections_t* s =
+        n ? m.At<fm::mstudioanimsections_t>(&a, a.sectionindex, n) : nullptr;
+    if (!s) {
+        u.external = a.animblock > 0;
+        return u;
+    }
+    for (int i = 0; i < n; ++i) {
+        if (s[i].animblock > 0) {
+            u.external = true;
+            break;
+        }
+        ++u.localSections;
+    }
+    return u;
+}
+
+// `highres` stores positions as full floats, and the only record of it is the
+// per-bone flag byte array of a frame-anim section - which usually sits in the
+// .ani, so that file is read too. Undetectable if the .ani is missing.
+bool AnimBlockHighRes(const Mdl& m, const fm::mstudioanimdesc_t* a, int count, int numbones,
+                      const fm::mstudioanimblock_t* blocks, int numblocks,
+                      const std::vector<char>& ani) {
+    for (int i = 0; i < count; ++i) {
+        if (!(a[i].flags & fm::STUDIO_FRAMEANIM) || (a[i].flags & fm::STUDIO_ALLZEROS))
+            continue;
+        int32_t block = a[i].animblock, off = a[i].animindex;
+        if (a[i].sectionframes > 0) {
+            const fm::mstudioanimsections_t* s =
+                m.At<fm::mstudioanimsections_t>(&a[i], a[i].sectionindex, 1);
+            if (!s)
+                continue;
+            block = s->animblock;
+            off = s->animindex;
+        }
+        const uint8_t* flags = nullptr;
+        if (block == 0) {
+            const fm::mstudio_frame_anim_t* fa = m.At<fm::mstudio_frame_anim_t>(&a[i], off);
+            flags = fa ? m.At<uint8_t>(fa, static_cast<int32_t>(sizeof(*fa)), numbones) : nullptr;
+        } else if (blocks && block < numblocks && !ani.empty()) {
+            const int64_t at = static_cast<int64_t>(blocks[block].datastart) + off +
+                               static_cast<int64_t>(sizeof(fm::mstudio_frame_anim_t));
+            if (at >= 0 && at + numbones <= static_cast<int64_t>(ani.size()))
+                flags = reinterpret_cast<const uint8_t*>(ani.data()) + at;
+        }
+        for (int j = 0; flags && j < numbones; ++j)
+            if (flags[j] & (fm::STUDIO_FRAME_ANIM_POS2 | fm::STUDIO_FRAME_CONST_POS2))
+                return true;
+    }
+    return false;
+}
+
+// $sectionframes / $animblocksize / $bonesaveframe - compression sectioning and
+// demand loading. A .ani exists iff the block table has real entries; index 0 is
+// the pseudo block meaning "in the .mdl".
+void WriteAnimBlocks(Qc& q, const Mdl& m, const std::string& mdlPath) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudioanimdesc_t* a =
+        m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
+    if (!a || h.numlocalanim <= 0)
+        return;
+    std::vector<std::string> lines;
+
+    // Every clip at or over the frame limit was sectioned, all at the same
+    // length. Any limit above the longest unsectioned clip and at or below the
+    // shortest sectioned one reproduces the file, so prefer the default 30.
+    int section = 0, sectioned = 0, plain = 0;
+    bool frameanim = false;
+    for (int i = 0; i < h.numlocalanim; ++i) {
+        if (a[i].flags & fm::STUDIO_OVERRIDE)
+            continue;
+        frameanim |= (a[i].flags & fm::STUDIO_FRAMEANIM) != 0;
+        const int frames = a[i].numframes > 0 ? a[i].numframes : 1;
+        if (a[i].sectionframes > 0) {
+            section = a[i].sectionframes;
+            if (!sectioned || frames < sectioned)
+                sectioned = frames;
+        } else if (frames > plain) {
+            plain = frames;
+        }
+    }
+    const int limit = (section && plain < 30 && 30 <= sectioned) ? 30 : sectioned;
+    if (section && (section != 30 || limit != 30))
+        lines.push_back("$sectionframes " + std::to_string(section) + " " + std::to_string(limit));
+
+    const fm::mstudioanimblock_t* blocks =
+        m.At<fm::mstudioanimblock_t>(m.buf.data(), h.animblockindex, h.numanimblocks);
+    if (blocks && h.numanimblocks > 1) {
+        auto len = [&](int i) {
+            const int64_t n = static_cast<int64_t>(blocks[i].dataend) - blocks[i].datastart;
+            return n > 0 ? static_cast<size_t>(n) : size_t(0);
+        };
+        // A block closes BEFORE the section that would push it over
+        // $animblocksize, so a closed block that took more than one section is a
+        // lower bound on it - and blocks pack tight, so the largest such block
+        // rounded up to the next KB lands on the authored value. A block holding
+        // one oversized section overshoots the limit instead and is no evidence.
+        const int last = h.numanimblocks - 1;
+        std::vector<int> sections(static_cast<size_t>(h.numanimblocks), 0);
+        for (int i = 0; i < h.numlocalanim; ++i) {
+            if (a[i].flags & fm::STUDIO_OVERRIDE)
+                continue;
+            const int frames = a[i].numframes > 0 ? a[i].numframes : 1;
+            const int n = a[i].sectionframes > 0 ? frames / a[i].sectionframes + 2 : 0;
+            const fm::mstudioanimsections_t* s =
+                n ? m.At<fm::mstudioanimsections_t>(&a[i], a[i].sectionindex, n) : nullptr;
+            for (int w = 0; w < (s ? n : 1); ++w) {
+                const int32_t blk = s ? s[w].animblock : a[i].animblock;
+                if (blk > 0 && blk < h.numanimblocks)
+                    ++sections[static_cast<size_t>(blk)];
+            }
+        }
+        size_t est = 0;
+        for (int i = 1; i < last; ++i)
+            if (sections[static_cast<size_t>(i)] > 1 && len(i) > est)
+                est = len(i);
+        // no block ever took a second section: fall back to the longest one,
+        // which is all the file still says
+        if (!est)
+            for (int i = 1; i <= last; ++i)
+                est = std::max(est, len(i));
+        const int kb = std::max<int>(1, static_cast<int>((est + 1023) / 1024));
+
+        std::vector<char> ani;
+        ReadWhole(StripExt(mdlPath) + ".ani", ani);
+        std::string cmd = "$animblocksize " + std::to_string(kb);
+        if (!frameanim)
+            cmd += " lowres";
+        else if (AnimBlockHighRes(m, a, h.numlocalanim, h.numbones, blocks, h.numanimblocks, ani))
+            cmd += " highres";
+        lines.push_back(cmd + "  // KB; estimated from where the blocks fell");
+
+        // Stating any entry replaces the writer's automatic choice for EVERY
+        // bone, so every flagged bone is listed.
+        const fm::mstudiobone_t* bones =
+            m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+        const std::vector<std::string> names = BoneNames(m);
+        for (int i = 0; bones && i < h.numbones; ++i) {
+            std::string o;
+            if (bones[i].flags & fm::BONE_HAS_SAVEFRAME_POS)
+                o += " position";
+            if (bones[i].flags & fm::BONE_HAS_SAVEFRAME_ROT32)
+                o += " rotation";
+            if (bones[i].flags & fm::BONE_HAS_SAVEFRAME_ROT64)
+                o += " rotation64";
+            if (!o.empty())
+                lines.push_back("$bonesaveframe \"" + names[i] + "\"" + o);
+        }
+    }
+
+    if (lines.empty())
+        return;
+    q.Blank();
+    for (const std::string& l : lines)
+        q.Line(l);
+}
+
+// The `walkframe` control names, in the bit order LookupControl declares them.
+const struct { int32_t bit; const char* name; } kMotionControls[] = {
+    {fm::STUDIO_X, "X"},     {fm::STUDIO_Y, "Y"},     {fm::STUDIO_Z, "Z"},
+    {fm::STUDIO_XR, "XR"},   {fm::STUDIO_YR, "YR"},   {fm::STUDIO_ZR, "ZR"},
+    {fm::STUDIO_LX, "LX"},   {fm::STUDIO_LY, "LY"},   {fm::STUDIO_LZ, "LZ"},
+    {fm::STUDIO_LXR, "LXR"}, {fm::STUDIO_LYR, "LYR"}, {fm::STUDIO_LZR, "LZR"},
+    {fm::STUDIO_LINEAR, "LM"}, {fm::STUDIO_QUADRATIC_MOTION, "LQ"},
+};
+
 // The options an animation carries, shared by $animation and the inline form.
-std::string AnimOptions(const fm::mstudioanimdesc_t& a, const std::string& subtract) {
+std::string AnimOptions(const Mdl& m, const fm::mstudioanimdesc_t& a,
+                        const std::string& subtract) {
     std::string s = "fps " + F(a.fps);
     if ((a.flags & fm::STUDIO_DELTA) && !subtract.empty())
         s += " subtract \"" + subtract + "\" 0";
@@ -1414,6 +1590,28 @@ std::string AnimOptions(const fm::mstudioanimdesc_t& a, const std::string& subtr
         s += " snap";
     if (a.flags & fm::STUDIO_POST)
         s += " post";
+    // walkframe, one per stored movement key and in the same order - the
+    // compiler chains each from the previous key's end frame. smdwrite.cpp puts
+    // the travel back into the clip so there is something left to extract.
+    const fm::mstudiomovement_t* mv =
+        m.At<fm::mstudiomovement_t>(&a, a.movementindex, a.nummovements);
+    for (int k = 0; mv && k < a.nummovements; ++k) {
+        std::string ctrl;
+        for (const auto& c : kMotionControls)
+            if (mv[k].motionflags & c.bit)
+                ctrl += " " + std::string(c.name);
+        if (!ctrl.empty())
+            s += " walkframe " + std::to_string(mv[k].endframe) + ctrl;
+    }
+    // demand loading: which side of the .ani this clip's data actually landed on
+    if (m.hdr->numanimblocks > 1) {
+        const BlockUse u = AnimBlockUse(m, a);
+        if (!u.external)
+            s += " noanimblock";
+        else if (u.localSections > 0)
+            s += " noanimblockstall nostallframes " +
+                 std::to_string(u.localSections * a.sectionframes);
+    }
     return s;
 }
 
@@ -1441,7 +1639,7 @@ void WriteAnimations(Qc& q, const Mdl& m) {
         if (refs[i].implied)
             continue;
         lines.push_back("$animation \"" + refs[i].name + "\" \"anims/" + refs[i].name + ".smd\" " +
-                        AnimOptions(a[i], SubtractNameFor(refs, base, i)) + "  // " +
+                        AnimOptions(m, a[i], SubtractNameFor(refs, base, i)) + "  // " +
                         std::to_string(a[i].numframes) + " frames");
     }
     if (lines.empty())
@@ -1519,7 +1717,7 @@ void WriteSequences(Qc& q, const Mdl& m) {
         // animation options in a sequence body land on blend animation 0, so
         // they only belong here when that one was declared inline
         if (anims && anim0 >= 0 && anim0 < h.numlocalanim && animRefs[anim0].implied)
-            opt(AnimOptions(anims[anim0], SubtractNameFor(animRefs, subBase, anim0)));
+            opt(AnimOptions(m, anims[anim0], SubtractNameFor(animRefs, subBase, anim0)));
         const float lastframe = (anims && anim0 >= 0 && anim0 < h.numlocalanim)
                                     ? static_cast<float>(anims[anim0].numframes - 1)
                                     : 0.0f;
@@ -1825,6 +2023,7 @@ int RunDecompile(int argc, char** argv) {
     STAGE(WriteDriverBones, q, m);
     STAGE(WriteAimAtBones, q, m);
     STAGE(WriteJiggleBones, q, m);
+    STAGE(WriteAnimBlocks, q, m, in);
     STAGE(WritePoseParams, q, m);
     STAGE(WriteIk, q, m);
     STAGE(WriteWeightLists, q, m);

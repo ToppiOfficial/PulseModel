@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 # No project-wide version: each tool sets TOOL_VERSION in its own CMakeLists,
 # feeding both its -version printout and its Win32 version resource.
-project(PulseMDL2 LANGUAGES CXX)
+# C is enabled only for the vendored ufbx single-file reader; all of our own
+# code is C++.
+project(PulseMDL2 LANGUAGES CXX C)
 
 # C++17: inline constexpr + nested namespaces (used by libs/pulselimits.h).
 set(CMAKE_CXX_STANDARD 17)

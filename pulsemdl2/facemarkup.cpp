@@ -37,6 +37,7 @@ bool RegisterEyeball(cm::CompileInput& in, const FaceMarkup::Eyeball& src, std::
     eye.bonename = src.bonename;
     eye.material = src.material;
     eye.org = src.origin;
+    eye.center = src.center;
     eye.radius = src.diameter / 2.0f;
     eye.zoffset = src.angle;
     eye.iris_scale = src.pupilscale;

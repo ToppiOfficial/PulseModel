@@ -2172,6 +2172,9 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
         }
     }
 
+    matrix3x4 vtmp;
+    pm::AngleMatrix(ctx.defaultRotation, vtmp);
+
     for (Eyeball& eye : m.eyeballs) {
         source::Source* psource = m.models[eye.model].source;
 
@@ -2192,6 +2195,26 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
 
         const float scale = ctx.in->scale;
         Vector3 tmp = {eye.org.x * scale, eye.org.y * scale, eye.org.z * scale};
+
+        // `center`: sit on the bbox center of the verts wearing the eyeball's
+        // material (source verts are already $scale'd), with org as an offset in
+        // FINAL axes - so un-rotate it back into source space. $translatemodel
+        // drops out, an offset is a delta.
+        if (eye.center) {
+            const src::SrcMesh& sm = psource->mesh[eye.texture];
+            if (sm.numvertices > 0) {
+                Vector3 lo = psource->vertex[sm.vertexoffset].position, hi = lo;
+                for (int i = 1; i < sm.numvertices; ++i) {
+                    const Vector3& p = psource->vertex[sm.vertexoffset + i].position;
+                    lo = {std::fmin(lo.x, p.x), std::fmin(lo.y, p.y), std::fmin(lo.z, p.z)};
+                    hi = {std::fmax(hi.x, p.x), std::fmax(hi.y, p.y), std::fmax(hi.z, p.z)};
+                }
+                tmp = pm::VectorIRotate(tmp, vtmp);
+                tmp = {(lo.x + hi.x) * 0.5f + tmp.x, (lo.y + hi.y) * 0.5f + tmp.y,
+                       (lo.z + hi.z) * 0.5f + tmp.z};
+            }
+        }
+
         eye.radius *= scale;                                    // already halved by the loader
         eye.zoffset = std::tan(eye.zoffset * pm::kDeg2Rad);      // authored in degrees
         eye.iris_scale = eye.iris_scale != 0.0f ? 1.0f / (eye.iris_scale * scale) : 0.0f;
@@ -2201,8 +2224,6 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
         const matrix3x4& boneToPose = psource->boneToPose[eye.bone];
         eye.org = pm::VectorITransform(tmp, boneToPose);
 
-        matrix3x4 vtmp;
-        pm::AngleMatrix(ctx.defaultRotation, vtmp);
         eye.up = pm::VectorIRotate(pm::VectorIRotate(Vector3{0, 0, 1}, vtmp), boneToPose);
         eye.forward = pm::VectorIRotate(pm::VectorIRotate(Vector3{1, 0, 0}, vtmp), boneToPose);
     }
@@ -2335,7 +2356,8 @@ bool LinkAttachments(Ctx& ctx, std::string* err) {
         }
 
         if (!found) {
-            if (err) *err = "unknown attachment link '" + att.bonename + "'";
+            if (err) *err = "attachment '" + att.name + "' links to unknown bone '" +
+                            att.bonename + "'";
             return false;
         }
 

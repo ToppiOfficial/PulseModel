@@ -24,6 +24,9 @@ very difficult to maintain and update. PulseMDL2 starts over from a scratch.
 ## What it does
 
 - **DMX is the first-class source format.** SMD is supported as legacy input.
+  DMX files are read up to **model format 22 / binary encoding 9** - the Source 2
+  (ModelDoc) - and any lower version still works, so older exporters need
+  no change.
 - Meshes, LODs, bodygroups, materials, `$texturegroup` skins.
 - Skeletons, bone markup, collapse rules, bind-pose edits.
 - Procedural bones: jiggle bones, driver bones, aim-at bones, VRD.
@@ -72,6 +75,28 @@ pulsemdl2 <file.pulseqc> [-game <dir>] [-vtxformat <0|1>] [-defvar <name> <value
 | `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. |
 | `-defvar <name> <value>` | Define a script variable (`$name$`) before the script runs. Repeatable; the script cannot override it. |
 
+## mdldecompile
+
+The build also produces **`mdldecompile`**, which runs the pipeline backwards: an
+existing `.mdl` (plus its sibling `.vvd`/`.vtx`/`.phy`/`.ani`) becomes a
+`.pulseqc` script with `meshes/*.dmx` and `anims/*.smd` beside it, ready to feed
+straight back into `pulsemdl2`.
+
+```
+mdldecompile <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-o <file>` | Script to write. Defaults to a folder named after the `.mdl`, next to it, holding the script and its meshes. |
+| `-forceversion <n>` | Read the file as version `<n>` and ignore the header's version field. |
+
+`-forceversion` exists because some models carry a header version that does not
+match their actual layout - a trick used to make them unreadable to decompilers.
+Pointing it at the real version reads the file normally. It also never aborts the
+whole job over one unreadable mesh or animation: it writes what it can parse and
+tells you what it skipped.
+
 ## Building
 
 CMake + Ninja + MSVC, 64-bit only. Dependencies are vendored - no vcpkg, no
@@ -93,6 +118,7 @@ libs/       C++ libraries: DMX reader, math, binary format headers,
             collision, and vendored third-party code.
             pulselimits.h holds every hard limit.
 pulsemdl2/  The app: script loader, compile stage, .mdl/.vtx/.phy writers.
+mdldecompile/  The reverse tool: .mdl -> .pulseqc + .dmx meshes + .smd anims.
 ```
 
 ## Third-party code and references

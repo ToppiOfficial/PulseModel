@@ -63,6 +63,7 @@ struct Eyeball {
     std::string bonename;
     int bone = -1;
     Vector3 org{};      // script model-space, then bone-space after setup
+    bool center = false; // org is an offset (in final axes) from the material's bbox center
     std::string material;
     int model = -1;   // index into CompiledModel::models (owner)
     int mesh = -1;    // index into the owning model's meshes

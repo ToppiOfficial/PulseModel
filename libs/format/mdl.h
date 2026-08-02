@@ -133,7 +133,11 @@ inline constexpr int32_t STUDIO_ZR = 0x00000020;
 inline constexpr int32_t STUDIO_LX = 0x00000040;
 inline constexpr int32_t STUDIO_LY = 0x00000080;
 inline constexpr int32_t STUDIO_LZ = 0x00000100;
+inline constexpr int32_t STUDIO_LXR = 0x00000200;
+inline constexpr int32_t STUDIO_LYR = 0x00000400;
+inline constexpr int32_t STUDIO_LZR = 0x00000800;
 inline constexpr int32_t STUDIO_LINEAR = 0x00001000;
+inline constexpr int32_t STUDIO_QUADRATIC_MOTION = 0x00002000;
 
 // --- structs -------------------------------------------------------------------
 

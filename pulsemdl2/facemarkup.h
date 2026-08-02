@@ -33,6 +33,7 @@ struct FaceMarkup {
         std::string bonename; // the HEAD bone, not a dedicated eye bone
         std::string material; // matched by basename against the body's meshes
         math::Vector3 origin{};
+        bool center = false;  // origin is an offset from the material's bbox center
         float diameter = 0.0f;
         float angle = 0.0f;      // degrees; stored as tan() by the compile stage
         float pupilscale = 0.0f; // stored as its reciprocal

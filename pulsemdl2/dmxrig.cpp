@@ -232,17 +232,41 @@ void AddAimAtBone(const dmx::Element* dag, float scale, cm::CompileInput& in) {
     in.aimatbones.push_back(std::move(ab));
 }
 
+// DmeTransform -> matrix, translation scaled like the DMX skeleton loader's.
+pm::matrix3x4 DagLocal(const dmx::Element* dag, float scale) {
+    const dmx::Element* t = dag->GetElement("transform");
+    if (!t)
+        return pm::matrix3x4();
+    pm::Quaternion rot{0, 0, 0, 1};
+    if (const dmx::Attribute* a = t->Get("orientation"))
+        if (auto q = std::get_if<dmx::Quaternion>(&a->value))
+            rot = {q->x, q->y, q->z, q->w};
+    const pm::Vector3 p = ToVec(t->GetVector3("position"));
+    return pm::QuaternionMatrix(rot, {p.x * scale, p.y * scale, p.z * scale});
+}
+
 // A DMX attachment is a dag whose SHAPE is a DmeAttachment: the shape names the
-// attachment, the dag names the bone it hangs off, and the local transform is
-// identity (the attachment sits exactly at the bone). Reference LoadAttachments;
-// the static-prop case needs no special handling here, because LinkAttachments
-// already rebases onto the surviving bone when the named one collapses.
-void WalkAttachments(const dmx::Element* dag, cm::CompileInput& in) {
+// attachment. The BONE is the dag itself when the shape hangs on a joint, and
+// otherwise the nearest ancestor joint, with the plain-dag chain below it baked
+// into the local transform - an exporter that writes attachments as locators
+// parented under the joint would otherwise link to a bone that only exists if
+// this same DMX also supplies the mesh (every dag becomes one there, which is
+// all reference LoadAttachments relies on). The static-prop case needs no
+// special handling, because LinkAttachments already rebases onto the surviving
+// bone when the named one collapses.
+void WalkAttachments(const dmx::Element* dag, float scale, cm::CompileInput& in,
+                     const std::string& boneName, const pm::matrix3x4& boneToDag) {
+    const bool isJoint = dag->className == "DmeJoint";
+    const std::string& bone = isJoint ? dag->name : boneName;
+    const pm::matrix3x4 local =
+        isJoint ? pm::matrix3x4() : pm::ConcatTransforms(boneToDag, DagLocal(dag, scale));
+
     const dmx::Element* shape = dag->GetElement("shape");
     if (shape && shape->className == "DmeAttachment") {
         cm::Attachment att;
         att.name = shape->name;
-        att.bonename = dag->name;
+        att.bonename = bone;
+        att.local = local;
         att.type = cm::kAttachIsFromSource;
         if (shape->GetBool("isRigid", false))
             att.type |= cm::kAttachIsRigid;
@@ -254,7 +278,7 @@ void WalkAttachments(const dmx::Element* dag, cm::CompileInput& in) {
     if (auto kids = dag->GetElementArray("children"))
         for (const dmx::Element* c : *kids)
             if (c)
-                WalkAttachments(c, in);
+                WalkAttachments(c, scale, in, bone, local);
 }
 
 // root."hitboxSetList" -> DmeHitboxSetList."hitboxSetList" -> DmeHitboxSet
@@ -360,7 +384,7 @@ bool LoadDmxJoints(const dmx::Datamodel& dm, cm::CompileInput& in, bool jigglebo
             if (jigglebones || proceduralbones)
                 WalkDag(c, in.scale, in, jigglebones, proceduralbones);
             if (attachments)
-                WalkAttachments(c, in);
+                WalkAttachments(c, in.scale, in, std::string(), pm::matrix3x4());
         }
     }
     if (hitboxes)
