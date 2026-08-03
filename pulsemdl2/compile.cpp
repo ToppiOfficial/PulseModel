@@ -2209,9 +2209,13 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
                     lo = {std::fmin(lo.x, p.x), std::fmin(lo.y, p.y), std::fmin(lo.z, p.z)};
                     hi = {std::fmax(hi.x, p.x), std::fmax(hi.y, p.y), std::fmax(hi.z, p.z)};
                 }
-                tmp = pm::VectorIRotate(tmp, vtmp);
-                tmp = {(lo.x + hi.x) * 0.5f + tmp.x, (lo.y + hi.y) * 0.5f + tmp.y,
-                       (lo.z + hi.z) * 0.5f + tmp.z};
+                const Vector3 off = pm::VectorIRotate(tmp, vtmp);
+                tmp = {(lo.x + hi.x) * 0.5f + off.x, (lo.y + hi.y) * 0.5f + off.y,
+                       (lo.z + hi.z) * 0.5f + off.z};
+                std::printf("eyeball \"%s\" center %.3f %.3f %.3f + offset %.3f %.3f %.3f "
+                            "-> %.3f %.3f %.3f\n",
+                            eye.name.c_str(), (lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f,
+                            (lo.z + hi.z) * 0.5f, off.x, off.y, off.z, tmp.x, tmp.y, tmp.z);
             }
         }
 

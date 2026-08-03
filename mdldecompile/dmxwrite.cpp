@@ -1,8 +1,9 @@
 // dmxwrite.cpp - rebuilds a DMX render mesh per model in the .mdl.
 //
-// keyvalues2 ASCII, `format model 15`, written flat: every element sits at top
-// level with an id and is referenced by guid. Positions/normals/UVs/skinning
-// come from the .vvd, faces from the .vtx, morph deltas from the .mdl's flexes.
+// Binary `format model 15` by default, keyvalues2 text on -dmxencoding; either
+// way it is flat - every element sits at top level with an id and is referenced
+// by guid. Positions/normals/UVs/skinning come from the .vvd, faces from the
+// .vtx, morph deltas from the .mdl's flexes.
 //
 // Every LOD the .vtx carries gets its own file - LOD 0 under the $rendermesh
 // alias, the rest as <alias>_lod<n>.dmx for the $lod blocks to replacemodel
@@ -41,8 +42,6 @@ std::string G(float v) {
     std::snprintf(b, sizeof b, "%.9g", v);
     return b;
 }
-std::string G3(const pm::Vector3& v) { return G(v.x) + " " + G(v.y) + " " + G(v.z); }
-std::string G2(const pm::Vector2& v) { return G(v.x) + " " + G(v.y); }
 
 // --- .vvd -------------------------------------------------------------------
 
@@ -343,7 +342,119 @@ std::vector<std::pair<std::string, std::string>> LodMaterialReplacements(
     return out;
 }
 
-// --- the keyvalues2 emitter -------------------------------------------------
+// --- the DMX emitter --------------------------------------------------------
+
+// The binary encoding version that goes with a `format model <n>`: model 15 is
+// binary 4 (int32 table count, uint16 indices, pooled string values), model 1 is
+// binary 2 (uint16 table count, element names and string values written inline),
+// model 22 (modeldoc) is binary 9 (int32 indices, a zero prefix-element count and
+// array type ids as `scalar | 0x20`).
+// Another model version gets its own case here; 0 means we do not write that one.
+int BinaryVersionFor(int formatModel) {
+    switch (formatModel) {
+        case 1: return 2;
+        case 15: return 4;
+        case 22: return 9;
+        default: return 0;
+    }
+}
+
+// -dmxencoding / -dmxmodel, defaulting to what a Source 1 model wants.
+bool g_binary = true;
+int g_formatModel = 15;
+
+// Binary attribute type ids for encoding versions 1-5: scalars 1..14, the
+// matching array type 14 higher. Only the ones we emit are listed.
+enum : uint8_t {
+    kElement = 1, kInt = 2, kBool = 4, kString = 5, kTime = 7,
+    kVector2 = 9, kVector3 = 10, kQuaternion = 13,
+    kElementArray = 15, kIntArray = 16, kFloatArray = 17, kStringArray = 19,
+    kTimeArray = 21, kVector2Array = 23, kVector3Array = 24, kQuaternionArray = 27,
+};
+
+// A time is seconds in memory and in keyvalues2, int ticks of 1/10000 s on disk.
+int32_t Ticks(float seconds) {
+    return static_cast<int32_t>(std::floor(10000.0f * seconds + 0.5f));
+}
+
+bool IsArray(uint8_t t) { return t >= kElementArray; }
+
+// The on-disk type byte. Encoding 9 drops the contiguous array block and tags an
+// array as `scalar | 0x20` instead.
+uint8_t TypeId(uint8_t t, int ev) {
+    if (ev < 9 || !IsArray(t))
+        return t;
+    return static_cast<uint8_t>((t - kElementArray + 1) | 0x20);
+}
+
+// Vertex-stream names. Model 22 (modeldoc) spells them stream-indexed; 15 and
+// below use the long names. Anything not listed is the same in both.
+const char* F(const char* n) {
+    if (g_formatModel < 22)
+        return n;
+    static const struct { const char* v15; const char* v22; } kMap[] = {
+        {"positions", "position$0"},   {"positionsIndices", "position$0Indices"},
+        {"normals", "normal$0"},       {"normalsIndices", "normal$0Indices"},
+        {"textureCoordinates", "texcoord$0"},
+        {"textureCoordinatesIndices", "texcoord$0Indices"},
+        {"jointWeights", "blendweights$0"}, {"jointIndices", "blendindices$0"},
+        {"balance", "balance$0"},      {"balanceIndices", "balance$0Indices"},
+        {"speed", "speed$0"},          {"speedIndices", "speed$0Indices"},
+        {"wrinkle", "wrinkle$0"},      {"wrinkleIndices", "wrinkle$0Indices"},
+    };
+    for (const auto& p : kMap)
+        if (std::strcmp(n, p.v15) == 0)
+            return p.v22;
+    return n;
+}
+
+const char* TypeName(uint8_t t) {
+    switch (t) {
+        case kElement: return "element";
+        case kInt: return "int";
+        case kBool: return "bool";
+        case kString: return "string";
+        case kTime: return "time";
+        case kTimeArray: return "time_array";
+        case kVector2: return "vector2";
+        case kVector3: return "vector3";
+        case kQuaternion: return "quaternion";
+        case kElementArray: return "element_array";
+        case kIntArray: return "int_array";
+        case kFloatArray: return "float_array";
+        case kStringArray: return "string_array";
+        case kVector2Array: return "vector2_array";
+        case kVector3Array: return "vector3_array";
+        case kQuaternionArray: return "quaternion_array";
+    }
+    return "";
+}
+
+// Floats per value, so a float run splits back into vectors.
+int Width(uint8_t t) {
+    switch (t) {
+        case kVector2: case kVector2Array: return 2;
+        case kVector3: case kVector3Array: return 3;
+        case kQuaternion: case kQuaternionArray: return 4;
+        default: return 1;
+    }
+}
+
+// One attribute. Every type we emit is a run of floats, of ints or of strings
+// (element refs are held as the target's id), so the type tag alone says which
+// of the three to read and how to group it.
+struct Attr {
+    std::string name;
+    uint8_t type = 0;
+    std::vector<float> f;
+    std::vector<int> i;
+    std::vector<std::string> s;
+};
+
+struct Elem {
+    std::string cls, id, name;
+    std::vector<Attr> attrs;
+};
 
 // FNV-1a, only ever used to spread mesh names across the id space.
 uint32_t Hash(const std::string& s) {
@@ -353,14 +464,18 @@ uint32_t Hash(const std::string& s) {
     return h;
 }
 
+// Elements are buffered, not streamed: binary wants the string table and the
+// whole element list before any attribute, and refs resolve to element indices.
+//
 // Ids are derived, never random: the same .mdl decompiles to the same bytes
 // twice, so a diff of two runs means something. The first three groups are a
 // hash of the mesh name and the last is a counter, which keeps the ids of two
 // meshes out of the same model apart when a tool loads both into one scene.
-struct Kv2 {
+struct Dmx {
     std::FILE* f;
     uint32_t seed = 0;
     int next = 1;
+    std::vector<Elem> elems;
 
     std::string NewId() {
         char b[48];
@@ -372,52 +487,249 @@ struct Kv2 {
         return b;
     }
     void Begin(const char* cls, const std::string& id, const std::string& name) {
-        std::fprintf(f, "\"%s\"\n{\n\t\"id\" \"elementid\" \"%s\"\n\t\"name\" \"string\" \"%s\"\n",
-                     cls, id.c_str(), name.c_str());
+        elems.push_back(Elem{cls, id, name, {}});
     }
-    void End() { std::fprintf(f, "}\n\n"); }
+    void End() {} // blocks are implicit; kept so the emit sites still read as blocks
 
-    void Str(const char* k, const std::string& v) {
-        std::fprintf(f, "\t\"%s\" \"string\" \"%s\"\n", k, v.c_str());
+    Attr& Push(const char* k, uint8_t t) {
+        elems.back().attrs.push_back(Attr{k, t, {}, {}, {}});
+        return elems.back().attrs.back();
     }
-    void Int(const char* k, int v) { std::fprintf(f, "\t\"%s\" \"int\" \"%d\"\n", k, v); }
-    void Bool(const char* k, bool v) { std::fprintf(f, "\t\"%s\" \"bool\" \"%d\"\n", k, v ? 1 : 0); }
-    void Vec3(const char* k, const pm::Vector3& v) {
-        std::fprintf(f, "\t\"%s\" \"vector3\" \"%s\"\n", k, G3(v).c_str());
-    }
+    void Str(const char* k, const std::string& v) { Push(k, kString).s.push_back(v); }
+    void Time(const char* k, float seconds) { Push(k, kTime).f.push_back(seconds); }
+    void Int(const char* k, int v) { Push(k, kInt).i.push_back(v); }
+    void Bool(const char* k, bool v) { Push(k, kBool).i.push_back(v ? 1 : 0); }
+    void Vec3(const char* k, const pm::Vector3& v) { Push(k, kVector3).f = {v.x, v.y, v.z}; }
     void Quat(const char* k, const pm::Quaternion& q) {
-        std::fprintf(f, "\t\"%s\" \"quaternion\" \"%s %s %s %s\"\n", k, G(q.x).c_str(),
-                     G(q.y).c_str(), G(q.z).c_str(), G(q.w).c_str());
+        Push(k, kQuaternion).f = {q.x, q.y, q.z, q.w};
     }
-    void Ref(const char* k, const std::string& id) {
-        std::fprintf(f, "\t\"%s\" \"element\" \"%s\"\n", k, id.c_str());
-    }
+    void Ref(const char* k, const std::string& id) { Push(k, kElement).s.push_back(id); }
     void RefArray(const char* k, const std::vector<std::string>& ids) {
-        std::fprintf(f, "\t\"%s\" \"element_array\"\n\t[\n", k);
-        for (size_t i = 0; i < ids.size(); ++i)
-            std::fprintf(f, "\t\t\"element\" \"%s\"%s\n", ids[i].c_str(),
-                         i + 1 < ids.size() ? "," : "");
-        std::fprintf(f, "\t]\n");
+        Push(k, kElementArray).s = ids;
     }
-    // entries are already formatted; `type` is the keyvalues2 array type name
-    template <typename T, typename Fn>
-    void Array(const char* k, const char* type, const std::vector<T>& v, Fn fmt) {
-        std::fprintf(f, "\t\"%s\" \"%s\"\n\t[\n", k, type);
-        for (size_t i = 0; i < v.size(); ++i)
-            std::fprintf(f, "\t\t\"%s\"%s\n", fmt(v[i]).c_str(), i + 1 < v.size() ? "," : "");
-        std::fprintf(f, "\t]\n");
-    }
-    void IntArray(const char* k, const std::vector<int>& v) {
-        Array(k, "int_array", v, [](int x) { return std::to_string(x); });
-    }
-    void FloatArray(const char* k, const std::vector<float>& v) {
-        Array(k, "float_array", v, [](float x) { return G(x); });
+    void IntArray(const char* k, const std::vector<int>& v) { Push(k, kIntArray).i = v; }
+    void FloatArray(const char* k, const std::vector<float>& v) { Push(k, kFloatArray).f = v; }
+    void TimeArray(const char* k, const std::vector<float>& v) { Push(k, kTimeArray).f = v; }
+    void QuatArray(const char* k, const std::vector<pm::Quaternion>& v) {
+        Attr& a = Push(k, kQuaternionArray);
+        a.f.reserve(v.size() * 4);
+        for (const pm::Quaternion& q : v) {
+            a.f.push_back(q.x);
+            a.f.push_back(q.y);
+            a.f.push_back(q.z);
+            a.f.push_back(q.w);
+        }
     }
     void V3Array(const char* k, const std::vector<pm::Vector3>& v) {
-        Array(k, "vector3_array", v, [](const pm::Vector3& x) { return G3(x); });
+        Attr& a = Push(k, kVector3Array);
+        a.f.reserve(v.size() * 3);
+        for (const pm::Vector3& p : v) {
+            a.f.push_back(p.x);
+            a.f.push_back(p.y);
+            a.f.push_back(p.z);
+        }
+    }
+    void V2Array(const char* k, const std::vector<pm::Vector2>& v) {
+        Attr& a = Push(k, kVector2Array);
+        a.f.reserve(v.size() * 2);
+        for (const pm::Vector2& p : v) {
+            a.f.push_back(p.x);
+            a.f.push_back(p.y);
+        }
     }
     void StrArray(const char* k, const std::vector<std::string>& v) {
-        Array(k, "string_array", v, [](const std::string& x) { return x; });
+        Push(k, kStringArray).s = v;
+    }
+
+    void Save() { g_binary ? SaveBinary() : SaveKv2(); }
+
+    // --- keyvalues2 text ---
+    void Kv2Attr(const Attr& a) {
+        const int w = Width(a.type);
+        if (!IsArray(a.type)) {
+            std::string v;
+            if (!a.s.empty())
+                v = a.s[0];
+            else if (!a.i.empty())
+                v = std::to_string(a.i[0]);
+            else
+                for (int k = 0; k < w; ++k)
+                    v += (k ? " " : "") + G(a.f[k]);
+            std::fprintf(f, "\t\"%s\" \"%s\" \"%s\"\n", a.name.c_str(), TypeName(a.type),
+                         v.c_str());
+            return;
+        }
+        const size_t n = a.type == kIntArray ? a.i.size()
+                       : a.f.empty()         ? a.s.size()
+                                             : a.f.size() / static_cast<size_t>(w);
+        std::fprintf(f, "\t\"%s\" \"%s\"\n\t[\n", a.name.c_str(), TypeName(a.type));
+        for (size_t k = 0; k < n; ++k) {
+            const char* sep = k + 1 < n ? "," : "";
+            if (a.type == kElementArray) {
+                std::fprintf(f, "\t\t\"element\" \"%s\"%s\n", a.s[k].c_str(), sep);
+            } else if (a.type == kStringArray) {
+                std::fprintf(f, "\t\t\"%s\"%s\n", a.s[k].c_str(), sep);
+            } else if (a.type == kIntArray) {
+                std::fprintf(f, "\t\t\"%d\"%s\n", a.i[k], sep);
+            } else {
+                std::string v;
+                for (int c = 0; c < w; ++c)
+                    v += (c ? " " : "") + G(a.f[k * static_cast<size_t>(w) + c]);
+                std::fprintf(f, "\t\t\"%s\"%s\n", v.c_str(), sep);
+            }
+        }
+        std::fprintf(f, "\t]\n");
+    }
+
+    void SaveKv2() {
+        std::fprintf(f, "<!-- dmx encoding keyvalues2 1 format model %d -->\n\n", g_formatModel);
+        for (const Elem& e : elems) {
+            std::fprintf(f,
+                         "\"%s\"\n{\n\t\"id\" \"elementid\" \"%s\"\n\t\"name\" \"string\" \"%s\"\n",
+                         e.cls.c_str(), e.id.c_str(), e.name.c_str());
+            for (const Attr& a : e.attrs)
+                Kv2Attr(a);
+            std::fprintf(f, "}\n\n");
+        }
+    }
+
+    // --- binary ---
+    void SaveBinary() {
+        // The string table pools element class names and attribute names, plus -
+        // from encoding 4 on - element names and scalar string values; before 4
+        // those two are written inline. Array strings are always inline.
+        const int ev = BinaryVersionFor(g_formatModel);
+        const bool pooledValues = ev >= 4;
+        const bool wideIndex = ev >= 5; // table indices widen to int32
+        std::map<std::string, int> pool;
+        std::vector<const std::string*> strings;
+        auto intern = [&](const std::string& s) {
+            const auto ins = pool.emplace(s, static_cast<int>(strings.size()));
+            if (ins.second)
+                strings.push_back(&ins.first->first); // map nodes are stable
+            return ins.first->second;
+        };
+        std::map<std::string, int> byId;
+        for (size_t k = 0; k < elems.size(); ++k) {
+            byId[elems[k].id] = static_cast<int>(k);
+            intern(elems[k].cls);
+            if (pooledValues)
+                intern(elems[k].name);
+            for (const Attr& a : elems[k].attrs) {
+                intern(a.name);
+                if (a.type == kString && pooledValues)
+                    intern(a.s[0]);
+            }
+        }
+
+        auto u8 = [&](uint8_t v) { std::fwrite(&v, 1, 1, f); };
+        auto u16 = [&](int v) {
+            const uint16_t x = static_cast<uint16_t>(v);
+            std::fwrite(&x, 2, 1, f);
+        };
+        auto i32 = [&](int32_t v) { std::fwrite(&v, 4, 1, f); };
+        auto f32 = [&](float v) { std::fwrite(&v, 4, 1, f); };
+        auto cstr = [&](const std::string& s) { std::fwrite(s.c_str(), 1, s.size() + 1, f); };
+        auto sidx = [&](int v) {
+            if (wideIndex)
+                i32(v);
+            else
+                u16(v);
+        };
+        auto ref = [&](const std::string& id) {
+            const auto it = byId.find(id);
+            i32(it == byId.end() ? -1 : it->second); // -1 is a null reference
+        };
+        // the id string is 32 hex digits with dashes, in byte order
+        auto guid = [&](const std::string& id) {
+            auto hex = [](char c) { return c >= 'a' ? c - 'a' + 10 : c - '0'; };
+            uint8_t g[16] = {};
+            int n = 0;
+            for (size_t k = 0; k + 1 < id.size() && n < 16; ++k) {
+                if (id[k] == '-')
+                    continue;
+                g[n++] = static_cast<uint8_t>((hex(id[k]) << 4) | hex(id[k + 1]));
+                ++k;
+            }
+            std::fwrite(g, 1, sizeof g, f);
+        };
+
+        // the header line is null-terminated, the way the reader expects it
+        std::fprintf(f, "<!-- dmx encoding binary %d format model %d -->\n", ev, g_formatModel);
+        u8(0);
+
+        if (ev >= 9)
+            i32(0); // prefix element count - nothing we write needs one
+
+        // the table count widens to int32 at encoding 4
+        if (pooledValues)
+            i32(static_cast<int32_t>(strings.size()));
+        else
+            u16(static_cast<int>(strings.size()));
+        for (const std::string* s : strings)
+            cstr(*s);
+
+        i32(static_cast<int32_t>(elems.size()));
+        for (const Elem& e : elems) {
+            sidx(pool[e.cls]);
+            if (pooledValues)
+                sidx(pool[e.name]);
+            else
+                cstr(e.name);
+            guid(e.id);
+        }
+
+        for (const Elem& e : elems) {
+            i32(static_cast<int32_t>(e.attrs.size()));
+            for (const Attr& a : e.attrs) {
+                sidx(pool[a.name]);
+                u8(TypeId(a.type, ev));
+                const int w = Width(a.type);
+                switch (a.type) {
+                    case kElement: ref(a.s[0]); break;
+                    case kInt: i32(a.i[0]); break;
+                    case kBool: u8(static_cast<uint8_t>(a.i[0])); break;
+                    case kTime: i32(Ticks(a.f[0])); break;
+                    case kString:
+                        if (pooledValues)
+                            sidx(pool[a.s[0]]);
+                        else
+                            cstr(a.s[0]);
+                        break;
+                    case kVector2:
+                    case kVector3:
+                    case kQuaternion:
+                        for (float v : a.f)
+                            f32(v);
+                        break;
+                    case kElementArray:
+                        i32(static_cast<int32_t>(a.s.size()));
+                        for (const std::string& id : a.s)
+                            ref(id);
+                        break;
+                    case kStringArray:
+                        i32(static_cast<int32_t>(a.s.size()));
+                        for (const std::string& s : a.s)
+                            cstr(s);
+                        break;
+                    case kIntArray:
+                        i32(static_cast<int32_t>(a.i.size()));
+                        for (int v : a.i)
+                            i32(v);
+                        break;
+                    case kTimeArray:
+                        i32(static_cast<int32_t>(a.f.size()));
+                        for (float v : a.f)
+                            i32(Ticks(v));
+                        break;
+                    default: // float / vector2 / vector3 arrays
+                        i32(static_cast<int32_t>(a.f.size() / static_cast<size_t>(w)));
+                        for (float v : a.f)
+                            f32(v);
+                        break;
+                }
+            }
+        }
     }
 };
 
@@ -436,12 +748,12 @@ struct Delta {
 // Ids are handed out in emit order, so allocation is split from writing: the
 // caller takes its own ids in between, after the joints and before the mesh.
 struct Skel {
-    std::string idRoot, idModel, idModelXform, idBind;
+    std::string idRoot, idModel, idModelXform, idBind, idAxis;
     std::vector<std::string> idJointDag, idJointXform;
     int numbones = 0;
 };
 
-Skel AllocSkel(Kv2& q, const Mdl& m) {
+Skel AllocSkel(Dmx& q, const Mdl& m) {
     Skel s;
     s.numbones = m.At<fm::mstudiobone_t>(m.buf.data(), m.hdr->boneindex, m.hdr->numbones)
                      ? m.hdr->numbones
@@ -457,23 +769,35 @@ Skel AllocSkel(Kv2& q, const Mdl& m) {
     }
     if (s.numbones)
         s.idBind = q.NewId();
+    if (g_formatModel >= 22)
+        s.idAxis = q.NewId();
     return s;
 }
 
 // The root DmElement, the DmeModel and one dag+transform per bone. `idMeshDag`
-// is the caller's mesh, which hangs off the model beside the root bones.
-void WriteSkel(Kv2& q, const Mdl& m, const Skel& s, const std::string& name,
-               const std::string& idMeshDag, const std::string& idCombo) {
+// is the caller's mesh, which hangs off the model beside the root bones; an
+// animation file has none. `pose0` overrides the bind pose the joints are
+// written at, for a clip whose frame 0 is its own reference pose.
+void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
+               const std::string& idMeshDag, const std::string& idCombo,
+               const std::string& idAnimList = std::string(),
+               const std::vector<AnimPose>* pose0 = nullptr) {
     const fm::mstudiobone_t* bones =
         m.At<fm::mstudiobone_t>(m.buf.data(), m.hdr->boneindex, m.hdr->numbones);
     const std::vector<std::string> boneNames = BoneNames(m);
     const std::vector<LocalPose> poses = LocalPoses(m);
 
+    // An animation file is `skeleton` only. A root that also carries `model`
+    // reads as a mesh export, and an importer that types the file off that
+    // attribute takes the ANIM branch away and drops every clip.
     q.Begin("DmElement", s.idRoot, name);
-    q.Ref("model", s.idModel);
+    if (idAnimList.empty())
+        q.Ref("model", s.idModel);
     q.Ref("skeleton", s.idModel);
     if (!idCombo.empty())
         q.Ref("combinationOperator", idCombo);
+    if (!idAnimList.empty())
+        q.Ref("animationList", idAnimList);
     q.End();
 
     // The root bones and the mesh hang off `children`, and every bone is listed
@@ -485,7 +809,8 @@ void WriteSkel(Kv2& q, const Mdl& m, const Skel& s, const std::string& name,
         if (bones[i].parent < 0)
             rootDags.push_back(s.idJointDag[i]);
     }
-    rootDags.push_back(idMeshDag);
+    if (!idMeshDag.empty())
+        rootDags.push_back(idMeshDag);
 
     q.Begin("DmeModel", s.idModel, name);
     q.Str("upAxis", "Z");
@@ -494,7 +819,18 @@ void WriteSkel(Kv2& q, const Mdl& m, const Skel& s, const std::string& name,
     q.RefArray("jointList", allJoints);
     if (!s.idBind.empty())
         q.RefArray("baseStates", {s.idBind});
+    if (!s.idAxis.empty())
+        q.Ref("axisSystem", s.idAxis);
     q.End();
+
+    // model 22 states the source axes explicitly: Z up, Y forward, right-handed.
+    if (!s.idAxis.empty()) {
+        q.Begin("DmeAxisSystem", s.idAxis, "axisSystem");
+        q.Int("upAxis", 3);
+        q.Int("forwardParity", 1);
+        q.Int("coordSys", 0);
+        q.End();
+    }
 
     q.Begin("DmeTransform", s.idModelXform, name);
     q.Vec3("position", {0.0f, 0.0f, 0.0f});
@@ -527,10 +863,11 @@ void WriteSkel(Kv2& q, const Mdl& m, const Skel& s, const std::string& name,
         // same rotation in a finished file, and $definebone is written from
         // `rot` - so taking `quat` here leaves the source skeleton and the
         // script disagreeing about the same bone.
+        const pm::Vector3 pos = pose0 ? (*pose0)[i].pos : poses[i].pos;
         pm::Quaternion rot;
-        pm::AngleQuaternion(poses[i].rot, rot);
+        pm::AngleQuaternion(pose0 ? (*pose0)[i].rot : poses[i].rot, rot);
         q.Begin("DmeTransform", s.idJointXform[i], boneNames[i]);
-        q.Vec3("position", poses[i].pos);
+        q.Vec3("position", pos);
         q.Quat("orientation", rot);
         q.End();
     }
@@ -762,7 +1099,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         std::printf("  cannot write \"%s\"\n", path.c_str());
         return;
     }
-    Kv2 q{f, Hash(meshName)};
+    Dmx q{f, Hash(meshName)};
     const std::vector<std::string> texNames = TextureNames(m);
 
     const Skel skel = AllocSkel(q, m);
@@ -779,8 +1116,6 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         idControl.push_back(q.NewId());
     }
     const std::string idCombo = deltaOrder.empty() ? std::string() : q.NewId();
-
-    std::fprintf(f, "<!-- dmx encoding keyvalues2 1 format model 15 -->\n\n");
 
     WriteSkel(q, m, skel, meshName, idMeshDag, idCombo);
 
@@ -802,33 +1137,32 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     q.RefArray("deltaStates", idDelta);
     q.End();
 
-    std::vector<std::string> fmtNames = {"positions", "normals", "textureCoordinates",
-                                         "jointWeights", "jointIndices"};
+    std::vector<std::string> fmtNames = {F("positions"), F("normals"), F("textureCoordinates"),
+                                         F("jointWeights"), F("jointIndices")};
     if (anyBalance)
-        fmtNames.push_back("balance");
+        fmtNames.push_back(F("balance"));
     if (anySpeed)
-        fmtNames.push_back("speed");
+        fmtNames.push_back(F("speed"));
 
     q.Begin("DmeVertexData", idData, "bind");
     q.StrArray("vertexFormat", fmtNames);
     q.Int("jointCount", jointCount);
     q.Bool("flipVCoordinates", true);
-    q.V3Array("positions", uniquePos);
-    q.IntArray("positionsIndices", posCorner);
-    q.V3Array("normals", normals);
-    q.IntArray("normalsIndices", corner);
-    q.Array("textureCoordinates", "vector2_array", texcoords,
-            [](const pm::Vector2& t) { return G2(t); });
-    q.IntArray("textureCoordinatesIndices", corner);
-    q.FloatArray("jointWeights", uniqueWeights);
-    q.IntArray("jointIndices", uniqueIndices);
+    q.V3Array(F("positions"), uniquePos);
+    q.IntArray(F("positionsIndices"), posCorner);
+    q.V3Array(F("normals"), normals);
+    q.IntArray(F("normalsIndices"), corner);
+    q.V2Array(F("textureCoordinates"), texcoords);
+    q.IntArray(F("textureCoordinatesIndices"), corner);
+    q.FloatArray(F("jointWeights"), uniqueWeights);
+    q.IntArray(F("jointIndices"), uniqueIndices);
     if (anyBalance) {
-        q.FloatArray("balance", balance);
-        q.IntArray("balanceIndices", corner);
+        q.FloatArray(F("balance"), balance);
+        q.IntArray(F("balanceIndices"), corner);
     }
     if (anySpeed) {
-        q.FloatArray("speed", speed);
-        q.IntArray("speedIndices", corner);
+        q.FloatArray(F("speed"), speed);
+        q.IntArray(F("speedIndices"), corner);
     }
     q.End();
 
@@ -853,18 +1187,18 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
 
     for (size_t i = 0; i < deltaOrder.size(); ++i) {
         const Delta& d = deltas[deltaOrder[i]];
-        std::vector<std::string> dfmt = {"positions", "normals"};
+        std::vector<std::string> dfmt = {F("positions"), F("normals")};
         if (!d.wrinkle.empty())
-            dfmt.push_back("wrinkle");
+            dfmt.push_back(F("wrinkle"));
         q.Begin("DmeVertexDeltaData", idDelta[i], deltaOrder[i]);
         q.StrArray("vertexFormat", dfmt);
-        q.V3Array("positions", d.pos);
-        q.IntArray("positionsIndices", d.posIdx);
-        q.V3Array("normals", d.norm);
-        q.IntArray("normalsIndices", d.normIdx);
+        q.V3Array(F("positions"), d.pos);
+        q.IntArray(F("positionsIndices"), d.posIdx);
+        q.V3Array(F("normals"), d.norm);
+        q.IntArray(F("normalsIndices"), d.normIdx);
         if (!d.wrinkle.empty()) {
-            q.FloatArray("wrinkle", d.wrinkle);
-            q.IntArray("wrinkleIndices", d.wrinkleIdx);
+            q.FloatArray(F("wrinkle"), d.wrinkle);
+            q.IntArray(F("wrinkleIndices"), d.wrinkleIdx);
         }
         q.End();
     }
@@ -887,6 +1221,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         }
     }
 
+    q.Save();
     std::fclose(f);
     std::printf("  wrote %s (%d verts, %d tris, %d deltas)\n", path.c_str(),
                 static_cast<int>(nverts), static_cast<int>(corner.size() / 3),
@@ -1099,6 +1434,126 @@ bool ReadPhyHulls(const Mdl& m, const std::string& phyPath, std::vector<PhyHull>
 
 } // namespace
 
+const char* SetDmxOutput(const std::string& encoding, int formatModel) {
+    if (encoding != "binary" && encoding != "keyvalues2")
+        return "unknown -dmxencoding (binary or keyvalues2)";
+    if (BinaryVersionFor(formatModel) == 0)
+        return "unsupported -dmxmodel (1, 15 or 22)";
+    g_binary = encoding == "binary";
+    g_formatModel = formatModel;
+    return nullptr;
+}
+
+bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string& clipName, int fps,
+                       const std::vector<std::vector<AnimPose>>& frames) {
+    if (frames.empty() || fps <= 0)
+        return false;
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+
+    Dmx q{f};
+    q.seed = Hash(clipName);
+    const Skel s = AllocSkel(q, m);
+    const std::string idList = q.NewId(), idClip = q.NewId(), idFrame = q.NewId();
+    // three elements per channel: the channel, its log and the log's one layer
+    std::vector<std::string> idChan(s.numbones * 2), idLog(s.numbones * 2),
+        idLayer(s.numbones * 2);
+    for (int i = 0; i < s.numbones * 2; ++i) {
+        idChan[i] = q.NewId();
+        idLog[i] = q.NewId();
+        idLayer[i] = q.NewId();
+    }
+
+    // The frame times a DmeChannelsClip is sampled at: whole seconds plus the
+    // rounded remainder, which is how the importer reconstructs them - a key
+    // that lands anywhere else gets interpolated instead of read.
+    std::vector<float> times;
+    times.reserve(frames.size());
+    for (int k = 0; k < static_cast<int>(frames.size()); ++k) {
+        const int whole = k / fps;
+        const int ticks = whole * 10000 +
+                          Ticks(static_cast<float>(k - whole * fps) / static_cast<float>(fps));
+        times.push_back(static_cast<float>(ticks) / 10000.0f);
+    }
+
+    WriteSkel(q, m, s, clipName, std::string(), std::string(), idList, &frames[0]);
+
+    q.Begin("DmeAnimationList", idList, clipName);
+    q.RefArray("animations", {idClip});
+    q.End();
+
+    q.Begin("DmeChannelsClip", idClip, clipName);
+    q.Ref("timeFrame", idFrame);
+    q.Int("frameRate", fps);
+    q.RefArray("channels", idChan);
+    q.End();
+
+    q.Begin("DmeTimeFrame", idFrame, "timeFrame");
+    q.Time("start", 0.0f);
+    q.Time("duration", times.back());
+    q.Time("offset", 0.0f);
+    q.End();
+
+    const std::vector<std::string> boneNames = BoneNames(m);
+    for (int j = 0; j < s.numbones; ++j) {
+        // A bone that never moves collapses to one key: FindKey holds the last
+        // key past the end of the list, so one is the whole clip.
+        std::vector<pm::Vector3> pos;
+        std::vector<pm::Quaternion> rot;
+        for (const std::vector<AnimPose>& fr : frames) {
+            pm::Quaternion qr;
+            pm::AngleQuaternion(fr[j].rot, qr);
+            pos.push_back(fr[j].pos);
+            rot.push_back(qr);
+        }
+        auto flat = [](const float* v, size_t n, size_t w) {
+            for (size_t k = w; k < n * w; ++k)
+                if (v[k] != v[k % w])
+                    return false;
+            return true;
+        };
+        if (flat(&pos[0].x, pos.size(), 3))
+            pos.resize(1);
+        if (flat(&rot[0].x, rot.size(), 4))
+            rot.resize(1);
+
+        for (int c = 0; c < 2; ++c) {
+            const int n = j * 2 + c;
+            const bool isPos = c == 0;
+            q.Begin("DmeChannel", idChan[n], boneNames[j] + (isPos ? "_p" : "_o"));
+            q.Ref("fromElement", std::string());
+            q.Str("fromAttribute", "");
+            q.Int("fromIndex", 0);
+            q.Ref("toElement", s.idJointXform[j]);
+            q.Str("toAttribute", isPos ? "position" : "orientation");
+            q.Int("toIndex", 0);
+            q.Int("mode", 3); // CM_PLAY
+            q.Ref("log", idLog[n]);
+            q.End();
+
+            q.Begin(isPos ? "DmeVector3Log" : "DmeQuaternionLog", idLog[n], "log");
+            q.RefArray("layers", {idLayer[n]});
+            q.Bool("usedefaultvalue", false);
+            q.End();
+
+            q.Begin(isPos ? "DmeVector3LogLayer" : "DmeQuaternionLogLayer", idLayer[n], "log");
+            q.TimeArray("times",
+                        std::vector<float>(times.begin(),
+                                           times.begin() + (isPos ? pos.size() : rot.size())));
+            if (isPos)
+                q.V3Array("values", pos);
+            else
+                q.QuatArray("values", rot);
+            q.End();
+        }
+    }
+
+    q.Save();
+    std::fclose(f);
+    return true;
+}
+
 PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
                                  const std::string& dir, const std::string& name) {
     PhysicsMeshInfo info;
@@ -1164,12 +1619,11 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
         }
     }
 
-    Kv2 q{f, Hash(name)};
+    Dmx q{f, Hash(name)};
     const Skel skel = AllocSkel(q, m);
     const std::string idMeshDag = q.NewId(), idMeshXform = q.NewId(), idMesh = q.NewId(),
                       idData = q.NewId(), idFaceSet = q.NewId(), idMaterial = q.NewId();
 
-    std::fprintf(f, "<!-- dmx encoding keyvalues2 1 format model 15 -->\n\n");
     WriteSkel(q, m, skel, name, idMeshDag, std::string());
 
     q.Begin("DmeDag", idMeshDag, name);
@@ -1190,19 +1644,18 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
     q.End();
 
     q.Begin("DmeVertexData", idData, "bind");
-    q.StrArray("vertexFormat",
-               {"positions", "normals", "textureCoordinates", "jointWeights", "jointIndices"});
+    q.StrArray("vertexFormat", {F("positions"), F("normals"), F("textureCoordinates"),
+                                F("jointWeights"), F("jointIndices")});
     q.Int("jointCount", 1);
     q.Bool("flipVCoordinates", true);
-    q.V3Array("positions", positions);
-    q.IntArray("positionsIndices", corner);
-    q.V3Array("normals", normals);
-    q.IntArray("normalsIndices", corner);
-    q.Array("textureCoordinates", "vector2_array", texcoords,
-            [](const pm::Vector2& t) { return G2(t); });
-    q.IntArray("textureCoordinatesIndices", corner);
-    q.FloatArray("jointWeights", jointWeights);
-    q.IntArray("jointIndices", jointIndices);
+    q.V3Array(F("positions"), positions);
+    q.IntArray(F("positionsIndices"), corner);
+    q.V3Array(F("normals"), normals);
+    q.IntArray(F("normalsIndices"), corner);
+    q.V2Array(F("textureCoordinates"), texcoords);
+    q.IntArray(F("textureCoordinatesIndices"), corner);
+    q.FloatArray(F("jointWeights"), jointWeights);
+    q.IntArray(F("jointIndices"), jointIndices);
     q.End();
 
     // A collision source's materials never reach the model, so the name is only
@@ -1216,6 +1669,7 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
     q.Str("mtlName", "phys");
     q.End();
 
+    q.Save();
     std::fclose(f);
     std::printf("  wrote %s (%d hulls, %d tris)\n", path.c_str(), static_cast<int>(hulls.size()),
                 static_cast<int>(corner.size() / 3));

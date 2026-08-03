@@ -1,4 +1,5 @@
-// smdwrite.cpp - rebuilds one SMD animation clip per local animation.
+// animwrite.cpp - rebuilds one animation clip per local animation, as a DMX or
+// - on -smdanimation - as an SMD.
 //
 // The clip is compressed in the .mdl (or demand-loaded from the .ani) in one of
 // two encodings, both undone here:
@@ -10,11 +11,11 @@
 //   FRAMEANIM - a per-bone flag byte array, a block of values that never change,
 //             then a fixed stride per frame. Values are absolute, no scaling.
 //
-// SMD is a poor container next to DMX for meshes but an exact one for animation:
-// a frame is the same parent-relative position + euler that comes out of either
-// encoding, so nothing is lost on the way through.
+// Either container holds the same thing: a frame is the parent-relative
+// position + rotation that comes out of either encoding, so nothing is lost on
+// the way through. DMX is the default; SMD stays for a tool that only reads it.
 
-#include "smdwrite.h"
+#include "animwrite.h"
 
 #include <cstdio>
 #include <cstring>
@@ -22,15 +23,15 @@
 #include <system_error>
 #include <vector>
 
+#include "dmxwrite.h"
 #include "math/compressed.h"
 
 namespace mdldecompile {
 namespace {
 
-struct Pose {
-    pm::Vector3 pos;
-    pm::RadianEuler rot;
-};
+using Pose = AnimPose;
+
+bool g_smd = false;
 
 // A block of animation data plus the bounds it has to stay inside. Sections may
 // live in the .mdl or in the .ani, so both files come through here.
@@ -317,7 +318,11 @@ void RestoreMotion(const Mdl& m, const fm::mstudioanimdesc_t& a, const fm::mstud
 
 } // namespace
 
-void WriteAnimationSmds(const Mdl& m, const std::string& mdlPath, const std::string& dir) {
+void SetAnimFormat(bool smd) { g_smd = smd; }
+
+const char* AnimExt() { return g_smd ? ".smd" : ".dmx"; }
+
+void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::string& dir) {
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudioanimdesc_t* descs =
         m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
@@ -376,8 +381,18 @@ void WriteAnimationSmds(const Mdl& m, const std::string& mdlPath, const std::str
         }
     };
 
-    auto emit = [&](const std::string& name, const std::vector<std::vector<Pose>>& frames) {
-        const std::string path = animDir + "/" + name + ".smd";
+    auto emit = [&](const std::string& name, const std::vector<std::vector<Pose>>& frames,
+                    int fps) {
+        const std::string path = animDir + "/" + name + AnimExt();
+        if (!g_smd) {
+            if (!WriteAnimationDmx(m, path, name, fps, frames)) {
+                std::printf("  cannot write \"%s\"\n", path.c_str());
+                return false;
+            }
+            std::printf("  wrote %s (%d frame%s, %d bones)\n", path.c_str(),
+                        static_cast<int>(frames.size()), frames.size() == 1 ? "" : "s", h.numbones);
+            return true;
+        }
         std::FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) {
             std::printf("  cannot write \"%s\"\n", path.c_str());
@@ -407,7 +422,7 @@ void WriteAnimationSmds(const Mdl& m, const std::string& mdlPath, const std::str
     if (NeedsBindPoseAnim(m, baseIndex)) {
         std::vector<std::vector<Pose>> one{bindPose};
         unyawRoots(one[0]);
-        if (emit(kBindPoseAnim, one))
+        if (emit(kBindPoseAnim, one, 30)) // the fps the .pulseqc writes for it
             ++written;
     }
     for (int i = 0; i < h.numlocalanim; ++i) {
@@ -453,14 +468,17 @@ void WriteAnimationSmds(const Mdl& m, const std::string& mdlPath, const std::str
         for (std::vector<Pose>& fr : frames)
             unyawRoots(fr);
 
-        if (emit(refs[i].name, frames))
+        // the clip's own fps, so the DMX key times land on the frames the
+        // `fps` the script writes will sample
+        const int fps = a.fps > 0.0f ? static_cast<int>(a.fps + 0.5f) : 30;
+        if (emit(refs[i].name, frames, fps))
             ++written;
         else
             ++skipped;
     }
 
     if (written)
-        std::printf("%d animation smd%s in %s\n", written, written == 1 ? "" : "s",
+        std::printf("%d animation clip%s in %s\n", written, written == 1 ? "" : "s",
                     animDir.c_str());
     if (skipped)
         std::printf("  %d animation%s could not be extracted\n", skipped, skipped == 1 ? "" : "s");

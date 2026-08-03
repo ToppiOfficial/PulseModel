@@ -2,10 +2,11 @@
 //
 // Usage:
 //   mdldecompile <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
+//                           [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]
 //
 // The script-level markup - names, materials, bodygroups, skeleton, attachments,
-// hitboxes, skins - plus one .dmx render mesh per model (dmxwrite.cpp). Animation
-// clips are still only named, not extracted.
+// hitboxes, skins - plus one .dmx render mesh per model (dmxwrite.cpp) and one
+// clip per animation (animwrite.cpp).
 
 #include <algorithm>
 #include <cctype>
@@ -23,11 +24,11 @@
 #include <string>
 #include <vector>
 
+#include "animwrite.h"
 #include "dmxwrite.h"
 #include "fatalerror.h"
 #include "format/phy.h"
 #include "mdlfile.h"
-#include "smdwrite.h"
 
 using namespace mdldecompile;
 using pulse::fatal::Fail;
@@ -50,12 +51,19 @@ void PrintHeader() {
 
 int Usage() {
     std::printf("usage: mdldecompile <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]\n");
+    std::printf("                    [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]\n");
     std::printf("\n");
     std::printf("  -o <file>     script to write; defaults to a folder named after the\n");
     std::printf("                .mdl, next to it, holding the script and its meshes\n");
     std::printf("  -forceversion <n>\n");
     std::printf("                read the file as version <n>, ignoring the header field\n");
     std::printf("                (some compilers write a bogus one to block decompiling)\n");
+    std::printf("  -dmxencoding <enc>\n");
+    std::printf("                how the .dmx meshes are encoded: binary (default) or\n");
+    std::printf("                keyvalues2 text\n");
+    std::printf("  -dmxmodel <n> the `format model` version they declare: 15 (default),\n");
+    std::printf("                1, or 22 for Source 2 modeldoc\n");
+    std::printf("  -smdanimation write the animation clips as .smd instead of .dmx\n");
     return 1;
 }
 
@@ -111,10 +119,11 @@ std::string V3Deg(const pm::Vector3& radians) {
     return Deg(radians.x) + " " + Deg(radians.y) + " " + Deg(radians.z);
 }
 
-// $definebone, $attachment and $driverbone all read their angles as QAngle
-// degrees - pitch, yaw, roll - while a RadianEuler holds the same rotation as
-// (roll, pitch, yaw). Writing one straight out cycles the three components and
-// the recompile rebinds every vertex to a twisted skeleton.
+// $definebone and $attachment read their angles as QAngle degrees - pitch, yaw,
+// roll - while a RadianEuler holds the same rotation as (roll, pitch, yaw).
+// Writing one straight out cycles the three components and the recompile
+// rebinds every vertex to a twisted skeleton. ($driverbone is the exception -
+// its triggers are RadianEuler-ordered, so they go out through V3Deg.)
 std::string QAngleDeg(const pm::RadianEuler& r) {
     return Deg(r.y) + " " + Deg(r.z) + " " + Deg(r.x);
 }
@@ -175,6 +184,13 @@ std::string ContentsTokens(int32_t v) {
 void WriteHeader(Qc& q, const Mdl& m) {
     const fm::studiohdr_t& h = *m.hdr;
     q.Line("$modelname \"" + std::string(h.name) + "\"");
+
+    // sources go in meshes/ and anims/ beside the script - registered here so
+    // every reference below can name a bare filename
+    q.Blank();
+    q.Line("$addsearchdir \"meshes\"");
+    q.Line("$addsearchdir \"anims\"");
+    q.Blank();
 
     q.Line(std::string("$modelarchetype ") + Archetype(m));
 
@@ -314,7 +330,7 @@ std::vector<std::vector<std::string>> WriteBodyParts(Qc& q, const Mdl& m) {
             for (int n = 2; !used.insert(unique).second; ++n)
                 unique = name + "_" + std::to_string(n);
             meshNames[i].push_back(unique);
-            q.Line("$rendermesh \"" + unique + "\" \"meshes/" + unique + ".dmx\"");
+            q.Line("$rendermesh \"" + unique + "\" \"" + unique + ".dmx\"");
         }
     }
 
@@ -532,8 +548,10 @@ void WriteDriverBones(Qc& q, const Mdl& m) {
             pm::QuaternionAngles(tr[t].quat, helperRot);
             // the file keeps 1/tolerance; a zero would have been refused on the
             // way in, so the reciprocal is safe
-            q.Line("    trigger " + Deg(1.0f / tr[t].inv_tolerance) + "  " + QAngleDeg(driverRot) +
-                   "  " + QAngleDeg(helperRot) + "  " + V3(tr[t].pos));
+            // RadianEuler order, not QAngle - a trigger's angles go straight
+            // into AngleQuaternion, same as the VRD line they mirror
+            q.Line("    trigger " + Deg(1.0f / tr[t].inv_tolerance) + "  " + V3Deg(driverRot) +
+                   "  " + V3Deg(helperRot) + "  " + V3(tr[t].pos));
         }
         q.Line("}");
     }
@@ -708,7 +726,7 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
     q.Line("$physicsmodel {");
     if (!phys.written)
         q.Line("    // the .phy's hulls could not be read - this file has to be supplied");
-    q.Line("    $physicsshape fromfile \"meshes/" + meshName + ".dmx\" {");
+    q.Line("    $physicsshape fromfile \"" + meshName + ".dmx\" {");
     q.Line("        importtype perjoint");
     if (phys.concave || (edit && edit->Get("concave") == "1"))
         q.Line("        concave");
@@ -1312,6 +1330,32 @@ void WriteIncludeModels(Qc& q, const Mdl& m) {
     }
 }
 
+// $keyvalues. The stored text is the block's contents wrapped in an outer
+// "mdlkeyvalue { }" that the compiler puts back on write - strip it here or the
+// wrapper nests one level deeper every round trip.
+void WriteKeyValues(Qc& q, const Mdl& m) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const char* kv = m.At<char>(m.buf.data(), h.keyvalueindex, h.keyvaluesize);
+    if (!kv || h.keyvaluesize <= 0)
+        return;
+    std::string text(kv, strnlen(kv, h.keyvaluesize));
+
+    const size_t open = text.find('{'), close = text.rfind('}');
+    if (text.compare(0, 11, "mdlkeyvalue") == 0 && open != std::string::npos &&
+        close != std::string::npos && close > open)
+        text = text.substr(open + 1, close - open - 1);
+
+    const size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return;
+    text = text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+
+    q.Blank();
+    q.Line("$keyvalues {");
+    q.Line(text);
+    q.Line("}");
+}
+
 // $defaultweightlist / $weightlist. A seqdesc keeps the resolved per-bone
 // rotation weights, so the lists come back as values - the names they were
 // authored under are not in the file, and neither are position weights (an
@@ -1615,7 +1659,7 @@ std::string AnimOptions(const Mdl& m, const fm::mstudioanimdesc_t& a,
     return s;
 }
 
-// $animation / $declareanimation, naming the clip smdwrite.cpp put in anims/.
+// $animation / $declareanimation, naming the clip animwrite.cpp put in anims/.
 // An implied animation is skipped - it goes back inside its own $sequence.
 void WriteAnimations(Qc& q, const Mdl& m) {
     const fm::studiohdr_t& h = *m.hdr;
@@ -1629,8 +1673,8 @@ void WriteAnimations(Qc& q, const Mdl& m) {
     std::vector<std::string> lines;
     // declared first so every delta below can name it
     if (NeedsBindPoseAnim(m, base))
-        lines.push_back("$animation \"" + std::string(kBindPoseAnim) + "\" \"anims/" +
-                        kBindPoseAnim + ".smd\" fps 30  // the pose the deltas subtract");
+        lines.push_back("$animation \"" + std::string(kBindPoseAnim) + "\" \"" + kBindPoseAnim +
+                        AnimExt() + "\" fps 30  // the pose the deltas subtract");
     for (int i = 0; i < h.numlocalanim; ++i) {
         if (a[i].flags & fm::STUDIO_OVERRIDE) {
             lines.push_back("$declareanimation \"" + refs[i].name + "\"");
@@ -1638,7 +1682,8 @@ void WriteAnimations(Qc& q, const Mdl& m) {
         }
         if (refs[i].implied)
             continue;
-        lines.push_back("$animation \"" + refs[i].name + "\" \"anims/" + refs[i].name + ".smd\" " +
+        lines.push_back("$animation \"" + refs[i].name + "\" \"" + refs[i].name + AnimExt() +
+                        "\" " +
                         AnimOptions(m, a[i], SubtractNameFor(refs, base, i)) + "  // " +
                         std::to_string(a[i].numframes) + " frames");
     }
@@ -1703,7 +1748,7 @@ void WriteSequences(Qc& q, const Mdl& m) {
             }
             // an implied animation was written inline as a file, not by name
             const AnimRef& r = animRefs[grid[k]];
-            opt(r.implied ? "\"anims/" + r.name + ".smd\"  // " +
+            opt(r.implied ? "\"" + r.name + AnimExt() + "\"  // " +
                                 std::to_string(anims[grid[k]].numframes) + " frames"
                           : "\"" + r.name + "\"");
             animFlags |= anims[grid[k]].flags;
@@ -1944,16 +1989,26 @@ int RunDecompile(int argc, char** argv) {
     const char* in = nullptr;
     const char* out = nullptr;
     int forceVersion = 0;
+    std::string dmxEncoding = "binary";
+    int dmxModel = 15;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
             out = argv[++i];
         else if (std::strcmp(argv[i], "-forceversion") == 0 && i + 1 < argc)
             forceVersion = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "-dmxencoding") == 0 && i + 1 < argc)
+            dmxEncoding = argv[++i];
+        else if (std::strcmp(argv[i], "-dmxmodel") == 0 && i + 1 < argc)
+            dmxModel = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "-smdanimation") == 0)
+            SetAnimFormat(true);
         else if (!in)
             in = argv[i];
     }
     if (!in)
         return Usage();
+    if (const char* err = SetDmxOutput(dmxEncoding, dmxModel))
+        return Fail("command line", err);
 
     std::printf("Decompiling: %s\n", in);
 
@@ -2006,7 +2061,7 @@ int RunDecompile(int argc, char** argv) {
         for (const std::vector<std::string>& part : meshNames)
             for (const std::string& name : part)
                 if (!name.empty())
-                    q.Line("    replacemodel \"" + name + "\" \"meshes/" + name + "_lod" +
+                    q.Line("    replacemodel \"" + name + "\" \"" + name + "_lod" +
                            std::to_string(l) + ".dmx\"");
         for (const auto& r : lods[l].materialReplacements)
             q.Line("    replacematerial \"" + r.first + "\" \"" + r.second + "\"");
@@ -2030,12 +2085,13 @@ int RunDecompile(int argc, char** argv) {
     STAGE(WriteAnimations, q, m);
     STAGE(WriteSequences, q, m);
     STAGE(WriteIncludeModels, q, m);
+    STAGE(WriteKeyValues, q, m);
     STAGE(WritePhysics, q, m, in, dir);
     std::fclose(f);
 
     if (h.numlocalanim > 0)
         std::printf("\nanimations:\n");
-    STAGE(WriteAnimationSmds, m, in, dir);
+    STAGE(WriteAnimationFiles, m, in, dir);
 
     pulse::fatal::g_stage = "done";
     std::printf("\nwrote %s\n", outPath.c_str());

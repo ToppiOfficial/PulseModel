@@ -3915,7 +3915,9 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
 //     trigger <tolerance> <driver rot x y z> <helper rot x y z> <helper pos x y z>
 //     ...
 // }
-// The inline replacement for a VRD quatinterp helper.
+// The inline replacement for a VRD quatinterp helper. Both rotations are
+// RadianEuler degrees (x=roll, y=pitch, z=yaw), NOT a QAngle - they go into
+// AngleQuaternion unpermuted, exactly like the <trigger> line they mirror.
 //
 // `relative` (the default) reads the helper pose as a DELTA from its bind pose,
 // which MapProceduralBones folds in once the skeleton is final - so an all-zero
@@ -3974,12 +3976,12 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
         const Token sub{"$driverbone trigger", t.line, false};
         Raw r{sub};
         if (!c.WantFloat("a tolerance in degrees", sub, r.tol) ||
-            !c.WantFloat("a driver pitch", sub, r.driverRot.x) ||
-            !c.WantFloat("a driver yaw", sub, r.driverRot.y) ||
-            !c.WantFloat("a driver roll", sub, r.driverRot.z) ||
-            !c.WantFloat("a helper pitch", sub, r.helperRot.x) ||
-            !c.WantFloat("a helper yaw", sub, r.helperRot.y) ||
-            !c.WantFloat("a helper roll", sub, r.helperRot.z) ||
+            !c.WantFloat("a driver roll", sub, r.driverRot.x) ||
+            !c.WantFloat("a driver pitch", sub, r.driverRot.y) ||
+            !c.WantFloat("a driver yaw", sub, r.driverRot.z) ||
+            !c.WantFloat("a helper roll", sub, r.helperRot.x) ||
+            !c.WantFloat("a helper pitch", sub, r.helperRot.y) ||
+            !c.WantFloat("a helper yaw", sub, r.helperRot.z) ||
             !c.WantFloat("a helper X offset", sub, r.pos.x) ||
             !c.WantFloat("a helper Y offset", sub, r.pos.y) ||
             !c.WantFloat("a helper Z offset", sub, r.pos.z))
