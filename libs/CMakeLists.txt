@@ -32,7 +32,7 @@ target_include_directories(pulse_vhacd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vhacd)
 target_link_libraries(pulse_vhacd PUBLIC pulse_libs)
 
 # minicollision - .phy collision hulls and IVP compact-surface serialization.
-# Ported from the original PulseMDL (author-written); self-contained vector math
+# Ported from the original PulseMDL; self-contained vector math
 # so it stays clear of libs/math's byte-parity constraints.
 add_library(pulse_phys STATIC
     minicollision/convexhull.cpp

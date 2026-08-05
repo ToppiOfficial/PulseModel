@@ -1,12 +1,9 @@
 #pragma once
 // minicollision - standalone .phy collision builder.
 //
-// Ported from the original PulseMDL's libs/minicollision (author-written). The
-// original implemented Valve's IPhysicsCollision virtual interface so it could
-// stand in for vphysics.dll; here the compiler is the only consumer, so the
-// interface and its ~30 unused stubs are gone and what remains is the handful
-// of free functions that actually do work.
-//
+// Ported from the original PulseMDL's libs/minicollision. The original implemented
+// Valve's IPhysicsCollision virtual interface so it could stand in for vphysics.dll;
+// 
 // Two opaque types, matching vphysics' model:
 //   Convex  - one convex hull.
 //   Collide - a compound of one or more hulls; this is what serializes to the

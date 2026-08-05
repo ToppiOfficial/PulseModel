@@ -24,8 +24,7 @@ namespace pulse::source {
 // `filter` = $rendermesh $exceptionlist: rejected mesh dags contribute nothing
 // and are written back through so the caller can flag names that matched nothing.
 // `animOnly` = skeleton + channel clips only, no mesh dags read at all (materials
-// never reach `mats`, no morphs). Deliberate divergence from reference
-// Load_DMX, which always calls LoadMeshes.
+// never reach `mats`, no morphs).
 bool LoadDmxSource(const pulse::dmx::Datamodel& dm, Source& out,
                    MaterialTable& mats, float scale, std::string* err,
                    bool morphSource = false, MeshFilter* filter = nullptr,

@@ -250,39 +250,39 @@ void AngleQuaternion(const RadianEuler& anglesRad, Quaternion& outQuat) {
     SinCos(anglesRad.y * 0.5f, &sp, &cp);
     SinCos(anglesRad.x * 0.5f, &sr, &cr);
 
-    float srXcp = sr * cp, crXsp = cr * sp;
-    outQuat.x = srXcp * cy - crXsp * sy; // X
-    outQuat.y = crXsp * cy + srXcp * sy; // Y
+    float sinRollCosPitch = sr * cp, cosRollSinPitch = cr * sp;
+    outQuat.x = sinRollCosPitch * cy - cosRollSinPitch * sy; // X
+    outQuat.y = cosRollSinPitch * cy + sinRollCosPitch * sy; // Y
 
-    float crXcp = cr * cp, srXsp = sr * sp;
-    outQuat.z = crXcp * sy - srXsp * cy; // Z
-    outQuat.w = crXcp * cy + srXsp * sy; // W
+    float cosRollCosPitch = cr * cp, sinRollSinPitch = sr * sp;
+    outQuat.z = cosRollCosPitch * sy - sinRollSinPitch * cy; // Z
+    outQuat.w = cosRollCosPitch * cy + sinRollSinPitch * sy; // W
 }
 
 // QuaternionScale (reference mathlib_base.cpp): scale a rotation's angle
 // by t. sqrt/sin/asin run in double and truncate on store, as the reference's
 // implicit promotions do.
 void QuaternionScale(const Quaternion& p, float t, Quaternion& q) {
-    float sinom = static_cast<float>(sqrt(
+    float vecMag = static_cast<float>(sqrt(
         static_cast<double>(p.x * p.x + p.y * p.y + p.z * p.z)));
-    sinom = sinom < 1.0f ? sinom : 1.0f;
+    vecMag = vecMag < 1.0f ? vecMag : 1.0f;
 
-    float sinsom = static_cast<float>(sin(asin(static_cast<double>(sinom)) *
+    float scaledSin = static_cast<float>(sin(asin(static_cast<double>(vecMag)) *
                                           static_cast<double>(t)));
 
-    t = sinsom / (sinom + FLT_EPSILON);
+    t = scaledSin / (vecMag + FLT_EPSILON);
     q.x = p.x * t;
     q.y = p.y * t;
     q.z = p.z * t;
 
-    // rescale rotation
-    float r = 1.0f - sinsom * sinsom;
-    if (r < 0.0f)
-        r = 0.0f;
-    r = static_cast<float>(sqrt(static_cast<double>(r)));
+    // recompute w so the result stays a unit quaternion
+    float w2 = 1.0f - scaledSin * scaledSin;
+    if (w2 < 0.0f)
+        w2 = 0.0f;
+    w2 = static_cast<float>(sqrt(static_cast<double>(w2)));
 
-    // keep sign of rotation
-    q.w = (p.w < 0) ? -r : r;
+    // stay on the same hemisphere as the input
+    q.w = (p.w < 0) ? -w2 : w2;
 }
 
 // QuaternionMult (mathlib_base.cpp): qt = p * q with hemisphere align.
@@ -293,7 +293,6 @@ void QuaternionMult(const Quaternion& p, const Quaternion& q, Quaternion& qt) {
         return;
     }
 
-    // decide if one of the quaternions is backwards
     Quaternion q2;
     QuaternionAlign(p, q, q2);
 
@@ -342,65 +341,66 @@ void QuaternionMAAngles(const Quaternion& p, float s, const Quaternion& q, Radia
 }
 
 void QuaternionAlign(const Quaternion& p, const Quaternion& q, Quaternion& qt) {
-    const float* pf = &p.x;
-    const float* qf = &q.x;
-    float* qtf = &qt.x;
+    const float* pComp = &p.x;
+    const float* qComp = &q.x;
+    float* outComp = &qt.x;
 
-    float a = 0;
-    float b = 0;
+    // shorter path wins: compare the "same sign" vs "flipped sign" distance
+    float distSame = 0;
+    float distFlip = 0;
     for (int i = 0; i < 4; i++) {
-        a += (pf[i] - qf[i]) * (pf[i] - qf[i]);
-        b += (pf[i] + qf[i]) * (pf[i] + qf[i]);
+        distSame += (pComp[i] - qComp[i]) * (pComp[i] - qComp[i]);
+        distFlip += (pComp[i] + qComp[i]) * (pComp[i] + qComp[i]);
     }
-    if (a > b) {
+    if (distSame > distFlip) {
         for (int i = 0; i < 4; i++)
-            qtf[i] = -qf[i];
+            outComp[i] = -qComp[i];
     } else if (&qt != &q) {
         for (int i = 0; i < 4; i++)
-            qtf[i] = qf[i];
+            outComp[i] = qComp[i];
     }
 }
 
 void QuaternionSlerpNoAlign(const Quaternion& p, const Quaternion& q, float t, Quaternion& qt) {
-    const float* pf = &p.x;
-    const float* qf = &q.x;
-    float* qtf = &qt.x;
-    float omega, cosom, sinom, sclp, sclq;
+    const float* pComp = &p.x;
+    const float* qComp = &q.x;
+    float* outComp = &qt.x;
+    float angle, cosAngle, sinAngle, scaleP, scaleQ;
     int i;
 
-    // 0.0 returns p, 1.0 return q.
-    cosom = pf[0] * qf[0] + pf[1] * qf[1] + pf[2] * qf[2] + pf[3] * qf[3];
+    // t=0 -> p, t=1 -> q
+    cosAngle = pComp[0] * qComp[0] + pComp[1] * qComp[1] + pComp[2] * qComp[2] + pComp[3] * qComp[3];
 
-    if ((1.0f + cosom) > 0.000001f) {
-        if ((1.0f - cosom) > 0.000001f) {
+    if ((1.0f + cosAngle) > 0.000001f) {
+        if ((1.0f - cosAngle) > 0.000001f) {
             // note: double-precision acos/sin, truncated on store - as the reference does
-            omega = static_cast<float>(acos(static_cast<double>(cosom)));
-            sinom = static_cast<float>(sin(static_cast<double>(omega)));
-            sclp = static_cast<float>(sin(static_cast<double>((1.0f - t) * omega))) / sinom;
-            sclq = static_cast<float>(sin(static_cast<double>(t * omega))) / sinom;
+            angle = static_cast<float>(acos(static_cast<double>(cosAngle)));
+            sinAngle = static_cast<float>(sin(static_cast<double>(angle)));
+            scaleP = static_cast<float>(sin(static_cast<double>((1.0f - t) * angle))) / sinAngle;
+            scaleQ = static_cast<float>(sin(static_cast<double>(t * angle))) / sinAngle;
         } else {
-            sclp = 1.0f - t;
-            sclq = t;
+            scaleP = 1.0f - t;
+            scaleQ = t;
         }
         for (i = 0; i < 4; i++) {
-            qtf[i] = sclp * pf[i] + sclq * qf[i];
+            outComp[i] = scaleP * pComp[i] + scaleQ * qComp[i];
         }
     } else {
-        qtf[0] = -qf[1];
-        qtf[1] = qf[0];
-        qtf[2] = -qf[3];
-        qtf[3] = qf[2];
-        sclp = static_cast<float>(sin(static_cast<double>((1.0f - t) * (0.5f * kPiF))));
-        sclq = static_cast<float>(sin(static_cast<double>(t * (0.5f * kPiF))));
+        outComp[0] = -qComp[1];
+        outComp[1] = qComp[0];
+        outComp[2] = -qComp[3];
+        outComp[3] = qComp[2];
+        scaleP = static_cast<float>(sin(static_cast<double>((1.0f - t) * (0.5f * kPiF))));
+        scaleQ = static_cast<float>(sin(static_cast<double>(t * (0.5f * kPiF))));
         for (i = 0; i < 3; i++) {
-            qtf[i] = sclp * pf[i] + sclq * qtf[i];
+            outComp[i] = scaleP * pComp[i] + scaleQ * outComp[i];
         }
     }
 }
 
 void QuaternionSlerp(const Quaternion& p, const Quaternion& q, float t, Quaternion& qt) {
     Quaternion q2;
-    // decide if one of the quaternions is backwards
+    // pick whichever sign of q gives the shorter interpolation path
     QuaternionAlign(p, q, q2);
     QuaternionSlerpNoAlign(p, q2, t, qt);
 }
@@ -429,38 +429,38 @@ matrix3x4 MatrixInverseTranspose(const matrix3x4& in) {
         rowMap[i] = i;
     }
 
-    for (int iRow = 0; iRow < 4; iRow++) {
-        // find the row with the largest element in this column
-        float fLargest = 1e-6f;
-        int iLargest = -1;
-        for (int iTest = iRow; iTest < 4; iTest++) {
-            float fTest = fabsf(mat[rowMap[iTest]][iRow]);
-            if (fTest > fLargest) {
-                iLargest = iTest;
-                fLargest = fTest;
+    for (int col = 0; col < 4; col++) {
+        // pick the largest-magnitude candidate in this column as pivot
+        float bestMag = 1e-6f;
+        int bestRow = -1;
+        for (int cand = col; cand < 4; cand++) {
+            float mag = fabsf(mat[rowMap[cand]][col]);
+            if (mag > bestMag) {
+                bestRow = cand;
+                bestMag = mag;
             }
         }
-        if (iLargest == -1)
+        if (bestRow == -1)
             return in; // singular; reference returns false and leaves dst - callers never hit this
 
-        int iTemp = rowMap[iLargest];
-        rowMap[iLargest] = rowMap[iRow];
-        rowMap[iRow] = iTemp;
+        int swapTmp = rowMap[bestRow];
+        rowMap[bestRow] = rowMap[col];
+        rowMap[col] = swapTmp;
 
-        float* pRow = mat[rowMap[iRow]];
-        float mul = 1.0f / pRow[iRow];
+        float* pivot = mat[rowMap[col]];
+        float invPivot = 1.0f / pivot[col];
         for (int j = 0; j < 8; j++)
-            pRow[j] *= mul;
-        pRow[iRow] = 1.0f; // preserve accuracy
+            pivot[j] *= invPivot;
+        pivot[col] = 1.0f; // force exact 1 despite the division's rounding
 
         for (int i = 0; i < 4; i++) {
-            if (i == iRow)
+            if (i == col)
                 continue;
-            float* pScaleRow = mat[rowMap[i]];
-            float mul2 = -pScaleRow[iRow];
+            float* target = mat[rowMap[i]];
+            float factor = -target[col];
             for (int j = 0; j < 8; j++)
-                pScaleRow[j] += pRow[j] * mul2;
-            pScaleRow[iRow] = 0.0f; // preserve accuracy
+                target[j] += pivot[j] * factor;
+            target[col] = 0.0f; // force exact 0 despite the fma's rounding
         }
     }
 

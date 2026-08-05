@@ -84,7 +84,8 @@ void ClipRotations(RadianEuler& rot) {
     // -float_pi, which is < -M_PI (double), so the second while bounces it back
     // to +float_pi - the reference lands on -3.1415925026f (inside the range)
     // and keeps the wrap. Found via tc8 byte-diff (anim values at the +-pi
-    // knife edge).
+    // knife edge).  
+    // This is stupid but it make this shit more consistent. - Airi
     float* r = &rot.x;
     for (int j = 0; j < 3; j++) {
         while (r[j] >= kPiD)
@@ -285,7 +286,7 @@ bool BoneIsBonemerge(const Ctx& ctx, const char* pname) {
 }
 
 // A procedural bone is driven at runtime, so it has to exist in the .mdl even
-// when nothing else references it (reference BoneIsProcedural, 3290).
+// when nothing else references it (reference BoneIsProcedural).
 //
 // Note this guards CollapseBones only - the reference does NOT protect
 // procedural bones from the earlier unreferenced-bone cull in
@@ -308,8 +309,8 @@ bool BoneIsProcedural(const Ctx& ctx, const char* pname) {
 }
 
 // The DRIVER of an animconstraint: the engine reads its rotation every frame,
-// so it cannot be folded into its parent. Reference BoneIsProceduralControl,
-// 3369. ($driverbone's driver used to need an explicit $donotcollapse.)
+// so it cannot be folded into its parent. Reference BoneIsProceduralControl.
+// ($driverbone's driver used to need an explicit $donotcollapse.)
 bool BoneIsProceduralControl(const Ctx& ctx, const char* pname) {
     for (const ProceduralBone& pb : ctx.out->proceduralbones)
         if (_stricmp(pb.drivername.c_str(), pname) == 0)
@@ -318,7 +319,7 @@ bool BoneIsProceduralControl(const Ctx& ctx, const char* pname) {
 }
 
 // A procedural bone's dependencies must outlive the collapse or the constraint
-// resolves against nothing. Reference BoneIsProceduralParent, 3395-3432.
+// resolves against nothing. Reference BoneIsProceduralParent.
 //
 // animconstraint (quatinterp): the helper's and the driver's named parents, and
 // whatever their CURRENT skeleton parents are - the triggers were authored in
@@ -386,7 +387,7 @@ bool BoneIsDoNotCollapse(const Ctx& ctx, const char* pname) {
 }
 
 // $alwayscollapse names this bone and $donotcollapse does not, which wins
-// (reference BoneIsAlwaysCollapse, 3438). Overrules bone_cull_type 2 (none).
+// (reference BoneIsAlwaysCollapse). Overrules bone_cull_type 2 (none).
 bool BoneIsAlwaysCollapse(const Ctx& ctx, const char* pname) {
     if (BoneIsDoNotCollapse(ctx, pname))
         return false;
@@ -689,7 +690,7 @@ void MakeStaticProp(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// MakeSimpleProp (author-written): archetype "simple".
+// MakeSimpleProp: archetype "simple".
 // Collapse the skeleton to one "prop_root" bone as a *dynamic* model - verts
 // stay in source space (any bind-pose bone reproduces them), the root keeps
 // its bind pose.
@@ -878,7 +879,7 @@ void MapJiggleBones(Ctx& ctx) {
 // nothing to point at.
 //
 // The reference does NOT push aimvector/upvector/basepos through srcRealign
-// (its post-realign pass at 5142 only re-validates), so neither do we.
+// (its post-realign pass only re-validates), so neither do we.
 // ---------------------------------------------------------------------------
 bool MapAimAtBones(Ctx& ctx, std::string* err) {
     std::vector<AimAtBone>& abs = ctx.out->aimatbones;
@@ -905,7 +906,7 @@ bool MapAimAtBones(Ctx& ctx, std::string* err) {
         }
 
         // $driveraimat leaves the base position to us: it is the bone's rest
-        // pose. Additive, so an authored offset would stack (reference 4811).
+        // pose. Additive, so an authored offset would stack.
         if (ab.autobasepos) {
             const Vector3& rest = ctx.out->bones[ab.bone].pos;
             ab.basepos = {ab.basepos.x + rest.x, ab.basepos.y + rest.y,
@@ -1374,7 +1375,7 @@ bool BuildGlobalBonetable(Ctx& ctx, std::string* err) {
 
         for (int j = 0; j < psource->numbones; j++) {
             // bones nothing references at all die here, before CollapseBones
-            // ever sees them (reference 4392). bone_cull_type 2 (none) keeps
+            // ever sees them. bone_cull_type 2 (none) keeps
             // them: the script asked for the skeleton verbatim. Non-skeletal
             // bones (a DmeJoint holding a DmeMesh, and the synthetic
             // defaultRoot) are exempt - exporter noise, same exemption
@@ -1517,7 +1518,7 @@ void CollapseBones(Ctx& ctx) {
             if (m.bones[k].bDontCollapse)
                 continue;
 
-            // $alwayscollapse overrules every keep below (reference 3458, 3487)
+            // $alwayscollapse overrules every keep below (reference BoneIsAlwaysCollapse)
             const bool always = BoneIsAlwaysCollapse(ctx, m.bones[k].name.c_str());
 
             // "none" keeps every bone the script authored. Non-skeletal bones
@@ -1615,6 +1616,7 @@ void RebuildLocalPose(Ctx& ctx) {
 // and RebuildLocalPose recompensates the direct children to stay where they were.
 // ---------------------------------------------------------------------------
 
+// I don't what else to do here...
 // The rotation (angles) half of an edit, bind frame B -> Bnew.
 void ApplyBoneEditAngles(const BoneTransformEdit& ed, const matrix3x4& B, matrix3x4& Bnew) {
     Vector3 O = MatrixGetColumn(B, 3);
@@ -1910,6 +1912,7 @@ void PopAnimSrcRealignOverride(Ctx& ctx, const std::vector<SrcRealignSave>& save
         ctx.out->bones[s.bone].srcRealign = s.saved;
 }
 
+// TODO: why tf it runs unconditionally?
 // RealignBones - runs UNCONDITIONALLY. With no $realignbones or IK
 // chains it still (a) builds srcRealign = Invert(boneToPose)*boneToPose (a
 // float-noise near-identity), (b) re-derives rot/pos from boneToPose, and
@@ -2122,13 +2125,7 @@ int AddFlexDesc(Ctx& ctx, const std::string& name) {
 // Option_Eyeball. Runs at parse time in the
 // reference, against the owning model's SOURCE bone table - so eye.bone is a
 // source-local index here and is remapped to global later by ReLinkEyeballs.
-// DIVERGENCE FROM QC (user's call, 2026-07-19): one authored Eyeball binds to
-// EVERY body carrying its material, not just the first. QC cannot express this
-// - `eyeball` is a $model block option and $model holds exactly one model,
-// while $bodygroup takes only `studio`/`blank` (Cmd_Bodygroup) - so a
-// multi-choice bodygroup with the face material on more than one choice has no
-// reference behavior and no producible golden. With a single match the output
-// is unchanged, which is what tc11/tc12 pin.
+// one authored Eyeball binds to EVERY body carrying its material, not just the first.
 bool SetupEyeballs(Ctx& ctx, std::string* err) {
     CompiledModel& m = *ctx.out;
     m.eyeballs.clear();
@@ -6584,7 +6581,7 @@ bool SetupHitBoxes(Ctx& ctx, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// CalcBoneTransforms (5713/5719) - delta anims blend onto the base animation
+// CalcBoneTransforms - delta anims blend onto the base animation
 // (anim 0) frame 0 via QuaternionMA, like the reference.
 // ---------------------------------------------------------------------------
 void CalcBoneTransforms(Ctx& ctx, Anim& panim, Anim* pbaseanim, int frame,
@@ -9579,14 +9576,14 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // ---- bone pipeline (RemapBones) ----
     // $setbindpose / $setflex bake into the rest mesh first, so an archetype
     // that collapses the skeleton collapses the already-posed geometry
-    // (reference RemapBones head, ApplyStaticPropPose at 5633)
+    // (reference RemapBones head, ApplyStaticPropPose)
     {
         PULSE_TIME_PASS("ApplyBindPoseBake");
         if (!ApplyBindPoseBake(ctx, err))
             return false;
     }
 
-    // archetype passes run next (reference RemapBones head, 5637-5640)
+    // archetype passes run next (reference RemapBones head)
     if (input.archetype == Archetype::Static) {
         MakeStaticProp(ctx);
         // the skeleton is now a single "static_prop" bone, so anything keyed to
@@ -9618,6 +9615,11 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             return false;
     }
 
+    // NOTE: CollapseBones needs anims list for BoneHasAnimation - built above.
+    { PULSE_TIME_PASS("CollapseBones"); CollapseBones(ctx); }
+
+    // $modelbudget bones is the final count after collapse, not a mid-process
+    // ceiling - check it against what CollapseBones left behind.
     if (out.bones.size() > static_cast<size_t>(input.budgetBones)) {
         if (err)
             *err = "too many bones (" + std::to_string(out.bones.size()) + ", max " +
@@ -9625,8 +9627,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         return false;
     }
 
-    // NOTE: CollapseBones needs anims list for BoneHasAnimation - built above.
-    { PULSE_TIME_PASS("CollapseBones"); CollapseBones(ctx); }
     { PULSE_TIME_PASS("RebuildLocalPose"); RebuildLocalPose(ctx); }
     { PULSE_TIME_PASS("MapSources"); MapSources(ctx); }
 
@@ -9685,7 +9685,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
 
     { PULSE_TIME_PASS("RemapVertices"); RemapVertices(ctx); }
     // reassign vertex weight off moved bones onto their residual bone, then clip
-    // every vertex to the hardware influence limit (reference 9357/9362)
+    // every vertex to the hardware influence limit
     ApplyMoveWeightQueue(ctx);
     BalanceGlobalBoneWeights(ctx);
     { PULSE_TIME_PASS("UnifyLods"); UnifyLods(ctx); }
@@ -9729,7 +9729,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     if (!LinkAttachments(ctx, err))
         return false;
 
-    // ik rules -> error curves -> compressed streams (9424/9426)
+    // ik rules -> error curves -> compressed streams
     if (!ProcessIKRules(ctx, err))
         return false;
     CompressIKErrors(ctx);

@@ -1862,7 +1862,7 @@ bool CmdDeclareSequence(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $includemodel "path/name.mdl"  (studiomdl Cmd_IncludeModel, 4935): borrow an
+// $includemodel "path/name.mdl"  (studiomdl Cmd_IncludeModel): borrow an
 // already-compiled model's sequences. Stored "models/"-prefixed and nothing is
 // read at compile time - the engine links it on load. Suppresses the automatic
 // "reference" bind-pose sequence a script with no $sequence would otherwise get.
@@ -1871,7 +1871,7 @@ bool CmdIncludeModel(Ctx& c, const Token& cmd) {
     if (!c.Want("a compiled .mdl path", cmd, name))
         return false;
     // must name a .mdl - a source .dmx/.smd or a bare name would compile fine
-    // and leave a reference the engine silently fails to resolve (ref 4941)
+    // and leave a reference the engine silently fails to resolve
     if (name.size() < 4 || _stricmp(name.c_str() + name.size() - 4, ".mdl") != 0)
         return c.Fail(cmd.line, cmd.text + ": \"" + name + "\" must end in .mdl");
     if (c.in.includeModels.size() >= static_cast<size_t>(lim::kMaxIncludeModels))

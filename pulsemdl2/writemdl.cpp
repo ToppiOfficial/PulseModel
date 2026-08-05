@@ -49,7 +49,7 @@ size_t VvdBufferSize(size_t numVerts, size_t numBlocks, size_t numFixups) {
 }
 
 // Reference console report (plus the nested
-// flexcontrollers/ik-pose/eyeballs/flexes lines at 2469/2700/2837/2936): one
+// flexcontrollers/ik-pose/eyeballs/flexes lines): one
 // byte count per block as the file is laid down. The reference prints these
 // inline while writing because it knows the output path up front; this writer
 // resolves the path at save time, so the lines are collected here and flushed

@@ -129,6 +129,8 @@ Vendored under `libs/`:
   overdraw optimization, LOD simplification. MIT.
 - [V-HACD](https://github.com/kmammou/v-hacd) - approximate convex
   decomposition, used to generate collision from a render mesh. BSD-3-Clause.
+- [ufbx](https://github.com/ufbx/ufbx) - FBX file reader, used to bring in FBX
+  mesh sources alongside DMX/SMD. MIT.
 
 Referenced, not vendored:
 
