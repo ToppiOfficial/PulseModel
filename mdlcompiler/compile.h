@@ -1081,9 +1081,10 @@ struct CompileInput {
     // start empty instead of at the bone origin
     bool skipBoneInBBox = false;
 
-    // $modelbudget: per-model ceilings. Default to the format limits, and only
-    // ever lower them - a budget above pulselimits.h is rejected at parse time.
-    int budgetBones = lim::kMaxBones;
+    // $modelbudget: per-model ceilings, capped at the pulselimits.h values (a
+    // budget above those is rejected at parse time). Bones default to 255 - the
+    // last bone a uint8 weight/RLE index can reach - not the 1024 hard cap.
+    int budgetBones = 255;
     int budgetMaterials = lim::kMaxSkins;
 
     // $bbox / $cbox, raw script values - no scale or rotation is applied

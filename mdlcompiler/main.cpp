@@ -1,7 +1,7 @@
 // mdlcompiler - Source engine model compiler (.mdl/.vvd/.vtx/.phy).
 //
 // Usage:
-//   mdlcompiler <file.pulseqc> [-game <dir>]
+//   mdlcompiler <file.pulseqc> [-game <dir>] [-pause]
 
 #include <chrono>
 #include <cstdio>
@@ -27,7 +27,7 @@ static void PrintHeader() {
     std::printf("-------------------------------\n");
     std::printf("PulseModel [Model Compiler]\n");
     std::printf("version:   %s (model version %d)\n", kAppVersion, pulse::limits::kStudioVersion);
-    std::printf("developer: Toppi (MIT License)\n");
+    std::printf("developer: Toppi\n");
     std::printf("-------------------------------\n");
 }
 
@@ -44,6 +44,7 @@ static int Usage() {
     std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and\n");
     std::printf("                stop - no .mdl/.vvd/.vtx/.phy is written\n");
+    std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     return 1;
 }
 
@@ -98,6 +99,8 @@ static int RunCompile(int argc, char** argv) {
                                               argv[i] + "\"");
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
             definebones = true;
+        } else if (std::strcmp(argv[i], "-pause") == 0) {
+            pulse::fatal::g_pause = true;
         } else if (argv[i][0] == '-') {
             // studiomdl GUI front ends pass switches we do not have (-nop4,
             // -verbose, ...). Warn and carry on rather than refusing to run.
@@ -188,13 +191,16 @@ int main(int argc, char** argv) {
     PrintHeader();
 
     // a leak past a stage's own error path still gets named in the footer
+    int rc;
     try {
-        return RunCompile(argc, argv);
+        rc = RunCompile(argc, argv);
     } catch (const std::bad_alloc&) {
-        return Fail("out of memory", "an allocation failed - the model may exceed available RAM");
+        rc = Fail("out of memory", "an allocation failed - the model may exceed available RAM");
     } catch (const std::exception& e) {
-        return Fail("internal error", e.what());
+        rc = Fail("internal error", e.what());
     } catch (...) {
-        return Fail("internal error", "unknown C++ exception");
+        rc = Fail("internal error", "unknown C++ exception");
     }
+    pulse::fatal::PauseIfAsked();
+    return rc;
 }

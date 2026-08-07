@@ -1,8 +1,9 @@
 // mdldecompiler - reads a compiled .mdl and writes back a .pulseqc describing it.
 //
 // Usage:
-//   mdldecompiler <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
+//   mdldecompiler <file.mdl|folder> ... [-o <file.pulseqc>] [-forceversion <n>]
 //                            [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]
+//                            [-pause]
 //
 // The script-level markup - names, materials, bodygroups, skeleton, attachments,
 // hitboxes, skins - plus one .dmx render mesh per model (dmxwrite.cpp) and one
@@ -45,17 +46,21 @@ void PrintHeader() {
     std::printf("-------------------------------\n");
     std::printf("PulseModel [Model Decompiler]\n");
     std::printf("version:   %s (model version 44-49)\n", kAppVersion);
-    std::printf("developer: Toppi (MIT License)\n");
+    std::printf("developer: Toppi\n");
     std::printf("-------------------------------\n");
 }
 
 int Usage() {
-    std::printf("usage: mdldecompiler <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]\n");
-    std::printf("                     [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]\n");
-    std::printf("                     [-studiomdl]\n");
+    std::printf("usage: mdldecompiler <file.mdl|folder> ... [-o <file.pulseqc>]\n");
+    std::printf("                     [-forceversion <n>] [-dmxencoding <enc>] [-dmxmodel <n>]\n");
+    std::printf("                     [-smdanimation] [-studiomdl]\n");
+    std::printf("\n");
+    std::printf("  several inputs may be given (drag-and-drop); a folder decompiles every\n");
+    std::printf("  .mdl under it, recursively\n");
     std::printf("\n");
     std::printf("  -o <file>     script to write; defaults to a folder named after the\n");
     std::printf("                .mdl, next to it, holding the script and its meshes\n");
+    std::printf("                (ignored when more than one model is decompiled)\n");
     std::printf("  -forceversion <n>\n");
     std::printf("                read the file as version <n>, ignoring the header field\n");
     std::printf("                (some compilers write a bogus one to block decompiling)\n");
@@ -66,6 +71,7 @@ int Usage() {
     std::printf("                1, 18, or 22 for Source 2 modeldoc\n");
     std::printf("  -smdanimation write the animation clips as .smd instead of .dmx\n");
     std::printf("  -studiomdl    write a stock-studiomdl .qc instead of a .pulseqc\n");
+    std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     return 1;
 }
 
@@ -1785,6 +1791,53 @@ void WriteIncludeModels(Qc& q, const Mdl& m) {
     }
 }
 
+// Re-indent a keyvalues1 blob: one pair per line, `key {` opening a block.
+// Quoting is preserved as authored; a `//` comment runs to end of line.
+void EmitKeyValues(Qc& q, const std::string& text, std::string indent) {
+    struct Tok { std::string s; bool quoted; };
+    std::vector<Tok> t;
+    for (size_t p = 0; p < text.size();) {
+        const char c = text[p];
+        if (std::isspace(static_cast<unsigned char>(c))) { ++p; continue; }
+        if (c == '/' && p + 1 < text.size() && text[p + 1] == '/') {
+            p = text.find('\n', p);
+            if (p == std::string::npos) break;
+            continue;
+        }
+        if (c == '"') {
+            const size_t e = text.find('"', p + 1);
+            if (e == std::string::npos) break;
+            t.push_back({text.substr(p + 1, e - p - 1), true});
+            p = e + 1;
+        } else if (c == '{' || c == '}') {
+            t.push_back({std::string(1, c), false});
+            ++p;
+        } else {
+            const size_t e = text.find_first_of(" \t\r\n{}\"", p);
+            t.push_back({text.substr(p, e - p), false});
+            p = e == std::string::npos ? text.size() : e;
+        }
+    }
+
+    auto spell = [](const Tok& k) { return k.quoted ? "\"" + k.s + "\"" : k.s; };
+    for (size_t i = 0; i < t.size(); ++i) {
+        if (t[i].s == "}" && !t[i].quoted) {
+            if (indent.size() >= 4)
+                indent.resize(indent.size() - 4);
+            q.Line(indent + "}");
+        } else if (i + 1 < t.size() && t[i + 1].s == "{" && !t[i + 1].quoted) {
+            q.Line(indent + spell(t[i]) + " {");
+            indent += "    ";
+            ++i;
+        } else if (i + 1 < t.size()) {
+            q.Line(indent + spell(t[i]) + " " + spell(t[i + 1]));
+            ++i;
+        } else {
+            q.Line(indent + spell(t[i]));
+        }
+    }
+}
+
 // $keyvalues. The stored text is the block's contents wrapped in an outer
 // "mdlkeyvalue { }" that the compiler puts back on write - strip it here or the
 // wrapper nests one level deeper every round trip.
@@ -1807,7 +1860,7 @@ void WriteKeyValues(Qc& q, const Mdl& m) {
 
     q.Blank();
     q.Line("$keyvalues {");
-    q.Line(text);
+    EmitKeyValues(q, text, "    ");
     q.Line("}");
 }
 
@@ -2498,42 +2551,45 @@ void WriteHitboxes(Qc& q, const Mdl& m) {
     }
 }
 
-} // namespace
-
-int RunDecompile(int argc, char** argv) {
-    pulse::fatal::g_stage = "command line";
-    const char* in = nullptr;
-    const char* out = nullptr;
-    int forceVersion = 0;
-    std::string dmxEncoding = "binary";
-    int dmxModel = 15;
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
-            out = argv[++i];
-        else if (std::strcmp(argv[i], "-forceversion") == 0 && i + 1 < argc)
-            forceVersion = std::atoi(argv[++i]);
-        else if (std::strcmp(argv[i], "-dmxencoding") == 0 && i + 1 < argc)
-            dmxEncoding = argv[++i];
-        else if (std::strcmp(argv[i], "-dmxmodel") == 0 && i + 1 < argc)
-            dmxModel = std::atoi(argv[++i]);
-        else if (std::strcmp(argv[i], "-smdanimation") == 0)
-            SetAnimFormat(true);
-        else if (std::strcmp(argv[i], "-studiomdl") == 0)
-            g_studiomdl = true;
-        else if (!in)
-            in = argv[i];
+// Every .mdl under `dir`, recursively, in a stable order. Case-insensitive so a
+// .MDL out of an old pack is not skipped.
+void CollectMdl(const std::string& dir, std::vector<std::string>& out) {
+    std::error_code ec;
+    std::vector<std::string> found;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(
+             dir, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        std::string ext = e.path().extension().string();
+        for (char& c : ext)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".mdl")
+            found.push_back(e.path().string());
     }
-    if (!in)
-        return Usage();
-    if (const char* err = SetDmxOutput(dmxEncoding, dmxModel))
-        return Fail("command line", err);
+    std::sort(found.begin(), found.end());
+    out.insert(out.end(), found.begin(), found.end());
+}
 
-    std::printf("Decompiling: %s\n", in);
+// Turn the in-flight exception into a footer - shared by the per-file guard and
+// main's outer one.
+int FailCaught() {
+    try {
+        throw;
+    } catch (const std::bad_alloc&) {
+        return Fail("out of memory", "an allocation failed - a bogus count in the file can ask for"
+                                     " more than available RAM");
+    } catch (const std::exception& e) {
+        return Fail("internal error", e.what());
+    } catch (...) {
+        return Fail("internal error", "unknown C++ exception");
+    }
+}
+
+int DecompileOne(const std::string& in, const char* out, int forceVersion) {
+    std::printf("Decompiling: %s\n", in.c_str());
 
     pulse::fatal::g_stage = "read";
     Mdl m;
     std::string err;
-    if (!ReadFile(in, m, forceVersion, err))
+    if (!ReadFile(in.c_str(), m, forceVersion, err))
         return Fail("read error", err);
 
     const fm::studiohdr_t& h = *m.hdr;
@@ -2562,7 +2618,7 @@ int RunDecompile(int argc, char** argv) {
 
     Qc q{f};
     q.Line("// mdldecompiler version " + std::string(kAppVersion));
-    q.Line("// " + std::string(in));
+    q.Line("// " + in);
     q.Blank();
     STAGE(WriteHeader, q, m);
     STAGE(WriteMaterials, q, m);
@@ -2652,6 +2708,75 @@ int RunDecompile(int argc, char** argv) {
     return 0;
 }
 
+} // namespace
+
+int RunDecompile(int argc, char** argv) {
+    pulse::fatal::g_stage = "command line";
+    std::vector<std::string> inputs;
+    const char* out = nullptr;
+    int forceVersion = 0;
+    std::string dmxEncoding = "binary";
+    int dmxModel = 15;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
+            out = argv[++i];
+        else if (std::strcmp(argv[i], "-forceversion") == 0 && i + 1 < argc)
+            forceVersion = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "-dmxencoding") == 0 && i + 1 < argc)
+            dmxEncoding = argv[++i];
+        else if (std::strcmp(argv[i], "-dmxmodel") == 0 && i + 1 < argc)
+            dmxModel = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "-smdanimation") == 0)
+            SetAnimFormat(true);
+        else if (std::strcmp(argv[i], "-studiomdl") == 0)
+            g_studiomdl = true;
+        else if (std::strcmp(argv[i], "-pause") == 0)
+            pulse::fatal::g_pause = true;
+        else
+            inputs.push_back(argv[i]);
+    }
+    if (inputs.empty())
+        return Usage();
+    if (const char* err = SetDmxOutput(dmxEncoding, dmxModel))
+        return Fail("command line", err);
+
+    // a folder input expands to the models under it; everything is collected
+    // before the first decompile, so the output folders it makes are not rescanned
+    std::vector<std::string> files;
+    for (const std::string& in : inputs) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(in, ec))
+            CollectMdl(in, files);
+        else
+            files.push_back(in);
+    }
+    if (files.empty())
+        return Fail("command line", "no .mdl files found");
+    if (files.size() > 1 && out) {
+        std::printf("-o names one script - ignored, %zu models are being decompiled\n",
+                    files.size());
+        out = nullptr;
+    }
+
+    // one bad model must not end a batch, so each is guarded on its own
+    int failed = 0;
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (files.size() > 1)
+            std::printf("\n===== [%zu/%zu] =====\n", i + 1, files.size());
+        int rc;
+        try {
+            rc = DecompileOne(files[i], out, forceVersion);
+        } catch (...) {
+            rc = FailCaught();
+        }
+        failed += rc != 0;
+    }
+    if (files.size() > 1)
+        std::printf("\n%zu of %zu decompiled, %d failed\n", files.size() - failed, files.size(),
+                    failed);
+    return failed ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     // progress lines are useless if they sit in the CRT buffer until exit -
     // MSVC has no line buffering (_IOLBF == _IOFBF), so go unbuffered
@@ -2662,14 +2787,12 @@ int main(int argc, char** argv) {
 
     // a malformed .mdl walks the writers off the end of an array as often as it
     // trips a check, so the footer names the writer that died
+    int rc;
     try {
-        return RunDecompile(argc, argv);
-    } catch (const std::bad_alloc&) {
-        return Fail("out of memory", "an allocation failed - a bogus count in the file can ask for"
-                                     " more than available RAM");
-    } catch (const std::exception& e) {
-        return Fail("internal error", e.what());
+        rc = RunDecompile(argc, argv);
     } catch (...) {
-        return Fail("internal error", "unknown C++ exception");
+        rc = FailCaught();
     }
+    pulse::fatal::PauseIfAsked();
+    return rc;
 }

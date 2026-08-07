@@ -11,6 +11,7 @@
 // includes this header
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#include <conio.h>
 #include <windows.h>
 #endif
 
@@ -20,6 +21,23 @@ namespace fatal {
 // What the tool is doing right now, so a crash or a stray C++ exception can name
 // the stage it died in. Updated at each pipeline step.
 inline const char* g_stage = "startup";
+
+// -pause: hold the window open at exit, so a drag-and-drop run stays readable.
+inline bool g_pause = false;
+
+inline void PauseIfAsked() {
+    if (!g_pause)
+        return;
+    g_pause = false; // a crash after the normal footer must not ask twice
+    std::printf("Press any key to exit...");
+    std::fflush(stdout);
+#ifdef _WIN32
+    (void)_getch();
+#else
+    (void)std::getchar();
+#endif
+    std::printf("\n");
+}
 
 // A spaced footer block so the reason stands out at the bottom of a long log.
 inline int Fail(const char* what, const std::string& detail) {
@@ -119,6 +137,8 @@ inline LONG WINAPI CrashFooter(EXCEPTION_POINTERS* ep) {
         detail += buf;
     }
     Fail("crashed", detail);
+    // the filter terminates the process, so main never gets to pause
+    PauseIfAsked();
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif

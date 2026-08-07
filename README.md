@@ -11,17 +11,15 @@
 > avoids Windows-only APIs so a Linux build should be achievable, but it has not
 > been attempted and is not currently planned.
 
-A Source-engine model compiler. It turns a compile script plus DMX/SMD source
-assets into Valve's binary model format - `.mdl`, `.vvd`, `.vtx`, `.phy` -
-targeting **studiomdl version 49** (Source 2013 era: HL2, TF2, L4D2, GMod, CS:S,
-SFM).
+A Source-engine model toolkit, targeting **studiomdl version 49** (Source 2013
+era: HL2, TF2, L4D2, GMod, CS:S, SFM). One build produces two executables:
 
-## What about the first PulseMDL
+- **`mdlcompiler`** - a compile script plus DMX/SMD source assets -> Valve's
+  binary model format (`.mdl`, `.vvd`, `.vtx`, `.phy`).
+- **`mdldecompiler`** - the same pipeline backwards: an existing `.mdl` ->
+  a compile script with DMX meshes and SMD animations beside it.
 
-The predecessor, **PulseMDL**, was built on an existing studiomdl codebase which is
-very difficult to maintain and update. PulseModel starts over from a scratch.
-
-## What it does
+## mdlcompiler
 
 - **DMX is the first-class source format.** SMD is supported as legacy input.
   DMX files are read up to **model format 22 / binary encoding 9** - the Source 2
@@ -40,7 +38,7 @@ very difficult to maintain and update. PulseModel starts over from a scratch.
 - Both `.vtx` layouts - legacy (`-vtxformat 0`, TF2/L4D2/GMod/HL2) and full
   (`-vtxformat 1`, SFM/CS:GO/ASW).
 
-## A note on limits
+### A note on limits
 
 **PulseModel does not enforce Valve's studiomdl limits.** Its own ceilings live in
 `libs/pulselimits.h`, and they are deliberately not a copy of any engine's
@@ -56,14 +54,14 @@ Exceeding what a given branch's `studio.h` expects can mean anything from
 silently ignored data to visual corruption to a crash on load. The engine you
 ship to is the thing that says no - not this compiler.
 
-## The compile script
+### The compile script
 
 The compile script is `.pulseqc` (a `.qc` extension is accepted as the same
 format). It looks like QC and shares much of its vocabulary, but **it is not
 stock QC** - commands have been removed, renamed and reshaped, and an
 unrecognized `$command` is a hard error rather than a warning.
 
-## Usage
+### Usage
 
 ```
 mdlcompiler <file.pulseqc> [-game <dir>] [-vtxformat <0|1>] [-defvar <name> <value>]
@@ -77,10 +75,11 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-vtxformat <0|1>] [-defvar <name> <val
 
 ## mdldecompiler
 
-The build also produces **`mdldecompiler`**, which runs the pipeline backwards: an
-existing `.mdl` (plus its sibling `.vvd`/`.vtx`/`.phy`/`.ani`) becomes a
+An existing `.mdl` (plus its sibling `.vvd`/`.vtx`/`.phy`/`.ani`) becomes a
 `.pulseqc` script with `meshes/*.dmx` and `anims/*.smd` beside it, ready to feed
 straight back into `mdlcompiler`.
+
+### Usage
 
 ```
 mdldecompiler <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]

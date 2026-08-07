@@ -3029,9 +3029,9 @@ bool CmdVtxFormat(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $modelbudget { bones <n> materials <n> } - lower the compile ceilings for
-// this model. Braces are optional for a single field. Budgets only ever lower:
-// the pulselimits.h value is both the default and the cap.
+// $modelbudget { bones <n> materials <n> } - set the compile ceilings for this
+// model. Braces are optional for a single field. The pulselimits.h value is the
+// cap; bones default to 255 and must be raised here to go past it.
 bool CmdModelBudget(Ctx& c, const Token& cmd) {
     const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
     if (braced)
