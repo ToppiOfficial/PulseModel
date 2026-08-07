@@ -347,6 +347,7 @@ std::vector<std::pair<std::string, std::string>> LodMaterialReplacements(
 // The binary encoding version that goes with a `format model <n>`: model 15 is
 // binary 4 (int32 table count, uint16 indices, pooled string values), model 1 is
 // binary 2 (uint16 table count, element names and string values written inline),
+// model 18 is binary 5 (model 15's content, table indices widened to int32),
 // model 22 (modeldoc) is binary 9 (int32 indices, a zero prefix-element count and
 // array type ids as `scalar | 0x20`).
 // Another model version gets its own case here; 0 means we do not write that one.
@@ -354,6 +355,7 @@ int BinaryVersionFor(int formatModel) {
     switch (formatModel) {
         case 1: return 2;
         case 15: return 4;
+        case 18: return 5;
         case 22: return 9;
         default: return 0;
     }
@@ -923,12 +925,15 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     // Gathered before the positions are shared: what a vertex's morphs do is
     // part of whether it may share at all.
     const std::vector<std::string> descs = FlexDescNames(m);
-    const std::set<int> lidDescs = LidDescs(m);
+    const std::map<int, LidRole> lidDescs = LidRoles(m);
     const bool vtaStereo = VtaStereoOrder(m, descs);
     std::map<std::string, Delta> deltas;
     std::vector<std::string> deltaOrder;
     std::vector<std::string> deltaSig(nverts);
     bool anyBalance = false, anySpeed = false;
+    std::set<std::string> lidTypes;      // which lids this model actually carries
+    std::vector<char> authored(nverts, 0); // vertex carries a real stereo side
+    std::vector<char> touched(nverts, 0);  // ... or a synthesized lid one
     for (int k = 0; k < model.nummeshes; ++k) {
         const fm::mstudioflex_t* flexes =
             m.At<fm::mstudioflex_t>(&meshes[k], meshes[k].flexindex, meshes[k].numflexes);
@@ -946,7 +951,13 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
             if (!deltas.count(name))
                 deltaOrder.push_back(name);
             Delta& d = deltas[name];
-            d.stereo = d.stereo || stereo;
+            // a merged lid delta is what dmxeyelid splits L/R, so it is stereo
+            // even though neither mono half was
+            const auto lid = lidDescs.find(fx.flexdesc);
+            const bool mergedLid = g_studiomdl && lid != lidDescs.end();
+            d.stereo = d.stereo || stereo || mergedLid;
+            if (mergedLid)
+                lidTypes.insert(lid->second.type);
             const int ord = static_cast<int>(
                 std::find(deltaOrder.begin(), deltaOrder.end(), name) - deltaOrder.begin());
 
@@ -982,6 +993,20 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
                 // 0, which would erase the balance on any vertex it shares.
                 if (stereo && a.side != 255) {
                     balance[mv] = vtaStereo ? 1.0f - a.side / 255.0f : a.side / 255.0f;
+                    authored[mv] = 1;
+                    touched[mv] = 1;
+                    anyBalance = true;
+                } else if (stereo) {
+                    // 255 IS the 1.0 default - keep the ramp off it
+                    touched[mv] = 1;
+                } else if (mergedLid && !authored[mv]) {
+                    // The merged halves carry no side of their own, so it comes
+                    // from the eye each came off - the model's right is 1, which
+                    // is what the authored sides on these vertices already read.
+                    // Never over an authored one: balance is a single per-vertex
+                    // stream and every other stereo morph reads the same entry.
+                    balance[mv] = lid->second.left ? 0.0f : 1.0f;
+                    touched[mv] = 1;
                     anyBalance = true;
                 }
                 if (a.speed != 255) {
@@ -991,6 +1016,43 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
             }
         }
     }
+
+    // Balance is a left/right ramp across the WHOLE mesh, not just the vertices
+    // some stereo morph happened to touch - a sparse map resamples to noise and
+    // any morph added later splits wrong. Authored sides are kept as truth - X is
+    // the left/right axis in the script space this mesh is written in, same as
+    // the compiler's own GenerateBalance, and the samples say which way it runs.
+    if (anyBalance) {
+        float k = 0.0f, wide = 0.0f;
+        for (size_t i = 0; i < nverts; ++i) {
+            wide = std::max(wide, std::fabs(positions[i].x));
+            if (touched[i])
+                k += (balance[i] - 0.5f) * positions[i].x;
+        }
+        // dir +1 puts 1.0 at +X, which is what a positive correlation asks for
+        const float dir = k > 0.0f ? 1.0f : -1.0f;
+        // the crossover is a narrow seam at the midline, not a body-wide fade
+        const float band = std::max(0.5f, wide * 0.05f);
+        for (size_t i = 0; i < nverts; ++i) {
+            if (touched[i])
+                continue;
+            float t = (band - dir * positions[i].x) / (2.0f * band);
+            t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+            balance[i] = 1.0f - (3.0f * t * t - 2.0f * t * t * t);
+        }
+    }
+
+    // dmxeyelid dereferences all three slots, so a lid pose whose neutral was
+    // just the base mesh still needs a delta state to name - an empty one is
+    // exactly that pose.
+    for (const std::string& t : lidTypes)
+        for (int slot = 0; slot < 3; ++slot) {
+            const std::string n = LidDeltaName(t, slot);
+            if (deltas.count(n))
+                continue;
+            deltaOrder.push_back(n);
+            deltas[n].stereo = true;
+        }
 
     // Which slot each vertex's position lands in. The stream carries one entry
     // per distinct point, with the seam copies sharing it through
@@ -1002,11 +1064,22 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     // The morph signature is part of the key: a closed mouth has the upper and
     // lower lip on the SAME point and they have to be able to move apart, so two
     // vertices may only share a slot when their vertanims agree as well.
+    //
+    // So is the skinning. DMX has no jointWeightsIndices - weights are indexed by
+    // position - so sharing a slot means sharing bones, and two points that
+    // coincide with different weights (hair cards, finger seams) must not.
     std::map<std::string, int> seen;
     std::vector<int> posOf(nverts);
     int slots = 0;
     for (size_t i = 0; i < nverts; ++i) {
         std::string key(reinterpret_cast<const char*>(&positions[i]), sizeof(pm::Vector3));
+        if (jointCount) {
+            const size_t w = i * static_cast<size_t>(jointCount);
+            key.append(reinterpret_cast<const char*>(&jointWeights[w]),
+                       static_cast<size_t>(jointCount) * sizeof(float));
+            key.append(reinterpret_cast<const char*>(&jointIndices[w]),
+                       static_cast<size_t>(jointCount) * sizeof(int));
+        }
         key += deltaSig[i];
         const auto ins = seen.emplace(key, slots);
         posOf[i] = ins.first->second;
@@ -1055,7 +1128,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     // slots -> the written stream, in first-use order. Skinning is indexed by
     // position (DMX has no jointWeightsIndices) and follows.
     std::vector<pm::Vector3> uniquePos;
-    std::vector<float> uniqueWeights;
+    std::vector<float> uniqueWeights, uniqueBalance;
     std::vector<int> uniqueIndices;
     std::vector<int> slotTo(static_cast<size_t>(slots), -1);
     for (size_t i = 0; i < nverts; ++i) {
@@ -1063,6 +1136,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         if (to < 0) {
             to = static_cast<int>(uniquePos.size());
             uniquePos.push_back(positions[i]);
+            uniqueBalance.push_back(balance[i]);
             const size_t w = i * static_cast<size_t>(jointCount);
             uniqueWeights.insert(uniqueWeights.end(), jointWeights.begin() + w,
                                  jointWeights.begin() + w + jointCount);
@@ -1161,8 +1235,10 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     q.FloatArray(F("jointWeights"), uniqueWeights);
     q.IntArray(F("jointIndices"), uniqueIndices);
     if (anyBalance) {
-        q.FloatArray(F("balance"), balance);
-        q.IntArray(F("balanceIndices"), corner);
+        // balance belongs to the point, like the skinning - so it rides the
+        // position stream's indices, not the per-corner ones
+        q.FloatArray(F("balance"), uniqueBalance);
+        q.IntArray(F("balanceIndices"), posCorner);
     }
     if (anySpeed) {
         q.FloatArray(F("speed"), speed);
@@ -1442,7 +1518,7 @@ const char* SetDmxOutput(const std::string& encoding, int formatModel) {
     if (encoding != "binary" && encoding != "keyvalues2")
         return "unknown -dmxencoding (binary or keyvalues2)";
     if (BinaryVersionFor(formatModel) == 0)
-        return "unsupported -dmxmodel (1, 15 or 22)";
+        return "unsupported -dmxmodel (1, 15, 18 or 22)";
     g_binary = encoding == "binary";
     g_formatModel = formatModel;
     return nullptr;

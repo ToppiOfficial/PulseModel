@@ -13,7 +13,8 @@ namespace mdldecompile {
 // -dmxencoding ("binary" | "keyvalues2") and -dmxmodel (the `format model`
 // version). Returns an error message when either is not one we write, else
 // nullptr. Defaults are binary + model 15, which is binary encoding version 4;
-// model 1 is binary encoding version 2, model 22 (modeldoc) version 9.
+// model 1 is binary encoding version 2, model 18 version 5, model 22 (modeldoc)
+// version 9.
 const char* SetDmxOutput(const std::string& encoding, int formatModel);
 
 // One LOD of the model, as the .vtx describes it. Index 0 is the root LOD that

@@ -31,16 +31,16 @@ jobs:
         shell: bash
         run: |
           sha=$(echo "${{ github.sha }}" | cut -c1-7)
-          for tool in pulsemdl2 mdldecompile; do
-            mkdir -p "pkg/$tool"
-            cp "dist/$tool${{ matrix.ext }}" LICENSE README.md "pkg/$tool/"
-            (cd "pkg/$tool" && 7z a -tzip "$GITHUB_WORKSPACE/cli-$tool-${{ matrix.plat }}-$sha.zip" .)
-          done
+          # both tools ship in one PulseModel archive
+          mkdir -p pkg
+          cp "dist/pulsemdl2${{ matrix.ext }}" "dist/mdldecompile${{ matrix.ext }}" \
+             LICENSE README.md pkg/
+          (cd pkg && 7z a -tzip "$GITHUB_WORKSPACE/pulsemodel-${{ matrix.plat }}-$sha.zip" .)
 
       - uses: actions/upload-artifact@v4
         with:
           name: dev-${{ matrix.plat }}
-          path: cli-*.zip
+          path: pulsemodel-*.zip
 
   publish:
     needs: build
@@ -60,7 +60,7 @@ jobs:
           git log -1 --pretty=%B > notes.txt
           # replace the old dev release and its tag, so "dev" is always latest
           gh release delete dev --yes --cleanup-tag || true
-          gh release create dev cli-*.zip \
+          gh release create dev pulsemodel-*.zip \
             --target "${{ github.sha }}" \
             --title "Dev build (${GITHUB_SHA:0:7})" \
             --notes-file notes.txt \

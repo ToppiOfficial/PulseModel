@@ -20,6 +20,10 @@ namespace pm = pulse::math;
 
 namespace mdldecompile {
 
+// -studiomdl: emit the stock studiomdl spellings instead of the .pulseqc
+// ones. Set once from the command line; the mesh writer reads it too.
+inline bool g_studiomdl = false;
+
 // A loaded file plus bounds-checked access. Every offset in a .mdl is
 // attacker-controlled once the file is not ours, so nothing dereferences
 // without a range check.
@@ -379,16 +383,55 @@ inline std::string LidDeltaName(const std::string& desc, int slot) {
     return desc + "_lid_" + kLidSlot[slot];
 }
 
+// A lid flexdesc's role: which lid it drives, and whether its eyeball is the
+// model's left. Script X becomes model Y under the default +90 yaw, so a
+// positive script X is the model's left.
+struct LidRole {
+    const char* type = "upper";
+    bool left = false;
+};
+
+inline std::map<int, LidRole> LidRoles(const Mdl& m) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudiobone_t* bones =
+        m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+    std::map<int, LidRole> out;
+    const fm::mstudiobodyparts_t* parts =
+        m.At<fm::mstudiobodyparts_t>(m.buf.data(), h.bodypartindex, h.numbodyparts);
+    for (int i = 0; parts && i < h.numbodyparts; ++i) {
+        const fm::mstudiomodel_t* models =
+            m.At<fm::mstudiomodel_t>(&parts[i], parts[i].modelindex, parts[i].nummodels);
+        for (int j = 0; models && j < parts[i].nummodels; ++j) {
+            const fm::mstudioeyeball_t* eb = m.At<fm::mstudioeyeball_t>(
+                &models[j], models[j].eyeballindex, models[j].numeyeballs);
+            for (int k = 0; eb && k < models[j].numeyeballs; ++k) {
+                pm::Vector3 org = eb[k].org;
+                if (bones && eb[k].bone >= 0 && eb[k].bone < h.numbones)
+                    org = pm::VectorITransform(eb[k].org, bones[eb[k].bone].poseToBone);
+                const bool left = org.x >= 0.0f;
+                if (eb[k].upperlidflexdesc >= 0 && eb[k].upperlidflexdesc < h.numflexdesc)
+                    out[eb[k].upperlidflexdesc] = {"upper", left};
+                if (eb[k].lowerlidflexdesc >= 0 && eb[k].lowerlidflexdesc < h.numflexdesc)
+                    out[eb[k].lowerlidflexdesc] = {"lower", left};
+            }
+        }
+    }
+    return out;
+}
+
 // The name a flex's vertex data is written out under: a lid pose gets one per
 // slot, a stereo pair collapses back to the delta it was split from, everything
 // else keeps the desc name.
-inline std::string DeltaName(const std::vector<std::string>& descs, const std::set<int>& lids,
-                             const fm::mstudioflex_t& fx) {
+// stock's dmxeyelid takes ONE delta per slot and splits it L/R by balance, so
+// under -studiomdl the two eyes' lid poses merge into a per-lid delta.
+inline std::string DeltaName(const std::vector<std::string>& descs,
+                             const std::map<int, LidRole>& lids, const fm::mstudioflex_t& fx) {
     if (fx.flexdesc < 0 || static_cast<size_t>(fx.flexdesc) >= descs.size())
         return std::string();
     const std::string& d = descs[fx.flexdesc];
-    if (lids.count(fx.flexdesc))
-        return LidDeltaName(d, LidSlot(fx));
+    const auto lid = lids.find(fx.flexdesc);
+    if (lid != lids.end())
+        return LidDeltaName(g_studiomdl ? lid->second.type : d, LidSlot(fx));
     std::string base;
     bool vtaOrder = false;
     if (fx.flexpair > 0 && static_cast<size_t>(fx.flexpair) < descs.size() &&

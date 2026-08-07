@@ -52,6 +52,7 @@ void PrintHeader() {
 int Usage() {
     std::printf("usage: mdldecompile <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]\n");
     std::printf("                    [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]\n");
+    std::printf("                    [-studiomdl]\n");
     std::printf("\n");
     std::printf("  -o <file>     script to write; defaults to a folder named after the\n");
     std::printf("                .mdl, next to it, holding the script and its meshes\n");
@@ -62,8 +63,9 @@ int Usage() {
     std::printf("                how the .dmx meshes are encoded: binary (default) or\n");
     std::printf("                keyvalues2 text\n");
     std::printf("  -dmxmodel <n> the `format model` version they declare: 15 (default),\n");
-    std::printf("                1, or 22 for Source 2 modeldoc\n");
+    std::printf("                1, 18, or 22 for Source 2 modeldoc\n");
     std::printf("  -smdanimation write the animation clips as .smd instead of .dmx\n");
+    std::printf("  -studiomdl    write a stock-studiomdl .qc instead of a .pulseqc\n");
     return 1;
 }
 
@@ -139,9 +141,34 @@ pm::Vector3 Unswizzle(const pm::Vector3& v) {
 
 struct Qc {
     std::FILE* f;
-    void Line(const std::string& s) { std::fprintf(f, "%s\n", s.c_str()); }
-    void Blank() { std::fprintf(f, "\n"); }
+    std::string* sink = nullptr; // set to capture output instead of writing it
+    void Line(const std::string& s) {
+        if (sink)
+            sink->append(s).append("\n");
+        else
+            std::fprintf(f, "%s\n", s.c_str());
+    }
+    void Blank() { Line(""); }
 };
+
+// Source filenames. studiomdl's $addsearchdir does nothing, so a studiomdl .qc
+// spells the folder into every reference instead.
+std::string MeshFile(const std::string& name) {
+    return (g_studiomdl ? "meshes/" : "") + name + ".dmx";
+}
+std::string AnimFile(const std::string& name) {
+    return (g_studiomdl ? "anims/" : "") + name + AnimExt();
+}
+
+// Re-emit captured text at `indent`, blank lines left blank.
+void Indent(Qc& q, const std::string& text, const char* indent) {
+    for (size_t p = 0; p < text.size();) {
+        const size_t e = text.find('\n', p);
+        const std::string line = text.substr(p, e - p);
+        q.Line(line.empty() ? line : indent + line);
+        p = e == std::string::npos ? text.size() : e + 1;
+    }
+}
 
 // Which archetype the compile ran under. Static sets the flag and collapses to
 // one "static_prop" bone; simple collapses to one "prop_root"; general keeps
@@ -189,11 +216,17 @@ void WriteHeader(Qc& q, const Mdl& m) {
     // sources go in meshes/ and anims/ beside the script - registered here so
     // every reference below can name a bare filename
     q.Blank();
-    q.Line("$addsearchdir \"meshes\"");
-    q.Line("$addsearchdir \"anims\"");
-    q.Blank();
+    if (!g_studiomdl) {
+        q.Line("$addsearchdir \"meshes\"");
+        q.Line("$addsearchdir \"anims\"");
+        q.Blank();
+    }
 
-    q.Line(std::string("$modelarchetype ") + Archetype(m));
+    // stock only spells the static archetype - general and simple have no command
+    if (!g_studiomdl)
+        q.Line(std::string("$modelarchetype ") + Archetype(m));
+    else if (std::strcmp(Archetype(m), "static") == 0)
+        q.Line("$staticprop");
 
     const char* prop = m.Str(m.buf.data(), h.surfacepropindex);
     if (*prop)
@@ -202,9 +235,9 @@ void WriteHeader(Qc& q, const Mdl& m) {
     q.Line("$contents " + ContentsTokens(h.contents));
 
     if (h.flags & fm::STUDIOHDR_FLAGS_FORCE_OPAQUE)
-        q.Line("$renderpass opaque");
+        q.Line(g_studiomdl ? "$opaque" : "$renderpass opaque");
     else if (h.flags & fm::STUDIOHDR_FLAGS_TRANSLUCENT_TWOPASS)
-        q.Line("$renderpass mostlyopaque");
+        q.Line(g_studiomdl ? "$mostlyopaque" : "$renderpass mostlyopaque");
 
     if (h.flags & fm::STUDIOHDR_FLAGS_AMBIENT_BOOST)
         q.Line("$ambientboost");
@@ -286,6 +319,32 @@ void WriteSkins(Qc& q, const Mdl& m) {
                                                                  : std::string();
     };
 
+    // stock's form is one braced row per family including the base one, and only
+    // the slots that vary - a column identical down every row is an untouched
+    // material that the group must not claim.
+    if (g_studiomdl) {
+        std::vector<int> cols;
+        for (int r = 0; r < h.numskinref; ++r)
+            for (int fam = 1; fam < h.numskinfamilies; ++fam)
+                if (skins[fam * h.numskinref + r] != skins[r]) {
+                    cols.push_back(r);
+                    break;
+                }
+        if (cols.empty())
+            return;
+        q.Blank();
+        q.Line("$texturegroup \"skinfamilies\"");
+        q.Line("{");
+        for (int fam = 0; fam < h.numskinfamilies; ++fam) {
+            std::string row = "    {";
+            for (int r : cols)
+                row += " \"" + name(skins[fam * h.numskinref + r]) + "\"";
+            q.Line(row + " }");
+        }
+        q.Line("}");
+        return;
+    }
+
     q.Blank();
     q.Line("$texturegroup {");
     for (int fam = 1; fam < h.numskinfamilies; ++fam) {
@@ -300,27 +359,34 @@ void WriteSkins(Qc& q, const Mdl& m) {
     q.Line("}");
 }
 
-// $rendermesh + $modelgroup. Returns the alias picked for each model ("" for a
-// blank body) - dmxwrite writes <alias>.dmx next to the script, which is what
-// the emitted $rendermesh names.
-std::vector<std::vector<std::string>> WriteBodyParts(Qc& q, const Mdl& m) {
+// Does this model carry morph or eyeball data - i.e. must it be a $model?
+bool ModelHasFace(const Mdl& m, const fm::mstudiomodel_t& mo) {
+    if (mo.numeyeballs > 0)
+        return true;
+    const fm::mstudiomesh_t* meshes = m.At<fm::mstudiomesh_t>(&mo, mo.meshindex, mo.nummeshes);
+    for (int k = 0; meshes && k < mo.nummeshes; ++k)
+        if (meshes[k].numflexes > 0)
+            return true;
+    return false;
+}
+
+// The alias each model's .dmx is written under, "" for a blank body. dmxwrite
+// writes <alias>.dmx and every reference in the script names it.
+std::vector<std::vector<std::string>> MeshNames(const Mdl& m) {
     const fm::studiohdr_t& h = *m.hdr;
-    std::vector<std::vector<std::string>> meshNames;
+    std::vector<std::vector<std::string>> out;
     const fm::mstudiobodyparts_t* parts =
         m.At<fm::mstudiobodyparts_t>(m.buf.data(), h.bodypartindex, h.numbodyparts);
     if (!parts)
-        return meshNames;
-
-    // pass 1: one $rendermesh per non-blank model, names made unique
+        return out;
     std::set<std::string> used;
-    meshNames.resize(h.numbodyparts);
-    q.Blank();
+    out.resize(h.numbodyparts);
     for (int i = 0; i < h.numbodyparts; ++i) {
         const fm::mstudiomodel_t* models =
             m.At<fm::mstudiomodel_t>(&parts[i], parts[i].modelindex, parts[i].nummodels);
         for (int j = 0; models && j < parts[i].nummodels; ++j) {
             if (models[j].numvertices == 0) {
-                meshNames[i].push_back(""); // blank body
+                out[i].push_back(""); // blank body
                 continue;
             }
             const std::string file(models[j].name, strnlen(models[j].name, sizeof models[j].name));
@@ -330,22 +396,111 @@ std::vector<std::vector<std::string>> WriteBodyParts(Qc& q, const Mdl& m) {
             std::string unique = name;
             for (int n = 2; !used.insert(unique).second; ++n)
                 unique = name + "_" + std::to_string(n);
-            meshNames[i].push_back(unique);
-            q.Line("$rendermesh \"" + unique + "\" \"" + unique + ".dmx\"");
+            out[i].push_back(unique);
         }
     }
+    return out;
+}
 
-    // pass 2: the bodygroups that pick between them
-    for (int i = 0; i < h.numbodyparts; ++i) {
-        q.Blank();
-        q.Line("$modelgroup \"" + std::string(m.Str(&parts[i], parts[i].sznameindex)) + "\" {");
-        for (const std::string& name : meshNames[i])
-            // the reference is quoted too - a model name with a space in it is
-            // one token only when it is
-            q.Line(name.empty() ? "    blank" : "    mesh name \"" + name + "\" \"" + name + "\"");
-        q.Line("}");
+// The bodypart carrying the morph/eyeball data - in studiomdl mode the one that
+// has to be a $model. -1 when nothing does.
+int FacePart(const Mdl& m) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudiobodyparts_t* parts =
+        m.At<fm::mstudiobodyparts_t>(m.buf.data(), h.bodypartindex, h.numbodyparts);
+    for (int i = 0; parts && i < h.numbodyparts; ++i) {
+        const fm::mstudiomodel_t* models =
+            m.At<fm::mstudiomodel_t>(&parts[i], parts[i].modelindex, parts[i].nummodels);
+        for (int j = 0; models && j < parts[i].nummodels; ++j)
+            if (ModelHasFace(m, models[j]))
+                return i;
     }
-    return meshNames;
+    return -1;
+}
+
+// The .dmx holding the face model's morphs - what dmxeyelid loads deltas from.
+std::string FaceMesh(const Mdl& m, const std::vector<std::vector<std::string>>& names) {
+    const int p = FacePart(m);
+    if (p < 0 || static_cast<size_t>(p) >= names.size())
+        return std::string();
+    for (const std::string& n : names[p])
+        if (!n.empty())
+            return MeshFile(n);
+    return std::string();
+}
+
+// $rendermesh + $modelgroup, or in -studiomdl mode $bodygroup / $model.
+// `faceBody` is the captured flex/eye markup, which only a $model can hold.
+void WriteBodyParts(Qc& q, const Mdl& m, const std::vector<std::vector<std::string>>& meshNames,
+                    const std::string& faceBody) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudiobodyparts_t* parts =
+        m.At<fm::mstudiobodyparts_t>(m.buf.data(), h.bodypartindex, h.numbodyparts);
+    if (!parts || meshNames.empty())
+        return;
+
+    // studiomdl has no $rendermesh - a $bodygroup/$model names the file itself
+    if (!g_studiomdl) {
+        q.Blank();
+        for (const std::vector<std::string>& part : meshNames)
+            for (const std::string& name : part)
+                if (!name.empty())
+                    q.Line("$rendermesh \"" + name + "\" \"" + MeshFile(name) + "\"");
+    }
+
+    // the markup has to land on some $model even when no mesh admits to
+    // carrying a morph - bodypart 0 is the only sane fallback
+    int facePart = FacePart(m);
+    if (facePart < 0 && !faceBody.empty())
+        facePart = 0;
+
+    bool placed = false;
+    for (int i = 0; i < h.numbodyparts; ++i) {
+        const std::string part = m.Str(&parts[i], parts[i].sznameindex);
+        q.Blank();
+        if (!g_studiomdl) {
+            q.Line("$modelgroup \"" + part + "\" {");
+            for (const std::string& name : meshNames[i])
+                // the reference is quoted too - a model name with a space in it
+                // is one token only when it is
+                q.Line(name.empty() ? "    blank"
+                                    : "    mesh name \"" + name + "\" \"" + name + "\"");
+            q.Line("}");
+            continue;
+        }
+
+        // A $bodygroup entry takes no options, so a model with flex/eyeball data
+        // has to be a $model - which makes its own single-model bodypart. Only a
+        // part with something to choose between loses anything that way, so only
+        // that one gets the grouping written out commented.
+        const bool split = i == facePart;
+        const char* pre = split ? "// " : "";
+        if (!split || meshNames[i].size() > 1) {
+            if (split)
+                q.Line("// flex/eyeball data forces $model, which cannot be a bodygroup member:");
+            q.Line(pre + ("$bodygroup \"" + part + "\""));
+            q.Line(std::string(pre) + "{");
+            for (const std::string& name : meshNames[i])
+                q.Line(pre +
+                       (name.empty() ? "    blank" : "    studio \"" + MeshFile(name) + "\""));
+            q.Line(std::string(pre) + "}");
+        }
+        if (!split)
+            continue;
+        for (const std::string& name : meshNames[i]) {
+            if (name.empty())
+                continue;
+            // $model reads its options off the command's own line, so a '{' on
+            // the next one never opens the block - the file becomes an option
+            const bool body = !placed && !faceBody.empty();
+            q.Line("$model \"" + name + "\" \"" + MeshFile(name) + "\"" + (body ? " {" : ""));
+            if (!body)
+                continue;
+            Indent(q, faceBody, "    ");
+            q.Line("}");
+            placed = true;
+        }
+    }
 }
 
 
@@ -605,6 +760,145 @@ void WriteAimAtBones(Qc& q, const Mdl& m) {
     }
 }
 
+// $proceduralbones + the .vrd it names - the file form of $driverbone and
+// $driveraimat, and the only spelling stock studiomdl has for either. Written
+// beside the script; the aim-at block carries its own <basepos>, which the
+// inline $driveraimat cannot.
+void WriteProceduralBones(Qc& q, const Mdl& m, const std::string& dir) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudiobone_t* bones =
+        m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+    if (!bones || std::strcmp(Archetype(m), "general") != 0)
+        return;
+    const std::vector<std::string> names = BoneNames(m);
+    const fm::mstudioattachment_t* atts =
+        m.At<fm::mstudioattachment_t>(m.buf.data(), h.localattachmentindex, h.numlocalattachments);
+    // stock's VRD scanner is a bare sscanf: whitespace-delimited, no quoting,
+    // and it drops a name's prefix up to the first '.'. The prefix eating is
+    // VRD-only - every other command in the script takes the full bone name.
+    std::set<std::string> spaced;
+    auto vrd = [&](std::string n) {
+        const size_t dot = n.find('.');
+        if (dot != std::string::npos)
+            n.erase(0, dot + 1);
+        if (n.find(' ') != std::string::npos)
+            spaced.insert(n);
+        return n;
+    };
+    auto pick = [&](int32_t i) {
+        return vrd((i >= 0 && static_cast<size_t>(i) < names.size()) ? names[i] : std::string());
+    };
+
+    // One procedural bone. The triggers are kept as cells so their columns can
+    // be padded to a common width once the block is complete.
+    struct Block {
+        std::string head;
+        std::vector<std::string> tail;              // the aim-at value lines
+        std::vector<std::vector<std::string>> rows; // <trigger>, keyword dropped
+    };
+    std::vector<Block> blocks;
+
+    for (int i = 0; i < h.numbones; ++i) {
+        if (bones[i].proctype == fm::STUDIO_PROC_QUATINTERP) {
+            const fm::mstudioquatinterpbone_t* qi =
+                m.At<fm::mstudioquatinterpbone_t>(&bones[i], bones[i].procindex);
+            const fm::mstudioquatinterpinfo_t* tr =
+                qi ? m.At<fm::mstudioquatinterpinfo_t>(qi, qi->triggerindex, qi->numtriggers)
+                   : nullptr;
+            if (!tr)
+                continue;
+            const int32_t ctl = qi->control;
+            Block b;
+            b.head = "<helper> " + vrd(names[i]) + " " + pick(bones[i].parent) + " " +
+                     pick(ctl >= 0 && ctl < h.numbones ? bones[ctl].parent : -1) + " " + pick(ctl);
+            for (int t = 0; t < qi->numtriggers; ++t) {
+                pm::RadianEuler driverRot, helperRot;
+                pm::QuaternionAngles(tr[t].trigger, driverRot);
+                pm::QuaternionAngles(tr[t].quat, helperRot);
+                b.rows.push_back({Deg(1.0f / tr[t].inv_tolerance), Deg(driverRot.x),
+                                  Deg(driverRot.y), Deg(driverRot.z), Deg(helperRot.x),
+                                  Deg(helperRot.y), Deg(helperRot.z), F(tr[t].pos.x),
+                                  F(tr[t].pos.y), F(tr[t].pos.z)});
+            }
+            blocks.push_back(std::move(b));
+            continue;
+        }
+        const bool attach = bones[i].proctype == fm::STUDIO_PROC_AIMATATTACH;
+        if (!attach && bones[i].proctype != fm::STUDIO_PROC_AIMATBONE)
+            continue;
+        const fm::mstudioaimatbone_t* ab =
+            m.At<fm::mstudioaimatbone_t>(&bones[i], bones[i].procindex);
+        if (!ab)
+            continue;
+        std::string target;
+        if (attach) {
+            if (atts && ab->aim >= 0 && ab->aim < h.numlocalattachments)
+                target = m.Str(&atts[ab->aim], atts[ab->aim].sznameindex);
+        } else {
+            target = pick(ab->aim);
+        }
+        Block b;
+        b.head = "<aimconstraint> " + vrd(names[i]) + " " + pick(bones[i].parent) + " " +
+                 vrd(target);
+        b.tail = {"<aimvector> " + V3(ab->aimvector), "<upvector> " + V3(ab->upvector),
+                  "<basepos> " + V3(ab->basepos)};
+        blocks.push_back(std::move(b));
+    }
+    if (blocks.empty())
+        return;
+
+    // basepos is file-scoped and carries across helpers, so every block states
+    // its own. A helper's is always 0 - the offset is summed into each trigger.
+    std::vector<std::string> lines;
+    for (const Block& b : blocks) {
+        if (!lines.empty())
+            lines.push_back("");
+        lines.push_back(b.head);
+        for (const std::string& t : b.tail)
+            lines.push_back(t);
+        if (b.rows.empty())
+            continue;
+        lines.push_back("<basepos> 0 0 0");
+        std::vector<size_t> w(b.rows.front().size(), 0);
+        for (const std::vector<std::string>& r : b.rows)
+            for (size_t c = 0; c < r.size(); ++c)
+                w[c] = std::max(w[c], r[c].size());
+        for (const std::vector<std::string>& r : b.rows) {
+            std::string s = "<trigger>";
+            for (size_t c = 0; c < r.size(); ++c)
+                // a wider gap opens each triple; padding trails the value so the
+                // columns line up on the left
+                s += (c == 1 || c == 4 || c == 7 ? "  " : " ") + r[c] +
+                     std::string(w[c] - r[c].size(), ' ');
+            s.erase(s.find_last_not_of(' ') + 1);
+            lines.push_back(s);
+        }
+    }
+
+    const std::string name = BaseName(dir) + ".vrd";
+    std::FILE* f = std::fopen((std::filesystem::path(dir) / name).string().c_str(), "wb");
+    if (!f) {
+        q.Blank();
+        q.Line("// could not write " + name + " - the procedural bones are lost");
+        return;
+    }
+    // a .vrd has no way to quote, so a name with a space in it splits into two
+    // tokens and the line it is on will not parse
+    for (const std::string& s : spaced)
+        std::fprintf(f, "// \"%s\" has a space - the lines naming it will not parse\n", s.c_str());
+    for (const std::string& l : lines)
+        std::fprintf(f, "%s\n", l.c_str());
+    std::fclose(f);
+    std::printf("\nprocedural bones:\n  wrote %s\n", name.c_str());
+
+    q.Blank();
+    if (!spaced.empty())
+        q.Line("// " + std::to_string(spaced.size()) +
+               " bone name(s) in the .vrd contain a space, which it cannot quote - those"
+               "\n// procedural bones will not load; rename them in the source");
+    q.Line("$proceduralbones \"" + name + "\"");
+}
+
 // --- physics ----------------------------------------------------------------
 
 // One `section { "key" "value" ... }` out of the .phy's plain-text tail. Every
@@ -723,15 +1017,28 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
     const std::string meshName = BaseName(StripExt(mdlPath)) + "_physics";
     const PhysicsMeshInfo phys = WritePhysicsMesh(m, mdlPath, dir, meshName);
 
+    const bool concave = phys.concave || (edit && edit->Get("concave") == "1");
     q.Blank();
-    q.Line("$physicsmodel {");
+    // stock splits the command by archetype: several solids is a ragdoll
+    if (g_studiomdl) {
+        q.Line((solids.size() > 1 ? "$collisionjoints \"" : "$collisionmodel \"") +
+               MeshFile(meshName) + "\"");
+        q.Line("{");
+    } else {
+        q.Line("$physicsmodel {");
+    }
     if (!phys.written)
         q.Line("    // the .phy's hulls could not be read - this file has to be supplied");
-    q.Line("    $physicsshape fromfile \"" + meshName + ".dmx\" {");
-    q.Line("        importtype perjoint");
-    if (phys.concave || (edit && edit->Get("concave") == "1"))
-        q.Line("        concave");
-    q.Line("    }");
+    if (g_studiomdl) {
+        if (concave)
+            q.Line("    $concave");
+    } else {
+        q.Line("    $physicsshape fromfile \"" + MeshFile(meshName) + "\" {");
+        q.Line("        importtype perjoint");
+        if (concave)
+            q.Line("        concave");
+        q.Line("    }");
+    }
 
     const float totalmass = edit ? edit->Getf("totalmass", 1.0f) : 1.0f;
     q.Line(totalmass < 0.0f ? "    $automass" : "    $mass " + F(totalmass));
@@ -748,6 +1055,24 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
     if (solids[0]->Find("drag"))
         q.Line("    $drag " + F(solids[0]->Getf("drag")));
 
+    for (const PhySection& s : secs)
+        if (s.name == "collisionrules" && s.Get("selfcollisions") == "0")
+            q.Line("    $noselfcollisions");
+
+    // Everything per-joint is grouped under the bone it belongs to - markup,
+    // constraints, then the pairs it opens - rather than one run per command.
+    // A ragdoll is read and edited bone by bone.
+    std::vector<std::string> order;
+    std::map<std::string, std::vector<std::string>> byBone;
+    for (const PhySection* s : solids)
+        order.push_back(s->Get("name"));
+    auto add = [&](const std::string& bone, std::string line) {
+        if (byBone.find(bone) == byBone.end() &&
+            std::find(order.begin(), order.end(), bone) == order.end())
+            order.push_back(bone);
+        byBone[bone].push_back(std::move(line));
+    };
+
     for (const PhySection* s : solids) {
         std::vector<std::string> lines;
         static const char* kPer[] = {"massbias", "inertia", "damping", "rotdamping"};
@@ -762,10 +1087,19 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
         }
         if (lines.empty())
             continue;
-        q.Line("    $physicsmarkup \"" + s->Get("name") + "\" {");
+        if (g_studiomdl) {
+            // stock has one $joint<field> command per value instead of a block
+            for (const std::string& l : lines) {
+                const size_t k = l.find_first_not_of(' '), sp = l.find(' ', k);
+                add(s->Get("name"), "    $joint" + l.substr(k, sp - k) + " \"" + s->Get("name") +
+                                        "\"" + l.substr(sp));
+            }
+            continue;
+        }
+        add(s->Get("name"), "    $physicsmarkup \"" + s->Get("name") + "\" {");
         for (const std::string& l : lines)
-            q.Line(l);
-        q.Line("    }");
+            add(s->Get("name"), l);
+        add(s->Get("name"), "    }");
     }
 
     // "a,b" = the bone b was merged into a
@@ -776,8 +1110,11 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
             const size_t comma = kv.second.find(',');
             if (comma == std::string::npos)
                 continue;
-            q.Line("    $physicsmarkup \"" + kv.second.substr(comma + 1) + "\" { mergeinto \"" +
-                   kv.second.substr(0, comma) + "\" }");
+            add(kv.second.substr(comma + 1),
+                g_studiomdl ? "    $jointmerge \"" + kv.second.substr(0, comma) + "\" \"" +
+                                  kv.second.substr(comma + 1) + "\""
+                            : "    $physicsmarkup \"" + kv.second.substr(comma + 1) +
+                                  "\" { mergeinto \"" + kv.second.substr(0, comma) + "\" }");
         }
 
     static const char* kAxis[3][4] = {{"x", "xmin", "xmax", "xfriction"},
@@ -786,7 +1123,16 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
     for (const PhySection& s : secs) {
         if (s.name != "ragdollconstraint")
             continue;
-        q.Line("    $physicsjoint \"" + solidName(std::atoi(s.Get("child").c_str())) + "\" {");
+        const std::string joint = solidName(std::atoi(s.Get("child").c_str()));
+        // stock reads the limits from the args either way, so `limit` always
+        // reproduces the stored pair - free/fixed are only spelling
+        if (g_studiomdl) {
+            for (const auto& a : kAxis)
+                add(joint, "    $jointconstrain \"" + joint + "\" " + a[0] + " limit " +
+                               F(s.Getf(a[1])) + " " + F(s.Getf(a[2])) + " " + F(s.Getf(a[3])));
+            continue;
+        }
+        add(joint, "    $physicsjoint \"" + joint + "\" {");
         for (const auto& a : kAxis) {
             const float lo = s.Getf(a[1]), hi = s.Getf(a[2]), fr = s.Getf(a[3]);
             // an axis the script never named was zero-filled, which is exactly
@@ -800,26 +1146,43 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
                 line += " limit " + F(lo) + " " + F(hi);
             if (fr != 0.0f)
                 line += " friction " + F(fr);
-            q.Line(line);
+            add(joint, line);
         }
-        q.Line("    }");
+        add(joint, "    }");
     }
 
+    for (const std::string& bone : order) {
+        const auto it = byBone.find(bone);
+        if (it == byBone.end())
+            continue;
+        q.Blank();
+        for (const std::string& l : it->second)
+            q.Line(l);
+    }
+
+    // the pairs name two bones each, so they belong to neither group - they run
+    // as one list after them
+    bool anyPair = false;
     for (const PhySection& s : secs) {
         if (s.name != "collisionrules")
             continue;
-        if (s.Get("selfcollisions") == "0")
-            q.Line("    $noselfcollisions");
         for (const auto& kv : s.kv) {
             if (kv.first != "collisionpair")
                 continue;
             const size_t comma = kv.second.find(',');
             if (comma == std::string::npos)
                 continue;
-            q.Line("    $physicscollide \"" + solidName(std::atoi(kv.second.c_str())) + "\" \"" +
+            if (!anyPair) {
+                q.Blank();
+                anyPair = true;
+            }
+            q.Line(std::string(g_studiomdl ? "    $jointcollide \"" : "    $physicscollide \"") +
+                   solidName(std::atoi(kv.second.c_str())) + "\" \"" +
                    solidName(std::atoi(kv.second.c_str() + comma + 1)) + "\"");
         }
     }
+    if (anyPair || !byBone.empty())
+        q.Blank();
 
     for (const PhySection& s : secs)
         if (s.name == "animatedfriction")
@@ -948,8 +1311,11 @@ void WriteAttachments(Qc& q, const Mdl& m) {
             (atts[i].localbone >= 0 && static_cast<size_t>(atts[i].localbone) < names.size())
                 ? names[atts[i].localbone]
                 : std::string();
+        // stock takes the position bare after the bone and spells the rotation
+        // `rotate`; both are the same QAngle either way
         std::string line = "$attachment \"" + std::string(m.Str(&atts[i], atts[i].sznameindex)) +
-                           "\" \"" + bone + "\" origin " + V3(pos) + " angles " + QAngleDeg(rot);
+                           "\" \"" + bone + "\" " + (g_studiomdl ? "" : "origin ") + V3(pos) +
+                           (g_studiomdl ? " rotate " : " angles ") + QAngleDeg(rot);
         if (atts[i].flags & 0x10000u) // ATTACHMENT_FLAG_WORLD_ALIGN
             line += " world_align";
         q.Line(line);
@@ -1009,7 +1375,8 @@ std::vector<EyeballRef> GatherEyeballs(const Mdl& m) {
     return eyes;
 }
 
-void WriteEyes(Qc& q, const Mdl& m) {
+// `faceMesh` is the .dmx the lid deltas were written into - dmxeyelid names it.
+void WriteEyes(Qc& q, const Mdl& m, const std::string& faceMesh) {
     std::vector<EyeballRef> eyes = GatherEyeballs(m);
     if (eyes.empty())
         return;
@@ -1041,6 +1408,15 @@ void WriteEyes(Qc& q, const Mdl& m) {
 
     q.Blank();
     for (const EyeballRef& r : eyes) {
+        // stock: eyeball <name> <bone> <x y z> <material> <diameter> <angle>
+        // <iris material, read and discarded> <pupil scale>
+        if (g_studiomdl) {
+            q.Line("eyeball \"" + r.name + "\" \"" + pick(boneNames, r.e->bone) + "\" " +
+                   V3(r.origin) + " \"" + BaseName(r.material) + "\" " + F(r.e->radius * 2.0f) +
+                   " " + F(std::atan(r.e->zoffset) * pm::kRad2Deg) + " \"iris_unused\" " +
+                   F(r.e->iris_scale != 0.0f ? 1.0f / r.e->iris_scale : 1.0f));
+            continue;
+        }
         std::string line = "$eyeball \"" + r.name + "\" bone \"" + pick(boneNames, r.e->bone) +
                            "\" origin " + V3(r.origin) + " diameter " + F(r.e->radius * 2.0f) +
                            " angle " + F(std::atan(r.e->zoffset) * pm::kRad2Deg);
@@ -1089,6 +1465,30 @@ void WriteEyes(Qc& q, const Mdl& m) {
                 noted = true;
             }
         };
+        // stock takes ONE delta per slot and splits it L/R by balance, so both
+        // eyes ride one command and the deltas are the merged per-lid ones
+        // dmxwrite wrote. It creates its own flexdescs (upper_left, ...), so a
+        // model whose lid descs are named otherwise loses the rules fetching them.
+        if (g_studiomdl) {
+            const EyeballRef* side[2] = {nullptr, nullptr}; // [0] left, [1] right
+            for (const EyeballRef& r : eyes)
+                if (const int s = r.origin.x < 0.0f ? 1 : 0; !side[s])
+                    side[s] = &r;
+            if (!side[0] || !side[1] || faceMesh.empty() ||
+                (!slotsOf(lidDesc(*side[0])) && !slotsOf(lidDesc(*side[1]))))
+                continue;
+            const float* lt = upper ? side[0]->e->uppertarget : side[0]->e->lowertarget;
+            const float* rt = upper ? side[1]->e->uppertarget : side[1]->e->lowertarget;
+            std::string body;
+            // one target per slot, so the two eyes' windows meet in the middle
+            for (int i = 0; i < 3; ++i)
+                body += std::string(" ") + kLidSlot[i] + " \"" + LidDeltaName(type, i) + "\" " +
+                        F(0.5f * (lt[i] + rt[i]));
+            blank();
+            q.Line("dmxeyelid " + type + " \"" + faceMesh + "\"" + body + " righteyeball \"" +
+                   side[1]->name + "\" lefteyeball \"" + side[0]->name + "\"");
+            continue;
+        }
 
         if (lidStereo) {
             // one command for both eyes; pair them by which side's flexdesc
@@ -1120,8 +1520,8 @@ void WriteEyes(Qc& q, const Mdl& m) {
                     continue;
                 const std::string base = pick(descs, lidDesc(r));
                 blank();
-                q.Line("$eyelid " + type + " flexdesc \"" + base + "\"" +
-                       poses(r, base, have) + " eyeball \"" + r.name + "\"");
+                q.Line("$eyelid " + type + " flexdesc \"" + base + "\"" + poses(r, base, have) +
+                       " eyeball \"" + r.name + "\"");
             }
         }
     }
@@ -1243,9 +1643,15 @@ void WriteFlexes(Qc& q, const Mdl& m) {
     std::vector<std::string> ctrls;
     if (fc && h.numflexcontrollers > 0) {
         q.Blank();
+        // The .dmx's combination controls are named after its deltas, so stock
+        // would auto-create a controller for each on top of the real ones below
+        // and blow the limit. This keeps the deltas and drops only that.
+        if (g_studiomdl)
+            q.Line("noautodmxrules");
         for (int i = 0; i < h.numflexcontrollers; ++i) {
             ctrls.push_back(m.Str(&fc[i], fc[i].sznameindex));
-            std::string line = "$flexcontroller " + std::string(m.Str(&fc[i], fc[i].sztypeindex));
+            std::string line = (g_studiomdl ? "flexcontroller " : "$flexcontroller ") +
+                               std::string(m.Str(&fc[i], fc[i].sztypeindex));
             if (fc[i].min != 0.0f || fc[i].max != 1.0f)
                 line += " range " + F(fc[i].min) + " " + F(fc[i].max);
             q.Line(line + " \"" + ctrls.back() + "\"");
@@ -1279,7 +1685,11 @@ void WriteFlexes(Qc& q, const Mdl& m) {
                 (mouths[i].bone >= 0 && static_cast<size_t>(mouths[i].bone) < bones.size())
                     ? bones[mouths[i].bone]
                     : std::string();
-            q.Line("$mouth \"" + ctrl + "\" \"" + bone + "\" " + V3(mouths[i].forward));
+            // stock takes the mouth's own index first
+            q.Line(g_studiomdl ? "mouth " + std::to_string(i) + " \"" + ctrl + "\" \"" + bone +
+                                     "\" " + V3(mouths[i].forward)
+                               : "$mouth \"" + ctrl + "\" \"" + bone + "\" " +
+                                     V3(mouths[i].forward));
         }
     }
 
@@ -1310,7 +1720,7 @@ void WriteFlexes(Qc& q, const Mdl& m) {
     if (!localvars.empty()) {
         q.Blank();
         for (const std::string& v : localvars)
-            q.Line("$flexlocalvar \"" + v + "\"");
+            q.Line(g_studiomdl ? "localvar " + v : "$flexlocalvar \"" + v + "\"");
     }
 
     // A rule naming a desc the recompile cannot recreate goes out commented -
@@ -1340,7 +1750,9 @@ void WriteFlexes(Qc& q, const Mdl& m) {
             if (ops[k].op == fm::STUDIO_FETCH2 && !known(ops[k].d.index))
                 ok = false;
         commented += !ok;
-        q.Line((ok ? "" : "// ") + ("$flexrule \"" + target + "\" = " + expr));
+        // stock spells the target as one %-prefixed token, not a quoted name
+        q.Line((ok ? "" : "// ") + (g_studiomdl ? "%" + target + " = " + expr
+                                                : "$flexrule \"" + target + "\" = " + expr));
     }
     if (commented)
         q.Line("// " + std::to_string(commented) + " of " + std::to_string(h.numflexrules) +
@@ -1772,8 +2184,8 @@ void WriteAnimations(Qc& q, const Mdl& m) {
     bool prevBlock = false; // a { } body gets a blank line either side
     // declared first so every delta below can name it
     if (NeedsBindPoseAnim(m, base))
-        lines.push_back("$animation \"" + std::string(kBindPoseAnim) + "\" \"" + kBindPoseAnim +
-                        AnimExt() + "\" fps 30  // the pose the deltas subtract");
+        lines.push_back("$animation \"" + std::string(kBindPoseAnim) + "\" \"" +
+                        AnimFile(kBindPoseAnim) + "\" fps 30  // the pose the deltas subtract");
     for (int i = 0; i < h.numlocalanim; ++i) {
         if (a[i].flags & fm::STUDIO_OVERRIDE) {
             lines.push_back("$declareanimation \"" + refs[i].name + "\"");
@@ -1781,8 +2193,8 @@ void WriteAnimations(Qc& q, const Mdl& m) {
         }
         if (refs[i].implied)
             continue;
-        const std::string decl = "$animation \"" + refs[i].name + "\" \"" + refs[i].name +
-                                 AnimExt() + "\" ";
+        const std::string decl =
+            "$animation \"" + refs[i].name + "\" \"" + AnimFile(refs[i].name) + "\" ";
         const std::string frames = "  // " + std::to_string(a[i].numframes) + " frames";
         // more than one option takes the { } body - one per line, editable
         const std::vector<std::string> opts = AnimOptions(m, a[i], SubtractNameFor(refs, base, i));
@@ -1860,7 +2272,7 @@ void WriteSequences(Qc& q, const Mdl& m) {
             }
             // an implied animation was written inline as a file, not by name
             const AnimRef& r = animRefs[grid[k]];
-            opt(r.implied ? "\"" + r.name + AnimExt() + "\"  // " +
+            opt(r.implied ? "\"" + AnimFile(r.name) + "\"  // " +
                                 std::to_string(anims[grid[k]].numframes) + " frames"
                           : "\"" + r.name + "\"");
             animFlags |= anims[grid[k]].flags;
@@ -2053,24 +2465,36 @@ void WriteHitboxes(Qc& q, const Mdl& m) {
         const fm::mstudiobbox_t* boxes =
             m.At<fm::mstudiobbox_t>(&sets[s], sets[s].hitboxindex, sets[s].numhitboxes);
         q.Blank();
-        q.Line("$hitboxset \"" + std::string(m.Str(&sets[s], sets[s].sznameindex)) + "\" {");
+        // stock's $hbox lines are top level, not a block body
+        q.Line("$hboxset \"" + std::string(m.Str(&sets[s], sets[s].sznameindex)) + "\"" +
+               (g_studiomdl ? "" : " {"));
         for (int i = 0; boxes && i < sets[s].numhitboxes; ++i) {
             const fm::mstudiobbox_t& b = boxes[i];
             const std::string bone =
                 (b.bone >= 0 && static_cast<size_t>(b.bone) < names.size()) ? names[b.bone]
                                                                             : std::string();
-            std::string line = "    $hbox " + std::to_string(b.group) + " \"" + bone + "\" " +
-                               V3(b.bbmin) + "  " + V3(b.bbmax);
-            if (b.angOffsetOrientation.x || b.angOffsetOrientation.y || b.angOffsetOrientation.z)
-                line += " angles " + V3(b.angOffsetOrientation);
-            if (b.flCapsuleRadius > 0.0f)
+            std::string line = (g_studiomdl ? "$hbox " : "    $hbox ") + std::to_string(b.group) +
+                               " \"" + bone + "\" " + V3(b.bbmin) + "  " + V3(b.bbmax);
+            // a box is only a capsule when the radius is positive, and the
+            // orientation is read only for a capsule - on a box it is dead data
+            if (b.flCapsuleRadius > 0.0f) {
+                if (b.angOffsetOrientation.x || b.angOffsetOrientation.y ||
+                    b.angOffsetOrientation.z)
+                    line += " angles " + V3(b.angOffsetOrientation);
                 line += " radius " + F(b.flCapsuleRadius);
-            const char* hbname = m.Str(&b, b.szhitboxnameindex);
-            if (*hbname)
-                line += " name \"" + std::string(hbname) + "\"";
+            }
+            // whitespace or junk is not a name worth restating
+            std::string hbname = m.Str(&b, b.szhitboxnameindex);
+            const size_t first = hbname.find_first_not_of(" \t");
+            hbname = first == std::string::npos
+                         ? std::string()
+                         : hbname.substr(first, hbname.find_last_not_of(" \t") - first + 1);
+            if (CleanName(hbname))
+                line += " name \"" + hbname + "\"";
             q.Line(line);
         }
-        q.Line("}");
+        if (!g_studiomdl)
+            q.Line("}");
     }
 }
 
@@ -2094,6 +2518,8 @@ int RunDecompile(int argc, char** argv) {
             dmxModel = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "-smdanimation") == 0)
             SetAnimFormat(true);
+        else if (std::strcmp(argv[i], "-studiomdl") == 0)
+            g_studiomdl = true;
         else if (!in)
             in = argv[i];
     }
@@ -2125,7 +2551,9 @@ int RunDecompile(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     const std::string outPath =
-        out ? out : (std::filesystem::path(dir) / (BaseName(dir) + ".pulseqc")).string();
+        out ? out
+            : (std::filesystem::path(dir) / (BaseName(dir) + (g_studiomdl ? ".qc" : ".pulseqc")))
+                  .string();
     std::FILE* f = std::fopen(outPath.c_str(), "wb");
     if (!f)
         return Fail("write error",
@@ -2138,8 +2566,21 @@ int RunDecompile(int argc, char** argv) {
     q.Blank();
     STAGE(WriteHeader, q, m);
     STAGE(WriteMaterials, q, m);
+
+    // stock has no top-level flex/eye commands - they are $model options, so
+    // capture them here and let WriteBodyParts put them in the block.
+    pulse::fatal::g_stage = "MeshNames";
+    const std::vector<std::vector<std::string>> meshNames = MeshNames(m);
+    std::string faceBody;
+    if (g_studiomdl) {
+        q.sink = &faceBody;
+        STAGE(WriteEyes, q, m, FaceMesh(m, meshNames));
+        STAGE(WriteFlexes, q, m);
+        q.sink = nullptr;
+        faceBody.erase(0, faceBody.find_first_not_of('\n'));
+    }
     pulse::fatal::g_stage = "WriteBodyParts";
-    const std::vector<std::vector<std::string>> meshNames = WriteBodyParts(q, m);
+    WriteBodyParts(q, m, meshNames, faceBody);
 
     // $lod / $shadowlod, right after the bodygroups. The meshes are written
     // first so the blocks only name files that exist. LOD 0 is the root the
@@ -2147,29 +2588,49 @@ int RunDecompile(int argc, char** argv) {
     std::printf("\nmeshes:\n");
     pulse::fatal::g_stage = "WriteRenderMeshes";
     const std::vector<LodInfo> lods = WriteRenderMeshes(m, in, dir, meshNames);
+    // The LOD meshes come out of the .vvd already rigged, so stock must not
+    // re-derive their weights from LOD 0 the way an authored LOD needs.
+    if (g_studiomdl && lods.size() > 1) {
+        q.Blank();
+        q.Line("$skinnedlods");
+    }
     for (size_t l = 1; l < lods.size(); ++l) {
         q.Blank();
-        q.Line(lods[l].switchPoint < 0.0f ? "$shadowlod {"
-                                          : "$lod " + F(lods[l].switchPoint) + " {");
+        // $shadowlod eats whatever is left on its line as a switch value, so its
+        // '{' has to go on the next one. $lod wants the opposite - inline.
+        if (lods[l].switchPoint < 0.0f) {
+            q.Line("$shadowlod");
+            q.Line("{");
+        } else {
+            q.Line("$lod " + F(lods[l].switchPoint) + " {");
+        }
         for (const std::vector<std::string>& part : meshNames)
             for (const std::string& name : part)
                 if (!name.empty())
-                    q.Line("    replacemodel \"" + name + "\" \"" + name + "_lod" +
-                           std::to_string(l) + ".dmx\"");
+                    // stock matches the source by filename, not by model name
+                    q.Line("    replacemodel \"" + (g_studiomdl ? MeshFile(name) : name) + "\" \"" +
+                           MeshFile(name + "_lod" + std::to_string(l)) + "\"");
         for (const auto& r : lods[l].materialReplacements)
             q.Line("    replacematerial \"" + r.first + "\" \"" + r.second + "\"");
         q.Line("}");
     }
 
-    STAGE(WriteEyes, q, m);
-    STAGE(WriteFlexes, q, m);
+    if (!g_studiomdl) {
+        STAGE(WriteEyes, q, m, std::string());
+        STAGE(WriteFlexes, q, m);
+    }
     STAGE(WriteSkins, q, m);
     STAGE(WriteAttachments, q, m);
     STAGE(WriteHitboxes, q, m);
     STAGE(WriteBones, q, m);
     STAGE(WriteBoneMerges, q, m);
-    STAGE(WriteDriverBones, q, m);
-    STAGE(WriteAimAtBones, q, m);
+    // stock has neither $driverbone nor $driveraimat - only the .vrd file form
+    if (g_studiomdl) {
+        STAGE(WriteProceduralBones, q, m, dir);
+    } else {
+        STAGE(WriteDriverBones, q, m);
+        STAGE(WriteAimAtBones, q, m);
+    }
     STAGE(WriteJiggleBones, q, m);
     STAGE(WriteAnimBlocks, q, m, in);
     STAGE(WritePoseParams, q, m);

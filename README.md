@@ -107,7 +107,7 @@ cmake --preset x64-release
 cmake --build --preset x64-release
 ```
 
-The binary lands in `out/build/x64-release/`. Windows is the only supported and
+Both binaries land in `out/build/x64-release/PulseModel/`. Windows is the only supported and
 tested target; the CMake files carry a Linux branch and the code avoids
 Windows-only APIs, but that path is unverified.
 

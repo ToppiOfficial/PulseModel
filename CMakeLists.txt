@@ -24,6 +24,12 @@ endif()
 
 add_compile_definitions(${PLATFORM_DEFINES} _CRT_SECURE_NO_WARNINGS)
 
+# Both tools ship side by side in one PulseModel/ folder. Guarded so a -D on
+# the command line (the CI workflows) still wins.
+if(NOT DEFINED CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/PulseModel")
+endif()
+
 # Layout (kept shallow):
 #   libs/     - C++ libraries (pulselimits.h lives here), vendored OSS
 #   pulsemdl2/ - the app: .pulsemdl loader, compile stage, writers, main()

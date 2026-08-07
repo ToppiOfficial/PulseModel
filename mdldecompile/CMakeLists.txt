@@ -3,7 +3,7 @@
 add_executable(mdldecompile main.cpp dmxwrite.cpp animwrite.cpp)
 target_include_directories(mdldecompile PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 0.4.0)
+set(TOOL_VERSION 0.5.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(mdldecompile PRIVATE PULSEMDL2_VERSION="${TOOL_VERSION}")
 

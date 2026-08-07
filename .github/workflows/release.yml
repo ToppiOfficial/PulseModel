@@ -31,16 +31,16 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          for tool in pulsemdl2 mdldecompile; do
-            mkdir -p "pkg/$tool"
-            cp "dist/$tool${{ matrix.ext }}" LICENSE README.md "pkg/$tool/"
-            (cd "pkg/$tool" && 7z a -tzip "$GITHUB_WORKSPACE/cli-$tool-${{ matrix.plat }}.zip" .)
-          done
+          # both tools ship in one PulseModel archive
+          mkdir -p pkg
+          cp "dist/pulsemdl2${{ matrix.ext }}" "dist/mdldecompile${{ matrix.ext }}" \
+             LICENSE README.md pkg/
+          (cd pkg && 7z a -tzip "$GITHUB_WORKSPACE/pulsemodel-${{ matrix.plat }}.zip" .)
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.plat }}
-          path: cli-*.zip
+          path: pulsemodel-*.zip
 
   publish:
     needs: build
@@ -66,7 +66,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           git log -1 --pretty=%B > notes.txt
-          gh release create "v${{ steps.ver.outputs.version }}" cli-*.zip \
+          gh release create "v${{ steps.ver.outputs.version }}" pulsemodel-*.zip \
             --target "${{ github.sha }}" \
             --title "v${{ steps.ver.outputs.version }}" \
             --notes-file notes.txt \
