@@ -44,7 +44,7 @@ namespace {
 void PrintHeader() {
     std::printf("-------------------------------\n");
     std::printf("MDLDecompiler\n");
-    std::printf("version:   %s (model version 49)\n", kAppVersion);
+    std::printf("version:   %s (model version 44-49)\n", kAppVersion);
     std::printf("developer: Toppi (MIT License)\n");
     std::printf("-------------------------------\n");
 }
@@ -94,17 +94,18 @@ bool ReadFile(const char* path, Mdl& m, int forceVersion, std::string& err) {
         err = std::string("\"") + path + "\" is not a studio model (bad id)";
         return false;
     }
-    // Some compilers hex-edit a bogus version into a file whose layout is
-    // really an older one, to throw decompilers off. -forceversion reads it as
-    // the version given and ignores the field.
-    const int32_t version = forceVersion ? forceVersion : m.hdr->version;
-    if (version != 49) {
-        err = "unsupported .mdl version " + std::to_string(version) +
-              " (only 49; -forceversion 49 reads it anyway)";
-        return false;
-    }
-    if (version != m.hdr->version)
-        std::printf("file says version %d, reading it as %d\n", m.hdr->version, version);
+    const int32_t headerVersion = m.hdr->version;
+    const int32_t version = forceVersion ? forceVersion : headerVersion;
+    if (version != headerVersion)
+        std::printf("file says version %d, reading it as %d\n", headerVersion, version);
+    // 44 through 49 share one binary layout: Valve only ever repurposed reserved
+    // padding in studiohdr_t/mstudiobone_t/mstudioanimdesc_t/mstudioseqdesc_t,
+    // never moved a field, so the v49 structs below read them all. studiohdr2_t
+    // only exists from 45 on; earlier files simply have studiohdr2index == 0,
+    // which every reader here already treats as "no extension header".
+    if (version < 44 || version > 49)
+        std::printf("model version %d is outside the confirmed 44-49 range; reading it as 49 anyway\n",
+                     version);
     return true;
 }
 
@@ -1048,39 +1049,81 @@ void WriteEyes(Qc& q, const Mdl& m) {
         q.Line(line + " material \"" + BaseName(r.material) + "\"");
     }
 
-    // $eyelid is one command per lid covering both eyes, so pair them by which
-    // side's flexdesc each eyeball's lid base points at.
-    auto sideOf = [&](const EyeballRef& r, bool upper) {
-        const std::string n = pick(descs, upper ? r.e->upperlidflexdesc : r.e->lowerlidflexdesc);
-        if (n.size() >= 6 && n.compare(n.size() - 6, 6, "_right") == 0)
-            return 1;
-        if (n.size() >= 5 && n.compare(n.size() - 5, 5, "_left") == 0)
-            return 0;
-        return -1; // unauthored - CheckEyeballSetup filled in "dummy_eyelid"
+    // Which lid poses carry vertex data, per lid flexdesc, and whether the file
+    // splits them stereo (one desc pair for both eyes, the DMX form) or mono
+    // (one desc per eye, what every VTA-era v44-48 model has).
+    const std::set<int> lids = LidDescs(m);
+    std::map<int, int> lidSlots; // flexdesc -> bitmask of poses with vertex data
+    bool lidStereo = false;
+    ForEachFlex(m, [&](const fm::mstudioflex_t& fx) {
+        if (!lids.count(fx.flexdesc))
+            return;
+        lidSlots[fx.flexdesc] |= 1 << LidSlot(fx);
+        lidStereo = lidStereo || fx.flexpair > 0;
+    });
+    auto slotsOf = [&](int32_t d) {
+        const auto it = lidSlots.find(d);
+        return it == lidSlots.end() ? 0 : it->second;
     };
 
-    static const char* kSlot[3] = {"lowerer", "neutral", "raiser"};
     bool noted = false;
     for (int upper = 1; upper >= 0; --upper) {
-        const EyeballRef* side[2] = {nullptr, nullptr}; // [0] left, [1] right
-        for (const EyeballRef& r : eyes) {
-            const int s = sideOf(r, upper != 0);
-            if (s >= 0 && !side[s])
-                side[s] = &r;
+        const std::string type = upper ? "upper" : "lower";
+        auto lidDesc = [&](const EyeballRef& r) {
+            return upper ? r.e->upperlidflexdesc : r.e->lowerlidflexdesc;
+        };
+        // The lid poses share a desc, so each is named per slot; a slot with no
+        // vertex data (the VTA neutral is usually the base frame) writes "-".
+        auto poses = [&](const EyeballRef& r, const std::string& base, int have) {
+            const float* target = upper ? r.e->uppertarget : r.e->lowertarget;
+            std::string s;
+            for (int i = 0; i < 3; ++i)
+                s += std::string(" ") + kLidSlot[i] + " " +
+                     (((have >> i) & 1) ? "\"" + LidDeltaName(base, i) + "\"" : "-") + " " +
+                     F(target[i]);
+            return s;
+        };
+        auto blank = [&] {
+            if (!noted) {
+                q.Blank();
+                noted = true;
+            }
+        };
+
+        if (lidStereo) {
+            // one command for both eyes; pair them by which side's flexdesc
+            // each eyeball's lid base points at
+            const EyeballRef* side[2] = {nullptr, nullptr}; // [0] left, [1] right
+            for (const EyeballRef& r : eyes) {
+                const std::string n = pick(descs, lidDesc(r));
+                int s = -1; // unauthored lids got the shared "dummy_eyelid" desc
+                if (n.size() >= 6 && n.compare(n.size() - 6, 6, "_right") == 0)
+                    s = 1;
+                else if (n.size() >= 5 && n.compare(n.size() - 5, 5, "_left") == 0)
+                    s = 0;
+                if (s >= 0 && !side[s])
+                    side[s] = &r;
+            }
+            if (!side[0] || !side[1])
+                continue;
+            // the split's flexdesc is the LEFT desc, so that is what the deltas
+            // were written under
+            const std::string base = pick(descs, lidDesc(*side[0]));
+            blank();
+            q.Line("$eyelid " + type + poses(*side[1], base, slotsOf(lidDesc(*side[0]))) +
+                   " righteyeball \"" + side[1]->name + "\" lefteyeball \"" + side[0]->name +
+                   "\"");
+        } else {
+            for (const EyeballRef& r : eyes) {
+                const int have = slotsOf(lidDesc(r));
+                if (!have)
+                    continue;
+                const std::string base = pick(descs, lidDesc(r));
+                blank();
+                q.Line("$eyelid " + type + " flexdesc \"" + base + "\"" +
+                       poses(r, base, have) + " eyeball \"" + r.name + "\"");
+            }
         }
-        if (!side[0] || !side[1])
-            continue;
-        if (!noted) {
-            q.Blank();
-            noted = true;
-        }
-        const int32_t* flex = upper ? side[1]->e->upperflexdesc : side[1]->e->lowerflexdesc;
-        const float* target = upper ? side[1]->e->uppertarget : side[1]->e->lowertarget;
-        std::string line = std::string("$eyelid ") + (upper ? "upper" : "lower");
-        for (int i = 0; i < 3; ++i)
-            line += std::string(" ") + kSlot[i] + " \"" + pick(descs, flex[i]) + "\" " + F(target[i]);
-        q.Line(line + " righteyeball \"" + side[1]->name + "\" lefteyeball \"" + side[0]->name +
-               "\"");
     }
 }
 
@@ -1620,20 +1663,73 @@ const struct { int32_t bit; const char* name; } kMotionControls[] = {
     {fm::STUDIO_LINEAR, "LM"}, {fm::STUDIO_QUADRATIC_MOTION, "LQ"},
 };
 
+// ikrule is an animation option, so the rules ride on whichever animation owns
+// them - writing blend anim 0's set on the sequence would drop the rules of
+// every other grid animation and desync the compiler's per-rule realign check.
+// A chain's own height/pad/floor never reach the .mdl - only the resolved
+// per-rule copies do - so those are always written out rather than inherited.
+// The ramp and contact are cycle fractions of this animation. One line each,
+// for the { } body of whatever declared the animation.
+std::vector<std::string> IkRules(const Mdl& m, const fm::mstudioanimdesc_t& a) {
+    // animblockikruleindex is relative to the .ani block, not the .mdl - a
+    // demand-loaded clip's rules are simply out of reach here.
+    const fm::mstudioikrule_t* rules =
+        m.At<fm::mstudioikrule_t>(&a, a.ikruleindex, a.numikrules);
+    if (!rules)
+        return {};
+    const std::vector<std::string> chains = IkChainNames(m);
+    const std::vector<std::string> boneNames = BoneNames(m);
+    const float lastframe = static_cast<float>(a.numframes - 1);
+    auto pick = [](const std::vector<std::string>& v, int i) {
+        return (i >= 0 && static_cast<size_t>(i) < v.size()) ? v[i] : std::string();
+    };
+    std::vector<std::string> out;
+    for (int k = 0; k < a.numikrules; ++k) {
+        const fm::mstudioikrule_t& r = rules[k];
+        std::string line = "ikrule \"" + pick(chains, r.chain) + "\"";
+        switch (r.type) {
+            case fm::IK_SELF: line += " touch \"" + pick(boneNames, r.bone) + "\""; break;
+            case fm::IK_GROUND: line += " footstep"; break;
+            case fm::IK_RELEASE: line += " release"; break;
+            case fm::IK_ATTACHMENT:
+                // a raw string after the error streams, not the string table
+                line += " attachment \"" + std::string(m.Str(&r, r.szattachmentindex)) + "\"";
+                break;
+            default:
+                // IK_WORLD / IK_UNLATCH: no script spelling to write back
+                continue;
+        }
+        line += " height " + F(r.height) + " radius " + F(r.radius) + " floor " + F(r.floor);
+        // -1 is the "never set" the parser starts from; it survives as a
+        // negative cycle
+        if (r.contact >= 0.0f)
+            line += " contact " + std::to_string(std::lround(r.contact * lastframe));
+        line += " range " + std::to_string(std::lround(r.start * lastframe)) + " " +
+                std::to_string(std::lround(r.peak * lastframe)) + " " +
+                std::to_string(std::lround(r.tail * lastframe)) + " " +
+                std::to_string(std::lround(r.end * lastframe));
+        out.push_back(std::move(line));
+    }
+    return out;
+}
+
 // The options an animation carries, shared by $animation and the inline form.
-std::string AnimOptions(const Mdl& m, const fm::mstudioanimdesc_t& a,
-                        const std::string& subtract) {
-    std::string s = "fps " + F(a.fps);
-    if ((a.flags & fm::STUDIO_DELTA) && !subtract.empty())
-        s += " subtract \"" + subtract + "\" 0";
+// One per line so the result stays editable; the bare flags share the fps line
+// because they read as one clause and never need arguments.
+std::vector<std::string> AnimOptions(const Mdl& m, const fm::mstudioanimdesc_t& a,
+                                     const std::string& subtract) {
+    std::string first = "fps " + F(a.fps);
     if (a.flags & fm::STUDIO_LOOPING)
-        s += " loop";
+        first += " loop";
     if (a.flags & fm::STUDIO_NOFORCELOOP)
-        s += " noforceloop";
+        first += " noforceloop";
     if (a.flags & fm::STUDIO_SNAP)
-        s += " snap";
+        first += " snap";
     if (a.flags & fm::STUDIO_POST)
-        s += " post";
+        first += " post";
+    std::vector<std::string> out{std::move(first)};
+    if ((a.flags & fm::STUDIO_DELTA) && !subtract.empty())
+        out.push_back("subtract \"" + subtract + "\" 0");
     // walkframe, one per stored movement key and in the same order - the
     // compiler chains each from the previous key's end frame. smdwrite.cpp puts
     // the travel back into the clip so there is something left to extract.
@@ -1645,18 +1741,20 @@ std::string AnimOptions(const Mdl& m, const fm::mstudioanimdesc_t& a,
             if (mv[k].motionflags & c.bit)
                 ctrl += " " + std::string(c.name);
         if (!ctrl.empty())
-            s += " walkframe " + std::to_string(mv[k].endframe) + ctrl;
+            out.push_back("walkframe " + std::to_string(mv[k].endframe) + ctrl);
     }
     // demand loading: which side of the .ani this clip's data actually landed on
     if (m.hdr->numanimblocks > 1) {
         const BlockUse u = AnimBlockUse(m, a);
         if (!u.external)
-            s += " noanimblock";
+            out.push_back("noanimblock");
         else if (u.localSections > 0)
-            s += " noanimblockstall nostallframes " +
-                 std::to_string(u.localSections * a.sectionframes);
+            out.push_back("noanimblockstall nostallframes " +
+                          std::to_string(u.localSections * a.sectionframes));
     }
-    return s;
+    for (std::string& r : IkRules(m, a))
+        out.push_back(std::move(r));
+    return out;
 }
 
 // $animation / $declareanimation, naming the clip animwrite.cpp put in anims/.
@@ -1671,6 +1769,7 @@ void WriteAnimations(Qc& q, const Mdl& m) {
     const int base = SubtractBase(m, refs);
 
     std::vector<std::string> lines;
+    bool prevBlock = false; // a { } body gets a blank line either side
     // declared first so every delta below can name it
     if (NeedsBindPoseAnim(m, base))
         lines.push_back("$animation \"" + std::string(kBindPoseAnim) + "\" \"" + kBindPoseAnim +
@@ -1682,10 +1781,23 @@ void WriteAnimations(Qc& q, const Mdl& m) {
         }
         if (refs[i].implied)
             continue;
-        lines.push_back("$animation \"" + refs[i].name + "\" \"" + refs[i].name + AnimExt() +
-                        "\" " +
-                        AnimOptions(m, a[i], SubtractNameFor(refs, base, i)) + "  // " +
-                        std::to_string(a[i].numframes) + " frames");
+        const std::string decl = "$animation \"" + refs[i].name + "\" \"" + refs[i].name +
+                                 AnimExt() + "\" ";
+        const std::string frames = "  // " + std::to_string(a[i].numframes) + " frames";
+        // more than one option takes the { } body - one per line, editable
+        const std::vector<std::string> opts = AnimOptions(m, a[i], SubtractNameFor(refs, base, i));
+        const bool block = opts.size() > 1;
+        if (!lines.empty() && (block || prevBlock))
+            lines.push_back("");
+        prevBlock = block;
+        if (!block) {
+            lines.push_back(decl + opts[0] + frames);
+            continue;
+        }
+        lines.push_back(decl + "{" + frames);
+        for (const std::string& o : opts)
+            lines.push_back("    " + o);
+        lines.push_back("}");
     }
     if (lines.empty())
         return;
@@ -1762,7 +1874,9 @@ void WriteSequences(Qc& q, const Mdl& m) {
         // animation options in a sequence body land on blend animation 0, so
         // they only belong here when that one was declared inline
         if (anims && anim0 >= 0 && anim0 < h.numlocalanim && animRefs[anim0].implied)
-            opt(AnimOptions(m, anims[anim0], SubtractNameFor(animRefs, subBase, anim0)));
+            for (const std::string& o :
+                 AnimOptions(m, anims[anim0], SubtractNameFor(animRefs, subBase, anim0)))
+                opt(o);
         const float lastframe = (anims && anim0 >= 0 && anim0 < h.numlocalanim)
                                     ? static_cast<float>(anims[anim0].numframes - 1)
                                     : 0.0f;
@@ -1861,7 +1975,7 @@ void WriteSequences(Qc& q, const Mdl& m) {
             const std::string o(ev[k].options, strnlen(ev[k].options, sizeof ev[k].options));
             if (!o.empty())
                 line += " \"" + o + "\"";
-            opt(line);
+            opt("{ " + line + " }");
         }
 
         const fm::mstudioanimtag_t* tag =
@@ -1901,60 +2015,38 @@ void WriteSequences(Qc& q, const Mdl& m) {
                 opt("weightlist \"" + wl + "\"");
         }
 
-        // ikrule. The rules are stored on the animation but spelled in the
-        // sequence, so they come off blend animation 0. A chain's own
-        // height/pad/floor never reach the .mdl - only the resolved per-rule
-        // copies do - so those are always written out rather than left to be
-        // inherited. The ramp and contact are cycle fractions of this animation.
-        if (anims && anim0 >= 0 && anim0 < h.numlocalanim) {
-            const fm::mstudioikrule_t* rules = m.At<fm::mstudioikrule_t>(
-                &anims[anim0], anims[anim0].ikruleindex, anims[anim0].numikrules);
-            for (int k = 0; rules && k < anims[anim0].numikrules; ++k) {
-                const fm::mstudioikrule_t& r = rules[k];
-                std::string line = "ikrule \"" + pick(chains, r.chain) + "\"";
-                switch (r.type) {
-                    case fm::IK_SELF:
-                        line += " touch \"" + pick(boneNames, r.bone) + "\"";
-                        break;
-                    case fm::IK_GROUND: line += " footstep"; break;
-                    case fm::IK_RELEASE: line += " release"; break;
-                    case fm::IK_ATTACHMENT:
-                        // a raw string after the error streams, not the string table
-                        line += " attachment \"" + std::string(m.Str(&r, r.szattachmentindex)) +
-                                "\"";
-                        break;
-                    default:
-                        // IK_WORLD / IK_UNLATCH: no script spelling to write back
-                        opt("// ikrule type " + std::to_string(r.type) + " on chain \"" +
-                            pick(chains, r.chain) + "\" has no script spelling");
-                        continue;
-                }
-                line += " height " + F(r.height) + " radius " + F(r.radius) + " floor " +
-                        F(r.floor);
-                // -1 is the "never set" the parser starts from; it survives as a
-                // negative cycle
-                if (r.contact >= 0.0f)
-                    line += " contact " + std::to_string(std::lround(r.contact * lastframe));
-                line += " range " + std::to_string(std::lround(r.start * lastframe)) + " " +
-                        std::to_string(std::lround(r.peak * lastframe)) + " " +
-                        std::to_string(std::lround(r.tail * lastframe)) + " " +
-                        std::to_string(std::lround(r.end * lastframe));
-                opt(line);
-            }
-        }
-
         q.Line("}");
     }
 }
 
 void WriteHitboxes(Qc& q, const Mdl& m) {
     const fm::studiohdr_t& h = *m.hdr;
-    if (h.flags & fm::STUDIOHDR_FLAGS_AUTOGENERATED_HITBOX)
-        return; // nothing was authored - let the compiler generate them again
     const fm::mstudiohitboxset_t* sets =
         m.At<fm::mstudiohitboxset_t>(m.buf.data(), h.hitboxsetindex, h.numhitboxsets);
     if (!sets)
         return;
+
+    if (h.flags & fm::STUDIOHDR_FLAGS_AUTOGENERATED_HITBOX) {
+        // nothing was authored - let the compiler generate them again. The one
+        // input that can't be re-derived that way is $skipboneinbbox: without
+        // it every auto box is seeded at the bone's local origin (0,0,0), so a
+        // box that ends up excluding it proves the flag was set.
+        for (int s = 0; s < h.numhitboxsets; ++s) {
+            const fm::mstudiobbox_t* boxes =
+                m.At<fm::mstudiobbox_t>(&sets[s], sets[s].hitboxindex, sets[s].numhitboxes);
+            for (int i = 0; boxes && i < sets[s].numhitboxes; ++i) {
+                const fm::mstudiobbox_t& b = boxes[i];
+                if (b.bbmin.x > 0.0f || b.bbmax.x < 0.0f || b.bbmin.y > 0.0f ||
+                    b.bbmax.y < 0.0f || b.bbmin.z > 0.0f || b.bbmax.z < 0.0f) {
+                    q.Blank();
+                    q.Line("$skipboneinbbox");
+                    return;
+                }
+            }
+        }
+        return;
+    }
+
     const std::vector<std::string> names = BoneNames(m);
 
     for (int s = 0; s < h.numhitboxsets; ++s) {
@@ -2041,7 +2133,8 @@ int RunDecompile(int argc, char** argv) {
                         (ec ? " (" + ec.message() + ")" : std::string()));
 
     Qc q{f};
-    q.Line("// decompiled by mdldecompile from " + std::string(in));
+    q.Line("// mdldecompile version " + std::string(kAppVersion));
+    q.Line("// " + std::string(in));
     q.Blank();
     STAGE(WriteHeader, q, m);
     STAGE(WriteMaterials, q, m);

@@ -39,6 +39,21 @@ struct MeshFilter {
     const std::string* Unmatched() const;
 };
 
+// $wrinklescale <morph> <scale> - what dmxedit's SetWrinkleScale would have
+// baked into the DMX, minus the controller argument: wrinkle bakes per morph,
+// so the combination control a scale hangs off never reaches the output.
+struct WrinkleScaleOption {
+    std::string shape;
+    float scale = 0.0f;
+    int line = 0;
+    bool matched = false; // a name no source has is a hard error
+};
+
+// Bake wrinkle onto every matching morph, per vertex: |posDelta| * scale /
+// maxDeflection (reference GenerateWrinkleDelta). Runs after every source is
+// loaded, so it overwrites whatever the file itself carried or generated.
+void ApplyWrinkleScales(Source& src, std::vector<WrinkleScaleOption>& opts);
+
 // $skinnedbonecull <aggressive|tree> - drop every bone no vertex of this source
 // weights, on top of (and before) the compile stage's own collapse pass. Tree
 // keeps the parent chain of a skinned bone, so the hierarchy above it survives;

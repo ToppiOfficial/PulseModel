@@ -3,6 +3,7 @@
 #include "meshedit.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "math/math.h"
@@ -24,6 +25,35 @@ bool MeshFilter::Keep(const std::string& meshName, const std::string& dagName) {
         }
     }
     return exclusive ? !hit : hit;
+}
+
+void ApplyWrinkleScales(Source& src, std::vector<WrinkleScaleOption>& opts) {
+    for (WrinkleScaleOption& w : opts) {
+        SrcMorphAnim* morph = nullptr;
+        for (SrcMorphAnim& m : src.morphs)
+            if (_stricmp(m.name.c_str(), w.shape.c_str()) == 0) { morph = &m; break; }
+        if (!morph)
+            continue;
+        w.matched = true;
+
+        // Valve Vector::Length (float accumulate + sqrtf), as the DMX path uses
+        float maxDeflection = 0.0f;
+        for (const SrcVertAnim& va : morph->vanims) {
+            const float d = sqrtf(va.pos.x * va.pos.x + va.pos.y * va.pos.y + va.pos.z * va.pos.z);
+            if (d > maxDeflection)
+                maxDeflection = d;
+        }
+        if (w.scale == 0.0f || maxDeflection == 0.0f) {
+            for (SrcVertAnim& va : morph->vanims)
+                va.wrinkle = 0.0f;
+            continue;
+        }
+        const double invMax = static_cast<double>(w.scale) / static_cast<double>(maxDeflection);
+        for (SrcVertAnim& va : morph->vanims) {
+            const float d = sqrtf(va.pos.x * va.pos.x + va.pos.y * va.pos.y + va.pos.z * va.pos.z);
+            va.wrinkle = static_cast<float>(static_cast<double>(d) * invMax);
+        }
+    }
 }
 
 const std::string* MeshFilter::Unmatched() const {

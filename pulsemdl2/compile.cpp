@@ -5400,6 +5400,228 @@ void CalcBoneTransforms(Ctx& ctx, Anim& panim, Anim* pbaseanim, int frame,
 void CalcBoneTransforms(Ctx& ctx, Anim& panim, int frame,
                         std::vector<matrix3x4>& boneToWorld);
 
+Vector3 VecSub(const Vector3& a, const Vector3& b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+// calcPosition: where the clip has travelled to by iFrame, from the piecewise
+// motion an earlier walkframe extracted. Zero when nothing was extracted.
+Vector3 CalcPosition(const Anim& panim, int iFrame) {
+    Vector3 vecPos{};
+    if (panim.piecewisemove.empty() || panim.numframes <= 1)
+        return vecPos;
+
+    int loops = 0;
+    while (iFrame >= (panim.numframes - 1)) {
+        loops++;
+        iFrame -= panim.numframes - 1;
+    }
+
+    float prevframe = 0.0f;
+    for (const LinearMove& pmove : panim.piecewisemove) {
+        if (pmove.endframe >= iFrame) {
+            const float span = pmove.endframe - prevframe;
+            const float f = span > 0.0f ? (iFrame - prevframe) / span : 0.0f;
+            const float d = pmove.v0 * f + 0.5f * (pmove.v1 - pmove.v0) * f * f;
+            vecPos = {vecPos.x + d * pmove.vector.x, vecPos.y + d * pmove.vector.y,
+                      vecPos.z + d * pmove.vector.z};
+            if (loops != 0) {
+                const LinearMove& last = panim.piecewisemove.back();
+                vecPos = {vecPos.x + loops * last.pos.x, vecPos.y + loops * last.pos.y,
+                          vecPos.z + loops * last.pos.z};
+            }
+            return vecPos;
+        }
+        prevframe = static_cast<float>(pmove.endframe);
+        vecPos = pmove.pos;
+    }
+    return vecPos;
+}
+
+Vector3 CalcMovement(const Anim& panim, int iFrom, int iTo) {
+    return VecSub(CalcPosition(panim, iTo), CalcPosition(panim, iFrom));
+}
+
+// Rodrigues rotation taking unit `from` onto unit `to`. Antiparallel picks an
+// arbitrary perpendicular axis - the 180 flip is well defined, the plane is not.
+matrix3x4 RotationBetween(const Vector3& from, const Vector3& to) {
+    Vector3 axis = CrossProduct(from, to);
+    float s = pm::VectorNormalize(axis);
+    float c = DotProduct(from, to);
+    if (s < 1e-6f) {
+        if (c > 0.0f)
+            return matrix3x4{}; // identity
+        axis = fabsf(from.x) < 0.9f ? CrossProduct(from, Vector3{1, 0, 0})
+                                    : CrossProduct(from, Vector3{0, 1, 0});
+        pm::VectorNormalize(axis);
+        s = 0.0f;
+        c = -1.0f;
+    }
+    const float t = 1.0f - c;
+    matrix3x4 r;
+    r.m[0][0] = t * axis.x * axis.x + c;
+    r.m[0][1] = t * axis.x * axis.y - s * axis.z;
+    r.m[0][2] = t * axis.x * axis.z + s * axis.y;
+    r.m[1][0] = t * axis.x * axis.y + s * axis.z;
+    r.m[1][1] = t * axis.y * axis.y + c;
+    r.m[1][2] = t * axis.y * axis.z - s * axis.x;
+    r.m[2][0] = t * axis.x * axis.z - s * axis.y;
+    r.m[2][1] = t * axis.y * axis.z + s * axis.x;
+    r.m[2][2] = t * axis.z * axis.z + c;
+    r.m[0][3] = r.m[1][3] = r.m[2][3] = 0.0f;
+    return r;
+}
+
+// Swing `bones` about `pivot` by the rotation taking `from` onto `to`.
+void SwingAbout(std::vector<matrix3x4>& boneToWorld, const Vector3& pivot, Vector3 from,
+                Vector3 to, std::initializer_list<int> bones) {
+    if (pm::VectorNormalize(from) < 1e-6f || pm::VectorNormalize(to) < 1e-6f)
+        return;
+    const matrix3x4 r = RotationBetween(from, to);
+    for (int b : bones) {
+        matrix3x4& mat = boneToWorld[b];
+        const Vector3 rel = pm::VectorRotate(VecSub(MatrixGetColumn(mat, 3), pivot), r);
+        mat = pm::ConcatTransforms(r, mat);
+        MatrixSetColumn({pivot.x + rel.x, pivot.y + rel.y, pivot.z + rel.z}, 3, mat);
+    }
+}
+
+// Two-bone analytic IK: rotate thigh + knee so the end bone lands on `target`,
+// keeping both segment lengths. The current knee offset picks the bend plane.
+bool SolveTwoBoneIK(int iThigh, int iKnee, int iFoot, const Vector3& target,
+                    std::vector<matrix3x4>& boneToWorld) {
+    const Vector3 thigh = MatrixGetColumn(boneToWorld[iThigh], 3);
+    const Vector3 knee = MatrixGetColumn(boneToWorld[iKnee], 3);
+    const Vector3 foot = MatrixGetColumn(boneToWorld[iFoot], 3);
+
+    const float l1 = VectorLength(VecSub(knee, thigh));
+    const float l2 = VectorLength(VecSub(foot, knee));
+    if (l1 < 1e-4f || l2 < 1e-4f)
+        return false;
+
+    Vector3 dir = VecSub(target, thigh);
+    float dist = pm::VectorNormalize(dir);
+    if (dist < 1e-4f)
+        return false;
+    // hold the target inside the reachable annulus, backed off so the knee
+    // never locks dead straight (a straight leg has no bend plane left)
+    dist = std::max(dist, std::max(fabsf(l1 - l2) * 1.01f, 0.01f));
+    dist = std::min(dist, (l1 + l2) * 0.999f);
+
+    // bend plane: the current knee's offset from the new thigh->target axis
+    Vector3 bend = VecSub(knee, thigh);
+    const float along = DotProduct(bend, dir);
+    bend = {bend.x - dir.x * along, bend.y - dir.y * along, bend.z - dir.z * along};
+    if (pm::VectorNormalize(bend) < 1e-4f) {
+        bend = fabsf(dir.x) < 0.9f ? CrossProduct(dir, Vector3{1, 0, 0})
+                                   : CrossProduct(dir, Vector3{0, 1, 0});
+        pm::VectorNormalize(bend);
+    }
+
+    // law of cosines: the knee sits `a` along the axis and `h` off it
+    const float a = (dist * dist + l1 * l1 - l2 * l2) / (2.0f * dist);
+    const float h = sqrtf(std::max(0.0f, l1 * l1 - a * a));
+    const Vector3 newKnee{thigh.x + dir.x * a + bend.x * h, thigh.y + dir.y * a + bend.y * h,
+                          thigh.z + dir.z * a + bend.z * h};
+    const Vector3 newFoot{thigh.x + dir.x * dist, thigh.y + dir.y * dist,
+                          thigh.z + dir.z * dist};
+
+    SwingAbout(boneToWorld, thigh, VecSub(knee, thigh), VecSub(newKnee, thigh),
+               {iThigh, iKnee, iFoot});
+    const Vector3 movedFoot = MatrixGetColumn(boneToWorld[iFoot], 3);
+    SwingAbout(boneToWorld, newKnee, VecSub(movedFoot, newKnee), VecSub(newFoot, newKnee),
+               {iKnee, iFoot});
+    return true;
+}
+
+// solveBone: write one solved world transform back as a parent-relative keyframe.
+void SolveBone(CompiledModel& m, Anim& panim, int iFrame, int iBone,
+               const std::vector<matrix3x4>& boneToWorld) {
+    const int iParent = m.bones[iBone].parent;
+    iFrame = iFrame % panim.numframes;
+    if (iParent == -1) {
+        pm::MatrixAngles(boneToWorld[iBone], panim.sanim[iFrame][iBone].rot,
+                         panim.sanim[iFrame][iBone].pos);
+        return;
+    }
+    const matrix3x4 local =
+        pm::ConcatTransforms(pm::MatrixInvert(boneToWorld[iParent]), boneToWorld[iBone]);
+    pm::MatrixAngles(local, panim.sanim[iFrame][iBone].rot, panim.sanim[iFrame][iBone].pos);
+}
+
+// fixupIKErrors (`ikfixup`): bake the correction into the keyframes - pin the
+// chain's end bone where it sat at the contact frame, offset by whatever motion
+// an earlier walkframe extracted, and re-solve the chain to reach it.
+void FixupIkErrors(Ctx& ctx, Anim& panim, IkRule rule) {
+    CompiledModel& m = *ctx.out;
+    if (panim.numframes <= 1)
+        return;
+
+    if (rule.start == 0 && rule.peak == 0 && rule.tail == 0 && rule.end == 0) {
+        rule.tail = panim.numframes - 1;
+        rule.end = panim.numframes - 1;
+    }
+    // unwrap a range authored across the loop point
+    if (rule.start < 0) rule.start = 0;
+    if (rule.peak < rule.start) rule.peak += panim.numframes - 1;
+    if (rule.tail < rule.peak) rule.tail += panim.numframes - 1;
+    if (rule.end < rule.tail) rule.end += panim.numframes - 1;
+    if (rule.contact < 0) rule.contact = rule.peak;
+
+    const IkChain& chain = m.ikchains[rule.chain];
+    std::vector<matrix3x4> boneToWorld;
+    CalcBoneTransforms(ctx, panim, rule.contact, boneToWorld);
+    const Vector3 footfall = MatrixGetColumn(boneToWorld[chain.link[2].bone], 3);
+
+    const bool looping = (panim.flags & STUDIO_LOOPING) != 0;
+    float worstMiss = 0.0f;
+    int worstFrame = 0;
+    for (int t = rule.start; t <= rule.end; t++) {
+        if (t >= panim.numframes && !looping)
+            break;
+
+        // the reference throws this ramp away (it scores frame numbers against
+        // a cycle-space weight, so every frame reads 0) and hard-locks at 1.0.
+        // Score it in frame space instead, like every other range in this file.
+        float s = 1.0f;
+        if (t < rule.peak && rule.peak > rule.start)
+            s = static_cast<float>(t - rule.start) / (rule.peak - rule.start);
+        else if (t > rule.tail && rule.end > rule.tail)
+            s = static_cast<float>(rule.end - t) / (rule.end - rule.tail);
+        s = 3 * s * s - 2 * s * s * s;
+        if (s <= 0.0f)
+            continue;
+
+        CalcBoneTransforms(ctx, panim, t, boneToWorld);
+        const Vector3 orig = MatrixGetColumn(boneToWorld[chain.link[2].bone], 3);
+        const Vector3 move = CalcMovement(panim, t, rule.contact);
+        const Vector3 pos{(footfall.x + move.x) * s + orig.x * (1.0f - s),
+                          (footfall.y + move.y) * s + orig.y * (1.0f - s),
+                          (footfall.z + move.z) * s + orig.z * (1.0f - s)};
+
+        if (!SolveTwoBoneIK(chain.link[0].bone, chain.link[1].bone, chain.link[2].bone, pos,
+                            boneToWorld))
+            continue;
+        // the solve clamps a target the leg cannot reach, so the foot lands
+        // short - that is an authoring error (range longer than the stride)
+        const Vector3 got = MatrixGetColumn(boneToWorld[chain.link[2].bone], 3);
+        const float miss = VectorLength(VecSub(got, pos));
+        if (miss > worstMiss) {
+            worstMiss = miss;
+            worstFrame = t;
+        }
+        SolveBone(m, panim, t, chain.link[0].bone, boneToWorld);
+        SolveBone(m, panim, t, chain.link[1].bone, boneToWorld);
+        SolveBone(m, panim, t, chain.link[2].bone, boneToWorld);
+    }
+
+    // a miss under a few units is the normal edge-of-stride reach limit
+    if (worstMiss > 4.0f)
+        std::printf("WARNING: ikfixup \"%s\" chain \"%s\": target out of reach by %.1f units "
+                    "at frame %d - the range is longer than the chain can hold\n",
+                    panim.name.c_str(), chain.name.c_str(), worstMiss, worstFrame);
+}
+
 bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std::string* err) {
     CompiledModel& m = *ctx.out;
     for (size_t i = 0; i < m.anims.size(); ++i) {
@@ -6016,6 +6238,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 }
                 break;
             }
+            case AnimCmd::IkFixup:
+                break; // baked in ProcessIKRules, after all motion extraction
             case AnimCmd::Reverse: {
                 int iCountFrames = panim.numframes - 1;
                 for (int f = 0; f < iCountFrames / 2; f++) {
@@ -6935,11 +7159,65 @@ void CalcSeqTransforms(Ctx& ctx, int sequence, int frame, std::vector<matrix3x4>
 }
 
 // ---------------------------------------------------------------------------
+// LockBoneLengths ($lockbonelengths): a source animation that translates bones
+// stretches the skeleton. Force every bone back to its bind-pose local
+// translation, then re-solve each ik chain so its end bone lands back where the
+// animation had it - the leg changes shape, the foot does not move.
+//
+// The swing only rotates about joint origins, so the solved locals keep the
+// restored translations; the chain does not stretch itself back out.
+// ---------------------------------------------------------------------------
+void LockBoneLengths(Ctx& ctx) {
+    CompiledModel& m = *ctx.out;
+    if (!ctx.in->lockBoneLengths)
+        return;
+
+    std::vector<matrix3x4> boneToWorldOriginal, boneToWorld;
+    for (Anim& panim : m.anims) {
+        if (panim.flags & STUDIO_DELTA)
+            continue;
+        if (panim.weight.empty())
+            continue;
+
+        for (int j = 0; j < panim.numframes; j++) {
+            CalcBoneTransforms(ctx, panim, j, boneToWorldOriginal);
+
+            for (size_t k = 0; k < m.bones.size(); k++)
+                if (m.bones[k].parent != -1)
+                    panim.sanim[j][k].pos = m.bones[k].pos;
+
+            CalcBoneTransforms(ctx, panim, j, boneToWorld);
+
+            for (const IkChain& chain : m.ikchains) {
+                if (panim.weight[chain.link[2].bone] <= 0.0f)
+                    continue;
+                const Vector3 worldPos =
+                    MatrixGetColumn(boneToWorldOriginal[chain.link[2].bone], 3);
+                if (!SolveTwoBoneIK(chain.link[0].bone, chain.link[1].bone, chain.link[2].bone,
+                                    worldPos, boneToWorld))
+                    continue;
+                SolveBone(m, panim, j, chain.link[0].bone, boneToWorld);
+                SolveBone(m, panim, j, chain.link[1].bone, boneToWorld);
+                SolveBone(m, panim, j, chain.link[2].bone, boneToWorld);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ProcessIKRules minus autosteps/localhierarchy. Rules were attached to
 // anims at input-build time (the reference copies them from cmds here).
 // ---------------------------------------------------------------------------
 bool ProcessIKRules(Ctx& ctx, std::string* err) {
     CompiledModel& m = *ctx.out;
+
+    // `ikfixup` bakes here, not at its position in the command list: the
+    // reference no-ops the command during processAnimations so the bake sees
+    // the finished clip, motion extraction included.
+    for (Anim& panim : m.anims)
+        for (const AnimCmd& cmd : panim.cmds)
+            if (cmd.kind == AnimCmd::IkFixup)
+                FixupIkErrors(ctx, panim, cmd.ikfixup);
 
     for (size_t iAnim = 0; iAnim < m.anims.size(); iAnim++) {
         Anim& panim = m.anims[iAnim];
@@ -7147,8 +7425,8 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
                         CalcBoneTransforms(ctx, panim, t, boneToWorld);
                     }
 
-                    // no motion extraction -> calcMovement contributes zero
-                    Vector3 pos = pRule->pos;
+                    const Vector3 mv = CalcMovement(panim, t, pRule->contact);
+                    Vector3 pos{pRule->pos.x + mv.x, pRule->pos.y + mv.y, pRule->pos.z + mv.z};
 
                     RadianEuler qe;
                     pm::QuaternionAngles(pRule->q, qe);
@@ -7196,7 +7474,10 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
                         CalcBoneTransforms(ctx, panim, t, boneToWorld);
                     }
 
-                    Vector3 pos = pRule->pos; // + calcMovement (zero, no motion)
+                    // the footfall was captured at the contact frame, so it has
+                    // to travel with whatever motion extraction pulled out
+                    const Vector3 mv = CalcMovement(panim, t, pRule->contact);
+                    Vector3 pos{pRule->pos.x + mv.x, pRule->pos.y + mv.y, pRule->pos.z + mv.z};
                     float s;
 
                     Vector3 cur =
@@ -8490,6 +8771,14 @@ static std::string AnimSignature(const Anim& a) {
         SigVal(s, c.xform.angles);
         SigVal(s, c.xform.originSet);
         SigVal(s, c.xform.anglesSet);
+        // IkFixup: only what the bake actually reads
+        SigVal(s, c.ikfixup.chain);
+        SigVal(s, c.ikfixup.type);
+        SigVal(s, c.ikfixup.start);
+        SigVal(s, c.ikfixup.peak);
+        SigVal(s, c.ikfixup.tail);
+        SigVal(s, c.ikfixup.end);
+        SigVal(s, c.ikfixup.contact);
     }
     SigVal(s, static_cast<uint32_t>(a.ikrules.size()));
     for (const IkRule& r : a.ikrules) {
@@ -8854,6 +9143,64 @@ int CompiledModel::FindBone(const char* name) const {
     return -1;
 }
 
+// InIkRule -> IkRule (reference Option_IKRule). Shared by `ikrule` and the
+// `ikfixup` command, which bakes the same rule instead of shipping it.
+bool ConvertIkRule(const CompileInput& input, const CompileInput::InIkRule& ir,
+                   const std::string& animName, IkRule& rule, std::string* err) {
+    int chainIdx = -1;
+    for (size_t c = 0; c < input.ikchains.size(); c++)
+        if (_stricmp(input.ikchains[c].name.c_str(), ir.chain.c_str()) == 0)
+            chainIdx = static_cast<int>(c);
+    if (chainIdx == -1) {
+        if (err) *err = "unknown chain \"" + ir.chain + "\" in ikrule (" + animName + ")";
+        return false;
+    }
+    rule.chain = chainIdx;
+    rule.slot = chainIdx;
+    const IkChain& chain = input.ikchains[chainIdx];
+
+    if (_stricmp(ir.type.c_str(), "footstep") == 0) {
+        rule.type = 3; // IK_GROUND
+        rule.height = chain.height;
+        rule.floor = chain.floor;
+        rule.radius = chain.radius;
+    } else if (_stricmp(ir.type.c_str(), "touch") == 0) {
+        rule.type = 1; // IK_SELF
+        rule.bonename = ir.touchBone; // "" = worldspace
+    } else if (_stricmp(ir.type.c_str(), "attachment") == 0) {
+        rule.type = 5; // IK_ATTACHMENT
+        rule.attachment = ir.attachment;
+    } else if (_stricmp(ir.type.c_str(), "release") == 0) {
+        rule.type = 4; // IK_RELEASE
+    } else {
+        if (err) *err = "unknown ikrule type \"" + ir.type + "\" in " + animName;
+        return false;
+    }
+
+    if (ir.heightSet) rule.height = ir.height;
+    if (ir.floorSet) rule.floor = ir.floor;
+    if (ir.radiusSet) rule.radius = ir.radius;
+    rule.contact = ir.contact;
+    rule.start = ir.startframe;
+    rule.peak = ir.peakframe;
+    rule.tail = ir.tailframe;
+    rule.end = ir.endframe;
+    rule.usesequence = ir.usesequence;
+    rule.usesource = ir.usesource;
+    if (ir.fakeoriginSet) {
+        rule.pos = ir.fakeorigin;
+        rule.bone = -1;
+    }
+    if (ir.fakerotateSet) {
+        // QAngle degrees (pitch,yaw,roll) -> RadianEuler(roll,pitch,yaw)
+        RadianEuler rad{ir.fakerotate.z * pm::kDeg2Rad, ir.fakerotate.x * pm::kDeg2Rad,
+                        ir.fakerotate.y * pm::kDeg2Rad};
+        pm::AngleQuaternion(rad, rule.q);
+        rule.bone = -1;
+    }
+    return true;
+}
+
 bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     Ctx ctx;
     ctx.in = &input;
@@ -9117,6 +9464,11 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             case InCmd::Reverse:
                 cmd.kind = AnimCmd::Reverse;
                 break;
+            case InCmd::IkFixup:
+                cmd.kind = AnimCmd::IkFixup;
+                if (!ConvertIkRule(input, ic.ikfixup, a.name, cmd.ikfixup, err))
+                    return false;
+                break;
             case InCmd::NumFrames:
                 cmd.kind = AnimCmd::NumFrames;
                 cmd.numframes = ic.numframes;
@@ -9225,6 +9577,16 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             }
             }
             a.cmds.push_back(cmd);
+        }
+
+        // ik rules -> rule protos (reference Option_IKRule). `ikrule` is an
+        // animation option, so a sequence body's rules already landed on its
+        // blend anim 0 (and its implied grid anims) by the time we get here.
+        for (const auto& ir : ia.ikrules) {
+            IkRule rule;
+            if (!ConvertIkRule(input, ir, a.name, rule, err))
+                return false;
+            a.ikrules.push_back(std::move(rule));
         }
 
         // transformbone is pinned to run immediately after the last copypose,
@@ -9478,73 +9840,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         // sequence iklocks (chains resolved in LinkIKLocks)
         seq.iklocks = is.iklocks;
 
-        // ik rules -> anim rule protos (reference: CMD_IKRULE cmds on the
-        // sequence's animations; Option_IKRule). Attached
-        // to blend anim 0 and copied to implied grid anims like other cmds.
-        for (const auto& ir : is.ikrules) {
-            IkRule rule;
-            int chainIdx = -1;
-            for (size_t c = 0; c < input.ikchains.size(); c++)
-                if (_stricmp(input.ikchains[c].name.c_str(), ir.chain.c_str()) == 0)
-                    chainIdx = static_cast<int>(c);
-            if (chainIdx == -1) {
-                if (err) *err = "unknown chain \"" + ir.chain + "\" in ikrule (sequence " +
-                                seq.name + ")";
-                return false;
-            }
-            rule.chain = chainIdx;
-            rule.slot = chainIdx;
-            const IkChain& chain = input.ikchains[chainIdx];
-
-            if (_stricmp(ir.type.c_str(), "footstep") == 0) {
-                rule.type = 3; // IK_GROUND
-                rule.height = chain.height;
-                rule.floor = chain.floor;
-                rule.radius = chain.radius;
-            } else if (_stricmp(ir.type.c_str(), "touch") == 0) {
-                rule.type = 1; // IK_SELF
-                rule.bonename = ir.touchBone; // "" = worldspace
-            } else if (_stricmp(ir.type.c_str(), "attachment") == 0) {
-                rule.type = 5; // IK_ATTACHMENT
-                rule.attachment = ir.attachment;
-            } else if (_stricmp(ir.type.c_str(), "release") == 0) {
-                rule.type = 4; // IK_RELEASE
-            } else {
-                if (err) *err = "unknown ikrule type \"" + ir.type + "\" in sequence " + seq.name;
-                return false;
-            }
-
-            if (ir.heightSet) rule.height = ir.height;
-            if (ir.floorSet) rule.floor = ir.floor;
-            if (ir.radiusSet) rule.radius = ir.radius;
-            rule.contact = ir.contact;
-            rule.start = ir.startframe;
-            rule.peak = ir.peakframe;
-            rule.tail = ir.tailframe;
-            rule.end = ir.endframe;
-            rule.usesequence = ir.usesequence;
-            rule.usesource = ir.usesource;
-            if (ir.fakeoriginSet) {
-                rule.pos = ir.fakeorigin;
-                rule.bone = -1;
-            }
-            if (ir.fakerotateSet) {
-                // QAngle degrees (pitch,yaw,roll) -> RadianEuler(roll,pitch,yaw)
-                RadianEuler rad{ir.fakerotate.z * pm::kDeg2Rad, ir.fakerotate.x * pm::kDeg2Rad,
-                                ir.fakerotate.y * pm::kDeg2Rad};
-                pm::AngleQuaternion(rad, rule.q);
-                rule.bone = -1;
-            }
-
-            if (grid[0] >= 0)
-                out.anims[grid[0]].ikrules.push_back(rule);
-            for (size_t g = 1; g < grid.size(); g++) {
-                if (grid[g] >= 0 && !out.anims[grid[g]].name.empty() &&
-                    out.anims[grid[g]].name[0] == '@')
-                    out.anims[grid[g]].ikrules.push_back(rule);
-            }
-        }
-
         out.sequences.push_back(std::move(seq));
     }
 
@@ -9728,6 +10023,10 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         return false;
     if (!LinkAttachments(ctx, err))
         return false;
+
+    // $lockbonelengths, immediately before the rules like the reference
+    { PULSE_TIME_PASS("LockBoneLengths");
+      LockBoneLengths(ctx); }
 
     // ik rules -> error curves -> compressed streams
     if (!ProcessIKRules(ctx, err))

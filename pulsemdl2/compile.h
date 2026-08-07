@@ -442,7 +442,8 @@ struct AnimBoneTransform {
 struct AnimCmd {
     enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
-                Motion, RefMotion, CopyPose, TransformBone, NumFrames } kind = Weights;
+                Motion, RefMotion, CopyPose, TransformBone, NumFrames,
+                IkFixup } kind = Weights;
     int weightlistIndex = 0; // Weights: index into CompileInput::weightlists+1 space
     int numframes = 0;       // NumFrames: the length to clip or pad to
     int subtractAnim = -1;   // Subtract: index into CompiledModel::anims
@@ -481,6 +482,7 @@ struct AnimCmd {
     float fadeIn = 0.0f, fadeOut = 0.0f;
     bool copyPos = true, copyRot = true;
     AnimBoneTransform xform; // TransformBone
+    IkRule ikfixup;          // IkFixup: the rule this command bakes in
 };
 
 // one extracted motion segment (reference s_linearmove_t) - written as
@@ -1072,6 +1074,9 @@ struct CompileInput {
     // $forcephonemecrossfade -> STUDIOHDR_FLAGS_FORCE_PHONEME_CROSSFADE
     bool forcePhonemeCrossfade = false;
     bool realignBones = false; // $realignbones: realign every single-child chain
+    // $lockbonelengths: pin every bone to its bind-pose local translation, then
+    // re-solve each ik chain so its end bone keeps its authored world position
+    bool lockBoneLengths = false;
     // $skipboneinbbox (reference useBoneInBBox): the auto-hitbox bone extents
     // start empty instead of at the bone origin
     bool skipBoneInBBox = false;
@@ -1269,6 +1274,20 @@ struct CompileInput {
     // front end stores here is LOD 1 and up, in script order.
     std::vector<ScriptLod> scriptLods;
 
+    struct InIkRule {
+        std::string chain;
+        std::string type;      // footstep|touch|attachment|release
+        std::string touchBone; // IK_SELF target ("" = worldspace)
+        std::string attachment;
+        float height = 0, floor = 0, radius = 0;
+        bool heightSet = false, floorSet = false, radiusSet = false;
+        int contact = -1;
+        int startframe = -1, peakframe = -1, tailframe = -1, endframe = -1;
+        bool usesequence = false, usesource = false;
+        Vector3 fakeorigin;
+        Vector3 fakerotate; // degrees
+        bool fakeoriginSet = false, fakerotateSet = false;
+    };
     struct InAnim {
         std::string name; // "@<seq>" when implied
         source::Source* source = nullptr;
@@ -1283,7 +1302,8 @@ struct CompileInput {
         struct InCmd {
             enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
-                Motion, RefMotion, CopyPose, TransformBone, NumFrames } kind = Weights;
+                Motion, RefMotion, CopyPose, TransformBone, NumFrames,
+                IkFixup } kind = Weights;
             std::string name;   // Weights: weightlist; Subtract/Align/Match: animation
                                 // CopyPose: an animation OR a sequence
             int frame = 0;      // Subtract: reference frame
@@ -1309,6 +1329,7 @@ struct CompileInput {
             float fadeIn = 0.0f, fadeOut = 0.0f;
             bool copyPos = true, copyRot = true;
             AnimBoneTransform xform; // TransformBone
+            InIkRule ikfixup;        // IkFixup
         };
         std::vector<InCmd> cmds;
         // clip trim (`frame <a> <b>` / `framestart <a>`). endframe -1 = run to
@@ -1330,6 +1351,9 @@ struct CompileInput {
         // looprestart/looprestartpercent rotate the clip so it loops elsewhere.
         bool fudgeloop = false;
         bool noAutoIK = false; // `noautoik`: skip the auto IK_RELEASE pass
+        // `ikrule` is an animation option, not a sequence one - a sequence body
+        // routes it to blend anim 0 like every other animation token.
+        std::vector<InIkRule> ikrules;
         bool nocull = false;   // `nocull`: exempt from $animationcullmethod
         // `ignoretransformbone <angles|position>`, see Anim
         bool ignoreTransformAngles = false;
@@ -1355,20 +1379,6 @@ struct CompileInput {
         int flags = 0; // STUDIO_AL_*
         std::string poseparameter; // when STUDIO_AL_POSE
         float start = 0, peak = 0, tail = 0, end = 0; // frames
-    };
-    struct InIkRule {
-        std::string chain;
-        std::string type;      // footstep|touch|attachment|release
-        std::string touchBone; // IK_SELF target ("" = worldspace)
-        std::string attachment;
-        float height = 0, floor = 0, radius = 0;
-        bool heightSet = false, floorSet = false, radiusSet = false;
-        int contact = -1;
-        int startframe = -1, peakframe = -1, tailframe = -1, endframe = -1;
-        bool usesequence = false, usesource = false;
-        Vector3 fakeorigin;
-        Vector3 fakerotate; // degrees
-        bool fakeoriginSet = false, fakerotateSet = false;
     };
     struct InSequence {
         std::string name;
@@ -1403,7 +1413,6 @@ struct CompileInput {
         std::string paramcompanim;  // blendcomp: base for delta grid anims
         std::string paramcenter;    // blendcenter: the grid's neutral cell
         std::vector<IkLock> iklocks;   // chain by name, resolved in LinkIKLocks
-        std::vector<InIkRule> ikrules;
     };
     // $sectionframes: animation sectioning thresholds. An animation of at least
     // minSectionFrameLimit frames is split into sectionFrames-long sections.

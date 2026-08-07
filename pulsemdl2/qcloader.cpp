@@ -195,6 +195,9 @@ struct Ctx {
     };
     std::vector<PendingAttachment> attachments;
 
+    // top-level $wrinklescale: merged into every $rendermesh loaded after it
+    std::vector<source::WrinkleScaleOption> wrinkleScales;
+
     // $flexcontroller/$flexlocalvar/$flexrule/$flexcorrective, held until the
     // bodygroup list is final - registration order can't run command by command
     ManualFlex manual;
@@ -544,6 +547,18 @@ bool CmdModelName(Ctx& c, const Token& cmd) {
     c.in.outname = StripExtension(name);
     if (c.in.outname.empty())
         return c.Fail(cmd.line, "$modelname is empty");
+    return true;
+}
+
+// $wrinklescale <morph> <scale> - bake wrinkle onto that morph wherever it
+// appears. Applied once every source is loaded, so it is position-free and a
+// mesh that does not have the morph is skipped.
+bool CmdWrinkleScale(Ctx& c, const Token& cmd) {
+    source::WrinkleScaleOption w;
+    w.line = cmd.line;
+    if (!c.Want("a morph name", cmd, w.shape) || !c.WantFloat("a wrinkle scale", cmd, w.scale))
+        return false;
+    c.wrinkleScales.push_back(std::move(w));
     return true;
 }
 
@@ -1159,26 +1174,15 @@ bool HasActPrefix(const std::string& o) {
            o[3] == '_';
 }
 
-// studiomdl animation options we deliberately do not accept. Listed so they
-// report why instead of being mistaken for a filename. Returns the reason, or
-// null if `o` is not one of them.
+
 const char* UnsupportedAnimOption(const std::string& o) {
-    // stock's `if` is a stub - it tests one token for literal 0/"true" and
-    // skips the block, with no expression evaluation
-    // $if/$switch cover it properly.
     if (_stricmp(o.c_str(), "if") == 0)
         return "use $if / $switch instead";
-    // not planned. It bakes an IK correction into the keyframes against a
-    // guessed contact position; $ikrule records error deltas and lets the
-    // engine solve against real ground, which is what shipped models use.
-    // Stock's is a draft anyway - the reference hard-sets the rule weight
-    // to 1.0, discarding the start/peak/tail/end falloff.
-    if (_stricmp(o.c_str(), "ikfixup") == 0)
-        return "not planned - use ikrule (engine-side IK) instead";
     return nullptr;
 }
 
 int LookupControl(const std::string& s); // defined below, used by the align family
+bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRule>& out);
 
 // Apply one animation-option token to `a` (studiomdl ParseAnimationToken, the
 // backend-supported subset). The option keyword must already be consumed - `t`
@@ -1214,6 +1218,24 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "ignorescale") == 0) { a.ignorescale = true; return 1; }
     // noautoik/autoik: the compile stage auto-adds an IK_RELEASE rule for every
     // chain this animation moves but never references; noautoik opts out.
+    if (_stricmp(o.c_str(), "ikrule") == 0) return ParseIkRule(c, t, a.ikrules) ? 1 : -1;
+    // ikfixup: same syntax as ikrule, but the correction is baked into this
+    // clip's keyframes here instead of shipped as engine-side error deltas.
+    if (_stricmp(o.c_str(), "ikfixup") == 0) {
+        std::vector<cm::CompileInput::InIkRule> one;
+        if (!ParseIkRule(c, t, one))
+            return -1;
+        if (_stricmp(one[0].type.c_str(), "footstep") != 0) {
+            c.Fail(t.line, "ikfixup: only the footstep type bakes a correction "
+                           "(got \"" + one[0].type + "\") - use ikrule instead");
+            return -1;
+        }
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::IkFixup;
+        cmd.ikfixup = std::move(one[0]);
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
     if (_stricmp(o.c_str(), "noautoik") == 0) { a.noAutoIK = true; return 1; }
     if (_stricmp(o.c_str(), "autoik") == 0) { a.noAutoIK = false; return 1; }
     // nocull: keep this animation whatever $animationcullmethod says, both as
@@ -1883,7 +1905,7 @@ bool CmdIncludeModel(Ctx& c, const Token& cmd) {
 
 // ikrule <chain> <type> [type-args] [options]  (studiomdl Option_IKRule subset).
 // Fills InIkRule, whose chain/type are resolved later in the compile stage.
-bool ParseIkRule(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq) {
+bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRule>& out) {
     cm::CompileInput::InIkRule rule;
     // stock Option_IKRule leaves the ramp frames at calloc's 0 (only `range`
     // or autosteps move them) and sets contact to -1. Override the struct's
@@ -1978,7 +2000,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq) {
         }
     }
 
-    seq.ikrules.push_back(std::move(rule));
+    out.push_back(std::move(rule));
     return true;
 }
 
@@ -2309,13 +2331,15 @@ bool CmdMouth(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $eyelid <upper|lower> lowerer <delta> <target> neutral <delta> <target>
-//         raiser <delta> <target> righteyeball <name> lefteyeball <name>
-// (Option_DmxEyelid). Poses addressed by delta name, not VTA frame index; no
-// source file argument (unlike QC's `dmxeyelid`) - each delta resolves against
-// whichever body carries a vertex animation of that name. One command covers
-// both eyeballs; right/left flexdesc order is parity-critical, so a model with
-// both lids needs two $eyelid lines, each after the $eyeball lines it names.
+// $eyelid <upper|lower> [flexdesc <name>] lowerer <delta> <target>
+//         neutral <delta> <target> raiser <delta> <target>
+//         (righteyeball <name> lefteyeball <name> | eyeball <name>)
+//
+// Poses are addressed by delta name, not VTA frame index, and resolve against
+// whichever body carries one; "-" means the pose has no vertex data. The
+// righteyeball/lefteyeball form covers both eyes with one desc pair; `eyeball`
+// with `flexdesc` is the per-eye form, one line per eye. Both need the $eyeball
+// lines they name to come first.
 bool CmdEyelid(Ctx& c, const Token& cmd) {
     FaceMarkup::Entry entry;
     entry.kind = FaceMarkup::Kind::Eyelid;
@@ -2341,30 +2365,52 @@ bool CmdEyelid(Ctx& c, const Token& cmd) {
         for (int i = 0; i < 3; ++i)
             if (o == kSuffix[i]) { slot = i; break; }
         if (slot >= 0) {
-            if (!c.Want("a delta state name", cmd, entry.eyelid.delta[slot]) ||
+            if (!c.Want("a delta state name or \"-\"", cmd, entry.eyelid.delta[slot]) ||
                 !c.WantFloat("a lid target", cmd, entry.eyelid.target[slot]))
                 return false;
+            if (entry.eyelid.delta[slot] == "-")
+                entry.eyelid.delta[slot].clear();
             // targets are scaled at parse time (`* g_currentscale`)
             entry.eyelid.target[slot] *= c.in.scale;
             haveSlot[slot] = true;
+        } else if (o == "flexdesc") {
+            if (!c.Want("a flexdesc name", cmd, entry.eyelid.basedesc)) return false;
+        } else if (o == "eyeball") {
+            if (!c.Want("an eyeball name", cmd, entry.eyelid.eyeball)) return false;
         } else if (o == "righteyeball") {
             if (!c.Want("an eyeball name", cmd, entry.eyelid.righteyeball)) return false;
         } else if (o == "lefteyeball") {
             if (!c.Want("an eyeball name", cmd, entry.eyelid.lefteyeball)) return false;
         } else {
             return c.Fail(t.line, "$eyelid: unknown option \"" + t.text +
-                                  "\" (expected lowerer/neutral/raiser/righteyeball/"
-                                  "lefteyeball)");
+                                  "\" (expected lowerer/neutral/raiser/flexdesc/eyeball/"
+                                  "righteyeball/lefteyeball)");
         }
     }
     for (int i = 0; i < 3; ++i)
         if (!haveSlot[i])
             return c.Fail(cmd.line, std::string("$eyelid ") + type + ": missing `" +
                                     kSuffix[i] + " <delta> <target>`");
-    if (entry.eyelid.righteyeball.empty())
-        return c.Fail(cmd.line, "$eyelid " + type + ": missing `righteyeball <name>`");
-    if (entry.eyelid.lefteyeball.empty())
-        return c.Fail(cmd.line, "$eyelid " + type + ": missing `lefteyeball <name>`");
+    const bool mono = !entry.eyelid.eyeball.empty();
+    if (mono) {
+        if (!entry.eyelid.righteyeball.empty() || !entry.eyelid.lefteyeball.empty())
+            return c.Fail(cmd.line, "$eyelid " + type +
+                                    ": `eyeball` is the per-eye form, it cannot be mixed with "
+                                    "`righteyeball`/`lefteyeball`");
+        if (entry.eyelid.basedesc.empty())
+            return c.Fail(cmd.line, "$eyelid " + type +
+                                    ": the `eyeball` form needs `flexdesc <name>` for its lid "
+                                    "flexdesc");
+    } else {
+        if (!entry.eyelid.basedesc.empty())
+            return c.Fail(cmd.line, "$eyelid " + type +
+                                    ": `flexdesc` only applies to the `eyeball` form; the "
+                                    "paired form names its descs after the type");
+        if (entry.eyelid.righteyeball.empty())
+            return c.Fail(cmd.line, "$eyelid " + type + ": missing `righteyeball <name>`");
+        if (entry.eyelid.lefteyeball.empty())
+            return c.Fail(cmd.line, "$eyelid " + type + ": missing `lefteyeball <name>`");
+    }
 
     c.face.entries.push_back(std::move(entry));
     return true;
@@ -2717,11 +2763,6 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                 seq.iklocks.push_back(std::move(lock));
                 continue;
             }
-            if (_stricmp(o.c_str(), "ikrule") == 0) {
-                if (!ParseIkRule(c, t, seq))
-                    return false;
-                continue;
-            }
             if (_stricmp(o.c_str(), "event") == 0) {
                 if (!ParseEvent(c, t, seq))
                     return false;
@@ -2887,6 +2928,7 @@ bool CmdSequenceCommon(Ctx& c, const Token& cmd, bool bindpose) {
         dst.rotation = src0.rotation;
         dst.rotationSet = src0.rotationSet;
         dst.cmds.insert(dst.cmds.end(), src0.cmds.begin(), src0.cmds.end());
+        dst.ikrules.insert(dst.ikrules.end(), src0.ikrules.begin(), src0.ikrules.end());
     }
 
     seq.animIndex = blends[0];
@@ -3460,6 +3502,14 @@ bool CmdBoneCullMethod(Ctx& c, const Token& cmd) {
 // each bone points at its child. Skips $definebone bones given a realign pair.
 bool CmdRealignBones(Ctx& c, const Token&) {
     c.in.realignBones = true;
+    return true;
+}
+
+// $lockbonelengths (Cmd_LockBoneLengths): stop source animation from stretching
+// bones - every frame gets the bind-pose local translation back, and each ik
+// chain is re-solved so its end bone stays where the animation put it.
+bool CmdLockBoneLengths(Ctx& c, const Token&) {
+    c.in.lockBoneLengths = true;
     return true;
 }
 
@@ -6208,6 +6258,7 @@ constexpr Command kCommands[] = {
     {"$modelgrouppreset", CmdModelGroupPreset},
     {"$datamodeljoints", CmdDataModelJoints},
     {"$datamodelflexes", CmdDataModelFlexes},
+    {"$wrinklescale", CmdWrinkleScale},
     {"$animation", CmdAnimation},
     {"$bindposeanimation", CmdBindPoseAnimation},
     {"$declareanimation", CmdDeclareAnimation},
@@ -6275,6 +6326,7 @@ constexpr Command kCommands[] = {
     {"$driveraimat", CmdDriverAimAt},
     {"$proceduralbones", CmdProceduralBones},
     {"$realignbones", CmdRealignBones},
+    {"$lockbonelengths", CmdLockBoneLengths},
     {"$transformbone", CmdTransformBone},
     {"$root", CmdRoot},
     {"$definebone", CmdDefineBone},
@@ -6414,6 +6466,17 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
     // set once every source has been read (the DMX loader latches it on the
     // first model carrying an upAxis attribute)
     out.upAxisY = source::DmxUpAxisY();
+
+    // $wrinklescale: every source, including the merged ones a `mesh` line built,
+    // so it never depends on where in the script it was written
+    if (!c.wrinkleScales.empty()) {
+        for (auto& src : c.in.sources)
+            source::ApplyWrinkleScales(*src, c.wrinkleScales);
+        for (const source::WrinkleScaleOption& w : c.wrinkleScales)
+            if (!w.matched)
+                return c.Fail(w.line, "$wrinklescale names \"" + w.shape +
+                                          "\", which is not a morph in any $rendermesh");
+    }
 
     // flex/morph: the automatic per-body DMX rig plus the $flexcontroller /
     // $flexlocalvar / $flexrule / $flexcorrective block. Needs the finished

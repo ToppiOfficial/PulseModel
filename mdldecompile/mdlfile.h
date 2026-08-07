@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -218,27 +219,25 @@ inline std::vector<AnimRef> AnimRefs(const Mdl& m) {
     return refs;
 }
 
-// What a delta was subtracted from is not in the file - only the delta flag
-// survives. A script subtracts the bind pose, so the first single-frame,
-// non-delta, script-nameable clip stands in for it. The .pulseqc names it in
-// `subtract` and the SMD writer undoes the subtraction with it, so both halves
-// have to make the same pick.
+// The delta's subtract source isn't stored, only the flag. Use animation 0's
+// frame 0 (the pose CalcBoneTransforms rebuilds deltas against) - a synthesized
+// bind pose would shift animation 0 and misplace ik `touch` targets. The writer
+// must subtract the same pose named here in `subtract`.
 inline int SubtractBase(const Mdl& m, const std::vector<AnimRef>& refs) {
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudioanimdesc_t* a =
         m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
     for (int i = 0; a && i < h.numlocalanim; ++i)
-        if (a[i].numframes == 1 && !refs[i].implied &&
-            !(a[i].flags & (fm::STUDIO_DELTA | fm::STUDIO_OVERRIDE)))
+        if (!refs[i].implied && !(a[i].flags & (fm::STUDIO_DELTA | fm::STUDIO_OVERRIDE)))
             return i;
     return -1;
 }
 
-// The clip a delta subtracts. A real single-frame reference earlier in the table
-// is used when there is one; otherwise the decompile writes the bind pose out
-// under this name, which is what the source almost certainly subtracted. Without
+// The clip a delta subtracts. A real clip earlier in the table is used when
+// there is one; otherwise the decompile writes the bind pose out under this
+// name, which is what the source almost certainly subtracted. Without
 // a base there is no way to spell a delta at all - the clip recompiles as an
-// absolute pose and loses STUDIO_DELTA.
+// absolute pose and loses STUDIO_DELTA. (wtf?)
 inline constexpr char kBindPoseAnim[] = "a_bindpose";
 
 inline std::string SubtractNameFor(const std::vector<AnimRef>& refs, int base, int i) {
@@ -257,16 +256,27 @@ inline bool NeedsBindPoseAnim(const Mdl& m, int base) {
     return false;
 }
 
-// A stereo flex was split at compile time into "<name>L"/"<name>R" descs sharing
-// one vertanim set, so the delta the source authored is the desc without its L.
-inline std::string DeltaName(const std::string& desc, bool stereo) {
-    if (stereo && desc.size() > 1 && desc.back() == 'L')
-        return desc.substr(0, desc.size() - 1);
-    return desc;
+// A stereo flex is one delta split across two descs. DMX names them <base>L
+// then <base>R, the VTA `split` path every v44-48 model came from names them
+// <base>R then <base>L - same per-vertex side either way, so a VTA pair
+// re-emitted under DMX naming needs its balance flipped or the halves swap.
+inline bool StereoBase(const std::string& desc, const std::string& pair, std::string& base,
+                       bool& vtaOrder) {
+    if (desc.size() < 2 || pair.size() != desc.size())
+        return false;
+    base = desc.substr(0, desc.size() - 1);
+    if (desc.back() == 'L' && pair == base + "R") {
+        vtaOrder = false;
+        return true;
+    }
+    if (desc.back() == 'R' && pair == base + "L") {
+        vtaOrder = true;
+        return true;
+    }
+    return false;
 }
 
-// Runs fn(flexdesc, flexpair) over every morph in the file. flexpair is 0 when
-// the flex is mono.
+// Runs fn(flex) over every morph in the file.
 template <typename F>
 void ForEachFlex(const Mdl& m, F fn) {
     const fm::studiohdr_t& h = *m.hdr;
@@ -282,7 +292,7 @@ void ForEachFlex(const Mdl& m, F fn) {
                 const fm::mstudioflex_t* fx =
                     m.At<fm::mstudioflex_t>(&meshes[k], meshes[k].flexindex, meshes[k].numflexes);
                 for (int n = 0; fx && n < meshes[k].numflexes; ++n)
-                    fn(fx[n].flexdesc, fx[n].flexpair);
+                    fn(fx[n]);
             }
         }
     }
@@ -314,7 +324,8 @@ inline std::vector<std::string> FlexDescNames(const Mdl& m) {
     // A stereo pair is rebuilt from ONE delta as <name>L/<name>R, so a renamed
     // pair has to keep that convention or nothing - no $flexrule, no $eyelid -
     // can name either half again.
-    ForEachFlex(m, [&](int32_t desc, int32_t pair) {
+    ForEachFlex(m, [&](const fm::mstudioflex_t& fx) {
+        const int32_t desc = fx.flexdesc, pair = fx.flexpair;
         if (pair <= 0 || desc < 0 || desc >= h.numflexdesc || pair >= h.numflexdesc)
             return;
         if (!renamed[desc] || !renamed[pair])
@@ -325,24 +336,105 @@ inline std::vector<std::string> FlexDescNames(const Mdl& m) {
     return names;
 }
 
-// Which descs a recompile will actually recreate: a mono flex writes its delta
-// under the desc's own name, a stereo one under <delta>L/<delta>R. A desc whose
-// name does not come back out of that is unreachable, and the $flexrule naming
-// it has to be written commented out.
+// --- eyelids ----------------------------------------------------------------
+
+inline constexpr const char* kLidSlot[3] = {"lowerer", "neutral", "raiser"};
+
+// All three lid poses hang off ONE flexdesc, told apart only by their target
+// window: the lowerer opens at -11, the raiser closes at 11.
+inline int LidSlot(const fm::mstudioflex_t& fx) {
+    if (fx.target0 <= -11.0f)
+        return 0;
+    if (fx.target3 >= 11.0f)
+        return 2;
+    return 1;
+}
+
+// The descs an eyeball drives its lid morph through.
+inline std::set<int> LidDescs(const Mdl& m) {
+    const fm::studiohdr_t& h = *m.hdr;
+    std::set<int> lids;
+    const fm::mstudiobodyparts_t* parts =
+        m.At<fm::mstudiobodyparts_t>(m.buf.data(), h.bodypartindex, h.numbodyparts);
+    for (int i = 0; parts && i < h.numbodyparts; ++i) {
+        const fm::mstudiomodel_t* models =
+            m.At<fm::mstudiomodel_t>(&parts[i], parts[i].modelindex, parts[i].nummodels);
+        for (int j = 0; models && j < parts[i].nummodels; ++j) {
+            const fm::mstudioeyeball_t* eb = m.At<fm::mstudioeyeball_t>(
+                &models[j], models[j].eyeballindex, models[j].numeyeballs);
+            for (int k = 0; eb && k < models[j].numeyeballs; ++k)
+                // desc 0 is a real lid desc, not "unset" - an unauthored lid
+                // gets the shared "dummy_eyelid" desc, never index 0
+                for (int32_t d : {eb[k].upperlidflexdesc, eb[k].lowerlidflexdesc})
+                    if (d >= 0 && d < h.numflexdesc)
+                        lids.insert(d);
+        }
+    }
+    return lids;
+}
+
+// A lid pose's delta name. NOT "<desc>_<slot>" - that is the slot flexdesc
+// $eyelid creates, and a delta of the same name would apply the morph twice.
+inline std::string LidDeltaName(const std::string& desc, int slot) {
+    return desc + "_lid_" + kLidSlot[slot];
+}
+
+// The name a flex's vertex data is written out under: a lid pose gets one per
+// slot, a stereo pair collapses back to the delta it was split from, everything
+// else keeps the desc name.
+inline std::string DeltaName(const std::vector<std::string>& descs, const std::set<int>& lids,
+                             const fm::mstudioflex_t& fx) {
+    if (fx.flexdesc < 0 || static_cast<size_t>(fx.flexdesc) >= descs.size())
+        return std::string();
+    const std::string& d = descs[fx.flexdesc];
+    if (lids.count(fx.flexdesc))
+        return LidDeltaName(d, LidSlot(fx));
+    std::string base;
+    bool vtaOrder = false;
+    if (fx.flexpair > 0 && static_cast<size_t>(fx.flexpair) < descs.size() &&
+        StereoBase(d, descs[fx.flexpair], base, vtaOrder))
+        return base;
+    return d;
+}
+
+// True when the file's stereo pairs are <base>R/<base>L. One answer per file:
+// balance is a per-vertex mesh stream shared by every delta, so the flip it
+// implies cannot be made per-delta.
+inline bool VtaStereoOrder(const Mdl& m, const std::vector<std::string>& descs) {
+    bool vta = false;
+    ForEachFlex(m, [&](const fm::mstudioflex_t& fx) {
+        const size_t d = static_cast<size_t>(fx.flexdesc), p = static_cast<size_t>(fx.flexpair);
+        std::string base;
+        bool one = false;
+        if (fx.flexpair > 0 && d < descs.size() && p < descs.size() &&
+            StereoBase(descs[d], descs[p], base, one) && one)
+            vta = true;
+    });
+    return vta;
+}
+
+// Which descs a recompile will actually recreate: mono under the desc's own
+// name, stereo under <delta>L/<delta>R, lid descs rebuilt by $eyelid. A desc
+// that does not come back out is unreachable, and a $flexrule naming it has to
+// go out commented.
 inline std::vector<bool> DescIsReproducible(const Mdl& m, const std::vector<std::string>& descs) {
     std::vector<bool> ok(descs.size(), true);
-    ForEachFlex(m, [&](int32_t desc, int32_t pair) {
-        const size_t d = static_cast<size_t>(desc), p = static_cast<size_t>(pair);
-        if (desc < 0 || d >= descs.size())
+    const std::set<int> lids = LidDescs(m);
+    ForEachFlex(m, [&](const fm::mstudioflex_t& fx) {
+        const size_t d = static_cast<size_t>(fx.flexdesc), p = static_cast<size_t>(fx.flexpair);
+        if (fx.flexdesc < 0 || d >= descs.size() || lids.count(fx.flexdesc))
             return;
-        if (pair <= 0) {
+        if (fx.flexpair <= 0) {
             ok[d] = true; // mono: the delta carries the desc's own name
             return;
         }
-        const std::string base = DeltaName(descs[d], true);
-        ok[d] = descs[d] == base + "L";
+        std::string base;
+        bool vtaOrder = false;
+        const bool split =
+            p < descs.size() && StereoBase(descs[d], descs[p], base, vtaOrder);
+        ok[d] = split;
         if (p < descs.size())
-            ok[p] = descs[p] == base + "R";
+            ok[p] = split;
     });
     return ok;
 }

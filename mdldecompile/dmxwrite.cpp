@@ -923,6 +923,8 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     // Gathered before the positions are shared: what a vertex's morphs do is
     // part of whether it may share at all.
     const std::vector<std::string> descs = FlexDescNames(m);
+    const std::set<int> lidDescs = LidDescs(m);
+    const bool vtaStereo = VtaStereoOrder(m, descs);
     std::map<std::string, Delta> deltas;
     std::vector<std::string> deltaOrder;
     std::vector<std::string> deltaSig(nverts);
@@ -940,7 +942,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
             if (!va || fx.flexdesc < 0 || static_cast<size_t>(fx.flexdesc) >= descs.size())
                 continue;
 
-            const std::string name = DeltaName(descs[fx.flexdesc], stereo);
+            const std::string name = DeltaName(descs, lidDescs, fx);
             if (!deltas.count(name))
                 deltaOrder.push_back(name);
             Delta& d = deltas[name];
@@ -975,9 +977,11 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
                                         h.flVertAnimFixedPointScale);
                 }
                 // side/speed are the mesh's own per-vertex fields, stored on
-                // every vertanim that touches the vertex rather than once
-                if (a.side != 255) {
-                    balance[mv] = a.side / 255.0f;
+                // every vertanim that touches the vertex rather than once. Only
+                // a stereo flex carries a real side - a mono one writes a flat
+                // 0, which would erase the balance on any vertex it shares.
+                if (stereo && a.side != 255) {
+                    balance[mv] = vtaStereo ? 1.0f - a.side / 255.0f : a.side / 255.0f;
                     anyBalance = true;
                 }
                 if (a.speed != 255) {

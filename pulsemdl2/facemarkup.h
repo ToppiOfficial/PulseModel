@@ -47,15 +47,19 @@ struct FaceMarkup {
         math::Vector3 forward{};
     };
 
-    // QC `dmxeyelid <upper|lower> <source> lowerer <delta> <target> ...`. The
-    // source is NOT named here - each delta is resolved on its own, so the
-    // three need not share a mesh. One entry covers BOTH eyeballs, because the
-    // reference emits the paired right/left flexdescs in one parity-critical
-    // pass.
+    // Lid poses are named, never a VTA frame index; the source is not named, so
+    // each delta resolves on its own and the three need not share a mesh. An
+    // empty delta means that pose has no vertex data.
+    //
+    // Stereo (righteyeball + lefteyeball) covers both eyes with one
+    // <type>_right/<type>_left desc pair. Mono (eyeball + basedesc) is one entry
+    // per eye with its own lid desc and targets - what a v44-48 model has.
     struct Eyelid {
         bool upper = true;
         std::string delta[3];  // lowerer, neutral, raiser
         float target[3] = {0.0f, 0.0f, 0.0f}; // scaled by RegisterFaceMarkup
+        std::string basedesc; // mono only: the single lid flexdesc
+        std::string eyeball;  // mono only
         std::string righteyeball;
         std::string lefteyeball;
     };

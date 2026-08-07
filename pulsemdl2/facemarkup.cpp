@@ -66,30 +66,29 @@ bool RegisterMouth(cm::CompileInput& in, const FaceMarkup::Mouth& src, std::stri
     return true;
 }
 
-// Option_DmxEyelid. Lid poses are addressed by
-// delta NAME, not by VTA frame index - the legacy `eyelid` frame-index form is
-// not supported.
+// Lid poses are addressed by delta NAME, never a VTA frame index. Stereo binds
+// both eyeballs to one <type>_right/<type>_left desc pair (Option_DmxEyelid);
+// mono gives one eyeball its own lid desc and targets (Option_Eyelid).
 bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::string* err) {
     const std::string type = src.upper ? "upper" : "lower";
+
+    const bool mono = !src.eyeball.empty();
 
     std::string deltaName[3];
     float target[3];
     for (int i = 0; i < 3; ++i) {
-        if (src.delta[i].empty()) {
-            if (err) *err = std::string("eyelid has no \"") + kLidSuffix[i] + "\" delta";
-            return false;
-        }
         deltaName[i] = src.delta[i];
         target[i] = src.target[i];
     }
 
-    // QC names the lid source explicitly; here each delta is resolved on its
-    // own against whichever body carries it, so the three need not live on the
-    // same mesh. The match also yields that flexkey's imodel - the reference
-    // gets it from the enclosing $model block.
+    // Each delta resolves on its own against whichever body carries it, and the
+    // match yields that flexkey's imodel. An empty name is a pose with no vertex
+    // data - it still gets its desc and target, just no flexkey.
     source::Source* lidSource[3] = {nullptr, nullptr, nullptr};
     int lidModel[3] = {-1, -1, -1};
     for (int i = 0; i < 3; ++i) {
+        if (deltaName[i].empty())
+            continue;
         int imodel = 0;
         for (const auto& part : in.bodyparts) {
             for (const auto& model : part.models) {
@@ -114,10 +113,11 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
         }
     }
 
-    // flexdesc order is fixed and load-bearing: <type>_right, its three
-    // suffixes, then <type>_left and its three
-    const std::string rightBase = type + "_right";
-    const std::string leftBase = type + "_left";
+    // flexdesc order is fixed and load-bearing. Mono is one base plus its three
+    // suffixes; stereo is <type>_right and its three, then <type>_left and its
+    // three.
+    const std::string rightBase = mono ? src.basedesc : type + "_right";
+    const std::string leftBase = mono ? src.basedesc : type + "_left";
     int baseDesc[2] = {-1, -1}; // [0] = left, [1] = right
     int lidDesc[3][2];          // [slot][left/right]
     baseDesc[1] = AddFlexdesc(in, rightBase, err);
@@ -126,15 +126,24 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
         lidDesc[i][1] = AddFlexdesc(in, rightBase + "_" + kLidSuffix[i], err);
         if (lidDesc[i][1] < 0) return false;
     }
-    baseDesc[0] = AddFlexdesc(in, leftBase, err);
-    if (baseDesc[0] < 0) return false;
-    for (int i = 0; i < 3; ++i) {
-        lidDesc[i][0] = AddFlexdesc(in, leftBase + "_" + kLidSuffix[i], err);
-        if (lidDesc[i][0] < 0) return false;
+    if (mono) {
+        baseDesc[0] = baseDesc[1];
+        for (int i = 0; i < 3; ++i)
+            lidDesc[i][0] = lidDesc[i][1];
+    } else {
+        baseDesc[0] = AddFlexdesc(in, leftBase, err);
+        if (baseDesc[0] < 0) return false;
+        for (int i = 0; i < 3; ++i) {
+            lidDesc[i][0] = AddFlexdesc(in, leftBase + "_" + kLidSuffix[i], err);
+            if (lidDesc[i][0] < 0) return false;
+        }
     }
 
-    // one flexkey per slot; the pair is always left=desc/right=pair
+    // one flexkey per slot that has a delta; stereo pairs left=desc/right=pair,
+    // mono drives the single base desc
     for (int i = 0; i < 3; ++i) {
+        if (!lidSource[i])
+            continue;
         if (in.flexkeys.size() >= static_cast<size_t>(lim::kMaxFlexKeys)) {
             if (err) *err = "too many flex keys, max " + std::to_string(lim::kMaxFlexKeys);
             return false;
@@ -145,7 +154,7 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
         fk.frame = 0; // always 0 for DMX
         fk.imodel = lidModel[i];
         fk.flexdesc = baseDesc[0];
-        fk.flexpair = baseDesc[1];
+        fk.flexpair = mono ? 0 : baseDesc[1];
         fk.split = 0.0f;
         fk.decay = 1.0f;
         switch (i) {
@@ -172,10 +181,15 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
     }
 
     // bind onto the already-registered eyeballs (hence list order)
-    bool rightOk = false, leftOk = false;
+    bool rightOk = false, leftOk = mono;
     for (cm::Eyeball& eye : in.eyeballs) {
         int side; // 0 = left, 1 = right
-        if (!src.righteyeball.empty() &&
+        if (mono) {
+            if (_stricmp(src.eyeball.c_str(), eye.name.c_str()) != 0)
+                continue;
+            side = 1;
+            rightOk = true;
+        } else if (!src.righteyeball.empty() &&
             _stricmp(src.righteyeball.c_str(), eye.name.c_str()) == 0) {
             side = 1;
             rightOk = true;
@@ -207,7 +221,8 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
         }
     }
     if (!rightOk) {
-        if (err) *err = "eyelid: could not find right eyeball \"" + src.righteyeball + "\"";
+        if (err) *err = "eyelid: could not find " + std::string(mono ? "" : "right ") +
+                        "eyeball \"" + (mono ? src.eyeball : src.righteyeball) + "\"";
         return false;
     }
     if (!leftOk) {

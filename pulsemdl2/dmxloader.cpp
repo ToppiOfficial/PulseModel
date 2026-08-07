@@ -1181,21 +1181,22 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             // control's wrinkleScale when nonzero
             std::vector<float> dWrinkle;
             std::vector<int32_t> dWrinkleIdx;
+            const FlexTemp::WrinkleScale* ws = nullptr;
+            for (const FlexTemp::WrinkleScale& w : flex->wrinkleScales) {
+                if (_stricmp(w.name.c_str(), delta->name.c_str()) == 0) {
+                    ws = &w;
+                    break;
+                }
+            }
             const std::vector<float>* aw = PickFloatArray(delta, "wrinkle$0", "wrinkle");
             if (aw) {
                 dWrinkle = *aw;
                 if (auto wi = PickIntArray(delta, "wrinkle$0Indices", "wrinkleIndices"))
                     dWrinkleIdx = *wi;
-            } else {
-                for (const FlexTemp::WrinkleScale& ws : flex->wrinkleScales) {
-                    if (_stricmp(ws.name.c_str(), delta->name.c_str()) == 0) {
-                        GenerateWrinkleDelta(dPos, dPosIdx, ws.scale, posInverse,
-                                             texcoordIndices ? *texcoordIndices
-                                                             : std::vector<int32_t>{},
-                                             nTexcoordDataCount, dWrinkle, dWrinkleIdx);
-                        break;
-                    }
-                }
+            } else if (ws) {
+                GenerateWrinkleDelta(dPos, dPosIdx, ws->scale, posInverse,
+                                     texcoordIndices ? *texcoordIndices : std::vector<int32_t>{},
+                                     nTexcoordDataCount, dWrinkle, dWrinkleIdx);
             }
 
             LoadDeltaState(*flex, delta->name, dPos, dPosIdx, dNormals, dNormalIdx, dWrinkle,
@@ -2067,21 +2068,18 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
 
     // Morphs are model data: only parse them for render-mesh loads so a DMX
     // referenced solely as an animation source contributes none (reference
-    // LoadingModelBody gate). The delta shapes hang off
-    // the combination operator, so it is still read here - but only for the
-    // wrinkle scales and the per-delta stereo signal. Its rig belongs to
-    // $datamodelflexes (LoadDmxFlexRig).
+    // LoadingModelBody gate).
+    //
+    // The combination operator is OPTIONAL - it only supplies wrinkle scales and
+    // the per-delta stereo signal. Without one the delta states still load and
+    // the rig is hand-authored ($flexcontroller / $datamodelflexes).
     FlexTemp flexTemp;
     ComboTemp comboTemp;
-    const dmx::Element* comboOp = nullptr;
     if (morphSource && !animOnly) {
-        comboOp = root->GetElement("combinationOperator");
-        if (comboOp) {
-            flexTemp.enabled = true;
-            // controls first - GenerateWrinkleDeltas runs before the meshes
-            // load in the reference
+        flexTemp.enabled = true;
+        // controls first - GenerateWrinkleDeltas runs before the meshes load
+        if (const dmx::Element* comboOp = root->GetElement("combinationOperator"))
             ParseComboControls(comboOp, comboTemp, flexTemp);
-        }
     }
 
     BoneMap boneMap;
@@ -2104,8 +2102,9 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
             BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out);
     }
 
-    // one flexkey per delta state (reference AddFlexKeys)
-    if (comboOp && flexTemp.enabled)
+    // one flexkey per delta state (reference AddFlexKeys). With no combination
+    // operator the ComboTemp is empty, so every key is mono.
+    if (flexTemp.enabled)
         AddFlexKeys(comboTemp, flexTemp, out);
 
     // animations
