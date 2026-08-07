@@ -1,4 +1,4 @@
-# PulseMDL2
+# PulseModel
 
 ![status: beta](https://img.shields.io/badge/status-beta-orange)
 ![platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-blue)
@@ -19,7 +19,7 @@ SFM).
 ## What about the first PulseMDL
 
 The predecessor, **PulseMDL**, was built on an existing studiomdl codebase which is
-very difficult to maintain and update. PulseMDL2 starts over from a scratch.
+very difficult to maintain and update. PulseModel starts over from a scratch.
 
 ## What it does
 
@@ -42,7 +42,7 @@ very difficult to maintain and update. PulseMDL2 starts over from a scratch.
 
 ## A note on limits
 
-**PulseMDL2 does not enforce Valve's studiomdl limits.** Its own ceilings live in
+**PulseModel does not enforce Valve's studiomdl limits.** Its own ceilings live in
 `libs/pulselimits.h`, and they are deliberately not a copy of any engine's
 runtime caps - studiomdl's numbers differ per branch and every fork raises them.
 The rule here is that the compiler rejects only what the **file format** cannot
@@ -66,7 +66,7 @@ unrecognized `$command` is a hard error rather than a warning.
 ## Usage
 
 ```
-pulsemdl2 <file.pulseqc> [-game <dir>] [-vtxformat <0|1>] [-defvar <name> <value>]
+mdlcompiler <file.pulseqc> [-game <dir>] [-vtxformat <0|1>] [-defvar <name> <value>]
 ```
 
 | Option | Meaning |
@@ -75,15 +75,15 @@ pulsemdl2 <file.pulseqc> [-game <dir>] [-vtxformat <0|1>] [-defvar <name> <value
 | `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. |
 | `-defvar <name> <value>` | Define a script variable (`$name$`) before the script runs. Repeatable; the script cannot override it. |
 
-## mdldecompile
+## mdldecompiler
 
-The build also produces **`mdldecompile`**, which runs the pipeline backwards: an
+The build also produces **`mdldecompiler`**, which runs the pipeline backwards: an
 existing `.mdl` (plus its sibling `.vvd`/`.vtx`/`.phy`/`.ani`) becomes a
 `.pulseqc` script with `meshes/*.dmx` and `anims/*.smd` beside it, ready to feed
-straight back into `pulsemdl2`.
+straight back into `mdlcompiler`.
 
 ```
-mdldecompile <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
+mdldecompiler <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
 ```
 
 | Option | Meaning |
@@ -114,11 +114,11 @@ Windows-only APIs, but that path is unverified.
 ## Layout
 
 ```
-libs/       C++ libraries: DMX reader, math, binary format headers,
-            collision, and vendored third-party code.
-            pulselimits.h holds every hard limit.
-pulsemdl2/  The app: script loader, compile stage, .mdl/.vtx/.phy writers.
-mdldecompile/  The reverse tool: .mdl -> .pulseqc + .dmx meshes + .smd anims.
+libs/           C++ libraries: DMX reader, math, binary format headers,
+                collision, and vendored third-party code.
+                pulselimits.h holds every hard limit.
+mdlcompiler/    The app: script loader, compile stage, .mdl/.vtx/.phy writers.
+mdldecompiler/  The reverse tool: .mdl -> .pulseqc + .dmx meshes + .smd anims.
 ```
 
 ## Third-party code and references

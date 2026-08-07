@@ -1,6 +1,6 @@
 name: Release
 
-# Manual only. Tags with pulsemdl2's TOOL_VERSION and creates a DRAFT release
+# Manual only. Tags with mdlcompiler's TOOL_VERSION and creates a DRAFT release
 # seeded with the commit message - nothing is published until you edit the notes
 # and hit publish yourself.
 on:
@@ -33,7 +33,7 @@ jobs:
         run: |
           # both tools ship in one PulseModel archive
           mkdir -p pkg
-          cp "dist/pulsemdl2${{ matrix.ext }}" "dist/mdldecompile${{ matrix.ext }}" \
+          cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE README.md pkg/
           (cd pkg && 7z a -tzip "$GITHUB_WORKSPACE/pulsemodel-${{ matrix.plat }}.zip" .)
 
@@ -56,8 +56,8 @@ jobs:
         id: ver
         shell: bash
         run: |
-          # each tool owns its version; the repo release tracks pulsemdl2's
-          v=$(sed -n 's/^set(TOOL_VERSION \([0-9.]*\)).*/\1/p' pulsemdl2/CMakeLists.txt)
+          # each tool owns its version; the repo release tracks mdlcompiler's
+          v=$(sed -n 's/^set(TOOL_VERSION \([0-9.]*\)).*/\1/p' mdlcompiler/CMakeLists.txt)
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Create draft release

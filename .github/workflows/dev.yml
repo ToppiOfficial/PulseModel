@@ -33,7 +33,7 @@ jobs:
           sha=$(echo "${{ github.sha }}" | cut -c1-7)
           # both tools ship in one PulseModel archive
           mkdir -p pkg
-          cp "dist/pulsemdl2${{ matrix.ext }}" "dist/mdldecompile${{ matrix.ext }}" \
+          cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE README.md pkg/
           (cd pkg && 7z a -tzip "$GITHUB_WORKSPACE/pulsemodel-${{ matrix.plat }}-$sha.zip" .)
 

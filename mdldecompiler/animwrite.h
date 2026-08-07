@@ -1,13 +1,13 @@
 // animwrite.h - rebuilds the animation clips the .mdl/.ani were compiled from.
 
-#ifndef MDLDECOMPILE_ANIMWRITE_H
-#define MDLDECOMPILE_ANIMWRITE_H
+#ifndef MDLDECOMPILER_ANIMWRITE_H
+#define MDLDECOMPILER_ANIMWRITE_H
 
 #include <string>
 
 #include "mdlfile.h"
 
-namespace mdldecompile {
+namespace mdldecompiler {
 
 // -smdanimation writes the clips as SMD instead of DMX.
 void SetAnimFormat(bool smd);
@@ -20,6 +20,6 @@ const char* AnimExt();
 // demand-loaded clips. Reports what it wrote and never fails the decompile.
 void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::string& dir);
 
-} // namespace mdldecompile
+} // namespace mdldecompiler
 
-#endif // MDLDECOMPILE_ANIMWRITE_H
+#endif // MDLDECOMPILER_ANIMWRITE_H

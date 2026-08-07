@@ -3619,7 +3619,8 @@ bool CmdTransformBone(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $root <bone> (Cmd_Root) - PLACEHOLDER: parsed and stored, nothing reads it.
+// $root <bone> (Cmd_Root): the bone motion extraction, $alignto and $angle
+// work from. Resolved after the bone table exists; unknown falls back to bone 0.
 bool CmdRoot(Ctx& c, const Token& cmd) {
     return c.Want("a bone name", cmd, c.in.primaryRootBone);
 }

@@ -1,7 +1,7 @@
-// PulseMDL - Source engine model compiler (.mdl/.vvd/.vtx/.phy).
+// mdlcompiler - Source engine model compiler (.mdl/.vvd/.vtx/.phy).
 //
 // Usage:
-//   pulsemdl <file.pulseqc> [-game <dir>]
+//   mdlcompiler <file.pulseqc> [-game <dir>]
 
 #include <chrono>
 #include <cstdio>
@@ -18,21 +18,21 @@
 #include "writer.h"
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
-static constexpr const char* kAppVersion = PULSEMDL2_VERSION;
+static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
 
 using pulse::fatal::Fail;
 static const char*& g_stage = pulse::fatal::g_stage;
 
 static void PrintHeader() {
     std::printf("-------------------------------\n");
-    std::printf("PulseMDL2\n");
+    std::printf("PulseModel [Model Compiler]\n");
     std::printf("version:   %s (model version %d)\n", kAppVersion, pulse::limits::kStudioVersion);
     std::printf("developer: Toppi (MIT License)\n");
     std::printf("-------------------------------\n");
 }
 
 static int Usage() {
-    std::printf("usage: pulsemdl <file.pulseqc> [-game <dir>]   (.qc accepted)\n");
+    std::printf("usage: mdlcompiler <file.pulseqc> [-game <dir>]   (.qc accepted)\n");
     std::printf("\n");
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
@@ -155,6 +155,20 @@ static int RunCompile(int argc, char** argv) {
     auto tWrite = Clock::now();
     g_stage = "done";
 
+    // lodFlag is a bit per LOD. The pool is shared, so a decimated LOD adds no
+    // verts to it - only a replacemodel LOD does. Per-LOD = verts it draws.
+    std::vector<size_t> lodVerts(model.scriptLods.size(), 0);
+    size_t vertsPool = 0;
+    for (const auto& m : model.models) {
+        vertsPool += m.vertices.size();
+        for (const auto& v : m.vertices)
+            for (size_t l = 0; l < lodVerts.size(); l++)
+                if (v.lodFlag & (1 << l)) lodVerts[l]++;
+    }
+    std::printf("bones: %zu | verts: %zu in .vvd\n", model.bones.size(), vertsPool);
+    for (size_t l = 0; l < lodVerts.size(); l++)
+        std::printf("  %s%zu: %zu verts\n",
+                    model.scriptLods[l].switchValue < 0 ? "shadowlod" : "lod", l, lodVerts[l]);
     std::printf("compile time: %.2f s\n", ms(t0, tWrite) / 1000.0);
 
     if (timing) {

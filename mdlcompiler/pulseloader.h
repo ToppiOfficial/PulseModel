@@ -1,7 +1,7 @@
 // pulseloader.h - PulseMDL
 //
 // HALTED: the .pulsemdl front end is shelved indefinitely. pulseloader.cpp is
-// out of pulsemdl2/CMakeLists.txt and main.cpp rejects .pulsemdl scripts;
+// out of mdlcompiler/CMakeLists.txt and main.cpp rejects .pulsemdl scripts;
 // .pulseqc is the only front end. Kept on disk as reference only.
 //
 // Loads a .pulsemdl compile script (DMX keyvalues2, format pulsemodel 1, root

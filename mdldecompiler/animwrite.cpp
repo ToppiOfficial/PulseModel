@@ -26,7 +26,7 @@
 #include "dmxwrite.h"
 #include "math/compressed.h"
 
-namespace mdldecompile {
+namespace mdldecompiler {
 namespace {
 
 using Pose = AnimPose;
@@ -484,4 +484,4 @@ void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::st
         std::printf("  %d animation%s could not be extracted\n", skipped, skipped == 1 ? "" : "s");
 }
 
-} // namespace mdldecompile
+} // namespace mdldecompiler

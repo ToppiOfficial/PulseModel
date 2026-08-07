@@ -1,7 +1,7 @@
 // mdlfile.h - the loaded .mdl plus the small readers every output writer shares.
 
-#ifndef MDLDECOMPILE_MDLFILE_H
-#define MDLDECOMPILE_MDLFILE_H
+#ifndef MDLDECOMPILER_MDLFILE_H
+#define MDLDECOMPILER_MDLFILE_H
 
 #include <algorithm>
 #include <cmath>
@@ -18,7 +18,7 @@
 namespace fm = pulse::format;
 namespace pm = pulse::math;
 
-namespace mdldecompile {
+namespace mdldecompiler {
 
 // -studiomdl: emit the stock studiomdl spellings instead of the .pulseqc
 // ones. Set once from the command line; the mesh writer reads it too.
@@ -482,6 +482,6 @@ inline std::vector<bool> DescIsReproducible(const Mdl& m, const std::vector<std:
     return ok;
 }
 
-} // namespace mdldecompile
+} // namespace mdldecompiler
 
-#endif // MDLDECOMPILE_MDLFILE_H
+#endif // MDLDECOMPILER_MDLFILE_H

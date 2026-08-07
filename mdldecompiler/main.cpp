@@ -1,8 +1,8 @@
-// mdldecompile - reads a compiled .mdl and writes back a .pulseqc describing it.
+// mdldecompiler - reads a compiled .mdl and writes back a .pulseqc describing it.
 //
 // Usage:
-//   mdldecompile <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
-//                           [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]
+//   mdldecompiler <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
+//                            [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]
 //
 // The script-level markup - names, materials, bodygroups, skeleton, attachments,
 // hitboxes, skins - plus one .dmx render mesh per model (dmxwrite.cpp) and one
@@ -30,29 +30,29 @@
 #include "format/phy.h"
 #include "mdlfile.h"
 
-using namespace mdldecompile;
+using namespace mdldecompiler;
 using pulse::fatal::Fail;
 
 // Name the writer in the crash footer without repeating its name as a string.
 #define STAGE(fn, ...) (pulse::fatal::g_stage = #fn, fn(__VA_ARGS__))
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
-static constexpr const char* kAppVersion = PULSEMDL2_VERSION;
+static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
 
 namespace {
 
 void PrintHeader() {
     std::printf("-------------------------------\n");
-    std::printf("MDLDecompiler\n");
+    std::printf("PulseModel [Model Decompiler]\n");
     std::printf("version:   %s (model version 44-49)\n", kAppVersion);
     std::printf("developer: Toppi (MIT License)\n");
     std::printf("-------------------------------\n");
 }
 
 int Usage() {
-    std::printf("usage: mdldecompile <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]\n");
-    std::printf("                    [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]\n");
-    std::printf("                    [-studiomdl]\n");
+    std::printf("usage: mdldecompiler <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]\n");
+    std::printf("                     [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]\n");
+    std::printf("                     [-studiomdl]\n");
     std::printf("\n");
     std::printf("  -o <file>     script to write; defaults to a folder named after the\n");
     std::printf("                .mdl, next to it, holding the script and its meshes\n");
@@ -2561,7 +2561,7 @@ int RunDecompile(int argc, char** argv) {
                         (ec ? " (" + ec.message() + ")" : std::string()));
 
     Qc q{f};
-    q.Line("// mdldecompile version " + std::string(kAppVersion));
+    q.Line("// mdldecompiler version " + std::string(kAppVersion));
     q.Line("// " + std::string(in));
     q.Blank();
     STAGE(WriteHeader, q, m);

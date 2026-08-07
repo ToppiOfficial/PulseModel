@@ -30,7 +30,7 @@
 #include "math/compressed.h"
 #include "minicollision/ivp_compact.h"
 
-namespace mdldecompile {
+namespace mdldecompiler {
 namespace {
 
 namespace vtx = pulse::format::vtx;
@@ -1839,4 +1839,4 @@ std::vector<LodInfo> WriteRenderMeshes(const Mdl& m, const std::string& mdlPath,
     return lods;
 }
 
-} // namespace mdldecompile
+} // namespace mdldecompiler

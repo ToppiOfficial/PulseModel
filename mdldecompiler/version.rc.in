@@ -9,12 +9,12 @@ FILETYPE       0x1L        // VFT_APP
     {
         BLOCK "040904B0"   // US English, Unicode
         {
-            VALUE "FileDescription",  ""
+            VALUE "FileDescription",  "Source model decompiler (.mdl -> .pulseqc)"
             VALUE "FileVersion",      "@TOOL_VERSION@"
-            VALUE "InternalName",     "pulsemdl2"
+            VALUE "InternalName",     "mdldecompiler"
             VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi - MIT License"
-            VALUE "OriginalFilename", "pulsemdl2.exe"
-            VALUE "ProductName",      "PulseMDL2"
+            VALUE "OriginalFilename", "mdldecompiler.exe"
+            VALUE "ProductName",      "PulseModel"
             VALUE "ProductVersion",   "@TOOL_VERSION@"
         }
     }

@@ -1,4 +1,4 @@
-// Fatal-error footer shared by pulsemdl2 and mdldecompile: every failure exits
+// Fatal-error footer shared by mdlcompiler and mdldecompiler: every failure exits
 // through Fail(), and Install() routes a crash into the same block.
 #pragma once
 

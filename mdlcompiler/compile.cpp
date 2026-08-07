@@ -187,6 +187,7 @@ struct Ctx {
     CompiledModel* out = nullptr;
     RadianEuler defaultRotation; // (0,0,pi/2) or (pi/2,0,pi/2) for Y-up
     BoneEditState boneEdits;     // $transformbone
+    int rootIndex = 0;           // $root, resolved in ProcessAnimations
 };
 
 int FindGlobalBone(const CompiledModel& m, const std::string& name) {
@@ -5205,8 +5206,7 @@ bool ExtractLinearMotion(Ctx& ctx, Anim& panim, int motiontype, int iStartFrame,
     const int iMidFrame = static_cast<int>(fFrame);
     const float s = fFrame - iMidFrame;
 
-    // g_rootIndex; we have no $root, so the root is bone 0
-    const int root = 0;
+    const int root = ctx.rootIndex; // $root
     RadianEuler rot{0, 0, 0};
 
     constexpr int kLX = 0x0040, kLY = 0x0080, kLZ = 0x0100;
@@ -5624,6 +5624,18 @@ void FixupIkErrors(Ctx& ctx, Anim& panim, IkRule rule) {
 
 bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std::string* err) {
     CompiledModel& m = *ctx.out;
+
+    // $root: the bone motion extraction and alignment work from. An unknown
+    // name falls back to bone 0, like the reference.
+    if (!ctx.in->primaryRootBone.empty()) {
+        ctx.rootIndex = FindGlobalBone(m, ctx.in->primaryRootBone);
+        if (ctx.rootIndex == -1) {
+            std::fprintf(stderr, "warning: $root bone \"%s\" not found, using bone 0\n",
+                         ctx.in->primaryRootBone.c_str());
+            ctx.rootIndex = 0;
+        }
+    }
+
     for (size_t i = 0; i < m.anims.size(); ++i) {
         Anim& panim = m.anims[i];
 
@@ -6101,7 +6113,7 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 // puts this clip's bone where the reference clip has it, then
                 // apply it to every root bone across every frame.
                 Anim& ref = m.anims[cmd.refAnim];
-                int bone = 0; // g_rootIndex; we have no $root, so bone 0
+                int bone = ctx.rootIndex; // $root unless the command names one
                 if (!cmd.alignBone.empty()) {
                     bone = FindGlobalBone(m, cmd.alignBone);
                     if (bone == -1) {
@@ -6214,7 +6226,7 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 // makeAngle: yaw the whole clip so the root
                 // bone's travel direction ends up at the given angle. We have no
                 // motion extraction, so this is the reference's root-bone branch.
-                const int root = 0;
+                const int root = ctx.rootIndex;
                 float da = 0.0f;
                 const Vector3 travel{
                     panim.sanim[panim.numframes - 1][root].pos.x - panim.sanim[0][root].pos.x,

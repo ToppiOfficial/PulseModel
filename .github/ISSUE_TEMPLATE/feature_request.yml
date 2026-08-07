@@ -68,4 +68,4 @@ body:
       options:
         - label: I searched existing issues and this is not already requested.
           required: true
-        - label: I checked the current commands in `pulsemdl2/qcloader.cpp` (the `kCommands` table) and this is not already supported.
+        - label: I checked the current commands in `mdlcompiler/qcloader.cpp` (the `kCommands` table) and this is not already supported.

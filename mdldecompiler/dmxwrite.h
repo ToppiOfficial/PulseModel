@@ -1,14 +1,14 @@
 // dmxwrite.h - rebuilds the render meshes the .mdl/.vvd/.vtx were compiled from.
 
-#ifndef MDLDECOMPILE_DMXWRITE_H
-#define MDLDECOMPILE_DMXWRITE_H
+#ifndef MDLDECOMPILER_DMXWRITE_H
+#define MDLDECOMPILER_DMXWRITE_H
 
 #include <string>
 #include <vector>
 
 #include "mdlfile.h"
 
-namespace mdldecompile {
+namespace mdldecompiler {
 
 // -dmxencoding ("binary" | "keyvalues2") and -dmxmodel (the `format model`
 // version). Returns an error message when either is not one we write, else
@@ -58,6 +58,6 @@ struct PhysicsMeshInfo {
 PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
                                  const std::string& dir, const std::string& name);
 
-} // namespace mdldecompile
+} // namespace mdldecompiler
 
-#endif // MDLDECOMPILE_DMXWRITE_H
+#endif // MDLDECOMPILER_DMXWRITE_H

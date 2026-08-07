@@ -1,6 +1,6 @@
-# Contributing to PulseMDL2
+# Contributing to PulseModel
 
-Thanks for looking. PulseMDL2 is a small project with one maintainer, so the
+Thanks for looking. PulseModel is a small project with one maintainer, so the
 most useful contributions are usually **good bug reports** - a full compile log
 and the script that produced it. See the
 [issue form](ISSUE_TEMPLATE/bug_report.yml) for what to include.
@@ -58,7 +58,7 @@ Say in the PR what you tested on - which model, which game, and which
 - **Every hard limit lives in `libs/pulselimits.h`** - no other file defines a
   limit constant. Limits reject only what the *file format* cannot express, not
   what a particular engine branch dislikes.
-- **The layout is deliberately flat** - `libs/` and `pulsemdl2/` with few
+- **The layout is deliberately flat** - `libs/` and `mdlcompiler/` with few
   subfolders. A new folder or a new layer of indirection needs a reason beyond
   tidiness.
 - **The script command surface is not stable yet.** Commands still get renamed

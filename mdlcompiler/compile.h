@@ -1132,8 +1132,8 @@ struct CompileInput {
     std::vector<ForcedHierarchy> forcedHierarchy;
     // bonemarkuplist container properties
     BoneCullType boneCullType = BoneCullType::Aggressive; // bone_cull_type
-    // primary_root_bone (QC $root) - PLACEHOLDER: parsed and stored, nothing
-    // reads it yet.
+    // $root: the bone motion extraction, $alignto and $angle work from.
+    // Unset (or unresolvable) means bone 0.
     std::string primaryRootBone;
 
     // phase 2: weightlists (index 0 = the default list, entries from the
