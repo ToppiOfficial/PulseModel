@@ -1,18 +1,19 @@
-# PulseModel
+<h1 align="center">PulseModel</h1>
 
-![status: beta](https://img.shields.io/badge/status-beta-orange)
-![platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-blue)
-![Linux: untested](https://img.shields.io/badge/Linux-untested-lightgrey)
-![model version 49](https://img.shields.io/badge/model%20version-49-informational)
-![license: MIT](https://img.shields.io/badge/license-MIT-green)
+<p align="center">
+<img alt="status" src="https://img.shields.io/badge/status-beta-orange?style=for-the-badge">
+<img alt="platform" src="https://img.shields.io/badge/platform-Windows%20x64-blue?style=for-the-badge&logo=windows&logoColor=white">
+<img alt="Linux" src="https://img.shields.io/badge/linux-untested-lightgrey?style=for-the-badge&logo=linux&logoColor=white">
+<img alt="model version" src="https://img.shields.io/badge/model%20version-49-informational?style=for-the-badge">
+<img alt="license" src="https://img.shields.io/badge/license-MIT-success?style=for-the-badge">
+</p>
 
 > **Beta, Windows only.** It compiles real models that load and render in-engine,
 > but expect rough edges and script-command changes between versions. The code
 > avoids Windows-only APIs so a Linux build should be achievable, but it has not
 > been attempted and is not currently planned.
 
-A Source-engine model toolkit, targeting **studiomdl version 49** (Source 2013
-era: HL2, TF2, L4D2, GMod, CS:S, SFM). One build produces two executables:
+A Source-engine model toolkit, targeting **studiomdl version 49** (HL2, TF2, L4D2, GMod, CS:S, SFM). One build produces two executables:
 
 - **`mdlcompiler`** - a compile script plus DMX/SMD source assets -> Valve's
   binary model format (`.mdl`, `.vvd`, `.vtx`, `.phy`).
@@ -64,37 +65,55 @@ unrecognized `$command` is a hard error rather than a warning.
 ### Usage
 
 ```
-mdlcompiler <file.pulseqc> [-game <dir>] [-vtxformat <0|1>] [-defvar <name> <value>]
+mdlcompiler <file.pulseqc> [-game <dir>] [-defvar <name> <value>]
+            [-vtxformat <0|1>] [-definebones]
 ```
 
 | Option | Meaning |
 | --- | --- |
 | `-game <dir>` | Mod directory to install into; output lands in `<dir>/models/<modelname>.mdl`. `-outdir` is a synonym. |
-| `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. |
 | `-defvar <name> <value>` | Define a script variable (`$name$`) before the script runs. Repeatable; the script cannot override it. |
+| `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. 0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW). |
+| `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
 
 ## mdldecompiler
 
 An existing `.mdl` (plus its sibling `.vvd`/`.vtx`/`.phy`/`.ani`) becomes a
-`.pulseqc` script with `meshes/*.dmx` and `anims/*.smd` beside it, ready to feed
-straight back into `mdlcompiler`.
+compile script with `meshes/*.dmx` and `anims/*` beside it, ready to feed straight
+back into `mdlcompiler`.
+
+- **Model versions 44 through 49** are read.
+- Anything from a static prop up: full character models with skeletons,
+  animations and sequences, flexes and eyeballs, LODs, bodygroups, hitboxes,
+  physics and ragdoll constraints.
+- Writes either format. **`.pulseqc`** by default; **`-studiomdl`** writes a
+  `.qc` that stock studiomdl accepts instead, using its command spellings and
+  file layout.
+- It never aborts the whole job over one unreadable mesh or animation - it
+  writes what it can parse and tells you what it skipped.
 
 ### Usage
 
 ```
-mdldecompiler <file.mdl> [-o <file.pulseqc>] [-forceversion <n>]
+mdldecompiler <file.mdl|folder> ... [-o <file>] [-forceversion <n>]
+              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-studiomdl]
 ```
+
+Several inputs may be given at once (drag-and-drop works); a folder decompiles
+every `.mdl` under it, recursively.
 
 | Option | Meaning |
 | --- | --- |
-| `-o <file>` | Script to write. Defaults to a folder named after the `.mdl`, next to it, holding the script and its meshes. |
+| `-o <file>` | Script to write. Defaults to a folder named after the `.mdl`, next to it, holding the script and its meshes. Ignored with more than one model. |
 | `-forceversion <n>` | Read the file as version `<n>` and ignore the header's version field. |
+| `-dmxencoding <enc>` | How the `.dmx` meshes are encoded: `binary` (default) or `keyvalues2` text. |
+| `-dmxmodel <n>` | The `format model` version they declare: 15 (default), 1, 18, or 22 (Source 2 ModelDoc). |
+| `-smdanimation` | Write animation clips as `.smd` instead of `.dmx`. |
+| `-studiomdl` | Write a stock-studiomdl `.qc` instead of a `.pulseqc`. |
 
 `-forceversion` exists because some models carry a header version that does not
 match their actual layout - a trick used to make them unreadable to decompilers.
-Pointing it at the real version reads the file normally. It also never aborts the
-whole job over one unreadable mesh or animation: it writes what it can parse and
-tells you what it skipped.
+Pointing it at the real version reads the file normally.
 
 ## Building
 
