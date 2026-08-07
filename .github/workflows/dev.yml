@@ -31,11 +31,11 @@ jobs:
         shell: bash
         run: |
           sha=$(echo "${{ github.sha }}" | cut -c1-7)
-          # both tools ship in one PulseModel archive
-          mkdir -p pkg
+          # both tools ship in one PulseModel/ folder inside the archive
+          mkdir -p PulseModel
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
-             LICENSE README.md pkg/
-          (cd pkg && 7z a -tzip "$GITHUB_WORKSPACE/pulsemodel-${{ matrix.plat }}-$sha.zip" .)
+             LICENSE README.md PulseModel/
+          7z a -tzip "pulsemodel-${{ matrix.plat }}-$sha.zip" PulseModel/
 
       - uses: actions/upload-artifact@v4
         with:
