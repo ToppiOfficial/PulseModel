@@ -3,16 +3,19 @@
 // Usage:
 //   mdlcompiler <file.pulseqc> [-game <dir>] [-pause]
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <new>
 #include <string>
 
 #include "compile.h"
 #include "fatalerror.h"
+#include "importqc.h"
 #include "pulselimits.h"
 #include "qcloader.h"
 #include "writer.h"
@@ -32,7 +35,7 @@ static void PrintHeader() {
 }
 
 static int Usage() {
-    std::printf("usage: mdlcompiler <file.pulseqc> [-game <dir>]   (.qc accepted)\n");
+    std::printf("usage: mdlcompiler <file.pulseqc> [-game <dir>]   (a .qc is imported first)\n");
     std::printf("\n");
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
@@ -44,6 +47,9 @@ static int Usage() {
     std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and\n");
     std::printf("                stop - no .mdl/.vvd/.vtx/.phy is written\n");
+    std::printf("  -studiomdl    treat the script as a stock studiomdl .qc: importqc\n");
+    std::printf("                rewrites a copy as .pulseqc and that is what compiles.\n");
+    std::printf("                Implied by a .qc extension\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     return 1;
 }
@@ -69,6 +75,15 @@ static void DumpDefineBones(const pulse::compile::CompiledModel& model) {
     std::printf("\n------------------------------------------------------------\n");
 }
 
+// A stock studiomdl script, by extension: .pulseqc is ours, a bare .qc is
+// stock's and goes through importqc first.
+static bool IsStockQc(const char* path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    for (char& c : ext)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == ".qc";
+}
+
 static int RunCompile(int argc, char** argv) {
     if (argc < 2)
         return Usage();
@@ -78,6 +93,7 @@ static int RunCompile(int argc, char** argv) {
     std::string outdir;
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
     bool definebones = false;
+    bool studiomdl = false; // -studiomdl: run the script through importqc first
     pulse::loader::ScriptVars defvars;
     for (int i = 1; i < argc; ++i) {
         // -game is studiomdl's name for it: the mod dir the model installs
@@ -99,6 +115,8 @@ static int RunCompile(int argc, char** argv) {
                                               argv[i] + "\"");
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
             definebones = true;
+        } else if (std::strcmp(argv[i], "-studiomdl") == 0) {
+            studiomdl = true;
         } else if (std::strcmp(argv[i], "-pause") == 0) {
             pulse::fatal::g_pause = true;
         } else if (argv[i][0] == '-') {
@@ -113,6 +131,18 @@ static int RunCompile(int argc, char** argv) {
     }
     if (!script)
         return Usage();
+
+    // A stock studiomdl .qc is rewritten into a .pulseqc beside it and the copy
+    // is what compiles - the original is never written to.
+    std::string converted;
+    if (studiomdl || IsStockQc(script)) {
+        g_stage = "qc import";
+        converted = pulse::importqc::DefaultOutput(script);
+        std::string importErr;
+        if (!pulse::importqc::Convert(script, converted, &importErr))
+            return Fail("import error", importErr);
+        script = converted.c_str();
+    }
 
     std::printf("Compiling: %s\n", script);
 

@@ -34,6 +34,8 @@ endif()
 #   libs/           - C++ libraries (pulselimits.h lives here), vendored OSS
 #   mdlcompiler/    - the app: .pulseqc loader, compile stage, writers, main()
 #   mdldecompiler/  - the reverse tool: .mdl -> .pulseqc
+#   subtools/       - standalone helpers (importqc: stock .qc -> .pulseqc)
 add_subdirectory(libs)
+add_subdirectory(subtools)
 add_subdirectory(mdlcompiler)
 add_subdirectory(mdldecompiler)

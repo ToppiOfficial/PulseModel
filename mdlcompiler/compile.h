@@ -252,6 +252,10 @@ struct ProceduralBone {
     // MapProceduralBones must not fold the helper's bind pose in again.
     bool absolutePose = false;
 
+    // false lets a name match a skeleton bone's dotted suffix ("Bip01_R_Thigh"
+    // resolves "ValveBiped.Bip01_R_Thigh") - the VRD form only.
+    bool strictName = true;
+
     std::vector<ProceduralBoneTrigger> triggers;
 };
 
@@ -281,6 +285,8 @@ struct AimAtBone {
     // from the bone's rest pose once the skeleton is final. The VRD form states
     // it outright, so it opts out. (Reference s_aimatbone_t::autobasepos.)
     bool autobasepos = false;
+    // see ProceduralBone::strictName
+    bool strictName = true;
 };
 
 // bone_cull_type: how hard the skeleton is pruned of bones nothing references.
@@ -767,7 +773,7 @@ struct PhysicsJointAxis {
     int type = 0;      // 0 = free, 1 = limit, 2 = fixed
     float min = 0.0f;
     float max = 0.0f;
-    float friction = 0.0f;
+    float friction = 1.0f; // an omitted `friction` on an axis, not "no friction"
 };
 
 // one `PhysicsJoint` - ragdoll constraint on a bone. Parsed in phase 4.0,
@@ -1206,6 +1212,9 @@ struct CompileInput {
     bool physMassCenterSet = false;
     std::string physRootBone;
     bool physNoSelfCollisions = false;
+    // $assumeworldspace - the collision source's verts are already in model
+    // space, so skip the remap onto the compiled skeleton's bind pose.
+    bool physAssumeWorldspace = false;
     float physDamping = 0.0f;
     float physRotdamping = 0.0f;
     float physInertia = 1.0f;

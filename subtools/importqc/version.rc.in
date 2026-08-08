@@ -9,11 +9,11 @@ FILETYPE       0x1L        // VFT_APP
     {
         BLOCK "040904B0"   // US English, Unicode
         {
-            VALUE "FileDescription",  "Source model compiler (.pulseqc -> .mdl)"
+            VALUE "FileDescription",  "Stock studiomdl .qc importer (.qc -> .pulseqc)"
             VALUE "FileVersion",      "@TOOL_VERSION@"
-            VALUE "InternalName",     "mdlcompiler"
-            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi"
-            VALUE "OriginalFilename", "mdlcompiler.exe"
+            VALUE "InternalName",     "importqc"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi - MIT License"
+            VALUE "OriginalFilename", "importqc.exe"
             VALUE "ProductName",      "PulseModel"
             VALUE "ProductVersion",   "@TOOL_VERSION@"
         }

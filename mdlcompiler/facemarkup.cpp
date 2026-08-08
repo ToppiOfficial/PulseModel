@@ -155,7 +155,7 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
         fk.imodel = lidModel[i];
         fk.flexdesc = baseDesc[0];
         fk.flexpair = mono ? 0 : baseDesc[1];
-        fk.split = 0.0f;
+        fk.split = src.split;
         fk.decay = 1.0f;
         switch (i) {
             case 0: // lowerer

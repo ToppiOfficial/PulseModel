@@ -62,6 +62,9 @@ struct FaceMarkup {
         std::string eyeball;  // mono only
         std::string righteyeball;
         std::string lefteyeball;
+        // optional: keep only the deltas on one side of the midline, so one
+        // delta can serve both eyes. 0 = whole delta.
+        float split = 0.0f;
     };
 
     enum class Kind { Eyeball, Mouth, Eyelid };

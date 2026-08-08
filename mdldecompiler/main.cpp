@@ -1039,17 +1039,21 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
         if (concave)
             q.Line("    $concave");
     } else {
-        q.Line("    $physicsshape fromfile \"" + MeshFile(meshName) + "\" {");
-        q.Line("        importtype perjoint");
-        if (concave)
+        // importtype perjoint is the default; concave is the only thing that
+        // still needs a block
+        const std::string shape = "    $physicsshape fromfile \"" + MeshFile(meshName) + "\"";
+        if (!concave) {
+            q.Line(shape);
+        } else {
+            q.Line(shape + " {");
             q.Line("        concave");
-        q.Line("    }");
+            q.Line("    }");
+        }
+        q.Blank();
     }
 
     const float totalmass = edit ? edit->Getf("totalmass", 1.0f) : 1.0f;
     q.Line(totalmass < 0.0f ? "    $automass" : "    $mass " + F(totalmass));
-    if (edit && !edit->Get("rootname").empty())
-        q.Line("    $rootbone \"" + edit->Get("rootname") + "\"");
 
     // The model-wide values are whatever body 0 got; a body that differs gets a
     // $physicsmarkup below. A differing rotdamping may be the compiler's own
@@ -1064,6 +1068,11 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
     for (const PhySection& s : secs)
         if (s.name == "collisionrules" && s.Get("selfcollisions") == "0")
             q.Line("    $noselfcollisions");
+
+    if (edit && !edit->Get("rootname").empty()) {
+        q.Blank();
+        q.Line("    $rootbone \"" + edit->Get("rootname") + "\"");
+    }
 
     // Everything per-joint is grouped under the bone it belongs to - markup,
     // constraints, then the pairs it opens - rather than one run per command.
@@ -1089,23 +1098,16 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
             if (!v || (std::strcmp(k, "massbias") != 0 &&
                        s->Getf(k) == solids[0]->Getf(k)))
                 continue;
-            lines.push_back(std::string("        ") + k + " " + F(s->Getf(k)));
+            lines.push_back(std::string(k) + " " + F(s->Getf(k)));
         }
-        if (lines.empty())
-            continue;
-        if (g_studiomdl) {
-            // stock has one $joint<field> command per value instead of a block
-            for (const std::string& l : lines) {
-                const size_t k = l.find_first_not_of(' '), sp = l.find(' ', k);
-                add(s->Get("name"), "    $joint" + l.substr(k, sp - k) + " \"" + s->Get("name") +
-                                        "\"" + l.substr(sp));
-            }
-            continue;
+        // one command per value, no block - stock spells it $joint<field>
+        for (const std::string& l : lines) {
+            const size_t sp = l.find(' ');
+            add(s->Get("name"),
+                g_studiomdl
+                    ? "    $joint" + l.substr(0, sp) + " \"" + s->Get("name") + "\"" + l.substr(sp)
+                    : "    $physicsmarkup \"" + s->Get("name") + "\" " + l);
         }
-        add(s->Get("name"), "    $physicsmarkup \"" + s->Get("name") + "\" {");
-        for (const std::string& l : lines)
-            add(s->Get("name"), l);
-        add(s->Get("name"), "    }");
     }
 
     // "a,b" = the bone b was merged into a
@@ -1120,7 +1122,7 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
                 g_studiomdl ? "    $jointmerge \"" + kv.second.substr(0, comma) + "\" \"" +
                                   kv.second.substr(comma + 1) + "\""
                             : "    $physicsmarkup \"" + kv.second.substr(comma + 1) +
-                                  "\" { mergeinto \"" + kv.second.substr(0, comma) + "\" }");
+                                  "\" mergeinto \"" + kv.second.substr(0, comma) + "\"");
         }
 
     static const char* kAxis[3][4] = {{"x", "xmin", "xmax", "xfriction"},
@@ -1138,24 +1140,36 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
                                F(s.Getf(a[1])) + " " + F(s.Getf(a[2])) + " " + F(s.Getf(a[3])));
             continue;
         }
-        add(joint, "    $physicsjoint \"" + joint + "\" {");
         for (const auto& a : kAxis) {
             const float lo = s.Getf(a[1]), hi = s.Getf(a[2]), fr = s.Getf(a[3]);
             // an axis the script never named was zero-filled, which is exactly
             // what `fixed` writes - so it comes back as fixed
-            std::string line = std::string("        ") + a[0];
+            const bool fixed = lo == 0.0f && hi == 0.0f && fr == 0.0f;
+            std::string line = "    $physicsjoint \"" + joint + "\" " + a[0];
             if (lo == -360.0f && hi == 360.0f)
                 line += " free";
-            else if (lo == 0.0f && hi == 0.0f && fr == 0.0f)
+            else if (fixed)
                 line += " fixed";
             else
                 line += " limit " + F(lo) + " " + F(hi);
-            if (fr != 0.0f)
-                line += " friction " + F(fr);
+            // a fixed axis zeroes its own friction, and an omitted one is 1 -
+            // so anything else has to be written out as the trailing number
+            if (!fixed && fr != 1.0f)
+                line += " " + F(fr);
             add(joint, line);
         }
-        add(joint, "    }");
     }
+
+    // cosmetic: emit the groups in skeleton order, root before its children
+    const std::vector<std::string> boneNames = BoneNames(m);
+    auto boneIndex = [&](const std::string& n) {
+        const auto it = std::find(boneNames.begin(), boneNames.end(), n);
+        return static_cast<size_t>(it - boneNames.begin());
+    };
+    std::stable_sort(order.begin(), order.end(),
+                     [&](const std::string& a, const std::string& b) {
+                         return boneIndex(a) < boneIndex(b);
+                     });
 
     for (const std::string& bone : order) {
         const auto it = byBone.find(bone);

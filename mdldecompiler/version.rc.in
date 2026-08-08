@@ -12,7 +12,7 @@ FILETYPE       0x1L        // VFT_APP
             VALUE "FileDescription",  "Source model decompiler (.mdl -> .pulseqc)"
             VALUE "FileVersion",      "@TOOL_VERSION@"
             VALUE "InternalName",     "mdldecompiler"
-            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi - MIT License"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi"
             VALUE "OriginalFilename", "mdldecompiler.exe"
             VALUE "ProductName",      "PulseModel"
             VALUE "ProductVersion",   "@TOOL_VERSION@"

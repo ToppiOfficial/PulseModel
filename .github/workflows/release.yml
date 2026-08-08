@@ -31,10 +31,12 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          # both tools ship in one PulseModel/ folder inside the archive
-          mkdir -p PulseModel
+          # both tools ship in one PulseModel/ folder inside the archive,
+          # with the helpers under PulseModel/subtools/
+          mkdir -p PulseModel/subtools
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE README.md PulseModel/
+          cp "dist/subtools/importqc${{ matrix.ext }}" PulseModel/subtools/
           7z a -tzip "pulsemodel-${{ matrix.plat }}.zip" PulseModel/
 
       - uses: actions/upload-artifact@v4

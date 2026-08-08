@@ -78,7 +78,8 @@ struct Token {
 };
 
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` line
-// comments, and braces as standalone tokens even when jammed against a word.
+// and `/* */` block comments, and braces as standalone tokens even when jammed
+// against a word.
 bool Tokenize(const std::string& s, const std::string& file,
               std::vector<Token>& out, std::string* err) {
     int line = 1;
@@ -97,6 +98,16 @@ bool Tokenize(const std::string& s, const std::string& file,
         if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
             while (i < s.size() && s[i] != '\n')
                 i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/')) {
+                if (s[i] == '\n')
+                    line++;
+                i++;
+            }
+            i = i + 1 < s.size() ? i + 2 : s.size();
             continue;
         }
         if (c == '"') {
@@ -128,7 +139,8 @@ bool Tokenize(const std::string& s, const std::string& file,
         while (i < s.size()) {
             const char d = s[i];
             if (std::isspace(static_cast<unsigned char>(d)) || d == '{' || d == '}' ||
-                d == '"' || (d == '/' && i + 1 < s.size() && s[i + 1] == '/'))
+                d == '"' ||
+                (d == '/' && i + 1 < s.size() && (s[i + 1] == '/' || s[i + 1] == '*')))
                 break;
             t.text.push_back(d);
             i++;
@@ -197,6 +209,14 @@ struct Ctx {
 
     // top-level $wrinklescale: merged into every $rendermesh loaded after it
     std::vector<source::WrinkleScaleOption> wrinkleScales;
+
+    // $renamemorph, applied once the script is parsed so placement never matters
+    struct MorphRename {
+        std::string from;
+        std::string to;
+        int line = 0;
+    };
+    std::vector<MorphRename> morphRenames;
 
     // $flexcontroller/$flexlocalvar/$flexrule/$flexcorrective, held until the
     // bodygroup list is final - registration order can't run command by command
@@ -2332,8 +2352,13 @@ bool CmdMouth(Ctx& c, const Token& cmd) {
 }
 
 // $eyelid <upper|lower> [flexdesc <name>] lowerer <delta> <target>
-//         neutral <delta> <target> raiser <delta> <target>
+//         neutral <delta> <target> raiser <delta> <target> [split <distance>]
 //         (righteyeball <name> lefteyeball <name> | eyeball <name>)
+//
+// `split` masks the deltas to one side of the midline, so a delta that moves
+// both lids can serve one eye per line; the sign picks the side and the
+// magnitude is the blend band. Omitted = the whole delta, which is what
+// per-side authored DMX deltas want.
 //
 // Poses are addressed by delta name, not VTA frame index, and resolve against
 // whichever body carries one; "-" means the pose has no vertex data. The
@@ -2373,6 +2398,8 @@ bool CmdEyelid(Ctx& c, const Token& cmd) {
             // targets are scaled at parse time (`* g_currentscale`)
             entry.eyelid.target[slot] *= c.in.scale;
             haveSlot[slot] = true;
+        } else if (o == "split") {
+            if (!c.WantFloat("a split distance", cmd, entry.eyelid.split)) return false;
         } else if (o == "flexdesc") {
             if (!c.Want("a flexdesc name", cmd, entry.eyelid.basedesc)) return false;
         } else if (o == "eyeball") {
@@ -2383,7 +2410,7 @@ bool CmdEyelid(Ctx& c, const Token& cmd) {
             if (!c.Want("an eyeball name", cmd, entry.eyelid.lefteyeball)) return false;
         } else {
             return c.Fail(t.line, "$eyelid: unknown option \"" + t.text +
-                                  "\" (expected lowerer/neutral/raiser/flexdesc/eyeball/"
+                                  "\" (expected lowerer/neutral/raiser/split/flexdesc/eyeball/"
                                   "righteyeball/lefteyeball)");
         }
     }
@@ -2485,6 +2512,121 @@ bool CmdMorphSplitStereo(Ctx& c, const Token& cmd) {
     }
     if (names == 0)
         return c.Fail(cmd.line, "$morphsplitstereo expects at least one morph name");
+    return true;
+}
+
+// $renamemorph <morph> <newname> - rename a source delta state. Held until the
+// script is parsed (ApplyMorphRenames), so it may sit anywhere: every morph
+// reference in the script is rewritten with it, before or after.
+bool CmdRenameMorph(Ctx& c, const Token& cmd) {
+    Ctx::MorphRename rn;
+    rn.line = cmd.line;
+    if (!c.Want("a morph name", cmd, rn.from) || !c.Want("a new morph name", cmd, rn.to))
+        return false;
+    if (_stricmp(rn.from.c_str(), rn.to.c_str()) != 0)
+        c.morphRenames.push_back(std::move(rn));
+    return true;
+}
+
+// Rewrite %name -> %newname in a flex rule expression. A bare name there is a
+// controller, never a morph.
+std::string RenameExprMorph(const std::string& expr, const std::string& from,
+                            const std::string& to) {
+    std::string out;
+    for (size_t i = 0; i < expr.size();) {
+        if (expr[i] != '%') {
+            out.push_back(expr[i++]);
+            continue;
+        }
+        size_t j = i + 1;
+        while (j < expr.size() && static_cast<unsigned char>(expr[j]) <= 32)
+            ++j; // the rule lexer allows "% name"
+        const size_t start = j;
+        while (j < expr.size() &&
+               (isalnum(static_cast<unsigned char>(expr[j])) || expr[j] == '_'))
+            ++j;
+        const std::string name = expr.substr(start, j - start);
+        out += '%' + (_stricmp(name.c_str(), from.c_str()) == 0 ? to : name);
+        i = j;
+    }
+    return out;
+}
+
+// $renamemorph: the delta states plus every script reference to them, in one
+// pass after parsing. Renames apply in script order, so chains work.
+bool ApplyMorphRenames(Ctx& c) {
+    for (const Ctx::MorphRename& rn : c.morphRenames) {
+        auto swapName = [&](std::string& s) {
+            if (_stricmp(s.c_str(), rn.from.c_str()) == 0)
+                s = rn.to;
+        };
+        // operand form: %name is a morph, a bare name is a controller
+        auto swapOperand = [&](std::string& s) {
+            if (!s.empty() && s[0] == '%' && _stricmp(s.c_str() + 1, rn.from.c_str()) == 0)
+                s = '%' + rn.to;
+        };
+
+        // The rename is global, so the target must be free everywhere - merging
+        // into a name another mesh already uses is never what was meant.
+        for (const auto& src : c.in.sources)
+            for (const source::SrcMorphAnim& m : src->morphs)
+                if (_stricmp(m.name.c_str(), rn.to.c_str()) == 0)
+                    return c.Fail(rn.line, "$renamemorph \"" + rn.from + "\" -> \"" + rn.to +
+                                               "\": " + src->filename +
+                                               " already has a morph \"" + rn.to + "\"");
+
+        bool hit = false;
+        for (auto& src : c.in.sources) {
+            for (source::SrcMorphAnim& m : src->morphs)
+                if (_stricmp(m.name.c_str(), rn.from.c_str()) == 0) {
+                    m.name = rn.to;
+                    hit = true;
+                }
+            for (source::SrcFlexKey& k : src->flexkeys)
+                if (_stricmp(k.name.c_str(), rn.from.c_str()) == 0) {
+                    k.name = rn.to;
+                    hit = true;
+                }
+            for (source::SrcFlexRule& r : src->dmeFlexRules) {
+                swapName(r.name);
+                r.expr = RenameExprMorph(r.expr, rn.from, rn.to);
+            }
+        }
+        if (!hit)
+            return c.Fail(rn.line, "$renamemorph names \"" + rn.from +
+                                       "\", which is not a morph in any $rendermesh");
+
+        for (ManualFlex::Rule& r : c.manual.rules) {
+            swapName(r.name);
+            for (std::string& op : r.combo)
+                swapOperand(op);
+            r.expr = RenameExprMorph(r.expr, rn.from, rn.to);
+        }
+        for (ManualFlex::Domination& d : c.manual.dominations) {
+            swapName(d.name);
+            for (std::string& op : d.dominators)
+                swapOperand(op);
+        }
+        for (ManualFlex::StereoSplit& s : c.manual.stereoSplits)
+            swapName(s.name);
+        for (source::FlexRig::Corrective& cor : c.manual.datamodel.correctives)
+            swapName(cor.delta);
+        for (source::SrcFlexRule& r : c.manual.datamodel.rules) {
+            swapName(r.name);
+            r.expr = RenameExprMorph(r.expr, rn.from, rn.to);
+        }
+        for (cm::CompileInput::FixedFlex& fx : c.in.fixedFlexes)
+            swapName(fx.name);
+        for (Ctx::PendingAttachment& a : c.attachments)
+            for (std::string& m : a.flexmorphs)
+                swapName(m);
+        for (FaceMarkup::Entry& e : c.face.entries)
+            if (e.kind == FaceMarkup::Kind::Eyelid)
+                for (std::string& d : e.eyelid.delta)
+                    swapName(d);
+        for (source::WrinkleScaleOption& w : c.wrinkleScales)
+            swapName(w.shape);
+    }
     return true;
 }
 
@@ -4091,6 +4233,9 @@ bool CmdDriverAimAt(Ctx& c, const Token& cmd) {
 // quatinterp poses here are ABSOLUTE (parent-relative), so the bind-pose fold
 // is skipped downstream.
 //
+// Bone names here are non-strict (ProceduralBone::strictName): a name may drop
+// the skeleton's dotted namespace, so "Bip01_R_Thigh" hits "ValveBiped.Bip01_R_Thigh".
+//
 //   <helper>   <bone> <parent> <controlparent> <control>
 //   <basepos>  x y z          added to every LATER trigger position
 //   <rotateaxis> / <jointorient>  x y z degrees, pre/post-rotate the pose
@@ -4188,6 +4333,7 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
             cur->driverparentname = tok[3];
             cur->drivername = tok[4];
             cur->absolutePose = true;
+            cur->strictName = false;
         } else if (kw == "<aimconstraint>") {
             if (tok.size() < 4)
                 return c.Fail(cmd.line, at.text + ": <aimconstraint> expects "
@@ -4196,6 +4342,7 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
             ab.bonename = tok[1];
             ab.parentname = tok[2];
             ab.aimname = tok[3];
+            ab.strictName = false;
             c.in.aimatbones.push_back(std::move(ab));
             if (c.in.aimatbones.size() > static_cast<size_t>(pulse::limits::kMaxProceduralBones))
                 return c.Fail(cmd.line, at.text + ": too many procedural bones");
@@ -4413,6 +4560,46 @@ bool CmdCdMaterials(Ctx& c, const Token& cmd) {
     c.in.cdmaterials.push_back(first);
     while (!c.AtCommand())
         c.in.cdmaterials.push_back(c.toks[c.pos++].text);
+    return true;
+}
+
+// $renamematerial <from> <to> - rewrite one loaded texture's name, so it must
+// come after the $body/$model that loaded it. Exact (case-insensitive) match
+// first, then a substring fallback, matching the reference.
+bool CmdRenameMaterial(Ctx& c, const Token& cmd) {
+    std::string from, to;
+    if (!c.Want("a material name", cmd, from) ||
+        !c.Want("a replacement material", cmd, to))
+        return false;
+
+    to = StripExtension(to); // names are stored extension-stripped
+    for (auto& tex : c.in.mats.textures) {
+        if (_stricmp(tex.name.c_str(), from.c_str()) == 0) {
+            tex.name = to;
+            return true;
+        }
+    }
+    for (auto& tex : c.in.mats.textures) {
+        if (Lower(tex.name).find(Lower(from)) != std::string::npos) {
+            std::printf("$renamematerial fell back to partial match: replacing %s with %s.\n",
+                        tex.name.c_str(), to.c_str());
+            tex.name = to;
+            return true;
+        }
+    }
+    return c.Fail(cmd.line, "$renamematerial: \"" + from + "\" is not a material of this model");
+}
+
+// $overridematerial <name> - point every loaded texture at one material. The
+// entries are not merged, so an N-material model still writes N identical slots.
+bool CmdOverrideMaterial(Ctx& c, const Token& cmd) {
+    std::string to;
+    if (!c.Want("a material name", cmd, to))
+        return false;
+    to = StripExtension(to);
+    std::printf("$overridematerial is replacing ALL material references with %s.\n", to.c_str());
+    for (auto& tex : c.in.mats.textures)
+        tex.name = to;
     return true;
 }
 
@@ -5274,12 +5461,31 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
     return true;
 }
 
-// $physicsjoint <bone> { x limit <min> <max> [friction <f>] / y free / z fixed }
-// An omitted axis is LOCKED, not free - the compile stage zero-fills and only
-// the axes named here move.
+// True when the next token is a bare number - the optional trailing friction,
+// as opposed to the next axis letter or '}'.
+bool AtNumber(const Ctx& c) {
+    if (c.Eof() || c.Cur().quoted)
+        return false;
+    const std::string& s = c.Cur().text;
+    try {
+        size_t used = 0;
+        static_cast<void>(std::stof(s, &used));
+        return used == s.size();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+// $physicsjoint <bone> { x limit <min> <max> [friction] / y free / z fixed }
+// Friction is the optional trailing NUMBER on an axis, not a keyword. Omitting
+// it means 1, not 0 - write an explicit 0 for a frictionless joint.
 //
-// Braces are optional for a single axis: $physicsjoint <bone> x fixed. More than
-// one axis needs either a block or one $physicsjoint per axis.
+// An omitted axis is LOCKED, not free - the compile stage zero-fills and only
+// the axes named here move. Braces are optional for a single axis:
+// $physicsjoint <bone> x fixed. More than one axis needs a block.
+//
+// `joint` may already hold axes from an earlier $physicsjoint on the same bone;
+// naming an axis twice is an error either way, not a silent last-one-wins.
 bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
     const std::string where = "$physicsjoint \"" + joint.bonename + "\"";
     const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
@@ -5302,6 +5508,9 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
         else return c.Fail(t.line, where + ": expected x, y" +
                                    (braced ? ", z or '}'" : " or z") + ", got \"" +
                                    t.text + "\"");
+        for (const cm::PhysicsJointAxis& e : joint.axes)
+            if (e.axis == a.axis)
+                return c.Fail(t.line, where + ": " + ax + " is written more than once");
 
         const Token sub{where + " " + t.text, t.line, false};
         std::string type;
@@ -5317,13 +5526,10 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
         if (a.type == 1 && (!c.WantFloat("a min angle", sub, a.min) ||
                             !c.WantFloat("a max angle", sub, a.max)))
             return false;
-        // keyword-prefixed so the optional value cannot be confused with the
-        // next axis line
-        if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "friction") {
-            c.pos++;
-            if (!c.WantFloat("a friction value", sub, a.friction))
-                return false;
-        }
+        // the next axis always starts with a letter or '}', so a bare number
+        // here can only be the friction
+        if (AtNumber(c) && !c.WantFloat("a friction value", sub, a.friction))
+            return false;
         joint.axes.push_back(a);
     } while (braced);
     return true;
@@ -5335,6 +5541,9 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
 //
 // Braces are optional for a single field: $physicsmarkup <bone> massbias 7. More
 // than one field needs either a block or one $physicsmarkup per field.
+//
+// `mk` may already hold fields from an earlier $physicsmarkup on the same bone;
+// writing a field twice is an error either way, not a silent last-one-wins.
 bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
     const std::string where = "$physicsmarkup \"" + mk.bonename + "\"";
     const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
@@ -5350,6 +5559,16 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
         const Token sub{where + " " + t.text, t.line, false};
+
+        bool already = false;
+        if      (o == "massbias")   already = mk.massBiasSet;
+        else if (o == "inertia")    already = mk.inertiaSet;
+        else if (o == "damping")    already = mk.dampingSet;
+        else if (o == "rotdamping") already = mk.rotdampingSet;
+        else if (o == "skip")       already = mk.skip;
+        else if (o == "mergeinto")  already = !mk.mergeInto.empty();
+        if (already)
+            return c.Fail(t.line, where + ": " + o + " is written more than once");
 
         if (o == "massbias") {
             if (!c.WantFloat("a bias", sub, mk.massBias)) return false;
@@ -5419,17 +5638,38 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
                 return c.Fail(t.line, "too many physics shapes (max " +
                                       std::to_string(pulse::limits::kMaxPhysShapes) + ")");
         } else if (o == "$physicsjoint") {
-            cm::PhysicsJoint joint;
-            if (!c.Want("a bone name", sub, joint.bonename) ||
-                !ParsePhysJoint(c, t, joint))
+            // find-or-create by bone: a bone gets one entry however many
+            // $physicsjoint lines name it, so the parser sees the axes already
+            // written for it and rejects a second one
+            std::string bone;
+            if (!c.Want("a bone name", sub, bone))
                 return false;
-            c.in.physJoints.push_back(std::move(joint));
+            cm::PhysicsJoint* joint = nullptr;
+            for (auto& e : c.in.physJoints)
+                if (_stricmp(e.bonename.c_str(), bone.c_str()) == 0) { joint = &e; break; }
+            if (!joint) {
+                c.in.physJoints.emplace_back();
+                joint = &c.in.physJoints.back();
+                joint->bonename = bone;
+            }
+            if (!ParsePhysJoint(c, t, *joint))
+                return false;
         } else if (o == "$physicsmarkup") {
-            cm::PhysicsMarkup mk;
-            if (!c.Want("a bone name", sub, mk.bonename) || !ParsePhysMarkup(c, t, mk))
+            // find-or-create by bone, same as $physicsjoint above
+            std::string bone;
+            if (!c.Want("a bone name", sub, bone))
                 return false;
-            mk.name = mk.bonename; // only ever used in diagnostics
-            c.in.physMarkups.push_back(std::move(mk));
+            cm::PhysicsMarkup* mk = nullptr;
+            for (auto& e : c.in.physMarkups)
+                if (_stricmp(e.bonename.c_str(), bone.c_str()) == 0) { mk = &e; break; }
+            if (!mk) {
+                c.in.physMarkups.emplace_back();
+                mk = &c.in.physMarkups.back();
+                mk->bonename = bone;
+                mk->name = bone; // only ever used in diagnostics
+            }
+            if (!ParsePhysMarkup(c, t, *mk))
+                return false;
         } else if (o == "$physicscollide") {
             // exactly two bones - the pair is symmetric, so a trailing list
             // would make one of them look like the subject
@@ -5447,8 +5687,30 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
             c.in.physMassCenterSet = true;
         } else if (o == "$rootbone") {
             if (!c.Want("a bone name", sub, c.in.physRootBone)) return false;
+        } else if (o == "$physicsnocollide") {
+            // Subtracts from the $physicscollide lines ABOVE it - the .phy has
+            // an allowed-pair list and no deny key, so there is nothing to
+            // cancel that has not been written yet.
+            std::string a, b;
+            if (!c.Want("a bone name", sub, a) || !c.Want("a second bone name", sub, b))
+                return false;
+            std::vector<cm::PhysicsCollidePair>& pairs = c.in.physCollidePairs;
+            const size_t before = pairs.size();
+            pairs.erase(std::remove_if(pairs.begin(), pairs.end(),
+                                       [&](const cm::PhysicsCollidePair& p) {
+                                           return (_stricmp(p.a.c_str(), a.c_str()) == 0 &&
+                                                   _stricmp(p.b.c_str(), b.c_str()) == 0) ||
+                                                  (_stricmp(p.a.c_str(), b.c_str()) == 0 &&
+                                                   _stricmp(p.b.c_str(), a.c_str()) == 0);
+                                       }),
+                        pairs.end());
+            if (pairs.size() == before)
+                std::printf("WARNING: $physicsnocollide \"%s\" \"%s\" matches no "
+                            "$physicscollide above it - ignored\n", a.c_str(), b.c_str());
         } else if (o == "$noselfcollisions") {
             c.in.physNoSelfCollisions = true;
+        } else if (o == "$assumeworldspace") {
+            c.in.physAssumeWorldspace = true;
         } else if (o == "$damping") {
             if (!c.WantFloat("a damping value", sub, c.in.physDamping)) return false;
         } else if (o == "$rotdamping") {
@@ -5476,8 +5738,8 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
         }
     }
 
-    if (c.in.physMass <= 0.0f && !c.in.physAutoMass)
-        return c.Fail(cmd.line, "$physicsmodel: $mass must be positive");
+    // A zero or negative $mass is not rejected - the per-solid mass floor in
+    // writephy clamps every body to 1 kg, which is what stock lands on too.
     return true;
 }
 
@@ -6301,6 +6563,7 @@ constexpr Command kCommands[] = {
     {"$flexcorrective", CmdFlexCorrective},
     {"$flexdominate", CmdFlexDominate},
     {"$morphsplitstereo", CmdMorphSplitStereo},
+    {"$renamemorph", CmdRenameMorph},
     {"$flexcullmethod", CmdFlexCullMethod},
     {"$animationcullmethod", CmdAnimationCullMethod},
     {"$eyeball", CmdEyeball},
@@ -6322,6 +6585,8 @@ constexpr Command kCommands[] = {
     {"$physicsjoint", CmdPhysicsOutsideModel},
     {"$physicsmarkup", CmdPhysicsOutsideModel},
     {"$physicscollide", CmdPhysicsOutsideModel},
+    {"$physicsnocollide", CmdPhysicsOutsideModel},
+    {"$assumeworldspace", CmdPhysicsOutsideModel},
     {"$jigglebone", CmdJiggleBone},
     {"$driverbone", CmdDriverBone},
     {"$driveraimat", CmdDriverAimAt},
@@ -6347,6 +6612,8 @@ constexpr Command kCommands[] = {
     {"$eyeposition", CmdEyePosition},
     {"$maxeyedeflection", CmdMaxEyeDeflection},
     {"$cdmaterials", CmdCdMaterials},
+    {"$renamematerial", CmdRenameMaterial},
+    {"$overridematerial", CmdOverrideMaterial},
     {"$texturegroup", CmdTextureGroup},
     {"$lod", CmdLod},
     {"$shadowlod", CmdLod},
@@ -6467,6 +6734,10 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
     // set once every source has been read (the DMX loader latches it on the
     // first model carrying an upAxis attribute)
     out.upAxisY = source::DmxUpAxisY();
+
+    // $renamemorph: before anything below resolves a morph by name
+    if (!ApplyMorphRenames(c))
+        return false;
 
     // $wrinklescale: every source, including the merged ones a `mesh` line built,
     // so it never depends on where in the script it was written

@@ -197,6 +197,26 @@ int FindGlobalBone(const CompiledModel& m, const std::string& name) {
     return -1;
 }
 
+// A .vrd may drop the skeleton's dotted namespace, so "Bip01_R_Thigh" resolves
+// "ValveBiped.Bip01_R_Thigh". $driverbone/$driveraimat stay strict.
+// Reference IsGlobalBoneXSI.
+bool ProcBoneNameMatches(const std::string& name, const std::string& bonename, bool strict) {
+    if (_stricmp(bonename.c_str(), name.c_str()) == 0)
+        return true;
+    if (strict || name.empty() || bonename.size() <= name.size())
+        return false;
+    const size_t off = bonename.size() - name.size();
+    return bonename[off - 1] == '.' &&
+           _stricmp(bonename.c_str() + off, name.c_str()) == 0;
+}
+
+int FindProcBone(const CompiledModel& m, const std::string& name, bool strict) {
+    for (size_t i = 0; i < m.bones.size(); ++i)
+        if (ProcBoneNameMatches(name, m.bones[i].name, strict))
+            return static_cast<int>(i);
+    return -1;
+}
+
 int FindLocalBoneNamed(const src::Source* s, const char* name) {
     for (int i = 0; i < s->numbones; ++i)
         if (_stricmp(s->localBone[i].name.c_str(), name) == 0)
@@ -301,10 +321,10 @@ bool BoneIsProcedural(const Ctx& ctx, const char* pname) {
         if (_stricmp(jb.bonename.c_str(), pname) == 0)
             return true;
     for (const ProceduralBone& pb : ctx.out->proceduralbones)
-        if (_stricmp(pb.helpername.c_str(), pname) == 0)
+        if (ProcBoneNameMatches(pb.helpername, pname, pb.strictName))
             return true;
     for (const AimAtBone& ab : ctx.out->aimatbones)
-        if (_stricmp(ab.bonename.c_str(), pname) == 0)
+        if (ProcBoneNameMatches(ab.bonename, pname, ab.strictName))
             return true;
     return false;
 }
@@ -314,7 +334,7 @@ bool BoneIsProcedural(const Ctx& ctx, const char* pname) {
 // ($driverbone's driver used to need an explicit $donotcollapse.)
 bool BoneIsProceduralControl(const Ctx& ctx, const char* pname) {
     for (const ProceduralBone& pb : ctx.out->proceduralbones)
-        if (_stricmp(pb.drivername.c_str(), pname) == 0)
+        if (ProcBoneNameMatches(pb.drivername, pname, pb.strictName))
             return true;
     return false;
 }
@@ -335,34 +355,36 @@ bool BoneIsProceduralDependency(const Ctx& ctx, const char* pname) {
     const CompiledModel& m = *ctx.out;
 
     // true when `pname` is the current skeleton parent of the named bone
-    auto isParentOf = [&](const std::string& childname) {
-        const int child = FindGlobalBone(m, childname);
+    auto isParentOf = [&](const std::string& childname, bool strict) {
+        const int child = FindProcBone(m, childname, strict);
         if (child == -1)
             return false;
         const int parent = m.bones[child].parent;
         return parent != -1 && _stricmp(m.bones[parent].name.c_str(), pname) == 0;
     };
-    auto named = [&](const std::string& n) {
-        return !n.empty() && _stricmp(n.c_str(), pname) == 0;
+    auto named = [&](const std::string& n, bool strict) {
+        return !n.empty() && ProcBoneNameMatches(n, pname, strict);
     };
 
     for (const ProceduralBone& pb : ctx.out->proceduralbones) {
-        if (FindGlobalBone(m, pb.helpername) == -1)
+        if (FindProcBone(m, pb.helpername, pb.strictName) == -1)
             continue;
-        if (named(pb.helperparentname) || named(pb.driverparentname))
+        if (named(pb.helperparentname, pb.strictName) ||
+            named(pb.driverparentname, pb.strictName))
             return true;
-        if (isParentOf(pb.helpername) || isParentOf(pb.drivername))
+        if (isParentOf(pb.helpername, pb.strictName) ||
+            isParentOf(pb.drivername, pb.strictName))
             return true;
     }
 
     for (const AimAtBone& ab : ctx.out->aimatbones) {
-        if (FindGlobalBone(m, ab.bonename) == -1)
+        if (FindProcBone(m, ab.bonename, ab.strictName) == -1)
             continue;
-        if (named(ab.parentname))
+        if (named(ab.parentname, ab.strictName))
             return true;
-        if (isParentOf(ab.bonename))
+        if (isParentOf(ab.bonename, ab.strictName))
             return true;
-        if (_stricmp(ab.aimname.c_str(), pname) == 0)
+        if (ProcBoneNameMatches(ab.aimname, pname, ab.strictName))
             return true;
     }
     return false;
@@ -887,7 +909,7 @@ bool MapAimAtBones(Ctx& ctx, std::string* err) {
 
     for (int i = static_cast<int>(abs.size()) - 1; i >= 0; --i) {
         AimAtBone& ab = abs[i];
-        ab.bone = ctx.out->FindBone(ab.bonename.c_str());
+        ab.bone = FindProcBone(*ctx.out, ab.bonename, ab.strictName);
         if (ab.bone < 0) {
             std::fprintf(stderr, "aimconstraint \"%s\" unused\n", ab.bonename.c_str());
             abs.erase(abs.begin() + i);
@@ -895,7 +917,7 @@ bool MapAimAtBones(Ctx& ctx, std::string* err) {
         }
 
         if (!ab.parentname.empty()) {
-            ab.parent = ctx.out->FindBone(ab.parentname.c_str());
+            ab.parent = FindProcBone(*ctx.out, ab.parentname, ab.strictName);
             if (ab.parent < 0) {
                 if (err) *err = "aimconstraint \"" + ab.bonename +
                                 "\": missing parent bone \"" + ab.parentname + "\"";
@@ -923,7 +945,7 @@ bool MapAimAtBones(Ctx& ctx, std::string* err) {
             }
         }
         if (ab.aimAttach < 0) {
-            ab.aimBone = ctx.out->FindBone(ab.aimname.c_str());
+            ab.aimBone = FindProcBone(*ctx.out, ab.aimname, ab.strictName);
             if (ab.aimBone < 0) {
                 if (err) *err = "aimconstraint \"" + ab.bonename +
                                 "\": missing aim attachment or bone \"" + ab.aimname + "\"";
@@ -956,8 +978,8 @@ bool MapProceduralBones(Ctx& ctx, std::string* err) {
 
     for (int i = static_cast<int>(pbs.size()) - 1; i >= 0; --i) {
         ProceduralBone& pb = pbs[i];
-        pb.helper = ctx.out->FindBone(pb.helpername.c_str());
-        pb.driver = ctx.out->FindBone(pb.drivername.c_str());
+        pb.helper = FindProcBone(*ctx.out, pb.helpername, pb.strictName);
+        pb.driver = FindProcBone(*ctx.out, pb.drivername, pb.strictName);
 
         if (pb.helper < 0) {
             std::fprintf(stderr, "animconstraint \"%s\" unused\n", pb.helpername.c_str());
@@ -1024,10 +1046,10 @@ bool RemapProceduralBones(Ctx& ctx, std::string* err) {
     for (ProceduralBone& pb : m.proceduralbones) {
         int origHelperParent = pb.helperparentname.empty()
                                    ? -1
-                                   : m.FindBone(pb.helperparentname.c_str());
+                                   : FindProcBone(m, pb.helperparentname, pb.strictName);
         int origDriverParent = pb.driverparentname.empty()
                                    ? -1
-                                   : m.FindBone(pb.driverparentname.c_str());
+                                   : FindProcBone(m, pb.driverparentname, pb.strictName);
 
         if (origHelperParent < 0 && !pb.helperparentname.empty()) {
             if (err) *err = "animconstraint \"" + pb.helpername +
@@ -3482,9 +3504,10 @@ Vector3 ApplyShapeFraming(const ShapeFraming& f, Vector3 p) {
     return {p.x + f.offset.x, p.y + f.offset.y, p.z + f.offset.z};
 }
 
-void GatherShapeVerts(const PhysicsShape& shape, std::vector<phys::Vec3>& out) {
+void GatherShapeVerts(const PhysicsShape& shape, bool assumeWorldspace,
+                      std::vector<phys::Vec3>& out) {
     const src::Source* ps = shape.source;
-    const bool haveGlobal = ps->globalVertices.size() >= ps->vertex.size();
+    const bool haveGlobal = !assumeWorldspace && ps->globalVertices.size() >= ps->vertex.size();
     const ShapeFraming framing = MakeShapeFraming(shape);
 
     out.clear();
@@ -4327,7 +4350,8 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             // Global-pose geometry moved into the target bone's space. This is
             // the model's transform, not the source's, because the target bone
             // need not exist in the collision mesh at all.
-            const bool haveGlobal = ps->globalVertices.size() >= ps->vertex.size();
+            const bool haveGlobal =
+                !in.physAssumeWorldspace && ps->globalVertices.size() >= ps->vertex.size();
             const matrix3x4& boneToPose = m.bones[globalBone].boneToPose;
             const ShapeFraming framing = MakeShapeFraming(shape);
 
@@ -4754,7 +4778,7 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
         if (shape.kind != PhysicsShapeKind::FromFile)
             continue;
         std::vector<phys::Vec3> shapeVerts;
-        GatherShapeVerts(shape, shapeVerts);
+        GatherShapeVerts(shape, in.physAssumeWorldspace, shapeVerts);
         if (shapeVerts.empty()) {
             if (err) *err = "physics shape \"" + shape.name + "\" has no vertices";
             freeConvexes();
@@ -7814,6 +7838,23 @@ constexpr float kMaxVAnimDist = 0.3873f; // MAX_VANIM_DIST
 constexpr uint8_t kVertAnimNormal = 0;   // STUDIO_VERT_ANIM_NORMAL
 constexpr uint8_t kVertAnimWrinkle = 1;  // STUDIO_VERT_ANIM_WRINKLE
 
+// reference ComputeSideAndScale. `split` masks a delta to one side of the
+// midline: base vertex X - the reference's axis, not a choice - smoothstepped
+// across the 2*|split| band, sign picking the side.
+//
+// A paired key spends it as balance at full scale instead. One clamped t: the
+// reference's two branches are the same formula with flipped bounds.
+void ComputeSideAndScale(const FlexKey& key, float baseX, float* side, float* scale) {
+    float t = (key.split - baseX) / (2.0f * key.split);
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    *scale = 3.0f * t * t - 2.0f * t * t * t;
+    *side = 0.0f;
+    if (key.flexpair != 0) {
+        *side = 1.0f - *scale;
+        *scale = 1.0f;
+    }
+}
+
 src::SrcMorphAnim* FindSourceMorph(src::Source* pSource, const char* name) {
     for (auto& morph : pSource->morphs)
         if (_stricmp(morph.name.c_str(), name) == 0)
@@ -8144,9 +8185,29 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
             if (p2 <= (0.001f * 0.001f) && n2 <= 0.001f && srcVA.wrinkle <= 0.001f)
                 continue;
 
+            // $eyelid split only - an unsplit key keeps the delta and whatever
+            // balance the mesh painted
+            float side = 0.0f, scale = 1.0f;
+            if (key.split != 0.0f) {
+                ComputeSideAndScale(key, key.source->vertex[srcVA.vertex].position.x, &side,
+                                    &scale);
+                if (scale <= 0.0f)
+                    continue;
+            }
+
             for (int modelVert : maps.map[srcVA.vertex]) {
                 src::SrcVertAnim dst = srcVA;
                 dst.vertex = modelVert;
+                if (key.split != 0.0f) {
+                    dst.pos.x *= scale;
+                    dst.pos.y *= scale;
+                    dst.pos.z *= scale;
+                    dst.normal.x *= scale;
+                    dst.normal.y *= scale;
+                    dst.normal.z *= scale;
+                    dst.wrinkle *= scale;
+                    dst.side = side;
+                }
 
                 if (dst.wrinkle != 0.0f)
                     key.vanimtype = kVertAnimWrinkle;
