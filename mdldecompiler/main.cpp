@@ -51,7 +51,7 @@ void PrintHeader() {
 }
 
 int Usage() {
-    std::printf("usage: mdldecompiler <file.mdl|folder> ... [-o <file.pulseqc>]\n");
+    std::printf("usage: mdldecompiler <file.mdl|folder> ... [-o <file.pulseqc>] [-outdir <dir>]\n");
     std::printf("                     [-forceversion <n>] [-dmxencoding <enc>] [-dmxmodel <n>]\n");
     std::printf("                     [-smdanimation] [-studiomdl]\n");
     std::printf("\n");
@@ -61,6 +61,8 @@ int Usage() {
     std::printf("  -o <file>     script to write; defaults to a folder named after the\n");
     std::printf("                .mdl, next to it, holding the script and its meshes\n");
     std::printf("                (ignored when more than one model is decompiled)\n");
+    std::printf("  -outdir <dir> put those per-model folders under <dir> instead of beside\n");
+    std::printf("                the .mdl; absolute, or relative to the current directory\n");
     std::printf("  -forceversion <n>\n");
     std::printf("                read the file as version <n>, ignoring the header field\n");
     std::printf("                (some compilers write a bogus one to block decompiling)\n");
@@ -2597,7 +2599,7 @@ int FailCaught() {
     }
 }
 
-int DecompileOne(const std::string& in, const char* out, int forceVersion) {
+int DecompileOne(const std::string& in, const char* out, const char* outDir, int forceVersion) {
     std::printf("Decompiling: %s\n", in.c_str());
 
     pulse::fatal::g_stage = "read";
@@ -2614,10 +2616,12 @@ int DecompileOne(const std::string& in, const char* out, int forceVersion) {
                 h.numflexcontrollers, h.numlocalattachments, h.numhitboxsets);
     STAGE(PrintMaterials, m);
 
-    // everything a decompile produces goes in its own folder next to the .mdl,
-    // named after the model. -o is an explicit override and is used verbatim.
+    // everything a decompile produces goes in its own folder named after the
+    // model, next to the .mdl or under -outdir (relative paths are off the cwd).
+    // -o is an explicit override for the script path and is used verbatim.
     pulse::fatal::g_stage = "output folder";
-    const std::string dir = StripExt(in);
+    const std::string dir =
+        outDir ? (std::filesystem::path(outDir) / BaseName(StripExt(in))).string() : StripExt(in);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     const std::string outPath =
@@ -2728,12 +2732,15 @@ int RunDecompile(int argc, char** argv) {
     pulse::fatal::g_stage = "command line";
     std::vector<std::string> inputs;
     const char* out = nullptr;
+    const char* outDir = nullptr;
     int forceVersion = 0;
     std::string dmxEncoding = "binary";
     int dmxModel = 15;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
             out = argv[++i];
+        else if (std::strcmp(argv[i], "-outdir") == 0 && i + 1 < argc)
+            outDir = argv[++i];
         else if (std::strcmp(argv[i], "-forceversion") == 0 && i + 1 < argc)
             forceVersion = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "-dmxencoding") == 0 && i + 1 < argc)
@@ -2779,7 +2786,7 @@ int RunDecompile(int argc, char** argv) {
             std::printf("\n===== [%zu/%zu] =====\n", i + 1, files.size());
         int rc;
         try {
-            rc = DecompileOne(files[i], out, forceVersion);
+            rc = DecompileOne(files[i], out, outDir, forceVersion);
         } catch (...) {
             rc = FailCaught();
         }

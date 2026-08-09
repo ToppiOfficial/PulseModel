@@ -64,7 +64,7 @@ void AddNodes(const ufbx_node* node, int parentIndex, bool inSkeleton, Source& o
         AddNodes(node->children.data[i], index, inSkeleton, out, nodeToBone);
 }
 
-// Rest transforms become the bind pose. ponytail: an FBX exported in a pose
+// Rest transforms become the bind pose: an FBX exported in a pose
 // other than its bind pose will bind wrong - the fix is ufbx_scene.poses
 // (is_bind_pose) per skin cluster, added when a sample actually needs it.
 void BuildSkeleton(const ufbx_scene* scene, float scale, Source& out,

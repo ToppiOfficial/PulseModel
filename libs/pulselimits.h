@@ -62,8 +62,6 @@ inline constexpr int kMaxBonesPerStrip = 512;
 inline constexpr int kMaxNumLods       = 8; // [format] numLODVertexes[8]
 
 // --- Skeleton -------------------------------------------------------------
-// [tool] Total bones. Already past what most of the format can address:
-// mstudioboneweight_t::bone and mstudio_rle_anim_t::bone are both uint8, so
 // only bones 0-255 can be skinned to or RLE-animated. Bones beyond that are
 // reachable through frame animation (mstudio_frame_anim_t indexes positionally)
 // and as attachment/hitbox parents. kMaxBoneBits must track this.
@@ -85,7 +83,7 @@ inline constexpr int kMaxBoneTransformEdits = kUncapped; // [file] 100 bytes eac
 // [format] vtx::MaterialReplacementHeader_t::materialID and the .mdl skin ref
 // table are int16. NOTE: sizes the per-material arrays on Source and Model
 // (~655 KB per Source at this value).
-// ponytail: flat kMaxSkins-sized arrays, size them to the live material count
+// flat kMaxSkins-sized arrays, size them to the live material count
 // if the memory ever shows up in a profile.
 inline constexpr int kMaxSkins = INT16_MAX; // 32767
 inline constexpr int kMaxSkinFamilies = kUncapped; // [file] one short per skin per family
@@ -132,8 +130,7 @@ inline constexpr int kMaxWeightsPerList = kMaxBones; // one per bone
 // --- Script preprocessing --------------------------------------------------
 inline constexpr int kMaxMacros          = kUncapped; // [tool] script-side only
 inline constexpr int kMaxMacroParams     = kUncapped; // [tool] script-side only
-// [tool] Runaway-recursion guard - raising it defeats the purpose.
-inline constexpr int kMaxMacroExpansions = 65536;
+inline constexpr int kMaxMacroExpansions = 65536; // [tool] Runaway-recursion guard - raising it defeats the purpose.
 
 // --- Names ----------------------------------------------------------------
 // [tool] String-table names are unbounded, but mstudiomodel_t::name and
