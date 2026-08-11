@@ -1895,6 +1895,17 @@ struct WeightLists {
                 return l.first;
         return std::string();
     }
+
+    bool HasName(const std::string& n) const {
+        for (const auto& l : lists)
+            if (l.first == n)
+                return true;
+        return false;
+    }
+
+    // True when the sole list is emitted as $defaultweightlist - it auto-applies
+    // to every sequence, so none gets (or references) a per-sequence weightlist.
+    bool DefaultApplies() const { return lists.size() == 1 && !sawPlain; }
 };
 
 // Distinct arrays in first-use order. A $declaresequence slot has no animation
@@ -1924,9 +1935,14 @@ WeightLists GatherWeightLists(const Mdl& m) {
         if (!out.NameFor(v).empty())
             continue;
         const std::string label = m.Str(&seqs[i], seqs[i].szlabelindex);
-        out.lists.emplace_back(
-            "weights_" + (CleanName(label) ? label : std::to_string(out.lists.size())),
-            std::move(v));
+        std::string name =
+            "weights_" + (CleanName(label) ? label : std::to_string(out.lists.size()));
+        // two sequences can share a name but keep different weights - .mdl stores
+        // values, not the authored list name, so uniquify or recompile duplicates.
+        std::string base = name;
+        for (int n = 2; out.HasName(name); ++n)
+            name = base + "_" + std::to_string(n);
+        out.lists.emplace_back(std::move(name), std::move(v));
     }
     return out;
 }
@@ -1948,7 +1964,9 @@ void WriteWeightLists(Qc& q, const Mdl& m) {
         for (int b = 0; b < h.numbones; ++b) {
             const int32_t p = bones[b].parent;
             const float pred = (p >= 0 && p < b) ? w[p] : rootSeed;
-            if (w[b] != pred)
+            // nonzero weights ride inheritance; a 0 is always spelled out so a
+            // masked-out bone is never mistaken for an inherited default.
+            if (w[b] != pred || w[b] == 0.0f)
                 q.Line("    \"" + names[b] + "\" " + F(w[b]));
         }
     };
@@ -1956,7 +1974,7 @@ void WriteWeightLists(Qc& q, const Mdl& m) {
     q.Blank();
     // one list and no sequence left on the plain default means every sequence
     // shared it - which is what $defaultweightlist does
-    if (lists.size() == 1 && !w.sawPlain) {
+    if (w.DefaultApplies()) {
         q.Line("$defaultweightlist {");
         body(lists[0].second, 1.0f);
         q.Line("}");
@@ -2490,7 +2508,7 @@ void WriteSequences(Qc& q, const Mdl& m) {
         // a weightlist rides on blend animation 0, which is where the sequence's
         // own array came from
         const float* w = m.At<float>(&s, s.weightlistindex, h.numbones);
-        if (w) {
+        if (w && !weights.DefaultApplies()) {
             const std::string wl = weights.NameFor(std::vector<float>(w, w + h.numbones));
             if (!wl.empty())
                 opt("weightlist \"" + wl + "\"");

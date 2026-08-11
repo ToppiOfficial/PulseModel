@@ -1898,6 +1898,9 @@ bool CmdDeclareSequence(Ctx& c, const Token& cmd) {
     seq.fadeouttime = c.defaultFadeOut;
     if (!c.Want("a name", cmd, seq.name))
         return false;
+    for (const auto& s : c.in.sequences)
+        if (_stricmp(s.name.c_str(), seq.name.c_str()) == 0)
+            return c.Fail(cmd.line, "duplicate sequence name \"" + seq.name + "\"");
     seq.isDeclare = true;
     seq.flags |= kStudioOverride;
     c.in.sequences.push_back(std::move(seq));
@@ -3031,6 +3034,10 @@ bool CmdSequenceCommon(Ctx& c, const Token& cmd, bool bindpose) {
     if (c.lcaseSequences)
         for (char& ch : seq.name)
             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+
+    for (const auto& s : c.in.sequences)
+        if (_stricmp(s.name.c_str(), seq.name.c_str()) == 0)
+            return c.Fail(cmd.line, "duplicate sequence name \"" + seq.name + "\"");
 
     // blend animation indices as discovered (into c.in.anims). The first one
     // receives sequence-body animation options, matching stock ParseSequence's
