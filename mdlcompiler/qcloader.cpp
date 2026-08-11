@@ -1898,9 +1898,6 @@ bool CmdDeclareSequence(Ctx& c, const Token& cmd) {
     seq.fadeouttime = c.defaultFadeOut;
     if (!c.Want("a name", cmd, seq.name))
         return false;
-    for (const auto& s : c.in.sequences)
-        if (_stricmp(s.name.c_str(), seq.name.c_str()) == 0)
-            return c.Fail(cmd.line, "duplicate sequence name \"" + seq.name + "\"");
     seq.isDeclare = true;
     seq.flags |= kStudioOverride;
     c.in.sequences.push_back(std::move(seq));
