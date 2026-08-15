@@ -18,6 +18,14 @@
 #include <memory>
 #include <unordered_map>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
+
 #include "format/mdl.h"
 #include "format/vvd.h"
 #include "format/vtx.h"
@@ -36,8 +44,9 @@ std::vector<std::string> g_vtxReport;
 
 namespace {
 
-// Floor for the .mdl and .ani buffers, whose payload has no cheap up-front
-// estimate. The .vvd does, so it is sized exactly - see VvdBufferSize.
+// Starting commit for the .mdl and .ani buffers, whose payload has no cheap
+// up-front estimate. Not a cap - Buf grows past it. The .vvd does have an
+// estimate, so it is sized exactly - see VvdBufferSize.
 constexpr size_t kFileBuffer = 32 * 1024 * 1024;
 
 // 48 bytes of vertex + 16 of tangent each, plus header, fixup table, and
@@ -72,28 +81,106 @@ void FlushReport(std::vector<std::string>& from) {
     from.clear();
 }
 
-// linear append buffer with reference ALIGN semantics
+// Address-space backing for Buf. Windows must commit explicitly; POSIX
+// anonymous maps are demand-paged, so the whole range is mapped at once.
+#ifdef _WIN32
+uint8_t* MapReserve(size_t bytes) {
+    return static_cast<uint8_t*>(VirtualAlloc(nullptr, bytes, MEM_RESERVE, PAGE_READWRITE));
+}
+bool MapCommit(uint8_t* base, size_t bytes) {
+    return VirtualAlloc(base, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr;
+}
+void MapRelease(uint8_t* base, size_t) { VirtualFree(base, 0, MEM_RELEASE); }
+#else
+uint8_t* MapReserve(size_t bytes) {
+    void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    return p == MAP_FAILED ? nullptr : static_cast<uint8_t*>(p);
+}
+bool MapCommit(uint8_t*, size_t) { return true; }
+void MapRelease(uint8_t* base, size_t bytes) { munmap(base, bytes); }
+#endif
+
+// Linear append buffer with reference ALIGN semantics.
+//
+// Callers hold raw pointers into it across the whole write, so it can never
+// move: it reserves a large range up front and commits more as `pos` advances.
+// Pages arrive zeroed either way, matching the old zero-filled vector.
 struct Buf {
-    std::vector<uint8_t> mem;
-    size_t pos = 0; // pData - pStart
+    static constexpr size_t kReserve = size_t(4) << 30; // address space only
+    static constexpr size_t kChunk = 32 * 1024 * 1024;  // commit granularity
 
-    explicit Buf(size_t size) : mem(size, 0) {}
+    uint8_t* base = nullptr;
+    size_t committed = 0;
+    size_t cur = 0;
+    bool failed = false;
 
-    uint8_t* start() { return mem.data(); }
-    uint8_t* p() { return mem.data() + pos; }
+    // The write sites take p() first and only then advance, so the commit has
+    // to hang off the advance - hence pos being a proxy rather than a size_t.
+    struct PosProxy {
+        Buf* b;
+        operator size_t() const { return b->cur; }
+        PosProxy& operator=(size_t v) {
+            b->cur = v;
+            b->Commit(v);
+            return *this;
+        }
+        PosProxy& operator+=(size_t n) { return *this = b->cur + n; }
+        PosProxy& operator++() { return *this += 1; }
+        size_t operator++(int) {
+            size_t was = b->cur;
+            *this += 1;
+            return was;
+        }
+    };
+    PosProxy pos{this}; // pData - pStart
+
+    explicit Buf(size_t initial) {
+        base = MapReserve(kReserve);
+        failed = base == nullptr;
+        Commit(initial);
+    }
+    ~Buf() {
+        if (base)
+            MapRelease(base, kReserve);
+    }
+    Buf(const Buf&) = delete;
+    Buf& operator=(const Buf&) = delete;
+
+    // Keep one chunk of headroom past `need` so the memcpy-then-advance sites
+    // (strings, keyvalues) write into committed pages.
+    void Commit(size_t need) {
+        if (failed || need + kChunk <= committed)
+            return;
+        size_t want = ((need + 2 * kChunk - 1) / kChunk) * kChunk;
+        if (want > kReserve) {
+            failed = true;
+            return;
+        }
+        failed = !MapCommit(base, want);
+        if (!failed)
+            committed = want;
+    }
+
+    uint8_t* start() { return base; }
+    // `bytes` is for the memcpy sites that write before advancing pos, when the
+    // blob can be bigger than the headroom Commit leaves.
+    uint8_t* p(size_t bytes = 0) {
+        if (bytes)
+            Commit(cur + bytes);
+        return base + cur;
+    }
     template <typename T>
     T* Reserve(size_t count = 1) {
         T* r = reinterpret_cast<T*>(p());
         pos += sizeof(T) * count;
         return r;
     }
-    void Align4() { pos = (pos + 3) & ~size_t(3); }
-    void Align16() { pos = (pos + 15) & ~size_t(15); }
-    // Callers hold raw pointers into mem across the whole write, so the buffer
-    // can never grow - the size has to be right up front. Checked once at the
-    // end: by then an overflow has already run past the allocation, but a
+    void Align4() { pos = (cur + 3) & ~size_t(3); }
+    void Align16() { pos = (cur + 15) & ~size_t(15); }
+    // Only trips if the reserve is exhausted or the OS refused a commit; a
     // reported error beats shipping a plausible-looking corrupt file.
-    bool overflowed() const { return pos > mem.size(); }
+    bool overflowed() const { return failed || cur > committed; }
 };
 
 // reference session string table
@@ -1254,7 +1341,7 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
         pseqdesc->keyvalueindex = static_cast<int32_t>(buf.p() - pSequenceStart);
         pseqdesc->keyvaluesize = static_cast<int32_t>(seq.keyvalues.size());
         if (pseqdesc->keyvaluesize) {
-            memcpy(buf.p(), seq.keyvalues.data(), seq.keyvalues.size());
+            memcpy(buf.p(seq.keyvalues.size() + 1), seq.keyvalues.data(), seq.keyvalues.size());
             buf.p()[seq.keyvalues.size()] = 0;
             pseqdesc->keyvaluesize++;
             buf.pos += pseqdesc->keyvaluesize;
@@ -1307,7 +1394,7 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
     phdr->numlocalnodes = numxnodes;
     phdr->localnodeindex = static_cast<int32_t>(buf.pos);
     if (numxnodes) {
-        memcpy(buf.p(), m.xnode.data(), m.xnode.size());
+        memcpy(buf.p(m.xnode.size()), m.xnode.data(), m.xnode.size());
         buf.pos += m.xnode.size();
     }
     buf.Align4();
@@ -2114,8 +2201,7 @@ std::vector<uint8_t> BuildVvd(cm::CompiledModel& m, int32_t checksum) {
     }
     Report(g_vvdReport, "total      %7zu bytes", buf.pos);
 
-    buf.mem.resize(buf.pos);
-    return buf.mem;
+    return std::vector<uint8_t>(buf.start(), buf.start() + buf.cur);
 }
 
 // ---------------------------------------------------------------------------
@@ -2519,8 +2605,7 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
             memcpy(&newTangents[i * 4], flatTangents[oldIndex], 4 * sizeof(float));
         }
 
-        nb.mem.resize(nb.pos);
-        vvdBuf = std::move(nb.mem);
+        vvdBuf.assign(nb.start(), nb.start() + nb.cur);
     }
 
     // ---- FixupVTXFile: remap origMeshVertIDs ----
@@ -2759,7 +2844,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     phdr->keyvaluesize = 0;
     if (!m.keyvalues.empty()) {
         const std::string capped = "mdlkeyvalue\n{\n" + m.keyvalues + "}\n";
-        memcpy(buf.p(), capped.data(), capped.size());
+        memcpy(buf.p(capped.size() + 1), capped.data(), capped.size());
         buf.p()[capped.size()] = 0;
         phdr->keyvaluesize = static_cast<int32_t>(capped.size()) + 1;
         buf.pos += phdr->keyvaluesize;
@@ -2797,13 +2882,13 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
 
     if (buf.overflowed() || (blockBuf && blockBuf->overflowed())) {
         if (err)
-            *err = "model is too large for the " +
-                   std::to_string(kFileBuffer / (1024 * 1024)) +
-                   " MB write buffer (kFileBuffer in writemdl.cpp)";
+            *err = "out of memory writing the .mdl (needed " +
+                   std::to_string(size_t(buf.pos) / (1024 * 1024)) + " MB, limit " +
+                   std::to_string(Buf::kReserve / (1024 * 1024)) + " MB)";
         return false;
     }
 
-    std::vector<uint8_t> mdlBuf(buf.mem.begin(), buf.mem.begin() + total);
+    std::vector<uint8_t> mdlBuf(buf.start(), buf.start() + total);
 
     using WClock = std::chrono::steady_clock;
     const bool wtiming = std::getenv("PULSEMDL_TIMING") != nullptr;
@@ -2898,7 +2983,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         pblockhdr->length = static_cast<int32_t>(blockBuf->pos);
         aniPath = announce(".ani");
         std::printf("blocks     %7zu\n", g_animblocks.count ? g_animblocks.count - 1 : 0);
-        std::printf("total      %7zu\n", blockBuf->pos);
+        std::printf("total      %7zu\n", blockBuf->cur);
         if (!SaveFile(aniPath, blockBuf->start(), blockBuf->pos, err))
             return false;
     }
@@ -2947,7 +3032,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     }
     if (!aniPath.empty())
         std::printf("  %-20s %-10s  %10zu bytes\n", name(aniPath).c_str(), "unchecksummed",
-                    blockBuf->pos);
+                    blockBuf->cur);
     if (!phyPath.empty())
         std::printf("  %-20s 0x%08X  %10zu bytes\n", name(phyPath).c_str(), checksum,
                     phyBuf.size());

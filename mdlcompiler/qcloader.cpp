@@ -2112,6 +2112,9 @@ bool ParseKeyValues(Ctx& c, const Token& cmd, std::string& out) {
 
     int level = 1;
     for (;;) {
+        if (out.size() > static_cast<size_t>(lim::kMaxKeyValuesBytes))
+            return c.Fail(cmd.line, cmd.text + ": keyvalue block exceeds " +
+                                    std::to_string(lim::kMaxKeyValuesBytes) + " bytes");
         const Token* t = c.Next();
         if (!t)
             return c.Fail(cmd.line, cmd.text + ": keyvalue block missing matching braces");
@@ -3858,6 +3861,17 @@ bool CmdDoNotCollapse(Ctx& c, const Token& cmd) {
     if (!c.Want("a bone name", cmd, name))
         return false;
     FindOrAddMarkup(c, name).doNotCollapse = true;
+    return true;
+}
+
+// $renamebone <bone> <new name>: rename a bone in the finished output. Applied
+// after every other pass, so the rest of the script keeps naming the source bone.
+bool CmdRenameBone(Ctx& c, const Token& cmd) {
+    std::string from, to;
+    if (!c.Want("a bone name", cmd, from) ||
+        !c.Want("a replacement bone name", cmd, to))
+        return false;
+    c.in.boneRenames.emplace_back(std::move(from), std::move(to));
     return true;
 }
 
@@ -6616,6 +6630,7 @@ constexpr Command kCommands[] = {
     {"$eyeposition", CmdEyePosition},
     {"$maxeyedeflection", CmdMaxEyeDeflection},
     {"$cdmaterials", CmdCdMaterials},
+    {"$renamebone", CmdRenameBone},
     {"$renamematerial", CmdRenameMaterial},
     {"$overridematerial", CmdOverrideMaterial},
     {"$texturegroup", CmdTextureGroup},

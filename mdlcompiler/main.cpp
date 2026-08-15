@@ -15,7 +15,9 @@
 
 #include "compile.h"
 #include "fatalerror.h"
+#ifdef PULSE_HAVE_IMPORTQC
 #include "importqc.h"
+#endif
 #include "pulselimits.h"
 #include "qcloader.h"
 #include "writer.h"
@@ -133,15 +135,20 @@ static int RunCompile(int argc, char** argv) {
         return Usage();
 
     // A stock studiomdl .qc is rewritten into a .pulseqc beside it and the copy
-    // is what compiles - the original is never written to.
+    // is what compiles - the original is never written to. A build without the
+    // importqc subtool skips the pass and feeds the .qc to the loader as-is.
     std::string converted;
     if (studiomdl || IsStockQc(script)) {
+#ifdef PULSE_HAVE_IMPORTQC
         g_stage = "qc import";
         converted = pulse::importqc::DefaultOutput(script);
         std::string importErr;
         if (!pulse::importqc::Convert(script, converted, &importErr))
             return Fail("import error", importErr);
         script = converted.c_str();
+#else
+        std::printf("warning: built without importqc - compiling %s as .pulseqc\n", script);
+#endif
     }
 
     std::printf("Compiling: %s\n", script);

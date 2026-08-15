@@ -131,6 +131,10 @@ inline constexpr int kMaxWeightsPerList = kMaxBones; // one per bone
 inline constexpr int kMaxMacros          = kUncapped; // [tool] script-side only
 inline constexpr int kMaxMacroParams     = kUncapped; // [tool] script-side only
 inline constexpr int kMaxMacroExpansions = 65536; // [tool] Runaway-recursion guard - raising it defeats the purpose.
+// [tool] Re-emitted text copied verbatim into the .mdl, so an absurd block
+// would be memcpy'd past the write buffer's commit headroom. Text; 1 MB is
+// already orders of magnitude past any real $keyvalues.
+inline constexpr int kMaxKeyValuesBytes  = 1 << 20;
 
 // --- Names ----------------------------------------------------------------
 // [tool] String-table names are unbounded, but mstudiomodel_t::name and

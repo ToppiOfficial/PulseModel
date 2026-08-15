@@ -10397,6 +10397,40 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         for (const auto& p : families[f])
             out.skinref[f + 1][p.first] = static_cast<int16_t>(p.second);
 
+    // $renamebone, last of everything: the bone name plus every string still
+    // resolved by name at write time - $bonesaveframe, and the .phy text tail
+    // (solid, parent, rootname, jointmerge).
+    for (const auto& rename : input.boneRenames) {
+        const int b = out.FindBone(rename.first.c_str());
+        if (b == -1) {
+            std::printf("WARNING: $renamebone \"%s\" - no such bone (collapsed?)\n",
+                        rename.first.c_str());
+            continue;
+        }
+        if (out.FindBone(rename.second.c_str()) != -1) {
+            if (err)
+                *err = "$renamebone: \"" + rename.second + "\" is already a bone of "
+                       "this model";
+            return false;
+        }
+        auto swap = [&rename](std::string& s) {
+            if (_stricmp(s.c_str(), rename.first.c_str()) == 0)
+                s = rename.second;
+        };
+        swap(out.bones[b].name);
+        for (BoneSaveFrame& bsf : out.boneSaveFrames)
+            swap(bsf.name);
+        for (PhysicsSolid& s : out.physSolids) {
+            swap(s.name);
+            swap(s.parent);
+        }
+        swap(out.physRootName);
+        for (auto& merge : out.physJointMerges) {
+            swap(merge.first);
+            swap(merge.second);
+        }
+    }
+
     return true;
 }
 

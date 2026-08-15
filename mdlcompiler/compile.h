@@ -1130,6 +1130,10 @@ struct CompileInput {
     std::vector<BoneMarkup> bonemarkups;
     // $alwayscollapse: force-collapse these bones. $donotcollapse wins.
     std::vector<std::string> alwaysCollapse;
+    // $renamebone <from> <to>, script order. Applied to the final bone table at
+    // the very end of the compile, so every other command still names the
+    // source bone.
+    std::vector<std::pair<std::string, std::string>> boneRenames;
     // $transformbone, script order. Applied as one batch after the bone table
     // is built, so the command is position-independent.
     std::vector<BoneTransformEdit> boneTransformEdits;
