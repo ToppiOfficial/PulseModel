@@ -4592,6 +4592,10 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
 
     // ---- constraints (BuildRagdollConstraint) -------------------------
     m.physRootName = in.physRootBone.empty() ? m.physSolids[0].name : in.physRootBone;
+    if (!in.physRootBone.empty() && FindSolidByName(m.physSolids, in.physRootBone) < 0) {
+        std::printf("WARNING: $rootbone \"%s\" has no collision body - the hull meant for it "
+                    "is weighted to some other bone\n", in.physRootBone.c_str());
+    }
     for (const PhysicsJoint& j : in.physJoints) {
         int gb = FindGlobalBone(m, j.bonename);
         if (gb < 0) {
@@ -4619,7 +4623,9 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
         }
         PhysicsSolid& solid = m.physSolids[idx];
         if (solid.parent.empty() && _stricmp(solid.name.c_str(), m.physRootName.c_str()) != 0) {
-            if (err) *err = "constraint on bone \"" + solid.name + "\" which has no parent";
+            if (err) *err = "constraint on bone \"" + solid.name + "\" whose collision body has "
+                            "no parent body - no ancestor of it carries a hull, and it is not "
+                            "the root \"" + m.physRootName + "\"";
             return false;
         }
         for (const PhysicsJointAxis& a : j.axes) {

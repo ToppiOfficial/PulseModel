@@ -71,6 +71,7 @@ vcpkg_installed/
 .cache/
 .todo/
 .archive/
+testsamples/
 
 # separate git repo for the GitHub wiki
 .wiki/
