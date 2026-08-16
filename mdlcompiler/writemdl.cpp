@@ -41,6 +41,7 @@ namespace lim = pulse::limits;
 
 // filled by BuildVtx in writevtx.cpp, printed by WriteModelFiles below
 std::vector<std::string> g_vtxReport;
+std::vector<std::string> g_writtenFiles;
 
 namespace {
 
@@ -2715,6 +2716,7 @@ bool SaveFile(const std::filesystem::path& path, const void* data, size_t len, s
     }
     fwrite(data, 1, len, f);
     fclose(f);
+    g_writtenFiles.push_back(path.string());
     return true;
 }
 

@@ -166,6 +166,10 @@ struct Conv {
     bool haveModelName = false; // this file has the $modelname the archetype goes under
     bool renderPass = false;    // an $opaque/$mostlyopaque was already converted
     std::vector<fs::path> cdStack; // $pushd, joined - stock's nest, a search dir does not
+    // brace depth as Run sees it, and the $if chain head converted at each depth
+    // ('d' = $ifdef, 'n' = $ifndef, 0 = left alone) - an $elif has to match it
+    int depth = 0;
+    std::vector<char> chainAt;
     std::string err;
     int commands = 0;
 };
@@ -236,8 +240,9 @@ std::string Reserve(Conv& c, const std::string& want) {
     return name;
 }
 
-// The $rendermesh a bodygroup's `studio` line gets. Two entries naming the same
-// file share one, since a plain studio entry has nothing private to it.
+// The $rendermesh a bodygroup's `studio` line gets, declared on first use. Two
+// entries naming the same file share one, since a plain studio entry has
+// nothing private to it.
 std::string MeshFor(Conv& c, const std::string& file) {
     const std::string key = Lower(file);
     auto it = c.meshOf.find(key);
@@ -245,6 +250,7 @@ std::string MeshFor(Conv& c, const std::string& file) {
         return it->second;
     const std::string name = Reserve(c, fs::path(file).stem().string());
     c.meshOf[key] = name;
+    c.meshDecls.push_back("$rendermesh " + Q(name) + " " + Q(file));
     return name;
 }
 
@@ -549,9 +555,7 @@ bool Bodygroup(Conv& c) {
         if (!Want(c, t.line, "studio", "a source filename", file))
             return false;
         StudioOpts(c, t.line, c.meshDecls);
-        const std::string mesh = MeshFor(c, file);
-        c.meshDecls.push_back("$rendermesh " + Q(mesh) + " " + Q(file));
-        group.push_back("    mesh " + Q(mesh));
+        group.push_back("    mesh " + Q(MeshFor(c, file)));
     }
 
     ClaimMeshSlot(c, cmd.line);
@@ -1028,6 +1032,194 @@ bool ModelName(Conv& c) {
     return true;
 }
 
+// A note above a line that is passing through unconverted.
+void Note(Conv& c, int line, const std::string& msg) {
+    c.repl[line - 1] += "// importqc: " + msg + "\n";
+}
+
+// PulseMDL's $if had function forms .pulseqc dropped: Not(None(x)) is now
+// $ifdef, None(x) is $ifndef. Returns 'd', 'n', or 0 for anything else.
+char DefTest(const std::string& tok, std::string& name) {
+    const std::string t = Lower(tok);
+    auto strip = [&](const std::string& pre, const std::string& post) {
+        if (t.size() <= pre.size() + post.size() || t.compare(0, pre.size(), pre) != 0 ||
+            t.compare(t.size() - post.size(), post.size(), post) != 0)
+            return false;
+        name = tok.substr(pre.size(), tok.size() - pre.size() - post.size());
+        return name.find_first_of("()[] \t") == std::string::npos;
+    };
+    if (strip("not(none(", "))"))
+        return 'd';
+    if (strip("none(", ")"))
+        return 'n';
+    return 0;
+}
+
+// The condition is rewritable only when it is that one token and nothing else.
+char PeekDefTest(const Conv& c, std::string& name) {
+    if (c.pos + 1 >= c.toks.size() || c.toks[c.pos].quoted || c.toks[c.pos + 1].quoted ||
+        c.toks[c.pos + 1].text != "{")
+        return 0;
+    return DefTest(c.toks[c.pos].text, name);
+}
+
+// Any other function call in the condition up to its '{'.
+bool HasLegacyCall(const Conv& c) {
+    for (size_t i = c.pos; i < c.toks.size(); i++) {
+        if (!c.toks[i].quoted && c.toks[i].text == "{")
+            break;
+        const std::string t = Lower(c.toks[i].text);
+        if (t.compare(0, 5, "none(") == 0 || t.compare(0, 4, "not(") == 0 ||
+            t.compare(0, 3, "in(") == 0)
+            return true;
+    }
+    return false;
+}
+
+// A '}' closing the clause above sits on this same line, inside the range Emit
+// replaces, so it has to be written back out.
+std::string ClosePrefix(const Conv& c, const Tok& cmd) {
+    if (c.pos < 2)
+        return "";
+    const Tok& prev = c.toks[c.pos - 2];
+    return !prev.quoted && prev.text == "}" && prev.line == cmd.line ? "} " : "";
+}
+
+char& ChainMode(Conv& c) {
+    if (c.depth >= static_cast<int>(c.chainAt.size()))
+        c.chainAt.resize(static_cast<size_t>(c.depth) + 1, 0);
+    return c.chainAt[c.depth];
+}
+
+// $if Not(None(x)) { -> $ifdef x {. A chain is all one kind, so the $elif of a
+// converted head has to convert too - see Elif.
+void If(Conv& c) {
+    const Tok cmd = c.toks[c.pos++];
+    std::string name;
+    const char kind = PeekDefTest(c, name);
+    ChainMode(c) = kind;
+    if (!kind) {
+        if (HasLegacyCall(c))
+            Note(c, cmd.line, "this $if uses a PulseMDL function form that .pulseqc "
+                              "dropped - rewrite it as a comparison, $ifdef or $ifndef");
+        return;
+    }
+    const std::string lead = ClosePrefix(c, cmd);
+    c.pos += 2; // the condition and its '{'
+    c.depth++;
+    Emit(c, cmd.line, LastLine(c),
+         {lead + (kind == 'd' ? "$ifdef " : "$ifndef ") + name + " {"});
+}
+
+// $elif under a converted head takes the bare name, since $ifdef/$ifndef test
+// the name in every clause.
+void Elif(Conv& c) {
+    const Tok cmd = c.toks[c.pos++];
+    const char head = ChainMode(c);
+    std::string name;
+    const char kind = PeekDefTest(c, name);
+    if (head && kind == head) {
+        const std::string lead = ClosePrefix(c, cmd);
+        c.pos += 2;
+        c.depth++;
+        Emit(c, cmd.line, LastLine(c), {lead + "$elif " + name + " {"});
+        return;
+    }
+    if (head)
+        Note(c, cmd.line, std::string("the $if above became ") +
+                          (head == 'd' ? "$ifdef" : "$ifndef") +
+                          ", so this $elif must be a bare variable name too");
+    else if (HasLegacyCall(c))
+        Note(c, cmd.line, "this $elif uses a PulseMDL function form that .pulseqc dropped");
+}
+
+// The old $rendermesh <name> <file> <0|1> { <mesh names> ... }. The flag is the
+// mesh filter's default state - 0 keeps only what is listed, 1 drops it, which
+// is $exceptionlist inclusive and exclusive. Already-current blocks pass through.
+bool RenderMesh(Conv& c) {
+    const Tok cmd = c.toks[c.pos];
+    const bool old = c.pos + 4 < c.toks.size() && !c.toks[c.pos + 3].quoted &&
+                     (c.toks[c.pos + 3].text == "0" || c.toks[c.pos + 3].text == "1") &&
+                     !c.toks[c.pos + 4].quoted && c.toks[c.pos + 4].text == "{";
+    if (!old) {
+        c.pos++;
+        return true;
+    }
+
+    const std::string name = c.toks[c.pos + 1].text;
+    const std::string file = c.toks[c.pos + 2].text;
+    const bool exclusive = c.toks[c.pos + 3].text == "1";
+    c.pos += 5;
+
+    std::vector<std::string> meshes, extra;
+    bool noFacial = false;
+    for (;;) {
+        if (!More(c))
+            return Fail(c, cmd.line, "$rendermesh \"" + name + "\" is missing '}'");
+        const Tok t = c.toks[c.pos++];
+        if (!t.quoted && t.text == "}")
+            break;
+        const std::string o = t.quoted ? std::string() : Lower(t.text);
+        if (o == "nofacial") {
+            noFacial = true;
+        } else if (o == "removematerial" || o == "removematerialword" ||
+                   o == "removeflexcontroller") {
+            std::string arg;
+            if (!Want(c, t.line, o, "a name", arg))
+                return false;
+            extra.push_back("    // importqc: dropped `" + t.text + " " + arg +
+                            "` - $rendermesh has no equivalent");
+        } else if (o == "nojigglebones" || o == "nohitbox" || o == "noproceduralbones" ||
+                   o == "noattachments") {
+            extra.push_back("    // importqc: dropped `" + t.text +
+                            "` - $rendermesh has no equivalent");
+        } else {
+            meshes.push_back(t.quoted ? Q(t.text) : t.text);
+        }
+    }
+
+    std::vector<std::string> out{"$rendermesh " + Q(name) + " " + Q(file) + " {"};
+    if (meshes.empty()) {
+        out.push_back(std::string("    // importqc: the mesh list was empty, so the old flag ") +
+                      (exclusive ? "1 kept everything" : "0 kept nothing"));
+    } else {
+        out.push_back(exclusive ? "    $exceptionlist exclusive {" : "    $exceptionlist {");
+        for (const std::string& m : meshes)
+            out.push_back("        " + m);
+        out.push_back("    }");
+    }
+    out.insert(out.end(), extra.begin(), extra.end());
+    if (noFacial)
+        out.push_back("    $nofacial");
+    out.push_back("}");
+    Emit(c, cmd.line, LastLine(c), out);
+
+    // a `studio` line names this alias, not a file, so point the lookup at it
+    c.usedNames.insert(Lower(name));
+    c.meshOf[Lower(name)] = name;
+    return true;
+}
+
+// Rewrite one keyword, keeping the rest of its line and its indentation. Args
+// that run onto later lines are untouched, which is what a rename wants.
+void Rename(Conv& c, const std::string& to) {
+    const Tok cmd = c.toks[c.pos++];
+    const std::string& src = c.src[cmd.line - 1];
+    const size_t ind = src.find_first_not_of(" \t");
+    Emit(c, cmd.line, cmd.line,
+         {src.substr(0, ind == std::string::npos ? 0 : ind) + to + RestOfLine(c, cmd.line)});
+}
+
+// $addincludedir <dir> - the old spelling of $addincludesearchdir.
+bool AddIncludeDir(Conv& c) {
+    const Tok cmd = c.toks[c.pos++];
+    std::string dir;
+    if (!Want(c, cmd.line, "$addincludedir", "a directory", dir))
+        return false;
+    Emit(c, cmd.line, LastLine(c), {"$addincludesearchdir " + Q(dir)});
+    return true;
+}
+
 // $pushd <dir> / $popd -> $addsearchdir. There is no cd stack in .pulseqc, so
 // each pushed dir is registered instead - joined through the stack, since a
 // nested $pushd is relative to the one below it. $popd cannot unregister one.
@@ -1128,6 +1320,26 @@ bool Run(Conv& c) {
             RenderPass(c, o.substr(1));
         else if (o == "$include")
             ok = Include(c);
+        else if (o == "$if")
+            If(c);
+        else if (o == "$elif")
+            Elif(c);
+        else if (o == "{") {
+            c.depth++;
+            c.pos++;
+        }
+        else if (o == "}") {
+            c.depth = c.depth > 0 ? c.depth - 1 : 0;
+            c.pos++;
+        }
+        else if (o == "$addincludedir")
+            ok = AddIncludeDir(c);
+        else if (o == "$rendermesh")
+            ok = RenderMesh(c);
+        else if (o == "$transformbindposebone")
+            Rename(c, "$transformbone");
+        else if (o == "ignoretransformbindpose")
+            Rename(c, "ignoretransformbone");
         else if (o == "$pushd")
             ok = PushD(c);
         else if (o == "$popd")

@@ -1,16 +1,11 @@
 // qcloader.h - PulseMDL
 //
-// keyvalues1 compile-script front end. Reads `.pulseqc` (and `.qc`, which is
-// accepted as the same format) into the SAME compile::CompileInput that the
-// keyvalues2 `.pulsemdl` loader fills, so nothing downstream - compile stage,
-// writers - knows or cares which front end ran.
+// keyvalues1 compile-script front end, and the only one. Reads `.pulseqc` (and
+// `.qc`, which is accepted as the same format) into compile::CompileInput.
 //
 // Commands are removed, renamed and changed from stock QC; the supported set
-// is the table at the top of qcloader.cpp. An unrecognized `$command` is a
+// is the kCommands table in qcloader.cpp. An unrecognized `$command` is a
 // hard error, never a silent skip - so a script that compiles did what it said.
-//
-// `.pulsemdl` stays the primary format; this is an additional front end, not
-// a replacement.
 
 #ifndef PULSEMDL_QCLOADER_H
 #define PULSEMDL_QCLOADER_H
@@ -35,6 +30,22 @@ bool LoadQcScript(const char* path, compile::CompileInput& out, std::string* err
 
 // True when the path's extension selects this front end (.pulseqc / .qc).
 bool IsQcScriptPath(const char* path);
+
+// Every accepted $command name, one per line, to stdout. The kCommands table is
+// the spec, so tools read the surface from the binary instead of a copy of it.
+void PrintCommandNames();
+
+// Absolute paths of every script, include and source file the last load
+// resolved, for -editorinfo. A watcher needs this from the compiler: $include
+// paths are built from variables and resolved through $addsearchdir, so the set
+// cannot be derived by reading the script.
+extern std::vector<std::string> g_openedFiles;
+
+// Line ranges in the ROOT script that a conditional skipped, for -editorinfo.
+// Losers, not survivors: an editor dims exactly these and leaves the rest
+// alone, so it needs no notion of a chain's full span. Inclusive, 1-based, and
+// they nest - a skipped clause reports its whole body, inner chains included.
+extern std::vector<std::pair<int, int>> g_inactiveRanges;
 
 } // namespace pulse::loader
 

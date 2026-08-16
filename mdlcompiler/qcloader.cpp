@@ -158,6 +158,7 @@ struct Ctx {
     cm::CompileInput& in;
     fs::path scriptDir; // root script's directory; every source path is relative to it
     std::string file;
+    std::string rootFile; // `file` for the root script; an $include changes `file`, not this
     std::vector<Token> toks;
     size_t pos = 0;
     std::string* err = nullptr;
@@ -345,6 +346,41 @@ std::string LookedIn(const std::vector<fs::path>& tried) {
 // searches cddir then g_addSearchDirs, joining the name as written - no
 // basename flattening, unlike $include). Empty return = nowhere, and `tried`
 // then holds every candidate for the error message.
+// Record a resolved path for -editorinfo, deduped case-insensitively. A probe
+// that only tested for existence still lands here - harmless, since the point
+// is telling a watcher which files this compile depends on.
+//
+// Always absolute: a source resolved against a relative search dir would
+// otherwise be reported relative to the compile's cwd, and a watcher resolving
+// that against its own directory silently watches nothing.
+void NoteOpenedFile(const fs::path& p) {
+    std::error_code ec;
+    fs::path abs = fs::absolute(p, ec);
+    std::string s = (ec ? p : abs.lexically_normal().make_preferred()).string();
+    for (const std::string& seen : g_openedFiles)
+        if (_stricmp(seen.c_str(), s.c_str()) == 0)
+            return;
+    g_openedFiles.push_back(std::move(s));
+}
+
+// A conditional clause this compile skipped, for -editorinfo dimming. Losers
+// are reported rather than survivors: the editor dims exactly these and leaves
+// everything else alone, so top-level lines need no enumeration.
+//
+// Root script only. The editor pane shows the entry's own file, never an
+// include, so a range from an included file has nothing to dim.
+void NoteInactive(const Ctx& c, int first, int last) {
+    if (c.file != c.rootFile || first <= 0 || last < first)
+        return;
+    g_inactiveRanges.emplace_back(first, last);
+}
+
+// Last line consumed - CollectBlock stops on the clause's closing "}", so this
+// is that brace and the clause spans up to it.
+int BlockEndLine(const Ctx& c) {
+    return c.pos > 0 ? c.toks[c.pos - 1].line : 0;
+}
+
 fs::path FindSourceFile(const Ctx& c, const std::string& filename,
                         std::vector<fs::path>* tried) {
     const fs::path rel(filename);
@@ -359,8 +395,10 @@ fs::path FindSourceFile(const Ctx& c, const std::string& filename,
     for (fs::path& p : cands) {
         p = p.lexically_normal().make_preferred();
         std::error_code ec;
-        if (fs::is_regular_file(p, ec))
+        if (fs::is_regular_file(p, ec)) {
+            NoteOpenedFile(p);
             return p;
+        }
     }
     if (tried) *tried = std::move(cands);
     return {};
@@ -5900,6 +5938,7 @@ bool CmdInclude(Ctx& c, const Token& cmd) {
     std::ifstream f(full, std::ios::binary);
     if (!f)
         return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
+    NoteOpenedFile(full);
     std::ostringstream buf;
     buf << f.rdbuf();
     std::string text = buf.str();
@@ -6073,7 +6112,8 @@ size_t CommandExtent(const Ctx& c) {
 bool ExpandCommandVars(Ctx& c) {
     const char* cmd = c.toks[c.pos].text.c_str();
     if (_stricmp(cmd, "$definemacro") == 0 || _stricmp(cmd, "$if") == 0 ||
-        _stricmp(cmd, "$ifdef") == 0 || _stricmp(cmd, "$switch") == 0)
+        _stricmp(cmd, "$ifdef") == 0 || _stricmp(cmd, "$ifndef") == 0 ||
+        _stricmp(cmd, "$switch") == 0)
         return true;
     const size_t end = CommandExtent(c);
     for (size_t i = c.pos; i < end; i++)
@@ -6397,7 +6437,8 @@ bool EvalCondition(Ctx& c, const Token& cmd, const std::vector<CondTok>& toks,
     return true;
 }
 
-// $ifdef <variable> - true when the name has a value, whatever that value is.
+// $ifdef <variable> - true when the name has a value, whatever that value is;
+// $ifndef is the same read, negated.
 // The name is taken bare and unexpanded; anything past it means a comparison
 // was written, which belongs under $if.
 bool ReadDefName(Ctx& c, const Token& cmd, bool& result) {
@@ -6406,25 +6447,28 @@ bool ReadDefName(Ctx& c, const Token& cmd, bool& result) {
     const Token name = c.toks[c.pos++];
     if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
         return c.Fail(name.line, cmd.text + " takes one bare variable name - a "
-                                 "condition belongs under $if, not $ifdef");
+                                 "condition belongs under $if, not " + cmd.text);
     c.pos++;
     result = c.variables.find(name.text) != c.variables.end();
     return true;
 }
 
-// $if <cond> { ... } [$elif <cond> { ... }]... [$else { ... }], and $ifdef with
-// the same shape but a name check in every clause. Every clause's condition is
-// evaluated even once one has won, so a typo in a later $elif is still
-// reported; only the BODIES of the losers go unread.
-bool IfChain(Ctx& c, const Token& cmd, bool ifdef) {
+// $if <cond> { ... } [$elif <cond> { ... }]... [$else { ... }], and $ifdef /
+// $ifndef with the same shape but a name check in every clause. Every clause's
+// condition is evaluated even once one has won, so a typo in a later $elif is
+// still reported; only the BODIES of the losers go unread.
+bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
     std::vector<Token> chosen;
     bool taken = false;
+    std::vector<std::pair<int, int>> spans; // one per clause, in source order
+    int winner = -1;
     for (Token clause = cmd;;) {
         bool val = false;
         std::vector<Token> body;
         if (ifdef) {
             if (!ReadDefName(c, clause, val))
                 return false;
+            val = val != negate;
         } else {
             std::vector<CondTok> cond;
             if (!ReadCondition(c, clause, cond) || !EvalCondition(c, clause, cond, val))
@@ -6432,8 +6476,10 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef) {
         }
         if (!CollectBlock(c, clause, body))
             return false;
+        spans.emplace_back(clause.line, BlockEndLine(c));
         if (val && !taken) {
             taken = true;
+            winner = static_cast<int>(spans.size()) - 1;
             chosen = std::move(body);
         }
         if (c.Eof() || c.Cur().quoted || _stricmp(c.Cur().text.c_str(), "$elif") != 0)
@@ -6445,15 +6491,22 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef) {
         std::vector<Token> body;
         if (!ExpectBrace(c, els) || !CollectBlock(c, els, body))
             return false;
-        if (!taken)
+        spans.emplace_back(els.line, BlockEndLine(c));
+        if (!taken) {
+            winner = static_cast<int>(spans.size()) - 1;
             chosen = std::move(body);
+        }
     }
+    for (size_t i = 0; i < spans.size(); i++)
+        if (static_cast<int>(i) != winner)
+            NoteInactive(c, spans[i].first, spans[i].second);
     c.toks.insert(c.toks.begin() + c.pos, chosen.begin(), chosen.end());
     return true;
 }
 
 bool CmdIf(Ctx& c, const Token& cmd) { return IfChain(c, cmd, false); }
 bool CmdIfdef(Ctx& c, const Token& cmd) { return IfChain(c, cmd, true); }
+bool CmdIfndef(Ctx& c, const Token& cmd) { return IfChain(c, cmd, true, /*negate=*/true); }
 
 // $switch <variable> { $case <value> { ... } ... $default { ... } }. The value
 // compare is exact - a $case is a label, not a condition.
@@ -6474,6 +6527,8 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
 
     std::vector<Token> chosen, fallback;
     bool taken = false, hasDefault = false;
+    std::vector<std::pair<int, int>> spans; // one per $case/$default, in source order
+    int winner = -1, defaultIdx = -1;
     for (;;) {
         if (c.Eof())
             return c.Fail(cmd.line, "$switch is missing its closing \"}\"");
@@ -6489,6 +6544,8 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
             hasDefault = true;
             if (!ExpectBrace(c, t) || !CollectBlock(c, t, fallback))
                 return false;
+            spans.emplace_back(t.line, BlockEndLine(c));
+            defaultIdx = static_cast<int>(spans.size()) - 1;
             continue;
         }
         if (c.Eof() || (!c.Cur().quoted && (c.Cur().text == "{" || c.Cur().text == "}")))
@@ -6499,16 +6556,23 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
         std::vector<Token> body;
         if (!ExpectBrace(c, t) || !CollectBlock(c, t, body))
             return false;
+        spans.emplace_back(t.line, BlockEndLine(c));
         if (!taken && label.text == value) {
             taken = true;
+            winner = static_cast<int>(spans.size()) - 1;
             chosen = std::move(body);
         }
     }
     if (!hasDefault)
         return c.Fail(cmd.line, "$switch requires a $default - say what happens "
                                 "when no $case matches, even if it is nothing");
-    if (!taken)
+    if (!taken) {
         chosen = std::move(fallback);
+        winner = defaultIdx;
+    }
+    for (size_t i = 0; i < spans.size(); i++)
+        if (static_cast<int>(i) != winner)
+            NoteInactive(c, spans[i].first, spans[i].second);
     c.toks.insert(c.toks.begin() + c.pos, chosen.begin(), chosen.end());
     return true;
 }
@@ -6544,6 +6608,7 @@ constexpr Command kCommands[] = {
     {"$endmacro", CmdEndMacroOutside},
     {"$if", CmdIf},
     {"$ifdef", CmdIfdef},
+    {"$ifndef", CmdIfndef},
     {"$elif", CmdElifOutside},
     {"$else", CmdElifOutside},
     {"$switch", CmdSwitch},
@@ -6716,6 +6781,14 @@ std::string SupportedList() {
 
 } // namespace
 
+std::vector<std::string> g_openedFiles;
+std::vector<std::pair<int, int>> g_inactiveRanges;
+
+void PrintCommandNames() {
+    for (const Command& k : kCommands)
+        std::printf("%s\n", k.name);
+}
+
 bool IsQcScriptPath(const char* path) {
     const std::string ext = fs::path(path).extension().string();
     return _stricmp(ext.c_str(), ".pulseqc") == 0 || _stricmp(ext.c_str(), ".qc") == 0;
@@ -6732,11 +6805,13 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
     buf << f.rdbuf();
     std::string text = buf.str();
     StripUtf8Bom(text);
+    NoteOpenedFile(fs::absolute(path));
 
     Ctx c{out};
     c.scriptDir = fs::path(path).parent_path();
     c.curDir = c.scriptDir;
     c.file = fs::path(path).filename().string();
+    c.rootFile = c.file;
     c.err = err;
 
     // -defvar: in effect from the first line, and pinned - a later repeat on
@@ -6759,6 +6834,17 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
 
     if (!RunCommands(c))
         return false;
+
+    // $break stopped the read, so everything below is unread and dims like a
+    // skipped clause. c.pos is the first token never reached - which also
+    // covers a break inside an $include, since the root resumes at the token
+    // after that $include and stops there.
+    if (c.scriptBreak && c.pos < c.toks.size()) {
+        int lines = static_cast<int>(std::count(text.begin(), text.end(), '\n'));
+        if (!text.empty() && text.back() != '\n')
+            lines++;
+        NoteInactive(c, c.toks[c.pos].line, lines);
+    }
 
     if (out.outname.empty()) {
         if (err) *err = c.file + ": no $modelname";
