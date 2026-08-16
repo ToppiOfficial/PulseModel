@@ -6,11 +6,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #include "math/math.h"
 #include "pulselimits.h"
-
 namespace pulse::source {
 
 namespace dmx = pulse::dmx;
@@ -611,24 +611,70 @@ void NormalizeDmxNormals(std::vector<dmx::Vector3>& normals) {
     }
 }
 
+// Hash grid over the unit sphere for the aggressive collapse. Normals are unit
+// (NormalizeDmxNormals ran) or zero, so dot > cos(2 deg) implies a chord under
+// 2*sin(1 deg) = 0.0349; a cell edge of 0.04 means the 3x3x3 neighborhood is
+// always a superset of the match set. A zero normal dots to 0 and never
+// matches, so it needs no bound.
+struct NormalGrid {
+    static constexpr float kCell = 0.04f;
+    struct Cell {
+        int32_t x, y, z;
+        bool operator==(const Cell& o) const { return x == o.x && y == o.y && z == o.z; }
+    };
+    struct Hash {
+        size_t operator()(const Cell& c) const {
+            uint64_t h = static_cast<uint32_t>(c.x) * 73856093ull;
+            h ^= static_cast<uint64_t>(static_cast<uint32_t>(c.y)) * 19349663ull;
+            h ^= static_cast<uint64_t>(static_cast<uint32_t>(c.z)) * 83492791ull;
+            return static_cast<size_t>(h ^ (h >> 32));
+        }
+    };
+    std::unordered_map<Cell, std::vector<int>, Hash> cells;
+
+    static Cell Of(const dmx::Vector3& v) {
+        return Cell{static_cast<int32_t>(std::floor(v.x / kCell)),
+                    static_cast<int32_t>(std::floor(v.y / kCell)),
+                    static_cast<int32_t>(std::floor(v.z / kCell))};
+    }
+    void Add(const dmx::Vector3& v, int id) { cells[Of(v)].push_back(id); }
+
+    // lowest matching index, which is what the linear scan's first hit was
+    int FindFirst(const std::vector<dmx::Vector3>& data, const dmx::Vector3& v,
+                  float flNormalBlend) const {
+        const Cell c = Of(v);
+        int best = -1;
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    auto it = cells.find(Cell{c.x + dx, c.y + dy, c.z + dz});
+                    if (it == cells.end())
+                        continue;
+                    for (int id : it->second)
+                        if ((best == -1 || id < best) &&
+                            NormalDot(v, data[id]) > flNormalBlend)
+                            best = id;
+                }
+        return best;
+    }
+};
+
 // reference CollapseRedundantBaseNormalsAggressive
 void CollapseBaseNormalsAggressive(std::vector<dmx::Vector3>& normals,
                                    std::vector<int32_t>& normalIndices,
                                    float flNormalBlend) {
     std::vector<int> normalMap(normals.size());
     std::vector<dmx::Vector3> newNormals;
+    NormalGrid grid;
     for (size_t i = 0; i < normals.size(); ++i) {
-        bool bUnique = true;
         const dmx::Vector3& vNormal = normals[i];
-        for (size_t j = 0; j < newNormals.size(); ++j) {
-            if (NormalDot(vNormal, newNormals[j]) > flNormalBlend) {
-                normalMap[i] = static_cast<int>(j);
-                bUnique = false;
-                break;
-            }
+        int j = grid.FindFirst(newNormals, vNormal, flNormalBlend);
+        if (j != -1) {
+            normalMap[i] = j;
+            continue;
         }
-        if (!bUnique) continue;
         normalMap[i] = static_cast<int>(newNormals.size());
+        grid.Add(vNormal, static_cast<int>(newNormals.size()));
         newNormals.push_back(vNormal);
     }
 

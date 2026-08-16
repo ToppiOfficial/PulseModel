@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <utility>
 
 #include "format/mdl.h"
@@ -40,29 +41,34 @@ struct HardwareMatrixState {
         int lastUsageID = 0;
     };
     std::vector<MatrixState> state;
+    // globalID -> allocated slot, -1 if not allocated. Pure lookup accelerator
+    // for IsMatrixAllocated, which is the innermost call in the strip build.
+    std::vector<int> slotOf;
     int lruCounter = 0;
     int allocatedCount = 0;
 
-    void Init(int numMatrices) {
+    void Init(int numMatrices, int numGlobalBones) {
         state.assign(numMatrices, MatrixState{});
+        slotOf.assign(numGlobalBones, -1);
         lruCounter = 0;
         allocatedCount = 0;
     }
     bool IsMatrixAllocated(int globalID) const {
-        for (const MatrixState& s : state)
-            if (s.globalMatrixID == globalID && s.allocated)
-                return true;
-        return false;
+        return globalID >= 0 && globalID < static_cast<int>(slotOf.size()) &&
+               slotOf[globalID] >= 0;
     }
     bool AllocateMatrix(int globalID) {
         if (IsMatrixAllocated(globalID))
             return true;
-        for (MatrixState& s : state) {
+        for (size_t i = 0; i < state.size(); i++) {
+            MatrixState& s = state[i];
             if (!s.allocated) {
                 s.globalMatrixID = globalID;
                 s.allocated = true;
                 s.lastUsageID = lruCounter++;
                 ++allocatedCount;
+                if (globalID >= 0 && globalID < static_cast<int>(slotOf.size()))
+                    slotOf[globalID] = static_cast<int>(i);
                 return true;
             }
         }
@@ -71,8 +77,11 @@ struct HardwareMatrixState {
     // flush the whole palette (reference CHardwareMatrixState::DeallocateAll);
     // the LRU counter keeps running, matching the reference's allocation ids
     void DeallocateAll() {
-        for (MatrixState& s : state)
+        for (MatrixState& s : state) {
+            if (s.allocated)
+                slotOf[s.globalMatrixID] = -1;
             s.allocated = false;
+        }
         allocatedCount = 0;
     }
     void DeallocateLRU(int n) {
@@ -87,6 +96,7 @@ struct HardwareMatrixState {
                 }
             }
             state[oldestID].allocated = false;
+            slotOf[state[oldestID].globalMatrixID] = -1;
             --allocatedCount;
         }
     }
@@ -256,11 +266,13 @@ void TryToReduceBoneInfluence(fmt::vtx::Vertex_t& v, fmt::mstudioboneweight_t& b
     }
 }
 
-// GenerateStripGroupVerticesFromFace
-// IsVertexFlexed: is this mesh-relative vertex touched by
-// any of the mesh's flexes? Called at VTX build time, BEFORE FixupMDLFile
-// remaps the vanim indices, so pAnim->index is still mesh-relative here.
-bool IsVertexFlexed(fmt::mstudiomesh_t* pStudioMesh, int vertID) {
+// Which mesh-relative vertices any of the mesh's flexes touch. Built at VTX
+// time, BEFORE FixupMDLFile remaps the vanim indices, so pAnim->index is still
+// mesh-relative here.
+// One flag per mesh-relative vertex, built once instead of rescanning every
+// flex's vanim list per face vertex per strip-group pass.
+std::vector<bool> BuildFlexedVertexFlags(fmt::mstudiomesh_t* pStudioMesh) {
+    std::vector<bool> flexed(pStudioMesh->numvertices > 0 ? pStudioMesh->numvertices : 0, false);
     uint8_t* pMeshBase = reinterpret_cast<uint8_t*>(pStudioMesh);
     for (int i = 0; i < pStudioMesh->numflexes; i++) {
         auto* pflex =
@@ -270,11 +282,15 @@ bool IsVertexFlexed(fmt::mstudiomesh_t* pStudioMesh, int vertID) {
                                      ? sizeof(fmt::mstudiovertanim_wrinkle_t)
                                      : sizeof(fmt::mstudiovertanim_t);
         for (int j = 0; j < pflex->numverts; j++, pvanim += nVAnimSizeBytes) {
-            if (reinterpret_cast<fmt::mstudiovertanim_t*>(pvanim)->index == vertID)
-                return true;
+            int idx = reinterpret_cast<fmt::mstudiovertanim_t*>(pvanim)->index;
+            if (idx < 0)
+                continue;
+            if (static_cast<size_t>(idx) >= flexed.size())
+                flexed.resize(idx + 1, false); // a vanim past the mesh still matched before
+            flexed[idx] = true;
         }
     }
-    return false;
+    return flexed;
 }
 
 // returns true when ANY vertex of the face is flexed (reference returns the
@@ -282,12 +298,15 @@ bool IsVertexFlexed(fmt::mstudiomesh_t* pStudioMesh, int vertID) {
 bool GenerateStripGroupVerticesFromFace(Builder& b, const source::SrcFace& face,
                                         fmt::mstudiomodel_t* pStudioModel,
                                         fmt::mstudiomesh_t* pStudioMesh, int maxPreferredBones,
+                                        const std::vector<bool>& flexedVerts,
                                         fmt::vtx::Vertex_t* out) {
     uint32_t vertIDs[3] = {face.a, face.b, face.c};
     bool bFaceIsFlexed = false;
     for (int fi = 0; fi < 3; ++fi) {
         int vertex = static_cast<int>(vertIDs[fi]);
-        bFaceIsFlexed = bFaceIsFlexed || IsVertexFlexed(pStudioMesh, vertex);
+        bFaceIsFlexed = bFaceIsFlexed ||
+                        (vertex >= 0 && static_cast<size_t>(vertex) < flexedVerts.size() &&
+                         flexedVerts[vertex]);
         // face vertex ids are MESH-relative; vvdVertex indexes the model's
         // vertex block, so the mesh's vertexoffset has to be added (the
         // reference goes through pStudioMesh->GetVertexData(), which is
@@ -317,7 +336,7 @@ bool GenerateStripGroupVerticesFromFace(Builder& b, const source::SrcFace& face,
 }
 
 int FindOrCreateVertex(std::vector<fmt::vtx::Vertex_t>& list,
-                       std::map<int, int>& lookup, const fmt::vtx::Vertex_t& vert) {
+                       std::unordered_map<int, int>& lookup, const fmt::vtx::Vertex_t& vert) {
     auto it = lookup.find(vert.origMeshVertID);
     if (it != lookup.end())
         return it->second;
@@ -327,18 +346,20 @@ int FindOrCreateVertex(std::vector<fmt::vtx::Vertex_t>& list,
     return result;
 }
 
-// BuildFaceBoneData
+// BuildFaceBoneData. A face carries at most 9 bones, so scanning what is
+// already collected beats a per-face bone-sized seen array and keeps the same
+// first-seen order.
 void BuildFaceBoneData(Builder& b, std::vector<fmt::vtx::Vertex_t>& list, Face& face) {
-    std::vector<bool> seen(b.numBones, false);
     face.numBones = 0;
     for (int j = 0; j < 3; j++) {
         fmt::vtx::Vertex_t& vert = list[face.vertID[j]];
         for (int k = 0; k < vert.numBones; ++k) {
             int bone = vert.boneID[k];
-            if (!seen[bone]) {
-                seen[bone] = true;
+            bool seen = false;
+            for (int s = 0; s < face.numBones; ++s)
+                if (face.boneID[s] == bone) { seen = true; break; }
+            if (!seen)
                 face.boneID[face.numBones++] = bone;
-            }
         }
     }
 }
@@ -389,40 +410,70 @@ int ComputeNewBonesNeeded(Builder& b, const Face& face) {
     return numNewBones;
 }
 
-Face* GetNextUntouched(std::vector<Face>& faces) {
-    for (Face& f : faces)
-        if (!f.touched)
-            return &f;
+// Ascending list of face indices, a superset of the untouched ones. Every seed
+// search below walked the whole face list skipping touched faces; iterating
+// this and skipping them is the same traversal in the same order. Compaction
+// is amortized - rewriting the array on every search costs more than it saves.
+struct LiveFaces {
+    std::vector<int> ids;
+    size_t remaining = 0; // exact untouched count
+    void Reset(size_t n) {
+        ids.resize(n);
+        for (size_t i = 0; i < n; ++i) ids[i] = static_cast<int>(i);
+        remaining = n;
+    }
+    void Touched() { --remaining; }
+    void MaybeCompact(const std::vector<Face>& faces) {
+        if (ids.size() <= remaining * 2)
+            return;
+        size_t w = 0;
+        for (size_t r = 0; r < ids.size(); ++r)
+            if (!faces[ids[r]].touched) ids[w++] = ids[r];
+        ids.resize(w);
+    }
+};
+
+Face* GetNextUntouched(std::vector<Face>& faces, LiveFaces& live) {
+    live.MaybeCompact(faces);
+    for (int id : live.ids)
+        if (!faces[id].touched)
+            return &faces[id];
     return nullptr;
 }
 
-Face* GetNextUntouchedWithoutBoneStateChange(Builder& b, std::vector<Face>& faces) {
+Face* GetNextUntouchedWithoutBoneStateChange(Builder& b, std::vector<Face>& faces,
+                                            LiveFaces& live) {
+    live.MaybeCompact(faces);
     Face* bestFace = nullptr;
     int bestNumNewBones = kMaxBonesPerVert * 3 + 1;
-    for (Face& f : faces) {
-        if (!f.touched) {
-            int numNewBones = ComputeNewBonesNeeded(b, f);
-            if (numNewBones <= b.hwState.FreeMatrixCount() && numNewBones < bestNumNewBones) {
-                bestNumNewBones = numNewBones;
-                bestFace = &f;
-                if (bestNumNewBones == 0)
-                    break;
-            }
+    for (int id : live.ids) {
+        Face& f = faces[id];
+        if (f.touched)
+            continue;
+        int numNewBones = ComputeNewBonesNeeded(b, f);
+        if (numNewBones <= b.hwState.FreeMatrixCount() && numNewBones < bestNumNewBones) {
+            bestNumNewBones = numNewBones;
+            bestFace = &f;
+            if (bestNumNewBones == 0)
+                break;
         }
     }
     return bestFace;
 }
 
-Face* GetNextUntouchedWithLeastBoneStateChanges(Builder& b, std::vector<Face>& faces) {
+Face* GetNextUntouchedWithLeastBoneStateChanges(Builder& b, std::vector<Face>& faces,
+                                               LiveFaces& live) {
+    live.MaybeCompact(faces);
     Face* bestFace = nullptr;
     int bestNumNewBones = kMaxBonesPerVert * 3 + 1;
-    for (Face& f : faces) {
-        if (!f.touched) {
-            int numNewBones = ComputeNewBonesNeeded(b, f);
-            if (numNewBones < bestNumNewBones) {
-                bestNumNewBones = numNewBones;
-                bestFace = &f;
-            }
+    for (int id : live.ids) {
+        Face& f = faces[id];
+        if (f.touched)
+            continue;
+        int numNewBones = ComputeNewBonesNeeded(b, f);
+        if (numNewBones < bestNumNewBones) {
+            bestNumNewBones = numNewBones;
+            bestFace = &f;
         }
     }
     if (!bestFace)
@@ -438,10 +489,10 @@ Face* GetNextUntouchedWithLeastBoneStateChanges(Builder& b, std::vector<Face>& f
     return bestFace;
 }
 
-Face* GetNextFace(Builder& b, std::vector<Face>& faceList, bool allowNewStrip) {
-    Face* face = GetNextUntouchedWithoutBoneStateChange(b, faceList);
+Face* GetNextFace(Builder& b, std::vector<Face>& faceList, LiveFaces& live, bool allowNewStrip) {
+    Face* face = GetNextUntouchedWithoutBoneStateChange(b, faceList, live);
     if (!face && allowNewStrip)
-        face = GetNextUntouchedWithLeastBoneStateChanges(b, faceList);
+        face = GetNextUntouchedWithLeastBoneStateChanges(b, faceList, live);
     return face;
 }
 
@@ -457,7 +508,7 @@ bool AllocateHardwareBonesForFace(Builder& b, Face* face) {
 
 // BuildStripsRecursive (iterative flood fill)
 void BuildStripsFloodFill(Builder& b, std::vector<uint16_t>& indices, std::vector<Face>& faceList,
-                          Face* seed) {
+                          LiveFaces& live, Face* seed) {
     std::vector<Face*> stack;
     stack.reserve(faceList.size());
     stack.push_back(seed);
@@ -469,6 +520,7 @@ void BuildStripsFloodFill(Builder& b, std::vector<uint16_t>& indices, std::vecto
         if (ComputeNewBonesNeeded(b, *f))
             continue;
         f->touched = true;
+        live.Touched();
         indices.push_back(static_cast<uint16_t>(f->vertID[0]));
         indices.push_back(static_cast<uint16_t>(f->vertID[1]));
         indices.push_back(static_cast<uint16_t>(f->vertID[2]));
@@ -506,17 +558,19 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
                           std::vector<fmt::vtx::Vertex_t>& vertices, StripGroup* pStripGroup,
                           int maxBonesPerStrip, fmt::mstudiomodel_t* pStudioModel,
                           fmt::mstudiomesh_t* pStudioMesh) {
-    b.hwState.Init(maxBonesPerStrip);
+    b.hwState.Init(maxBonesPerStrip, b.numBones);
 
     std::vector<uint16_t> facesToStrip;
     facesToStrip.reserve(faceList.size() * 3);
 
-    Face* pSeedFace = GetNextUntouched(faceList);
+    LiveFaces live;
+    live.Reset(faceList.size());
+    Face* pSeedFace = GetNextUntouched(faceList, live);
     while (pSeedFace) {
         AllocateHardwareBonesForFace(b, pSeedFace);
-        BuildStripsFloodFill(b, facesToStrip, faceList, pSeedFace);
+        BuildStripsFloodFill(b, facesToStrip, faceList, live, pSeedFace);
 
-        pSeedFace = GetNextFace(b, faceList, false);
+        pSeedFace = GetNextFace(b, faceList, live, false);
         if (pSeedFace)
             continue;
 
@@ -561,7 +615,7 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
         }
 
         facesToStrip.clear();
-        pSeedFace = GetNextFace(b, faceList, true);
+        pSeedFace = GetNextFace(b, faceList, live, true);
     }
 }
 
@@ -581,9 +635,10 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
     if (bIsHWSkinned)
         pStripGroup->flags |= fmt::vtx::STRIPGROUP_IS_HWSKINNED;
 
+    const std::vector<bool> flexedVerts = BuildFlexedVertexFlags(pStudioMesh);
     std::vector<Face> stripGroupSourceFaces;
     std::vector<fmt::vtx::Vertex_t> stripGroupVertices;
-    std::map<int, int> vertexLookup;
+    std::unordered_map<int, int> vertexLookup;
 
     for (size_t n = 0; n < srcFaces.size(); ++n) {
         if (facesProcessed[n])
@@ -593,8 +648,8 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
         int preferredBones = bIsHWSkinned ? maxBonesPerVert : 0;
 
         fmt::vtx::Vertex_t stripGroupVert[3];
-        bool bFaceIsFlexed = GenerateStripGroupVerticesFromFace(b, face, pStudioModel, pStudioMesh,
-                                                               preferredBones, stripGroupVert);
+        bool bFaceIsFlexed = GenerateStripGroupVerticesFromFace(
+            b, face, pStudioModel, pStudioMesh, preferredBones, flexedVerts, stripGroupVert);
 
         // nomorphs/nofacial: this LOD ignores the morphs entirely, so every
         // face lands in the non-flexed group (reference bForceNoFlex)

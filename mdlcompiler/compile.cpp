@@ -2990,28 +2990,79 @@ bool AreBoneWeightsEqual(const src::SrcBoneWeight& b1, const src::SrcBoneWeight&
     return true;
 }
 
-// FindVertexInDictionaryExact - exact, not fuzzy: a lower
-// LOD only shares a vertex it matches bit for bit.
-int FindVertexInDictionaryExact(const std::vector<LodVertex>& dict, int nStart, int nEnd,
-                                const LodVertex& v) {
-    for (int i = nStart; i < nEnd; ++i) {
-        const LodVertex& d = dict[i];
-        if (d.position.x != v.position.x || d.position.y != v.position.y ||
-            d.position.z != v.position.z)
-            continue;
-        if (!AreBoneWeightsEqual(d.boneweight, v.boneweight))
-            continue;
-        if (d.texcoord.x != v.texcoord.x || d.texcoord.y != v.texcoord.y)
-            continue;
-        if (d.normal.x != v.normal.x || d.normal.y != v.normal.y || d.normal.z != v.normal.z)
-            continue;
-        if (d.tangentS.x != v.tangentS.x || d.tangentS.y != v.tangentS.y ||
-            d.tangentS.z != v.tangentS.z || d.tangentS.w != v.tangentS.w)
-            continue;
-        return i;
-    }
-    return -1;
+// Exact, not fuzzy: a lower LOD only shares a vertex it matches bit for bit.
+bool AreVerticesEqual(const LodVertex& d, const LodVertex& v) {
+    if (d.position.x != v.position.x || d.position.y != v.position.y ||
+        d.position.z != v.position.z)
+        return false;
+    if (!AreBoneWeightsEqual(d.boneweight, v.boneweight))
+        return false;
+    if (d.texcoord.x != v.texcoord.x || d.texcoord.y != v.texcoord.y)
+        return false;
+    if (d.normal.x != v.normal.x || d.normal.y != v.normal.y || d.normal.z != v.normal.z)
+        return false;
+    if (d.tangentS.x != v.tangentS.x || d.tangentS.y != v.tangentS.y ||
+        d.tangentS.z != v.tangentS.z || d.tangentS.w != v.tangentS.w)
+        return false;
+    return true;
 }
+
+// Bucket index over one mesh's slice of the dictionary. Pure accelerator: a
+// hit still runs FindVertexInDictionaryExact's comparison, so semantics and
+// the winning (lowest) index are unchanged.
+struct DictIndex {
+    std::unordered_map<uint64_t, std::vector<int>> buckets;
+
+    // -0.0f folds to +0.0f so bit-hashing agrees with float ==.
+    static void Mix(uint64_t& h, float f) {
+        uint32_t bits;
+        f += 0.0f;
+        std::memcpy(&bits, &f, sizeof(bits));
+        h = (h ^ bits) * 0x100000001b3ull;
+    }
+    static uint64_t Hash(const LodVertex& v) {
+        uint64_t h = 0xcbf29ce484222325ull;
+        Mix(h, v.position.x); Mix(h, v.position.y); Mix(h, v.position.z);
+        Mix(h, v.normal.x);   Mix(h, v.normal.y);   Mix(h, v.normal.z);
+        Mix(h, v.texcoord.x); Mix(h, v.texcoord.y);
+        Mix(h, v.tangentS.x); Mix(h, v.tangentS.y);
+        Mix(h, v.tangentS.z); Mix(h, v.tangentS.w);
+        // AreBoneWeightsEqual ignores order, so the hash must too
+        const src::SrcBoneWeight& bw = v.boneweight;
+        std::vector<std::pair<int, float>> pairs;
+        for (int i = 0; i < bw.numbones; ++i)
+            pairs.emplace_back(bw.bone[i], bw.weight[i]);
+        std::sort(pairs.begin(), pairs.end(),
+                  [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+                      return a.first < b.first;
+                  });
+        for (const auto& p : pairs) {
+            h = (h ^ static_cast<uint32_t>(p.first)) * 0x100000001b3ull;
+            Mix(h, p.second);
+        }
+        return h;
+    }
+
+    void Build(const std::vector<LodVertex>& dict, int nStart, int nEnd) {
+        buckets.clear();
+        for (int i = nStart; i < nEnd; ++i)
+            buckets[Hash(dict[i])].push_back(i);
+    }
+    void Add(const std::vector<LodVertex>& dict, int id) {
+        buckets[Hash(dict[id])].push_back(id);
+    }
+    // candidates are inserted in ascending index order, so the first exact
+    // match in the bucket is the lowest-index match overall
+    int Find(const std::vector<LodVertex>& dict, const LodVertex& v) const {
+        auto it = buckets.find(Hash(v));
+        if (it == buckets.end())
+            return -1;
+        for (int id : it->second)
+            if (AreVerticesEqual(dict[id], v))
+                return id;
+        return -1;
+    }
+};
 
 // AddVertex: the dictionary sorts every vertex it stores by
 // bone index. LOD 0 verts are then re-sorted by weight in MarkRootLODBones;
@@ -3025,14 +3076,14 @@ int AddDictVertex(std::vector<LodVertex>& dict, const LodVertex& v) {
 
 // FindOrCreateExactVertexInDictionary
 int FindOrCreateDictVertex(std::vector<LodVertex>& dict, const LodVertex& v,
-                           src::SrcMesh* pDstMesh) {
-    int id = FindVertexInDictionaryExact(dict, pDstMesh->vertexoffset,
-                                         pDstMesh->vertexoffset + pDstMesh->numvertices, v);
+                           src::SrcMesh* pDstMesh, DictIndex& index) {
+    int id = index.Find(dict, v);
     if (id != -1) {
         dict[id].lodFlag |= v.lodFlag;
         return id - pDstMesh->vertexoffset;
     }
     id = AddDictVertex(dict, v);
+    index.Add(dict, id);
     ++pDstMesh->numvertices;
     return id - pDstMesh->vertexoffset;
 }
@@ -3120,7 +3171,12 @@ void UnifyModelLods(Ctx& ctx, Model& model) {
         }
 
         // Lower LODs reuse root-LOD vertices wherever they match exactly, and
-        // append to the shared pool where they do not.
+        // append to the shared pool where they do not. Built after
+        // MarkRootLODBones, which rewrites the LOD0 bone weights in place.
+        DictIndex dictIndex;
+        dictIndex.Build(model.vertices, pVertexDictMesh->vertexoffset,
+                        pVertexDictMesh->vertexoffset + pVertexDictMesh->numvertices);
+
         for (int lodID = 1; lodID < nNumLODs; ++lodID) {
             const src::Source* pCurrLod = model.lodSources[lodID];
             if (!pCurrLod)
@@ -3155,7 +3211,7 @@ void UnifyModelLods(Ctx& ctx, Model& model) {
                     m.bones[lv.boneweight.bone[j]].flags |= (BONE_USED_BY_VERTEX_LOD0 << lodID);
 
                 model.meshVertIndexMaps[lodID][nSrcID] =
-                    FindOrCreateDictVertex(model.vertices, lv, pVertexDictMesh);
+                    FindOrCreateDictVertex(model.vertices, lv, pVertexDictMesh, dictIndex);
             }
         }
     }
@@ -7870,8 +7926,9 @@ src::SrcMorphAnim* FindSourceMorph(src::Source* pSource, const char* name) {
 
 // per-(source, morph) mapping data (reference s_sourceanim_t vanim_flag /
 // vanim_mapcount / vanim_map)
+// Depends only on the source's modelToVAnim, so every morph of one source
+// gets the same maps - built once per source and shared.
 struct MorphMaps {
-    std::vector<int> flag;              // per source vertex
     std::vector<int> mapcount;          // per source vertex
     std::vector<std::vector<int>> map;  // per source vertex -> model verts
 };
@@ -8103,8 +8160,11 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
     if (!sorted.empty())
         qsort(sorted.data(), sorted.size(), sizeof(FlexSortEntry), FlexKeysSortFunc);
 
-    // build the per-source model map + per-morph vanim maps
-    std::map<const src::SrcMorphAnim*, MorphMaps> morphMaps;
+    // build the per-source model map + per-morph vanim maps. Which morphs get
+    // an entry is what decides whether a key emits deltas below, so that stays
+    // per morph; only the map payload is shared (std::map nodes are stable).
+    std::map<const src::Source*, MorphMaps> sourceMaps;
+    std::map<const src::SrcMorphAnim*, const MorphMaps*> morphMaps;
     src::Source* pVLastSource = nullptr;
     std::vector<int> modelToVAnim;
 
@@ -8127,29 +8187,14 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
             pVLastSource = pVSource;
         }
 
-        MorphMaps& maps = morphMaps[pVSourceAnim];
-        if (!maps.flag.empty())
+        auto ins = morphMaps.emplace(pVSourceAnim, nullptr);
+        if (!ins.second)
             continue; // already built for this morph
 
-        maps.flag.assign(pVSource->vertex.size(), 0);
-
-        // group [i, j) of keys with the same (source, animationname)
-        int j;
-        for (j = i + 1; j < static_cast<int>(sorted.size()); ++j) {
-            if (sorted[j].key->source != pVSource ||
-                _stricmp(sorted[j].key->animationname.c_str(),
-                         pFlexKey->animationname.c_str()) != 0)
-                break;
-        }
-        for (; i < j; ++i) {
-            for (const src::SrcVertAnim& va : pVSourceAnim->vanims) {
-                if (va.vertex >= 0 && va.vertex < static_cast<int>(maps.flag.size()))
-                    maps.flag[va.vertex] = 1;
-            }
-        }
-        --i;
-
-        BuildVAnimMap(pVSource, maps, modelToVAnim);
+        MorphMaps& shared = sourceMaps[pVSource];
+        if (shared.mapcount.empty())
+            BuildVAnimMap(pVSource, shared, modelToVAnim);
+        ins.first->second = &shared;
     }
 
     // remap each key's deltas onto its model's vertices (original key order)
@@ -8168,9 +8213,9 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
         if (!pVSourceAnim)
             continue;
         auto it = morphMaps.find(pVSourceAnim);
-        if (it == morphMaps.end() || it->second.mapcount.empty())
+        if (it == morphMaps.end() || it->second->mapcount.empty())
             continue;
-        const MorphMaps& maps = it->second;
+        const MorphMaps& maps = *it->second;
 
         key.vanimtype = kVertAnimNormal; // AllocateDestVAnim default
         key.vanim.clear();

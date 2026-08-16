@@ -168,6 +168,9 @@ struct Ctx {
     std::map<std::string, source::Source*> rendermeshes; // $rendermesh name -> loaded source
     // filename -> shared source. A bodied $rendermesh is excluded: its edits must not leak to other refs.
     std::map<std::string, source::Source*> sourceCache;
+    // full path -> parsed DMX. Read-only input, so the same file feeding several
+    // loads (each $rendermesh reopens it) is read and parsed once.
+    std::map<std::string, std::shared_ptr<pulse::dmx::Datamodel>> dmxCache;
     source::MaterialTable physMats; // collision-only materials, kept out of the model's texture table
     std::map<std::string, int> namedAnims; // $animation name -> index into in.anims
     std::map<std::string, std::vector<Token>> cmdlists; // $cmdlist name -> body tokens
@@ -446,6 +449,21 @@ struct MeshEdit {
 // source. `kind` (source::LoadKind) gates both how much gets read and what a
 // cached entry may satisfy - a cache hit needs kind >= what's requested, and
 // the store only ever raises a key's kind.
+// Parse a DMX once per file. The document is immutable input - the Source each
+// caller builds from it is still built fresh and stays private.
+std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& full,
+                                                     std::string* err) {
+    const std::string key = Lower(full.string());
+    auto it = c.dmxCache.find(key);
+    if (it != c.dmxCache.end())
+        return it->second;
+    std::shared_ptr<pulse::dmx::Datamodel> dm =
+        pulse::dmx::Datamodel::Load(full.string().c_str(), err);
+    if (dm)
+        c.dmxCache[key] = dm;
+    return dm;
+}
+
 source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                            bool morphSource = false, MeshEdit* edit = nullptr,
                            source::LoadKind kind = source::LoadKind::Model) {
@@ -520,7 +538,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             }
         }
     } else {
-        auto dm = pulse::dmx::Datamodel::Load(full.string().c_str(), &loadErr);
+        auto dm = LoadDmxCached(c, full, &loadErr);
         if (!dm) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
             return nullptr;
@@ -1002,14 +1020,14 @@ fs::path FindRigFile(Ctx& c, const Token& cmd, const std::string& filename) {
 
 // Open a DMX for its rig alone. It never becomes a Source, so nothing in it
 // reaches the skeleton, the bodygroups or the material table.
-std::unique_ptr<pulse::dmx::Datamodel> LoadRigDmx(Ctx& c, const Token& cmd,
-                                                  const std::string& filename,
-                                                  const std::string& what) {
+std::shared_ptr<pulse::dmx::Datamodel> LoadRigDmx(Ctx& c, const Token& cmd,
+                                                 const std::string& filename,
+                                                 const std::string& what) {
     const fs::path full = FindRigFile(c, cmd, filename);
     if (full.empty())
         return nullptr;
     std::string loadErr;
-    auto dm = pulse::dmx::Datamodel::Load(full.string().c_str(), &loadErr);
+    auto dm = LoadDmxCached(c, full, &loadErr);
     if (!dm) {
         c.Fail(cmd.line, "cannot load \"" + full.string() + "\": " + loadErr);
         return nullptr;
