@@ -311,7 +311,7 @@ bool GenerateStripGroupVerticesFromFace(Builder& b, const source::SrcFace& face,
         // vertex block, so the mesh's vertexoffset has to be added (the
         // reference goes through pStudioMesh->GetVertexData(), which is
         // already mesh-relative). Only meshes after the first have a nonzero
-        // offset, which is why single-mesh testcases never caught this.
+        // offset.
         fmt::mstudioboneweight_t* bw =
             &b.vvdVertex(pStudioModel, pStudioMesh->vertexoffset + vertex)->m_BoneWeights;
         int bonesAffectingVertex = bw->numbones;
@@ -484,7 +484,6 @@ Face* GetNextUntouchedWithLeastBoneStateChanges(Builder& b, std::vector<Face>& f
     // just bookkeeping: an empty palette means the next
     // GetNextUntouchedWithoutBoneStateChange finds nothing, so face traversal
     // (and therefore strip/vertex order) changes. Found by byte-diffing
-    // testcase10 - only the FIRST mesh matched with the LRU variant.
     b.hwState.DeallocateAll();
     return bestFace;
 }

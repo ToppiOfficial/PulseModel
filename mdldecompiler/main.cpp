@@ -28,6 +28,7 @@
 #include "animwrite.h"
 #include "dmxwrite.h"
 #include "fatalerror.h"
+#include "flexrig.h"
 #include "format/phy.h"
 #include "mdlfile.h"
 
@@ -1657,21 +1658,44 @@ std::vector<bool> DescHasGeometry(const Mdl& m) {
     return used;
 }
 
-void WriteFlexes(Qc& q, const Mdl& m) {
+void WriteFlexes(Qc& q, const Mdl& m, const FlexRig& rig, const std::string& faceMesh) {
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudioflexcontroller_t* fc =
         m.At<fm::mstudioflexcontroller_t>(m.buf.data(), h.flexcontrollerindex, h.numflexcontrollers);
 
+    // The combination rig went back into the mesh .dmx, so the controllers and
+    // rules it rebuilds are imported rather than written out again here. Only
+    // the .pulseqc can import one; stock reads the operator off the mesh itself.
+    const bool importRig = !g_studiomdl && !rig.empty() && !faceMesh.empty();
+    if (importRig) {
+        q.Blank();
+        q.Line("$datamodelflexes \"" + faceMesh +
+               "\" flexcontroller flexcorrective flexdominator");
+        q.Line("// " + std::to_string(rig.correctives.size()) + " correctives and " +
+               std::to_string(rig.dominations.size()) +
+               " domination rules, rebuilt from the flex rules into that file");
+        if (rig.dropped)
+            q.Line("// " + std::to_string(rig.dropped) +
+                   " rules did not decode as a combination and are commented out below");
+        if (rig.domMismatch)
+            q.Line("// " + std::to_string(rig.domMismatch) +
+                   " correctives get a different dominator set than the model had - the rules "
+                   "are\n// per-combination, and one written against a subset also hits its "
+                   "supersets");
+    }
+
     std::vector<std::string> ctrls;
     if (fc && h.numflexcontrollers > 0) {
         q.Blank();
-        // The .dmx's combination controls are named after its deltas, so stock
-        // would auto-create a controller for each on top of the real ones below
-        // and blow the limit. This keeps the deltas and drops only that.
+        // stock auto-creates a controller per combination control on top of the
+        // real ones below, which double-registers them. This keeps the deltas
+        // and the rig in the .dmx and drops only that.
         if (g_studiomdl)
             q.Line("noautodmxrules");
         for (int i = 0; i < h.numflexcontrollers; ++i) {
             ctrls.push_back(m.Str(&fc[i], fc[i].sznameindex));
+            if (importRig && rig.controllers.count(i))
+                continue; // the imported controls recreate this one
             std::string line = (g_studiomdl ? "flexcontroller " : "$flexcontroller ") +
                                std::string(m.Str(&fc[i], fc[i].sztypeindex));
             if (fc[i].min != 0.0f || fc[i].max != 1.0f)
@@ -1756,6 +1780,8 @@ void WriteFlexes(Qc& q, const Mdl& m) {
     q.Blank();
     int skipped = 0, commented = 0;
     for (int i = 0; i < h.numflexrules; ++i) {
+        if (importRig && rig.descs.count(rules[i].flex))
+            continue; // the imported rig rebuilds this one
         const fm::mstudioflexop_t* ops =
             m.At<fm::mstudioflexop_t>(&rules[i], rules[i].opindex, rules[i].numops);
         const std::string target =
@@ -1783,7 +1809,8 @@ void WriteFlexes(Qc& q, const Mdl& m) {
     if (skipped) {
         q.Line("// " + std::to_string(skipped) + " of " + std::to_string(h.numflexrules) +
                " flex rules use combo/dominate/nway/2way ops, which have no $flexrule");
-        q.Line("// spelling - they come back from the DMX rig via $datamodelflexes.");
+        q.Line(importRig ? "// spelling and did not rebuild as a combination - they are lost."
+                         : "// spelling - they come back from the DMX rig via $datamodelflexes.");
     }
 }
 
@@ -2663,11 +2690,14 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
     // capture them here and let WriteBodyParts put them in the block.
     pulse::fatal::g_stage = "MeshNames";
     const std::vector<std::vector<std::string>> meshNames = MeshNames(m);
+    pulse::fatal::g_stage = "BuildFlexRig";
+    const FlexRig rig = BuildFlexRig(m);
+    const std::string faceMesh = FaceMesh(m, meshNames);
     std::string faceBody;
     if (g_studiomdl) {
         q.sink = &faceBody;
-        STAGE(WriteEyes, q, m, FaceMesh(m, meshNames));
-        STAGE(WriteFlexes, q, m);
+        STAGE(WriteEyes, q, m, faceMesh);
+        STAGE(WriteFlexes, q, m, rig, faceMesh);
         q.sink = nullptr;
         faceBody.erase(0, faceBody.find_first_not_of('\n'));
     }
@@ -2679,7 +2709,7 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
     // loader makes on its own and has no block; a negative switch is the shadow LOD.
     std::printf("\nmeshes:\n");
     pulse::fatal::g_stage = "WriteRenderMeshes";
-    const std::vector<LodInfo> lods = WriteRenderMeshes(m, in, dir, meshNames);
+    const std::vector<LodInfo> lods = WriteRenderMeshes(m, in, dir, meshNames, rig);
     // The LOD meshes come out of the .vvd already rigged, so stock must not
     // re-derive their weights from LOD 0 the way an authored LOD needs.
     if (g_studiomdl && lods.size() > 1) {
@@ -2709,7 +2739,7 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
 
     if (!g_studiomdl) {
         STAGE(WriteEyes, q, m, std::string());
-        STAGE(WriteFlexes, q, m);
+        STAGE(WriteFlexes, q, m, rig, faceMesh);
     }
     STAGE(WriteSkins, q, m);
     STAGE(WriteAttachments, q, m);

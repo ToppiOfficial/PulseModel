@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "flexrig.h"
 #include "mdlfile.h"
 
 namespace mdldecompiler {
@@ -32,7 +33,8 @@ struct LodInfo {
 // read); never fails the decompile - the .pulseqc stands on its own.
 std::vector<LodInfo> WriteRenderMeshes(const Mdl& m, const std::string& mdlPath,
                                        const std::string& dir,
-                                       const std::vector<std::vector<std::string>>& names);
+                                       const std::vector<std::vector<std::string>>& names,
+                                       const FlexRig& rig);
 
 // One bone's parent-relative pose in one frame, as animwrite.cpp decodes it.
 struct AnimPose {

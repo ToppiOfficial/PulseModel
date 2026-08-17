@@ -368,7 +368,7 @@ int g_formatModel = 15;
 // Binary attribute type ids for encoding versions 1-5: scalars 1..14, the
 // matching array type 14 higher. Only the ones we emit are listed.
 enum : uint8_t {
-    kElement = 1, kInt = 2, kBool = 4, kString = 5, kTime = 7,
+    kElement = 1, kInt = 2, kFloat = 3, kBool = 4, kString = 5, kTime = 7,
     kVector2 = 9, kVector3 = 10, kQuaternion = 13,
     kElementArray = 15, kIntArray = 16, kFloatArray = 17, kStringArray = 19,
     kTimeArray = 21, kVector2Array = 23, kVector3Array = 24, kQuaternionArray = 27,
@@ -414,6 +414,7 @@ const char* TypeName(uint8_t t) {
     switch (t) {
         case kElement: return "element";
         case kInt: return "int";
+        case kFloat: return "float";
         case kBool: return "bool";
         case kString: return "string";
         case kTime: return "time";
@@ -500,6 +501,7 @@ struct Dmx {
     void Str(const char* k, const std::string& v) { Push(k, kString).s.push_back(v); }
     void Time(const char* k, float seconds) { Push(k, kTime).f.push_back(seconds); }
     void Int(const char* k, int v) { Push(k, kInt).i.push_back(v); }
+    void Float(const char* k, float v) { Push(k, kFloat).f.push_back(v); }
     void Bool(const char* k, bool v) { Push(k, kBool).i.push_back(v ? 1 : 0); }
     void Vec3(const char* k, const pm::Vector3& v) { Push(k, kVector3).f = {v.x, v.y, v.z}; }
     void Quat(const char* k, const pm::Quaternion& q) {
@@ -690,6 +692,7 @@ struct Dmx {
                 switch (a.type) {
                     case kElement: ref(a.s[0]); break;
                     case kInt: i32(a.i[0]); break;
+                    case kFloat: f32(a.f[0]); break;
                     case kBool: u8(static_cast<uint8_t>(a.i[0])); break;
                     case kTime: i32(Ticks(a.f[0])); break;
                     case kString:
@@ -877,7 +880,7 @@ void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
 
 void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName,
               const fm::mstudiomodel_t& model, const ModelLod& ml, const ModelTris& tris,
-              const std::vector<fm::mstudiovertex_t>& vvd) {
+              const std::vector<fm::mstudiovertex_t>& vvd, const FlexRig& rig) {
     const fm::studiohdr_t& h = *m.hdr;
     const size_t vbase = static_cast<size_t>(ml.base);
     const size_t nverts = static_cast<size_t>(ml.count);
@@ -984,8 +987,13 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
                     const auto& w =
                         *reinterpret_cast<const fm::mstudiovertanim_wrinkle_t*>(va + stride * n);
                     d.wrinkleIdx.push_back(mv);
-                    d.wrinkle.push_back(static_cast<float>(w.wrinkledelta) *
-                                        h.flVertAnimFixedPointScale);
+                    // the header field is only written when the scale isn't the
+                    // 1/4096 default, so an unflagged model reads back as 0
+                    const float scale =
+                        (h.flags & fm::STUDIOHDR_FLAGS_VERT_ANIM_FIXED_POINT_SCALE)
+                            ? h.flVertAnimFixedPointScale
+                            : 1.0f / 4096.0f;
+                    d.wrinkle.push_back(static_cast<float>(w.wrinkledelta) * scale);
                 }
                 // side/speed are the mesh's own per-vertex fields, stored on
                 // every vertanim that touches the vertex rather than once. Only
@@ -1188,11 +1196,15 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         idFaceSet.push_back(q.NewId());
         idMaterial.push_back(q.NewId());
     }
-    std::vector<std::string> idDelta, idControl;
-    for (size_t i = 0; i < deltaOrder.size(); ++i) {
+    // With a rebuilt rig the controls are the real ones, not one per delta.
+    const size_t numControl = rig.empty() ? deltaOrder.size() : rig.controls.size();
+    std::vector<std::string> idDelta, idControl, idDom;
+    for (size_t i = 0; i < deltaOrder.size(); ++i)
         idDelta.push_back(q.NewId());
+    for (size_t i = 0; i < numControl; ++i)
         idControl.push_back(q.NewId());
-    }
+    for (size_t i = 0; i < rig.dominations.size(); ++i)
+        idDom.push_back(q.NewId());
     const std::string idCombo = deltaOrder.empty() ? std::string() : q.NewId();
 
     WriteSkel(q, m, skel, meshName, idMeshDag, idCombo);
@@ -1213,6 +1225,11 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     q.RefArray("baseStates", {idData});
     q.RefArray("faceSets", idFaceSet);
     q.RefArray("deltaStates", idDelta);
+    // parallel to deltaStates - the weight each delta is dialed to, which is
+    // nothing at rest. The combination operator reads the pair as a set, so the
+    // array has to be there for the deltas to count as targets at all.
+    if (!rig.empty())
+        q.V2Array("deltaStateWeights", std::vector<pm::Vector2>(idDelta.size(), {0.0f, 0.0f}));
     q.End();
 
     std::vector<std::string> fmtNames = {F("positions"), F("normals"), F("textureCoordinates"),
@@ -1283,21 +1300,48 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         q.End();
     }
 
-    // The combination operator has to exist for the deltas to be read at all,
-    // but a $rendermesh takes only the raw control names and the stereo flag off
-    // it - the rig (correctives, dominators, rules) is $datamodelflexes' job and
-    // the .pulseqc carries it as $flexcontroller/$flexrule.
+    // The rig rebuilt from the .mdl's flex rules: the input controls, and the
+    // mesh as the target whose delta names spell the combinations. Without one
+    // (no rules, or rules we could not decode) each delta gets its own control,
+    // which carries the stereo flag and nothing else.
     if (!idCombo.empty()) {
         q.Begin("DmeCombinationOperator", idCombo, meshName);
         q.RefArray("controls", idControl);
-        q.RefArray("targets", {});
+        q.RefArray("targets", rig.empty() ? std::vector<std::string>{}
+                                          : std::vector<std::string>{idMesh});
+        if (!rig.dominations.empty())
+            q.RefArray("dominators", idDom);
         q.End();
-        for (size_t i = 0; i < deltaOrder.size(); ++i) {
-            q.Begin("DmeCombinationInputControl", idControl[i], deltaOrder[i]);
-            q.StrArray("rawControlNames", {deltaOrder[i]});
-            q.Bool("stereo", deltas[deltaOrder[i]].stereo);
-            q.Bool("eyelid", false);
-            q.End();
+
+        if (rig.empty()) {
+            for (size_t i = 0; i < deltaOrder.size(); ++i) {
+                q.Begin("DmeCombinationInputControl", idControl[i], deltaOrder[i]);
+                q.StrArray("rawControlNames", {deltaOrder[i]});
+                q.Bool("stereo", deltas[deltaOrder[i]].stereo);
+                q.Bool("eyelid", false);
+                q.End();
+            }
+        } else {
+            for (size_t i = 0; i < rig.controls.size(); ++i) {
+                const RigControl& c = rig.controls[i];
+                q.Begin("DmeCombinationInputControl", idControl[i], c.name);
+                q.StrArray("rawControlNames", c.rawControls);
+                q.Bool("stereo", c.stereo);
+                q.Bool("eyelid", c.eyelid);
+                if (!c.eyesUpDownFlex.empty())
+                    q.Str("eyesUpDownFlex", c.eyesUpDownFlex);
+                if (c.hasRange) {
+                    q.Float("flexMin", c.min);
+                    q.Float("flexMax", c.max);
+                }
+                q.End();
+            }
+            for (size_t i = 0; i < rig.dominations.size(); ++i) {
+                q.Begin("DmeCombinationDominationRule", idDom[i], "dominationRule");
+                q.StrArray("dominators", rig.dominations[i].dominators);
+                q.StrArray("suppressed", rig.dominations[i].suppressed);
+                q.End();
+            }
         }
     }
 
@@ -1759,7 +1803,8 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
 
 std::vector<LodInfo> WriteRenderMeshes(const Mdl& m, const std::string& mdlPath,
                                        const std::string& dir,
-                                       const std::vector<std::vector<std::string>>& names) {
+                                       const std::vector<std::vector<std::string>>& names,
+                                       const FlexRig& rig) {
     std::vector<LodInfo> lods;
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudiobodyparts_t* parts =
@@ -1832,7 +1877,7 @@ std::vector<LodInfo> WriteRenderMeshes(const Mdl& m, const std::string& mdlPath,
                                           ? tris[i][j]
                                           : empty;
                 WriteOne(m, meshDir + "/" + names[i][j] + suffix + ".dmx", names[i][j] + suffix,
-                         models[j], layout[i][j], mt, vvd);
+                         models[j], layout[i][j], mt, vvd, rig);
             }
         }
     }
