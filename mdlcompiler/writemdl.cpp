@@ -6,6 +6,7 @@
 // insertion order and the checksum-before-fixup sequencing are all load-bearing.
 
 #include "writer.h"
+#include "perf.h"
 
 #include <algorithm>
 #include <cctype>
@@ -949,7 +950,9 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
             pIkData = blockBuf->pos;
             WriteIkErrors(srcanim, *blockBuf);
         }
-        // (WriteLocalHierarchy: none in this phase)
+        // TODO: localhierarchy. A $sequence/$animation option that reparents a
+        // bone to another for a frame range (start/peak/tail/end ramp, pose
+        // compressed like IK error). Unparsed, so numlocalhierarchy stays 0.
 
         if (blockBuf && blockData != blockBuf->pos &&
             blockBuf->pos - g_animblocks.blocks[g_animblocks.count - 1].start >
@@ -2893,12 +2896,11 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     std::vector<uint8_t> mdlBuf(buf.start(), buf.start() + total);
 
     using WClock = std::chrono::steady_clock;
-    const bool wtiming = std::getenv("PULSEMDL_TIMING") != nullptr;
     auto wt0 = WClock::now();
-    auto wlog = [&](const char* what, WClock::time_point a, WClock::time_point b) {
-        if (wtiming)
-            std::printf("[write] %-12s %8.0f ms\n", what,
-                        std::chrono::duration<double, std::milli>(b - a).count());
+    auto wlog = [](const char* what, WClock::time_point a, WClock::time_point b) {
+        if (pulse::perf::g_enabled)
+            pulse::perf::Record("write", what,
+                                std::chrono::duration<double, std::milli>(b - a).count());
     };
 
     // These stages are silent and slow on a big model, and the per-file reports

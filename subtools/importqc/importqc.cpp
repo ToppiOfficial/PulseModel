@@ -6,6 +6,7 @@
 
 #include "importqc.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -141,8 +142,10 @@ fs::path ConvertedPath(const fs::path& p) {
 // The token stream plus the per-line rewrite plan.
 struct Conv {
     std::string file;
-    fs::path dir;                // the input's directory - $include is relative to it
+    fs::path dir;                // the input's directory - $include is tried here first
+    fs::path root;               // the top-level script's directory - $include's fallback
     std::set<std::string>* seen; // scripts already converted, shared down the include tree
+    std::set<std::string>* vars; // every $definevariable name seen, shared the same way
     std::vector<Tok> toks;
     size_t pos = 0;
     std::vector<std::string> src;  // input lines, 0-based
@@ -170,6 +173,12 @@ struct Conv {
     // ('d' = $ifdef, 'n' = $ifndef, 0 = left alone) - an $elif has to match it
     int depth = 0;
     std::vector<char> chainAt;
+    // one per open conditional: true when its head carried no '{', so $endif has
+    // to close it. A head that brought its own '{' is already closed by a '}'.
+    std::vector<bool> bareIf;
+    // stock's $definemacro body is one `\\`-continued logical line; .pulseqc
+    // closes it with $endmacro instead. Last source line of the open body, or 0.
+    int macroEnd = 0;
     std::string err;
     int commands = 0;
 };
@@ -284,9 +293,12 @@ struct Body {
 
 // `flex`/`flexpair`/`defaultflex` options: frame/position/split/decay. `split`
 // is flexpair's own argument as well as an option, and the option wins.
+// `defaultflex` only names the basis frame, which $vta takes as frame 0 - it
+// writes no entry.
 bool FlexOptions(Conv& c, int line, const std::string& where, const std::string& name,
-                 std::string split, Body& b) {
+                 std::string split, bool basis, Body& b) {
     std::string entry = "flex " + Q(name);
+    std::string frame = "0";
     while (SameLine(c, line)) {
         const std::string o = Lower(c.toks[c.pos].text);
         if (o != "frame" && o != "position" && o != "split" && o != "decay")
@@ -299,6 +311,14 @@ bool FlexOptions(Conv& c, int line, const std::string& where, const std::string&
             split = v;
         else
             entry += " " + o + " " + v;
+        if (o == "frame")
+            frame = v;
+    }
+    if (basis) {
+        if (frame != "0")
+            b.hoisted.push_back("// importqc: `defaultflex frame " + frame +
+                                "` - $vta always takes frame 0 as the basis");
+        return true;
     }
     b.vtaFlexes.push_back(entry);
     // stock splits a paired flex into <name>L/<name>R off the mesh balance
@@ -396,7 +416,8 @@ bool Eyeball(Conv& c, int line, Body& b) {
 }
 
 bool ConvertFile(const fs::path& in, const fs::path& out, bool bodyMode,
-                 std::set<std::string>& seen, std::string* err);
+                 std::set<std::string>& seen, std::set<std::string>& vars, const fs::path& root,
+                 std::string* err);
 
 // Convert the script an $include names and give back the lines replacing it -
 // .qci becomes .pulseqci and the path re-points at the twin. A file that is not
@@ -404,8 +425,12 @@ bool ConvertFile(const fs::path& in, const fs::path& out, bool bodyMode,
 bool IncludeFile(Conv& c, int line, const std::string& rel, const std::string& flags,
                  bool bodyMode, std::vector<std::string>& out) {
     const fs::path relPath(rel);
-    const fs::path full = (relPath.is_absolute() ? relPath : c.dir / relPath).lexically_normal();
     std::error_code ec;
+    // the including file's dir, then the root script's - stock resolves against
+    // the root, so a nested $include often carries the whole path down from it
+    fs::path full = relPath.is_absolute() ? relPath : (c.dir / relPath).lexically_normal();
+    if (!relPath.is_absolute() && !fs::is_regular_file(full, ec))
+        full = (c.root / relPath).lexically_normal();
     if (!fs::is_regular_file(full, ec)) {
         out.push_back("// importqc: \"" + rel +
                       "\" is missing - not converted, this path still points at stock QC");
@@ -416,7 +441,7 @@ bool IncludeFile(Conv& c, int line, const std::string& rel, const std::string& f
     const fs::path canon = fs::weakly_canonical(full, ec);
     const std::string key = Lower((ec ? full : canon).string());
     if (c.seen->insert(key).second &&
-        !ConvertFile(full, ConvertedPath(full), bodyMode, *c.seen, &c.err))
+        !ConvertFile(full, ConvertedPath(full), bodyMode, *c.seen, *c.vars, c.root, &c.err))
         return false;
 
     // keep the path as authored, only the filename changes
@@ -424,6 +449,8 @@ bool IncludeFile(Conv& c, int line, const std::string& rel, const std::string& f
     out.push_back("$include " + Q(newRel.generic_string()) + flags);
     return true;
 }
+
+bool ModelBody(Conv& c, const std::string& where, Body& b);
 
 // One $model body option. Everything it writes is a top-level .pulseqc command,
 // so it goes to `hoisted` and the caller decides where that lands.
@@ -476,13 +503,17 @@ bool BodyOption(Conv& c, const Tok& t, const std::string& where, Body& b) {
         } else if (o == "flexfile") {
             if (!Want(c, line, "flexfile", "a .vta file", b.vtaFile))
                 return false;
+            // the flex/defaultflex lines may sit in a block after the file
+            if (More(c) && !c.toks[c.pos].quoted && c.toks[c.pos].text == "{" &&
+                !ModelBody(c, "flexfile " + Q(b.vtaFile), b))
+                return false;
         } else if (o == "flex" || o == "flexpair" || o == "defaultflex") {
             std::string name = "default", split;
             if (o != "defaultflex" && !Want(c, line, o, "a flex name", name))
                 return false;
             if (o == "flexpair" && !Want(c, line, o, "a split", split))
                 return false;
-            if (!FlexOptions(c, line, o, name, split, b))
+            if (!FlexOptions(c, line, o, name, split, o == "defaultflex", b))
                 return false;
         } else if (o == "vcafile") {
             std::string file;
@@ -606,7 +637,11 @@ bool Model(Conv& c, bool bodied) {
         !Want(c, cmd.line, what, "a source filename", file))
         return false;
 
-    StudioOpts(c, cmd.line, c.meshDecls);
+    // inside a $definemacro body the decl stays put: its name and file are
+    // $param$ references that mean nothing at the top of the file
+    std::vector<std::string> out;
+    std::vector<std::string>& decls = c.macroEnd ? out : c.meshDecls;
+    StudioOpts(c, cmd.line, decls);
 
     Body b;
     const std::string where = what + " \"" + name + "\"";
@@ -621,18 +656,18 @@ bool Model(Conv& c, bool bodied) {
 
     const std::string decl = "$rendermesh " + Q(mesh) + " " + Q(file);
     if (b.vtaFlexes.empty()) {
-        c.meshDecls.push_back(decl);
+        decls.push_back(decl);
     } else {
-        c.meshDecls.push_back(decl + " {");
-        c.meshDecls.push_back("    $vta " + Q(b.vtaFile) + " {");
+        decls.push_back(decl + " {");
+        decls.push_back("    $vta " + Q(b.vtaFile) + " {");
         for (const std::string& f : b.vtaFlexes)
-            c.meshDecls.push_back("        " + f);
-        c.meshDecls.push_back("    }");
-        c.meshDecls.push_back("}");
+            decls.push_back("        " + f);
+        decls.push_back("    }");
+        decls.push_back("}");
     }
 
-    ClaimMeshSlot(c, cmd.line);
-    std::vector<std::string> out;
+    if (!c.macroEnd)
+        ClaimMeshSlot(c, cmd.line);
     out.push_back("$modelgroup " + Q(name) + " " + Q(mesh));
     AppendGrouped(out, b.hoisted, "$modelgroup");
     Emit(c, cmd.line, LastLine(c), out);
@@ -1064,9 +1099,11 @@ char PeekDefTest(const Conv& c, std::string& name) {
 }
 
 // Any other function call in the condition up to its '{'.
-bool HasLegacyCall(const Conv& c) {
+bool HasLegacyCall(const Conv& c, int line = -1) {
     for (size_t i = c.pos; i < c.toks.size(); i++) {
         if (!c.toks[i].quoted && c.toks[i].text == "{")
+            break;
+        if (line >= 0 && c.toks[i].line != line)
             break;
         const std::string t = Lower(c.toks[i].text);
         if (t.compare(0, 5, "none(") == 0 || t.compare(0, 4, "not(") == 0 ||
@@ -1089,6 +1126,66 @@ char& ChainMode(Conv& c) {
     if (c.depth >= static_cast<int>(c.chainAt.size()))
         c.chainAt.resize(static_cast<size_t>(c.depth) + 1, 0);
     return c.chainAt[c.depth];
+}
+
+// True when the conditional on `line` carries no '{' - the $endif-closed form.
+bool BareForm(const Conv& c, int line) {
+    for (size_t i = c.pos; i < c.toks.size() && c.toks[i].line == line; i++)
+        if (!c.toks[i].quoted && c.toks[i].text == "{")
+            return false;
+    return true;
+}
+
+// A bare word in a comparison is a literal in the $endif dialect but a variable
+// name in .pulseqc, so quote the ones no $definevariable declares.
+std::string CondText(Conv& c, int line, bool& lhsQuoted) {
+    static const std::set<std::string> kOps = {"==", "!=", "<", ">", "<=", ">=", "&&", "||", "!"};
+    std::string s;
+    bool quotedPrev = false;
+    while (SameLine(c, line)) {
+        const Tok& t = c.toks[c.pos++];
+        char* end = nullptr;
+        std::strtod(t.text.c_str(), &end);
+        const bool number = !t.text.empty() && end && *end == '\0';
+        const bool unknown = !t.quoted && !kOps.count(t.text) && !number &&
+                             t.text.find('$') == std::string::npos && !c.vars->count(t.text);
+        // an unknown word LEFT of a comparison is usually a variable this file
+        // cannot see - quoting it makes the test a literal one that never fires
+        if (quotedPrev && kOps.count(t.text))
+            lhsQuoted = true;
+        quotedPrev = unknown;
+        s += " " + (t.quoted || unknown ? Q(t.text) : t.text);
+    }
+    return s;
+}
+
+// The $endif-closed form. .pulseqc braces every clause, so the head opens a
+// block, $elif/$else close and reopen it, and $endif closes it.
+void BareCond(Conv& c, const std::string& o) {
+    const Tok cmd = c.toks[c.pos++];
+    if (o == "$endif") {
+        const bool bare = c.bareIf.empty() || c.bareIf.back();
+        if (!c.bareIf.empty())
+            c.bareIf.pop_back();
+        Emit(c, cmd.line, cmd.line, bare ? std::vector<std::string>{"}"}
+                                         : std::vector<std::string>{});
+        return;
+    }
+    const bool opens = o != "$elif" && o != "$else";
+    if ((o == "$if" || o == "$elif") && HasLegacyCall(c, cmd.line))
+        Note(c, cmd.line, "this " + o + " uses a PulseMDL function form that .pulseqc "
+                          "dropped - rewrite it as a comparison, $ifdef or $ifndef");
+    // $ifdef/$ifndef take a bare name, everything else a condition
+    const bool cond = o == "$if" || o == "$elif";
+    bool lhsQuoted = false;
+    const std::string head = (opens ? "" : "} ") + o +
+                             (cond ? CondText(c, cmd.line, lhsQuoted) : RestOfLine(c, cmd.line));
+    std::vector<std::string> out;
+    if (lhsQuoted)
+        out.push_back("// importqc: no $definevariable for the name being tested here, so it was "
+                      "quoted as a literal - this test can never be true");
+    out.push_back(head + " {");
+    Emit(c, cmd.line, LastLine(c), out);
 }
 
 // $if Not(None(x)) { -> $ifdef x {. A chain is all one kind, so the $elif of a
@@ -1220,6 +1317,62 @@ bool AddIncludeDir(Conv& c) {
     return true;
 }
 
+// $nekodriverbone <driver> { pose <file> trigger <tol> <frame> ... <helper> ... }
+// One $driverbone per helper, all sharing the pose and its sampled triggers. A
+// pose frame is parent-relative in full, which is $driverbone's `absolute`.
+bool NekoDriverBone(Conv& c) {
+    const Tok cmd = c.toks[c.pos++];
+    const std::string what = "$nekodriverbone";
+    std::string driver;
+    if (!Want(c, cmd.line, what, "a driver bone", driver))
+        return false;
+    const std::string where = what + " \"" + driver + "\"";
+    if (!More(c) || c.toks[c.pos].quoted || c.toks[c.pos].text != "{")
+        return Fail(c, cmd.line, where + " expects '{'");
+    c.pos++;
+
+    std::string pose;
+    std::vector<std::string> triggers, helpers;
+    for (;;) {
+        if (!More(c))
+            return Fail(c, cmd.line, where + " is missing '}'");
+        const Tok t = c.toks[c.pos++];
+        if (!t.quoted && t.text == "}")
+            break;
+        const std::string o = t.quoted ? std::string() : Lower(t.text);
+        if (o == "pose") {
+            if (!Want(c, t.line, where + " pose", "an animation file", pose))
+                return false;
+        } else if (o == "trigger") {
+            std::string tol, frame;
+            if (!Want(c, t.line, where + " trigger", "a tolerance", tol) ||
+                !Want(c, t.line, where + " trigger", "a frame", frame))
+                return false;
+            triggers.push_back("    posetrigger " + tol + " " + frame);
+        } else {
+            helpers.push_back(t.text);
+        }
+    }
+    if (pose.empty())
+        return Fail(c, cmd.line, where + " has no `pose` file");
+    if (triggers.empty())
+        return Fail(c, cmd.line, where + " has no triggers");
+    if (helpers.empty())
+        return Fail(c, cmd.line, where + " names no helper bones");
+
+    std::vector<std::string> out;
+    for (const std::string& h : helpers) {
+        if (!out.empty())
+            out.push_back("");
+        out.push_back("$driverbone " + Q(h) + " " + Q(driver) + " absolute poseanim " +
+                      Q(pose) + " {");
+        out.insert(out.end(), triggers.begin(), triggers.end());
+        out.push_back("}");
+    }
+    Emit(c, cmd.line, LastLine(c), out);
+    return true;
+}
+
 // $pushd <dir> / $popd -> $addsearchdir. There is no cd stack in .pulseqc, so
 // each pushed dir is registered instead - joined through the stack, since a
 // nested $pushd is relative to the one below it. $popd cannot unregister one.
@@ -1244,6 +1397,46 @@ void PopD(Conv& c) {
     else
         c.cdStack.pop_back();
     Emit(c, cmd.line, cmd.line, out);
+}
+
+bool AllSlashes(const std::string& s) {
+    return !s.empty() && s.find_first_not_of('\\') == std::string::npos;
+}
+
+// $definemacro <name> <params> \\ <body> - stock glues the body on with `\\`
+// continuations and ends at the first line that has none. .pulseqc drops the
+// glue and closes with $endmacro, so the body converts in place as usual.
+bool DefineMacro(Conv& c) {
+    const Tok cmd = c.toks[c.pos++];
+    std::string name;
+    if (!Want(c, cmd.line, "$definemacro", "a name", name))
+        return false;
+    std::string header = "$definemacro " + name;
+    while (SameLine(c, cmd.line)) {
+        const std::string p = c.toks[c.pos++].text;
+        if (!AllSlashes(p))
+            header += " " + p;
+    }
+    Emit(c, cmd.line, cmd.line, {header});
+
+    int end = cmd.line;
+    while (end < static_cast<int>(c.src.size())) {
+        std::string s = c.src[end - 1];
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+            s.pop_back();
+        if (s.empty() || s.back() != '\\')
+            break;
+        end++;
+    }
+    c.macroEnd = end;
+
+    // the glue is stock syntax, not an argument - drop it before the body parses
+    c.toks.erase(std::remove_if(c.toks.begin() + static_cast<std::ptrdiff_t>(c.pos), c.toks.end(),
+                                [&](const Tok& t) {
+                                    return t.line <= end && !t.quoted && AllSlashes(t.text);
+                                }),
+                 c.toks.end());
+    return true;
 }
 
 // $opaque / $mostlyopaque -> $renderpass. The render pass is one value, so a
@@ -1273,6 +1466,11 @@ void ScanFlags(Conv& c) {
         else if (o == "$modelname")
             c.haveModelName = true;
     }
+    for (size_t i = 0; i + 1 < c.toks.size(); i++) {
+        const std::string o = c.toks[i].quoted ? std::string() : Lower(c.toks[i].text);
+        if (o == "$definevariable" || o == "$redefinevariable")
+            c.vars->insert(c.toks[i + 1].text);
+    }
 }
 
 // A whole file of $model body options, which is what a .qci $included from
@@ -1300,6 +1498,10 @@ bool Run(Conv& c) {
     ScanFlags(c);
     while (More(c)) {
         const Tok& t = c.toks[c.pos];
+        if (c.macroEnd && t.line > c.macroEnd) {
+            c.repl[c.macroEnd - 1] += "$endmacro\n";
+            c.macroEnd = 0;
+        }
         const std::string o = t.quoted ? std::string() : Lower(t.text);
         bool ok = true;
         if (o == "$bodygroup")
@@ -1320,10 +1522,20 @@ bool Run(Conv& c) {
             RenderPass(c, o.substr(1));
         else if (o == "$include")
             ok = Include(c);
-        else if (o == "$if")
-            If(c);
-        else if (o == "$elif")
-            Elif(c);
+        else if (o == "$if" || o == "$ifdef" || o == "$ifndef" || o == "$elif" ||
+                 o == "$else" || o == "$endif") {
+            const bool bare = o != "$endif" && BareForm(c, t.line);
+            if (o == "$if" || o == "$ifdef" || o == "$ifndef")
+                c.bareIf.push_back(bare);
+            if (bare || o == "$endif")
+                BareCond(c, o);
+            else if (o == "$if")
+                If(c);
+            else if (o == "$elif")
+                Elif(c);
+            else
+                c.pos++; // already braced: $ifdef/$ifndef/$else pass through
+        }
         else if (o == "{") {
             c.depth++;
             c.pos++;
@@ -1336,6 +1548,10 @@ bool Run(Conv& c) {
             ok = AddIncludeDir(c);
         else if (o == "$rendermesh")
             ok = RenderMesh(c);
+        else if (o == "$msg")
+            Rename(c, "$print");
+        else if (o == "$nekodriverbone")
+            ok = NekoDriverBone(c);
         else if (o == "$transformbindposebone")
             Rename(c, "$transformbone");
         else if (o == "ignoretransformbindpose")
@@ -1368,17 +1584,22 @@ bool Run(Conv& c) {
             Emit(c, t.line, t.line, out);
             c.pos++;
         }
+        else if (o == "$definemacro")
+            ok = DefineMacro(c);
         else
             c.pos++; // not ours: the line passes through untouched
         if (!ok)
             return false;
     }
+    if (c.macroEnd)
+        c.repl[c.macroEnd - 1] += "$endmacro\n";
     FlushHboxSet(c);
     return true;
 }
 
 bool ConvertFile(const fs::path& in, const fs::path& out, bool bodyMode,
-                 std::set<std::string>& seen, std::string* err) {
+                 std::set<std::string>& seen, std::set<std::string>& vars, const fs::path& root,
+                 std::string* err) {
     std::ifstream f(in, std::ios::binary);
     if (!f) {
         if (err) *err = "cannot open \"" + in.string() + "\"";
@@ -1396,7 +1617,9 @@ bool ConvertFile(const fs::path& in, const fs::path& out, bool bodyMode,
     Conv c;
     c.file = in.string();
     c.dir = in.parent_path();
+    c.root = root;
     c.seen = &seen;
+    c.vars = &vars;
     if (!Tokenize(text, c.file, c.toks, err))
         return false;
 
@@ -1452,7 +1675,8 @@ bool Convert(const std::string& in, const std::string& out, std::string* err) {
     std::error_code ec;
     const fs::path canon = fs::weakly_canonical(in, ec);
     std::set<std::string> seen{Lower((ec ? fs::path(in) : canon).string())};
-    return ConvertFile(in, out, /*bodyMode=*/false, seen, err);
+    std::set<std::string> vars;
+    return ConvertFile(in, out, /*bodyMode=*/false, seen, vars, fs::path(in).parent_path(), err);
 }
 
 } // namespace pulse::importqc

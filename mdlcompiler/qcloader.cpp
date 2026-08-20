@@ -1,5 +1,6 @@
 // qcloader.cpp - keyvalues1 compile-script loader. See qcloader.h.
 
+#include "perf.h"
 #include "qcloader.h"
 
 #include <algorithm>
@@ -166,6 +167,10 @@ struct Ctx {
     std::vector<std::string> includeStack; // cycle guard
     std::vector<fs::path> includeDirs; // $addincludesearchdir
     std::vector<fs::path> searchDirs;  // $addsearchdir, for source files - never mixed with includeDirs
+    // -includesearchdir / -filesearchdir: searched only after the script's own
+    // dirs, so a script command always wins.
+    std::vector<fs::path> launchIncludeDirs;
+    std::vector<fs::path> launchSearchDirs;
     std::map<std::string, source::Source*> rendermeshes; // $rendermesh name -> loaded source
     // filename -> shared source. A bodied $rendermesh is excluded: its edits must not leak to other refs.
     std::map<std::string, source::Source*> sourceCache;
@@ -391,6 +396,8 @@ fs::path FindSourceFile(const Ctx& c, const std::string& filename,
         cands.push_back(c.scriptDir / rel);
         for (const fs::path& dir : c.searchDirs)
             cands.push_back(dir / rel);
+        for (const fs::path& dir : c.launchSearchDirs)
+            cands.push_back(dir / rel);
     }
     for (fs::path& p : cands) {
         p = p.lexically_normal().make_preferred();
@@ -473,6 +480,7 @@ struct MeshEdit {
     std::string name; // the $rendermesh alias, for the load print
     source::MeshFilter filter;
     source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
+    source::WeldMode weld = source::WeldMode::None;
     bool noMorph = false;
     std::string vta; // $vta: a legacy morph file for an SMD mesh
     int vtaLine = 0;
@@ -495,8 +503,9 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& ful
     auto it = c.dmxCache.find(key);
     if (it != c.dmxCache.end())
         return it->second;
-    std::shared_ptr<pulse::dmx::Datamodel> dm =
-        pulse::dmx::Datamodel::Load(full.string().c_str(), err);
+    std::shared_ptr<pulse::dmx::Datamodel> dm;
+    { PULSE_PERF("load", "dmx parse");
+      dm = pulse::dmx::Datamodel::Load(full.string().c_str(), err); }
     if (dm)
         c.dmxCache[key] = dm;
     return dm;
@@ -583,6 +592,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
         }
         std::printf("%s (%s %d, %s %d)\n", head.c_str(), dm->format.c_str(), dm->format_version,
                     dm->encoding.c_str(), dm->encoding_version);
+        PULSE_PERF("load", "dmx -> source");
         if (!source::LoadDmxSource(*dm, *src, mats, c.in.scale, &loadErr, morphSource,
                                    edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot parse \"" + full.string() + "\": " + loadErr);
@@ -599,8 +609,10 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
         }
     }
 
-    if (edit)
+    if (edit) {
+        source::WeldVertices(*src, edit->weld);
         source::CullUnskinnedBones(*src, edit->boneCull);
+    }
 
     c.in.sources.push_back(std::move(src));
     source::Source* loaded = c.in.sources.back().get();
@@ -707,6 +719,15 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            if (o == "$weld") {
+                edit.weld = source::WeldMode::KeepSeams;
+                if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "seams") {
+                    ++c.pos;
+                    edit.weld = source::WeldMode::All;
+                }
+                continue;
+            }
+
             if (o == "$nomorph" || o == "$nofacial") {
                 edit.noMorph = true;
                 continue;
@@ -782,7 +803,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $exceptionlist, $skinnedbonecull, "
-                                           "$nomorph, $vta, $vca or '}', got \"" + t->text + "\"");
+                                           "$weld, $nomorph, $vta, $vca or '}', got \"" +
+                                       t->text + "\"");
         }
     }
 
@@ -3900,23 +3922,37 @@ cm::BoneMarkup& FindOrAddMarkup(Ctx& c, const std::string& name) {
     return c.in.bonemarkups.back();
 }
 
-// $bonemerge <bone> (Cmd_BoneMerge): tag BONE_USED_BY_BONE_MERGE so the bone
-// survives the cull and a bonemerged child model can find it.
-bool CmdBoneMerge(Ctx& c, const Token& cmd) {
-    std::string name;
-    if (!c.Want("a bone name", cmd, name))
+// One or more bone names on the command line - the tagging commands all take a
+// list so the same command need not be repeated per bone.
+bool WantBoneNames(Ctx& c, const Token& cmd, std::vector<std::string>& names) {
+    std::string first;
+    if (!c.Want("a bone name", cmd, first))
         return false;
-    FindOrAddMarkup(c, name).isBonemerge = true;
+    names.push_back(std::move(first));
+    while (!c.AtCommand())
+        names.push_back(c.toks[c.pos++].text);
     return true;
 }
 
-// $donotcollapse <bone> (Cmd_DoNotCollapse): force-keep the bone. Beats
+// $bonemerge <bone>... (Cmd_BoneMerge): tag BONE_USED_BY_BONE_MERGE so the bone
+// survives the cull and a bonemerged child model can find it.
+bool CmdBoneMerge(Ctx& c, const Token& cmd) {
+    std::vector<std::string> names;
+    if (!WantBoneNames(c, cmd, names))
+        return false;
+    for (const std::string& n : names)
+        FindOrAddMarkup(c, n).isBonemerge = true;
+    return true;
+}
+
+// $donotcollapse <bone>... (Cmd_DoNotCollapse): force-keep the bones. Beats
 // $alwayscollapse.
 bool CmdDoNotCollapse(Ctx& c, const Token& cmd) {
-    std::string name;
-    if (!c.Want("a bone name", cmd, name))
+    std::vector<std::string> names;
+    if (!WantBoneNames(c, cmd, names))
         return false;
-    FindOrAddMarkup(c, name).doNotCollapse = true;
+    for (const std::string& n : names)
+        FindOrAddMarkup(c, n).doNotCollapse = true;
     return true;
 }
 
@@ -3931,13 +3967,14 @@ bool CmdRenameBone(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $alwayscollapse <bone> (Cmd_AlwaysCollapse): force-collapse the bone even
-// when something would normally keep it.
+// $alwayscollapse <bone>... (Cmd_AlwaysCollapse): force-collapse the bones even
+// when something would normally keep them.
 bool CmdAlwaysCollapse(Ctx& c, const Token& cmd) {
-    std::string name;
-    if (!c.Want("a bone name", cmd, name))
+    std::vector<std::string> names;
+    if (!WantBoneNames(c, cmd, names))
         return false;
-    c.in.alwaysCollapse.push_back(std::move(name));
+    for (std::string& n : names)
+        c.in.alwaysCollapse.push_back(std::move(n));
     return true;
 }
 
@@ -3966,6 +4003,11 @@ bool CmdHierarchy(Ctx& c, const Token& cmd) {
 // that lands in the .mdl.
 float DegToRad(float deg) {
     return static_cast<float>(deg * 3.14159265358979323846 / 180.0);
+}
+
+// Only for values headed back through DegToRad - a sampled pose trigger.
+float RadToDeg(float rad) {
+    return static_cast<float>(rad * 180.0 / 3.14159265358979323846);
 }
 
 bool WantOpenBrace(Ctx& c, const Token& cmd, const std::string& what) {
@@ -4151,11 +4193,12 @@ bool CmdJiggleBone(Ctx& c, const Token& cmd) {
 // the reference divides unguarded, we refuse.
 bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
                 const pm::Vector3& driverRotDeg, const pm::Vector3& helperRotDeg,
-                const pm::Vector3& pos) {
+                const pm::Vector3& pos, bool absolutePose) {
     if (tolDeg <= 0.0f)
         return c.Fail(cmd.line, "trigger tolerance must be > 0");
 
     cm::ProceduralBoneTrigger tr;
+    tr.absolutePose = absolutePose;
     tr.tolerance = DegToRad(tolDeg);
     pm::AngleQuaternion({DegToRad(driverRotDeg.x), DegToRad(driverRotDeg.y),
                          DegToRad(driverRotDeg.z)}, tr.trigger);
@@ -4177,7 +4220,7 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
     return true;
 }
 
-// $driverbone <helper> <driver> [relative|absolute] {
+// $driverbone <helper> <driver> [relative|absolute] [poseanim <file>] {
 //     basepos <x y z>                                        optional, default 0
 //     trigger <tolerance> <driver rot x y z> <helper rot x y z> <helper pos x y z>
 //     ...
@@ -4186,27 +4229,45 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
 // RadianEuler degrees (x=roll, y=pitch, z=yaw), NOT a QAngle - they go into
 // AngleQuaternion unpermuted, exactly like the <trigger> line they mirror.
 //
-// `relative` (the default) reads the helper pose as a DELTA from its bind pose,
-// which MapProceduralBones folds in once the skeleton is final - so an all-zero
-// trigger leaves the bone at rest and basepos is a plain shared offset.
-// `absolute` is the VRD's own convention: the pose is parent-relative in full,
-// so an all-zero trigger puts the bone AT its parent's origin and basepos has
-// to carry the bind pose. It exists so a VRD can be transcribed verbatim.
+// `absolute` (the default, and the VRD's own convention) reads the helper pose
+// as parent-relative in full: an all-zero trigger puts the bone AT its parent's
+// origin and basepos has to carry the bind pose.
+// `relative` reads it as a DELTA from the bind pose, which MapProceduralBones
+// folds in once the skeleton is final - an all-zero trigger leaves the bone at
+// rest and basepos is a plain shared offset. Governs `trigger` lines only.
+//
+// Both rotations and the position can also be sampled out of an animation named
+// by `poseanim <file>`:
+//     posetrigger <tolerance> <frame>
+// reads the driver's and the helper's local pose from that frame. A frame is
+// parent-relative in full, so a `posetrigger` is always absolute no matter the
+// block mode - one block can mix relative `trigger`s with sampled ones.
 bool CmdDriverBone(Ctx& c, const Token& cmd) {
     cm::ProceduralBone pb;
     if (!c.Want("a helper bone name", cmd, pb.helpername) ||
         !c.Want("a driver bone name", cmd, pb.drivername))
         return false;
 
-    // anything between the names and the '{' has to be the mode - a typo here
-    // would otherwise surface as a confusing "missing '{'"
-    if (!c.AtCommand() && !c.Cur().quoted && c.Cur().text != "{") {
-        const std::string mode = Lower(c.Cur().text);
-        if (mode != "relative" && mode != "absolute")
-            return c.Fail(c.Cur().line, "$driverbone: expected relative, absolute "
-                                        "or '{', got \"" + c.Cur().text + "\"");
-        pb.absolutePose = mode == "absolute";
-        c.pos++;
+    std::string poseFile;
+    int poseLine = cmd.line;
+    bool blockAbsolute = true; // governs `trigger` lines only
+
+    // anything between the names and the '{' has to be the mode or `poseanim
+    // <file>` - a typo would otherwise surface as a confusing "missing '{'"
+    while (!c.AtCommand() && !c.Cur().quoted && c.Cur().text != "{") {
+        const Token t = c.toks[c.pos++];
+        const std::string o = Lower(t.text);
+        if (o == "poseanim") {
+            const Token sub{"$driverbone poseanim", t.line, false};
+            if (!c.Want("an animation file", sub, poseFile))
+                return false;
+            poseLine = t.line;
+            continue;
+        }
+        if (o != "relative" && o != "absolute")
+            return c.Fail(t.line, "$driverbone: expected relative, absolute, poseanim "
+                                  "or '{', got \"" + t.text + "\"");
+        blockAbsolute = o == "absolute";
     }
     if (!WantOpenBrace(c, cmd, "$driverbone"))
         return false;
@@ -4216,6 +4277,7 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
         Token at;
         float tol = 0.0f;
         pm::Vector3 driverRot, helperRot, pos;
+        int frame = -1; // >= 0: sample the pose file instead
     };
     std::vector<Raw> raw;
     pm::Vector3 basepos{};
@@ -4228,6 +4290,17 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
 
+        if (o == "posetrigger") {
+            const Token sub{"$driverbone posetrigger", t.line, false};
+            Raw r{sub};
+            if (!c.WantFloat("a tolerance in degrees", sub, r.tol) ||
+                !c.WantInt("a frame", sub, r.frame))
+                return false;
+            if (r.frame < 0)
+                return c.Fail(t.line, "$driverbone posetrigger: frame must be >= 0");
+            raw.push_back(std::move(r));
+            continue;
+        }
         if (o == "basepos") {
             const Token sub{"$driverbone basepos", t.line, false};
             if (!c.WantFloat("an X offset", sub, basepos.x) ||
@@ -4237,8 +4310,8 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
             continue;
         }
         if (o != "trigger")
-            return c.Fail(t.line, "$driverbone: expected trigger, basepos or "
-                                  "'}', got \"" + t.text + "\"");
+            return c.Fail(t.line, "$driverbone: expected trigger, posetrigger, "
+                                  "basepos or '}', got \"" + t.text + "\"");
 
         const Token sub{"$driverbone trigger", t.line, false};
         Raw r{sub};
@@ -4259,12 +4332,70 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
     if (raw.empty())
         return c.Fail(cmd.line, "$driverbone \"" + pb.helpername + "\": no triggers");
 
+    const bool sampled = std::any_of(raw.begin(), raw.end(),
+                                     [](const Raw& r) { return r.frame >= 0; });
+    if (sampled) {
+        if (poseFile.empty())
+            return c.Fail(cmd.line, "$driverbone \"" + pb.helpername +
+                                    "\": posetrigger needs a `poseanim <file>` on the command");
+        source::Source* ps = LoadSource(c, WithSourceExtension(c, poseFile), poseLine, false,
+                                        nullptr, source::LoadKind::Animation);
+        if (!ps)
+            return false;
+        // the named clip carries the frames; "BindPose" is the one-frame fallback
+        source::SourceAnim* anim = nullptr;
+        for (source::SourceAnim& sa : ps->anims)
+            if (_stricmp(sa.name.c_str(), "BindPose") != 0) { anim = &sa; break; }
+        if (!anim && !ps->anims.empty())
+            anim = &ps->anims.front();
+        if (!anim || anim->frames.empty())
+            return c.Fail(poseLine, "$driverbone poseanim \"" + poseFile + "\": no animation frames");
+
+        int driver = -1, helper = -1;
+        for (size_t i = 0; i < ps->localBone.size(); ++i) {
+            if (_stricmp(ps->localBone[i].name.c_str(), pb.drivername.c_str()) == 0)
+                driver = static_cast<int>(i);
+            if (_stricmp(ps->localBone[i].name.c_str(), pb.helpername.c_str()) == 0)
+                helper = static_cast<int>(i);
+        }
+        if (driver < 0)
+            return c.Fail(poseLine, "$driverbone poseanim \"" + poseFile +
+                                    "\": no driver bone \"" + pb.drivername + "\"");
+        if (helper < 0)
+            return c.Fail(poseLine, "$driverbone poseanim \"" + poseFile +
+                                    "\": no helper bone \"" + pb.helpername + "\"");
+
+        // the loader pre-scales positions and AddTrigger scales again, so the
+        // sampled offset goes back to authored units here
+        const float unscale = c.in.scale != 0.0f ? 1.0f / c.in.scale : 1.0f;
+        for (Raw& r : raw) {
+            if (r.frame < 0)
+                continue;
+            if (r.frame >= static_cast<int>(anim->frames.size()))
+                return c.Fail(r.at.line, "$driverbone posetrigger: \"" + poseFile + "\" has " +
+                                         std::to_string(anim->frames.size()) + " frames");
+            const auto& f = anim->frames[r.frame];
+            if (static_cast<int>(f.size()) <= std::max(driver, helper))
+                return c.Fail(r.at.line, "$driverbone posetrigger: frame " +
+                                         std::to_string(r.frame) + " of \"" + poseFile +
+                                         "\" does not pose every bone");
+            const source::SrcBonePose& d = f[driver];
+            const source::SrcBonePose& h = f[helper];
+            r.driverRot = {RadToDeg(d.rot.x), RadToDeg(d.rot.y), RadToDeg(d.rot.z)};
+            r.helperRot = {RadToDeg(h.rot.x), RadToDeg(h.rot.y), RadToDeg(h.rot.z)};
+            r.pos = {h.pos.x * unscale, h.pos.y * unscale, h.pos.z * unscale};
+        }
+    }
+
     // emitted after the block so basepos applies wherever it was written. Added
     // before the scale, like the VRD's `(basepos + pos) * g_currentscale`.
     for (const Raw& r : raw) {
         const pm::Vector3 pos{basepos.x + r.pos.x, basepos.y + r.pos.y,
                               basepos.z + r.pos.z};
-        if (!AddTrigger(c, r.at, pb, r.tol, r.driverRot, r.helperRot, pos))
+        // posetrigger samples a full parent-relative frame, so it is absolute
+        // regardless of the block mode
+        if (!AddTrigger(c, r.at, pb, r.tol, r.driverRot, r.helperRot, pos,
+                        blockAbsolute || r.frame >= 0))
             return false;
     }
     c.in.proceduralbones.push_back(std::move(pb));
@@ -4406,7 +4537,6 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
             cur->helperparentname = tok[2];
             cur->driverparentname = tok[3];
             cur->drivername = tok[4];
-            cur->absolutePose = true;
             cur->strictName = false;
         } else if (kw == "<aimconstraint>") {
             if (tok.size() < 4)
@@ -4463,7 +4593,7 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
             // basepos is added before the scale, like the reference's
             // `(basepos + pos) * g_currentscale`
             pos = {basepos.x + pos.x, basepos.y + pos.y, basepos.z + pos.z};
-            if (!AddTrigger(c, at, *cur, tol, driverRot, helperRot, pos))
+            if (!AddTrigger(c, at, *cur, tol, driverRot, helperRot, pos, true))
                 return false;
 
             // rotateaxis pre-rotates the helper pose, jointorient post-rotates it
@@ -4551,7 +4681,7 @@ bool CmdCBox(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $illumposition <x> <y> <z> [bone <name>] (Cmd_Illumposition): the point the
+// $illumposition <x> <y> <z> [<bone>] (Cmd_Illumposition): the point the
 // engine samples the lighting environment at, instead of sequence 0's box
 // center. Neither form is scaled by $transformmodel - like $bbox the numbers
 // are taken as written.
@@ -4572,15 +4702,10 @@ bool CmdIllumPosition(Ctx& c, const Token& cmd) {
         return false;
 
     std::string bone;
-    while (!c.AtCommand()) {
-        const Token& t = c.toks[c.pos++];
-        if (t.quoted || _stricmp(t.text.c_str(), "bone") != 0)
-            return c.Fail(t.line, "$illumposition: expected bone, got \"" +
-                                  t.text + "\"");
-        const Token sub{cmd.text + " " + t.text, t.line, false};
-        if (!c.Want("a bone name", sub, bone))
-            return false;
-    }
+    if (!c.AtCommand())
+        bone = c.toks[c.pos++].text;
+    if (!c.AtCommand())
+        return c.Fail(cmd.line, "$illumposition: unexpected \"" + c.Cur().text + "\"");
 
     c.in.illumposition = pos;
     c.in.illumpositionSet = true;
@@ -4601,10 +4726,11 @@ bool CmdIllumPosition(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $eyeposition <x> <y> <z> (Cmd_Eyeposition): the ideal eye point, used by the
-// engine to aim eyes and by tools as the view origin. Same source -> model
-// swizzle as the static $illumposition, but this one IS scaled by $scale,
-// which the compile stage applies.
+// $eyeposition <x> <y> <z> [autoheight] (Cmd_Eyeposition): the ideal eye point,
+// used by the engine to aim eyes and by tools as the view origin. Same source ->
+// model swizzle as the static $illumposition, but this one IS scaled by $scale,
+// which the compile stage applies. `autoheight` derives Z from the eyeballs
+// (rounded mean of their |z|) and treats the authored Z as an offset from it.
 bool CmdEyePosition(Ctx& c, const Token& cmd) {
     pm::Vector3 pos;
     if (!c.WantFloat("an X position", cmd, pos.x) ||
@@ -4612,6 +4738,11 @@ bool CmdEyePosition(Ctx& c, const Token& cmd) {
         !c.WantFloat("a Z position", cmd, pos.z))
         return false;
     c.in.eyeposition = {-pos.y, pos.x, pos.z};
+    if (!c.AtCommand() && !c.Cur().quoted &&
+        _stricmp(c.Cur().text.c_str(), "autoheight") == 0) {
+        c.pos++;
+        c.in.eyepositionAutoHeight = true;
+    }
     return true;
 }
 
@@ -5837,6 +5968,7 @@ bool RunCommands(Ctx& c);
 // This is NOT $addincludesearchdir - source files and $include scripts keep
 // separate lists. $pushd/$popd are not coming back; a search dir covers the
 // same ground without a mode the rest of the script has to track.
+// -filesearchdir is the launch-line form, searched after this list.
 bool CmdAddSearchDir(Ctx& c, const Token& cmd) {
     std::string dir;
     if (!c.Want("a directory", cmd, dir))
@@ -5846,8 +5978,8 @@ bool CmdAddSearchDir(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $addincludesearchdir <dir>  (scriplib's AddIncludeDir, as a command - there
-// is no launch parameter). Registers a fallback directory for $include; the
+// $addincludesearchdir <dir>  (scriplib's AddIncludeDir; -includesearchdir is
+// the launch-line form, searched after this list). Registers a fallback directory for $include; the
 // list is searched in registration order, so only dirs registered ABOVE an
 // $include can serve it. A relative dir is relative to the file registering it,
 // the same rule the $include path itself follows, and is resolved here so the
@@ -5871,7 +6003,8 @@ bool CmdAddIncludeSearchDir(Ctx& c, const Token& cmd) {
 //   optional   found nowhere = do nothing, instead of an error
 //
 // The path is relative to the file the $include is written in (so a nested
-// include names its sibling directly), then to each $addincludesearchdir dir.
+// include names its sibling directly), then to the root script's directory,
+// then to each $addincludesearchdir dir.
 // Everything else in an included file - source filenames, $proceduralbones -
 // stays relative to the ROOT script's directory, matching how stock keeps
 // cddir pinned to the top-level script.
@@ -5901,14 +6034,19 @@ bool CmdInclude(Ctx& c, const Token& cmd) {
         tries.push_back(relPath);
     } else {
         tries.push_back(c.curDir / relPath);
+        // stock resolves every $include against the root script's dir, so a
+        // nested one often carries the whole path down from there
+        if (c.curDir != c.scriptDir)
+            tries.push_back(c.scriptDir / relPath);
         if (!localDir)
-            for (const fs::path& dir : c.includeDirs) {
-                tries.push_back(dir / relPath);
-                // last resort: the bare filename in that dir, for a request
-                // that carried a relative hierarchy the dir does not have
-                if (relPath.has_parent_path())
-                    tries.push_back(dir / relPath.filename());
-            }
+            for (const auto* list : {&c.includeDirs, &c.launchIncludeDirs})
+                for (const fs::path& dir : *list) {
+                    tries.push_back(dir / relPath);
+                    // last resort: the bare filename in that dir, for a request
+                    // that carried a relative hierarchy the dir does not have
+                    if (relPath.has_parent_path())
+                        tries.push_back(dir / relPath.filename());
+                }
     }
 
     fs::path full;
@@ -6795,7 +6933,8 @@ bool IsQcScriptPath(const char* path) {
 }
 
 bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
-                  const ScriptVars& defvars) {
+                  const ScriptVars& defvars, const SearchDirs& includeDirs,
+                  const SearchDirs& fileDirs) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         if (err) *err = std::string("cannot open \"") + path + "\"";
@@ -6821,6 +6960,16 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
         if (!c.IsLockedVar(kv.first))
             c.lockedVars.push_back(kv.first);
     }
+
+    auto seedDirs = [](const SearchDirs& in, std::vector<fs::path>& out) {
+        for (const std::string& dir : in) {
+            const fs::path p = fs::path(dir).is_absolute() ? fs::path(dir)
+                                                           : fs::current_path() / dir;
+            out.push_back(p.lexically_normal().make_preferred());
+        }
+    };
+    seedDirs(includeDirs, c.launchIncludeDirs);
+    seedDirs(fileDirs, c.launchSearchDirs);
 
     if (!Tokenize(text, c.file, c.toks, err))
         return false;
@@ -6850,9 +6999,10 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
         if (err) *err = c.file + ": no $modelname";
         return false;
     }
-    // animation-only models (.mdl + .ani, no geometry) are legal
-    if (out.bodyparts.empty())
-        printf("WARNING: %s: no $modelgroup\n", c.file.c_str());
+    // animation-only models (.mdl + .ani, no geometry) are legal; a script with
+    // geometry that never groups it is not - the meshes would not ship.
+    if (out.bodyparts.empty() && !c.rendermeshes.empty())
+        printf("WARNING: %s: $rendermesh but no $modelgroup\n", c.file.c_str());
 
     // set once every source has been read (the DMX loader latches it on the
     // first model carrying an upAxis attribute)

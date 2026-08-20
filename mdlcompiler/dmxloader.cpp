@@ -1,5 +1,6 @@
 // dmxloader.cpp - DMX document -> per-file Source. See dmxloader.h.
 
+#include "perf.h"
 #include "dmxloader.h"
 
 #include <cmath>
@@ -611,50 +612,52 @@ void NormalizeDmxNormals(std::vector<dmx::Vector3>& normals) {
     }
 }
 
-// Hash grid over the unit sphere for the aggressive collapse. Normals are unit
+// Uniform grid over the unit sphere for the aggressive collapse. Normals are unit
 // (NormalizeDmxNormals ran) or zero, so dot > cos(2 deg) implies a chord under
 // 2*sin(1 deg) = 0.0349; a cell edge of 0.04 means the 3x3x3 neighborhood is
 // always a superset of the match set. A zero normal dots to 0 and never
 // matches, so it needs no bound.
 struct NormalGrid {
     static constexpr float kCell = 0.04f;
-    struct Cell {
-        int32_t x, y, z;
-        bool operator==(const Cell& o) const { return x == o.x && y == o.y && z == o.z; }
-    };
-    struct Hash {
-        size_t operator()(const Cell& c) const {
-            uint64_t h = static_cast<uint32_t>(c.x) * 73856093ull;
-            h ^= static_cast<uint64_t>(static_cast<uint32_t>(c.y)) * 19349663ull;
-            h ^= static_cast<uint64_t>(static_cast<uint32_t>(c.z)) * 83492791ull;
-            return static_cast<size_t>(h ^ (h >> 32));
-        }
-    };
-    std::unordered_map<Cell, std::vector<int>, Hash> cells;
+    // one axis spans [-1,1] -> cell in [-25,24]; a non-unit (zero) normal
+    // clamps into the grid and still fails the dot test.
+    static constexpr int kAxis = 50;
+    std::vector<int> head = std::vector<int>(kAxis * kAxis * kAxis, -1);
+    std::vector<int> next; // per stored id, chained within its cell
 
-    static Cell Of(const dmx::Vector3& v) {
-        return Cell{static_cast<int32_t>(std::floor(v.x / kCell)),
-                    static_cast<int32_t>(std::floor(v.y / kCell)),
-                    static_cast<int32_t>(std::floor(v.z / kCell))};
+    static int Axis(float f) {
+        int i = static_cast<int>(std::floor(f / kCell)) + kAxis / 2;
+        return i < 0 ? 0 : (i >= kAxis ? kAxis - 1 : i);
     }
-    void Add(const dmx::Vector3& v, int id) { cells[Of(v)].push_back(id); }
+    static int CellOf(const dmx::Vector3& v) {
+        return (Axis(v.x) * kAxis + Axis(v.y)) * kAxis + Axis(v.z);
+    }
+    void Add(const dmx::Vector3& v, int id) {
+        if (static_cast<int>(next.size()) <= id)
+            next.resize(id + 1, -1);
+        const int c = CellOf(v);
+        next[id] = head[c];
+        head[c] = id;
+    }
 
     // lowest matching index, which is what the linear scan's first hit was
     int FindFirst(const std::vector<dmx::Vector3>& data, const dmx::Vector3& v,
                   float flNormalBlend) const {
-        const Cell c = Of(v);
+        const int cx = Axis(v.x), cy = Axis(v.y), cz = Axis(v.z);
         int best = -1;
-        for (int dz = -1; dz <= 1; ++dz)
-            for (int dy = -1; dy <= 1; ++dy)
-                for (int dx = -1; dx <= 1; ++dx) {
-                    auto it = cells.find(Cell{c.x + dx, c.y + dy, c.z + dz});
-                    if (it == cells.end())
-                        continue;
-                    for (int id : it->second)
+        for (int x = cx - 1; x <= cx + 1; ++x) {
+            if (x < 0 || x >= kAxis) continue;
+            for (int y = cy - 1; y <= cy + 1; ++y) {
+                if (y < 0 || y >= kAxis) continue;
+                for (int z = cz - 1; z <= cz + 1; ++z) {
+                    if (z < 0 || z >= kAxis) continue;
+                    for (int id = head[(x * kAxis + y) * kAxis + z]; id != -1; id = next[id])
                         if ((best == -1 || id < best) &&
                             NormalDot(v, data[id]) > flNormalBlend)
                             best = id;
                 }
+            }
+        }
         return best;
     }
 };
@@ -857,8 +860,18 @@ void DefineUniqueVertices(FlexTemp& flex,
     const bool bHasSpeed = speedIndices && !speedIndices->empty();
 
     // (v, n, t) -> unique index; first-seen insertion order matches the
-    // reference's AddToTail order (its hash only accelerates the find)
-    std::map<std::tuple<int, int, int>, int> lookup;
+    // reference's AddToTail order (the lookup only accelerates the find)
+    struct KeyHash {
+        size_t operator()(const std::tuple<int, int, int>& k) const {
+            uint64_t h = 0xcbf29ce484222325ull;
+            h = (h ^ static_cast<uint32_t>(std::get<0>(k))) * 0x100000001b3ull;
+            h = (h ^ static_cast<uint32_t>(std::get<1>(k))) * 0x100000001b3ull;
+            h = (h ^ static_cast<uint32_t>(std::get<2>(k))) * 0x100000001b3ull;
+            return static_cast<size_t>(h ^ (h >> 32));
+        }
+    };
+    std::unordered_map<std::tuple<int, int, int>, int, KeyHash> lookup;
+    lookup.reserve(nCorners);
 
     for (size_t i = 0; i < nCorners; ++i) {
         UniqueVert vert;
@@ -1131,26 +1144,32 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     // Meshes with delta states take the per-position variant that yields a
     // normalMap for remapping the delta states' normal entries.
     std::vector<dmx::Vector3> normals;
+    std::vector<int32_t> normalIndices;
+    {
     if (auto n = PickV3Array(bindState, "normal$0", "normals"))
         normals = *n;
-    std::vector<int32_t> normalIndices;
     if (auto ni = PickIntArray(bindState, "normal$0Indices", "normalsIndices"))
         normalIndices = *ni;
+    }
+
 
     const std::vector<dmx::ElementPtr>* deltaStates = mesh->GetElementArray("deltaStates");
     bool hasDeltas = deltaStates && !deltaStates->empty();
 
     const float flNormalBlend = static_cast<float>(cos(2.0f * pm::kDeg2Rad));
-    NormalizeDmxNormals(normals);
+    { PULSE_PERF("mesh", "NormalizeDmxNormals"); NormalizeDmxNormals(normals); }
 
     // position-data inverse map (corner lists per position data index)
+    // only the delta-state paths below read this, and it is one heap vector
+    // per position - do not pay for it on a mesh without morphs
     std::vector<std::vector<int>> posInverse;
-    if (positions && positionIndices)
+    if (hasDeltas && positions && positionIndices)
         posInverse = BuildInverseMap(*positionIndices, static_cast<int>(positions->size()));
 
     std::vector<int> normalMap; // old normal data index -> new (delta collapse)
     bool bNormalsCollapsed = false;
     if (!hasDeltas) {
+        PULSE_PERF("mesh", "CollapseBaseNormals");
         CollapseBaseNormalsAggressive(normals, normalIndices, flNormalBlend);
     } else {
         bNormalsCollapsed =
@@ -1165,12 +1184,14 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             PickIntArray(bindState, "balance$0Indices", "balanceIndices");
         const std::vector<int32_t>* speedIndices =
             PickIntArray(bindState, "speed$0Indices", "speedIndices");
+        PULSE_PERF("mesh", "DefineUniqueVertices");
         DefineUniqueVertices(*flex, *positionIndices, normalIndices, texcoordIndices,
                              balanceIndices, speedIndices, nStartingVertex, nStartingNormal,
                              nStartingTexCoord);
     }
 
-    LoadVertices(info, dag, bindState, mat, nBoneAssign, normals);
+    { PULSE_PERF("mesh", "LoadVertices");
+      LoadVertices(info, dag, bindState, mat, nBoneAssign, normals); }
 
     // balance/speed data follows the mesh's vertices (reference LoadVertices
     // tail: whole array, or a single 1.0f so the 0-index default hits it)
@@ -1255,6 +1276,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
 
     auto faceSets = mesh->GetElementArray("faceSets");
     if (!faceSets) return true;
+    PULSE_PERF("mesh", "faceSets");
 
     for (const dmx::Element* faceSet : *faceSets) {
         if (!faceSet) continue;
@@ -1521,16 +1543,32 @@ void CalcTriangleTangentSpace(const pm::Vector3& p0, const pm::Vector3& p1, cons
 void CalcModelTangentSpaces(Source& src) {
     for (int meshID = 0; meshID < src.nummeshes; meshID++) {
         SrcMesh* pMesh = &src.mesh[src.meshindex[meshID]];
-        std::vector<std::vector<int>> vertToFaceMap(pMesh->numvertices);
-        for (int faceID = 0; faceID < pMesh->numfaces; faceID++) {
-            SrcFace* pFace = &src.face[faceID + pMesh->faceoffset];
-            vertToFaceMap[pFace->a].push_back(faceID);
-            vertToFaceMap[pFace->b].push_back(faceID);
-            vertToFaceMap[pFace->c].push_back(faceID);
-            // REFERENCE QUIRK (parity): s_face_t.d is 0 for triangles (calloc),
-            // but the quad check is `d != 0xFFFFFFFF` - so EVERY triangle face
-            // is also appended to vertex 0's map, skewing its tangent.
-            vertToFaceMap[0].push_back(faceID);
+        // vert -> face lists, CSR (counts, prefix sum, fill) rather than a
+        // vector per vertex: same ascending-faceID order, one allocation.
+        // REFERENCE QUIRK (parity): s_face_t.d is 0 for triangles (calloc),
+        // but the quad check is `d != 0xFFFFFFFF` - so EVERY triangle face is
+        // also appended to vertex 0's map, skewing its tangent.
+        std::vector<int> mapStart(static_cast<size_t>(pMesh->numvertices) + 1, 0);
+        std::vector<int> mapFaces;
+        {
+            for (int faceID = 0; faceID < pMesh->numfaces; faceID++) {
+                const SrcFace* pFace = &src.face[faceID + pMesh->faceoffset];
+                mapStart[pFace->a + 1]++;
+                mapStart[pFace->b + 1]++;
+                mapStart[pFace->c + 1]++;
+                mapStart[1]++;
+            }
+            for (int i = 0; i < pMesh->numvertices; i++)
+                mapStart[i + 1] += mapStart[i];
+            mapFaces.resize(mapStart[pMesh->numvertices]);
+            std::vector<int> cursor(mapStart.begin(), mapStart.end() - 1);
+            for (int faceID = 0; faceID < pMesh->numfaces; faceID++) {
+                const SrcFace* pFace = &src.face[faceID + pMesh->faceoffset];
+                mapFaces[cursor[pFace->a]++] = faceID;
+                mapFaces[cursor[pFace->b]++] = faceID;
+                mapFaces[cursor[pFace->c]++] = faceID;
+                mapFaces[cursor[0]++] = faceID;
+            }
         }
 
         std::vector<pm::Vector3> faceSVect(pMesh->numfaces);
@@ -1549,7 +1587,8 @@ void CalcModelTangentSpaces(Source& src) {
             SrcVertex& vert = src.vertex[vertID + pMesh->vertexoffset];
             const pm::Vector3& normal = vert.normal;
             pm::Vector3 sVect{0, 0, 0}, tVect{0, 0, 0};
-            for (int f : vertToFaceMap[vertID]) {
+            for (int fi = mapStart[vertID]; fi < mapStart[vertID + 1]; fi++) {
+                const int f = mapFaces[fi];
                 sVect.x += faceSVect[f].x; sVect.y += faceSVect[f].y; sVect.z += faceSVect[f].z;
                 tVect.x += faceTVect[f].x; tVect.y += faceTVect[f].y; tVect.z += faceTVect[f].z;
             }
@@ -1632,12 +1671,13 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
     st.vlist.assign(tmp.vertex.size(), -1);
     struct UFace { int a, b, c; };
     std::vector<UFace> ufaces(tmp.face.size());
+    { PULSE_PERF("build", "UnifyIndices");
     for (size_t i = 0; i < tmp.face.size(); ++i) {
         const TmpFace& f = tmp.face[i];
         ufaces[i].a = AddToVlist(st, f.a, f.material, f.na, f.ta);
         ufaces[i].b = AddToVlist(st, f.b, f.material, f.nb, f.tb);
         ufaces[i].c = AddToVlist(st, f.c, f.material, f.nc, f.tc);
-    }
+    } }
 
     // reference order: UnifyIndices -> BuildVertexAnimations -> sort/remap
     if (flex)
@@ -1654,8 +1694,9 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
     for (int i = 0; i < numfaces; i++) facesort[i] = i;
     g_sortListData = &st.listdata;
     g_sortFaces = &tmp.face;
+    { PULSE_PERF("build", "sort verts/faces");
     if (numvlist > 0) qsort(v_listsort.data(), numvlist, sizeof(int), VlistCompare);
-    if (numfaces > 0) qsort(facesort.data(), numfaces, sizeof(int), FaceCompare);
+    if (numfaces > 0) qsort(facesort.data(), numfaces, sizeof(int), FaceCompare); }
     g_sortListData = nullptr;
     g_sortFaces = nullptr;
     for (int i = 0; i < numvlist; i++) v_ilistsort[v_listsort[i]] = i;
@@ -1718,7 +1759,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         }
     }
 
-    CalcModelTangentSpaces(out);
+    { PULSE_PERF("build", "CalcModelTangentSpaces"); CalcModelTangentSpaces(out); }
 }
 
 // ---------------------------------------------------------------------------
@@ -2000,7 +2041,7 @@ void CaptureFlexRig(const dmx::Element* comboOp, const ComboTemp& combo, FlexRig
                 } else if (rule->className == "DmeFlexRuleExpression") {
                     if (auto e = rule->GetString("expr"))
                         fr.expr = *e;
-                    // QC/CLI $var$ expansion is a Phase 6.5 feature
+                    // $var$ expansion inside a DMX flex rule is not supported
                     if (fr.expr.find('$') != std::string::npos) {
                         std::fprintf(stderr,
                                      "warning: DMX flex rule '%s' references $variables$ - not "
@@ -2139,13 +2180,14 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
     // model never draws in the .mdl.
     MeshTemp tmp;
     if (!animOnly) {
+        PULSE_PERF("load", "LoadMeshes");
         if (!LoadMeshes(model, scale, boneMap, mats, tmp, flexTemp.enabled ? &flexTemp : nullptr,
                         filter, out)) {
             if (err) *err = "failed to load meshes";
             return false;
         }
         if (!tmp.face.empty())
-            BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out);
+            { PULSE_PERF("load", "BuildIndividualMeshes"); BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out); }
     }
 
     // one flexkey per delta state (reference AddFlexKeys). With no combination

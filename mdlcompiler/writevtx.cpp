@@ -4,11 +4,13 @@
 // vcache+overdraw ordering, PostProcessStripGroup, the offset-computed file
 // layout, and MapGlobalBonesToHardwareBoneIDs.
 
+#include "perf.h"
 #include "writer.h"
 
 #include <cstring>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "format/mdl.h"
@@ -618,6 +620,19 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
     }
 }
 
+// Does any vertex of this mesh carry a morph delta? If not, the flexed strip
+// group is guaranteed empty and its whole pass can be skipped.
+bool MeshHasFlexedVerts(fmt::mstudiomesh_t* pStudioMesh) {
+    uint8_t* pMeshBase = reinterpret_cast<uint8_t*>(pStudioMesh);
+    for (int i = 0; i < pStudioMesh->numflexes; i++) {
+        auto* pflex =
+            reinterpret_cast<fmt::mstudioflex_t*>(pMeshBase + pStudioMesh->flexindex) + i;
+        if (pflex->numverts > 0)
+            return true;
+    }
+    return false;
+}
+
 // ProcessStripGroup
 void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, bool bIsFlexed,
                        fmt::mstudiomodel_t* pStudioModel, fmt::mstudiomesh_t* pStudioMesh,
@@ -703,16 +718,17 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
     if (bIsHWSkinned)
         BuildHWSkinnedStrips(b, stripGroupSourceFaces, stripGroupVertices, pStripGroup,
                              maxBonesPerStrip, pStudioModel, pStudioMesh);
-    // (software path: all faces already consumed by the HW pass in phase 1)
+    // (software path: all faces already consumed by the HW pass)
 }
 
 // how many verts this strip will contribute to its group (each strip gets its
 // own copy of every vertex it touches - see PostProcessStripGroup's per-strip
 // lookup, which starts empty)
 int CountStripVerts(const Strip& strip) {
-    std::map<int, int> seen;
+    std::unordered_set<int> seen;
+    seen.reserve(static_cast<size_t>(strip.numIndices));
     for (int j = 0; j < strip.numIndices; j++)
-        seen[strip.verts[strip.indices[j]].origMeshVertID] = 0;
+        seen.insert(strip.verts[strip.indices[j]].origMeshVertID);
     return static_cast<int>(seen.size());
 }
 
@@ -741,7 +757,7 @@ void PostProcessStripGroup(StripGroup* src, std::vector<StripGroup>& out) {
         strip.stripGroupVertexOffset = vertOffset;
         strip.stripGroupIndexOffset = static_cast<int>(pStripGroup->indices.size());
 
-        std::map<int, int> lookup; // origMeshVertID -> stripgroup vert id
+        std::unordered_map<int, int> lookup; // origMeshVertID -> stripgroup vert id
         for (size_t k = vertOffset; k < pStripGroup->verts.size(); k++)
             lookup[pStripGroup->verts[k].origMeshVertID] = static_cast<int>(k);
 
@@ -805,6 +821,7 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
 
     // ProcessModel: dx90, non-fixed-function, hw flex
     int modelIdx = 0;
+    { PULSE_PERF("vtx", "strip build");
     for (int bp = 0; bp < phdr->numbodyparts; bp++) {
         fmt::mstudiobodyparts_t* pBodyPart = b.bodypart(bp);
         for (int mo = 0; mo < pBodyPart->nummodels; mo++, modelIdx++) {
@@ -857,11 +874,15 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
 
                     // 4 passes: hw+flexed, hw+nonflexed, sw+flexed, sw+nonflexed.
                     // Empty groups are dropped below, so a model with no flexes
-                    // still emits only hw+nonflexed (byte-parity with phase 1/2).
+                    // still emits only hw+nonflexed.
                     // We write .dx90.vtx = hardware flex, so the bone maxima are
                     // NOT clamped to 1 (reference bHWFlex path).
+                    const bool anyFlexed =
+                        scriptLod.facialAnimation && MeshHasFlexedVerts(pStudioMesh);
                     for (int isHWSkinned = 1; isHWSkinned >= 0; --isHWSkinned) {
                         for (int isFlexed = 1; isFlexed >= 0; --isFlexed) {
+                            if (isFlexed && !anyFlexed)
+                                continue;
                             StripGroup sg;
                             ProcessStripGroup(b, &sg, isHWSkinned != 0, isFlexed != 0, pStudioModel,
                                               pStudioMesh, meshFaces, facesProcessed,
@@ -874,6 +895,9 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
             }
         }
     }
+
+    }
+    PULSE_PERF("vtx", "serialize");
 
     // ---- WriteVTXFile: compute offsets, write blocks ----
     int totalBodyParts = phdr->numbodyparts;

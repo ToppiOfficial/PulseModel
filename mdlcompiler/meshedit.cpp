@@ -63,6 +63,147 @@ const std::string* MeshFilter::Unmatched() const {
     return nullptr;
 }
 
+namespace {
+
+// Exact float compare on the bit pattern - a weld only ever joins vertices the
+// exporter emitted from one authored point.
+int CmpBits(const void* a, const void* b, size_t n) { return std::memcmp(a, b, n); }
+
+int WeldCompare(const SrcVertex& a, const SrcVertex& b, WeldMode mode) {
+    if (a.material != b.material)
+        return a.material < b.material ? -1 : 1;
+    if (int c = CmpBits(&a.position, &b.position, sizeof(a.position)))
+        return c;
+    if (mode == WeldMode::KeepSeams)
+        if (int c = CmpBits(&a.texcoord, &b.texcoord, sizeof(a.texcoord)))
+            return c;
+    if (a.boneweight.numbones != b.boneweight.numbones)
+        return a.boneweight.numbones < b.boneweight.numbones ? -1 : 1;
+    for (int i = 0; i < a.boneweight.numbones; ++i) {
+        if (a.boneweight.bone[i] != b.boneweight.bone[i])
+            return a.boneweight.bone[i] < b.boneweight.bone[i] ? -1 : 1;
+        if (int c = CmpBits(&a.boneweight.weight[i], &b.boneweight.weight[i], sizeof(float)))
+            return c;
+    }
+    return 0;
+}
+
+} // namespace
+
+void WeldVertices(Source& src, WeldMode mode) {
+    const int n = static_cast<int>(src.vertex.size());
+    if (mode == WeldMode::None || n == 0)
+        return;
+
+    // group the equal vertices; the lowest index in a group is its survivor, so
+    // the surviving order (and with it the material grouping) is unchanged
+    std::vector<int> order(n);
+    for (int i = 0; i < n; ++i)
+        order[i] = i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        const int c = WeldCompare(src.vertex[a], src.vertex[b], mode);
+        return c ? c < 0 : a < b;
+    });
+
+    std::vector<int> rep(n);
+    for (int i = 0; i < n;) {
+        int j = i + 1;
+        while (j < n && WeldCompare(src.vertex[order[i]], src.vertex[order[j]], mode) == 0)
+            ++j;
+        int survivor = order[i];
+        for (int k = i; k < j; ++k)
+            survivor = std::min(survivor, order[k]);
+        for (int k = i; k < j; ++k)
+            rep[order[k]] = survivor;
+        i = j;
+    }
+
+    std::vector<int> remap(n, -1);
+    std::vector<SrcVertex> kept;
+    kept.reserve(n);
+    std::vector<Vector3> normalSum;
+    for (int i = 0; i < n; ++i) {
+        if (rep[i] == i) {
+            remap[i] = static_cast<int>(kept.size());
+            kept.push_back(src.vertex[i]);
+            normalSum.push_back(src.vertex[i].normal);
+        }
+    }
+    if (static_cast<int>(kept.size()) == n)
+        return;
+    for (int i = 0; i < n; ++i) {
+        remap[i] = remap[rep[i]];
+        if (rep[i] != i)
+        {
+            Vector3& sum = normalSum[remap[i]];
+            sum.x += src.vertex[i].normal.x;
+            sum.y += src.vertex[i].normal.y;
+            sum.z += src.vertex[i].normal.z;
+        }
+    }
+    for (size_t i = 0; i < kept.size(); ++i) {
+        Vector3 nrm = normalSum[i];
+        if (pm::VectorNormalize(nrm) > 0.0f)
+            kept[i].normal = nrm;
+    }
+
+    // faces are mesh-relative, so go through absolute indices; face order and
+    // per-material face ranges are untouched, only the vertex ranges move
+    std::vector<SrcFace> faces = src.face;
+    for (int m = 0; m < static_cast<int>(src.mesh.size()); ++m) {
+        const SrcMesh& mesh = src.mesh[m];
+        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+            faces[f].a = static_cast<uint32_t>(remap[src.face[f].a + mesh.vertexoffset]);
+            faces[f].b = static_cast<uint32_t>(remap[src.face[f].b + mesh.vertexoffset]);
+            faces[f].c = static_cast<uint32_t>(remap[src.face[f].c + mesh.vertexoffset]);
+        }
+    }
+
+    src.vertex.swap(kept);
+    const int newCount = static_cast<int>(src.vertex.size());
+    for (int m = 0; m < static_cast<int>(src.mesh.size()); ++m) {
+        SrcMesh& mesh = src.mesh[m];
+        if (!mesh.numvertices)
+            continue;
+        mesh.numvertices = 0;
+        mesh.vertexoffset = newCount;
+    }
+    for (int i = 0; i < newCount; ++i) {
+        SrcMesh& mesh = src.mesh[src.vertex[i].material];
+        mesh.numvertices++;
+        if (mesh.vertexoffset > i)
+            mesh.vertexoffset = i;
+    }
+    for (int m = 0; m < static_cast<int>(src.mesh.size()); ++m) {
+        const SrcMesh& mesh = src.mesh[m];
+        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+            src.face[f].a = faces[f].a - mesh.vertexoffset;
+            src.face[f].b = faces[f].b - mesh.vertexoffset;
+            src.face[f].c = faces[f].c - mesh.vertexoffset;
+        }
+    }
+
+    // a morph delta on a welded-away vertex lands on its survivor; the first
+    // one wins, the rest would fight over the same vertex
+    for (SrcMorphAnim& morph : src.morphs) {
+        std::vector<char> seen(newCount, 0);
+        std::vector<SrcVertAnim> out;
+        out.reserve(morph.vanims.size());
+        for (SrcVertAnim va : morph.vanims) {
+            if (va.vertex < 0 || va.vertex >= n)
+                continue;
+            va.vertex = remap[va.vertex];
+            if (seen[va.vertex])
+                continue;
+            seen[va.vertex] = 1;
+            out.push_back(va);
+        }
+        morph.vanims.swap(out);
+    }
+
+    CalcModelTangentSpaces(src);
+}
+
 void CullUnskinnedBones(Source& src, SkinnedBoneCull mode) {
     if (mode == SkinnedBoneCull::None || src.numbones <= 0)
         return;

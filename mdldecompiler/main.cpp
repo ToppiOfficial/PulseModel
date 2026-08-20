@@ -218,6 +218,17 @@ std::string ContentsTokens(int32_t v) {
     return out.empty() ? "notsolid" : out;
 }
 
+// $illumposition with a bone becomes a rigid "__illumPosition" attachment the
+// header points at; returns that attachment's index, or -1 when it is static.
+int IllumAttachment(const Mdl& m) {
+    const fm::studiohdr2_t* h2 =
+        m.At<fm::studiohdr2_t>(m.buf.data(), m.hdr->studiohdr2index);
+    if (!h2 || h2->illumpositionattachmentindex <= 0 ||
+        h2->illumpositionattachmentindex > m.hdr->numlocalattachments)
+        return -1;
+    return h2->illumpositionattachmentindex - 1;
+}
+
 void WriteHeader(Qc& q, const Mdl& m) {
     const fm::studiohdr_t& h = *m.hdr;
     q.Line("$modelname \"" + std::string(h.name) + "\"");
@@ -264,10 +275,23 @@ void WriteHeader(Qc& q, const Mdl& m) {
         q.Line("$eyeposition " + V3(Unswizzle(h.eyeposition)));
 
     const fm::studiohdr2_t* h2 = m.At<fm::studiohdr2_t>(m.buf.data(), h.studiohdr2index);
-    // a bone-relative $illumposition became an attachment - only the static
-    // form is recoverable from the header numbers
-    if (!h2 || h2->illumpositionattachmentindex == 0)
+    const int illumAtt = IllumAttachment(m);
+    if (illumAtt < 0) {
         q.Line("$illumposition " + V3(Unswizzle(h.illumposition)));
+    } else {
+        // the bone form lives in the attachment, not in the header numbers
+        const fm::mstudioattachment_t& a = m.At<fm::mstudioattachment_t>(
+            m.buf.data(), h.localattachmentindex, h.numlocalattachments)[illumAtt];
+        pm::RadianEuler rot;
+        pm::Vector3 pos;
+        pm::MatrixAngles(a.local, rot, pos);
+        const std::vector<std::string> names = BoneNames(m);
+        const std::string bone =
+            (a.localbone >= 0 && static_cast<size_t>(a.localbone) < names.size())
+                ? names[a.localbone]
+                : std::string();
+        q.Line("$illumposition " + V3(pos) + " \"" + bone + "\"");
+    }
     if (h2 && h2->flMaxEyeDeflection != 0.0f)
         q.Line("$maxeyedeflection " + Deg(std::acos(h2->flMaxEyeDeflection)));
 }
@@ -1323,8 +1347,12 @@ void WriteAttachments(Qc& q, const Mdl& m) {
         return;
     const std::vector<std::string> names = BoneNames(m);
 
+    const int illumAtt = IllumAttachment(m);
+
     q.Blank();
     for (int i = 0; i < h.numlocalattachments; ++i) {
+        if (i == illumAtt) // $illumposition re-emits it
+            continue;
         // `rigid` / `absolute` are consumed at compile time and are not in the
         // file; the baked matrix reproduces the same result without them.
         pm::RadianEuler rot;
@@ -2352,8 +2380,17 @@ void WriteSequences(Qc& q, const Mdl& m) {
     const std::vector<std::string> chains = IkChainNames(m);
     const WeightLists weights = GatherWeightLists(m);
     std::vector<std::string> labels;
-    for (int i = 0; i < h.numlocalseq; ++i)
-        labels.push_back(m.Str(&seqs[i], seqs[i].szlabelindex));
+    // the engine allows duplicate sequence names, the compiler does not - suffix
+    // repeats so the emitted script recompiles
+    std::map<std::string, int> labelSeen;
+    for (int i = 0; i < h.numlocalseq; ++i) {
+        std::string name = m.Str(&seqs[i], seqs[i].szlabelindex);
+        std::string key = name;
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        int& n = labelSeen[key];
+        if (n++ > 0) name += "_" + std::to_string(n);
+        labels.push_back(name);
+    }
     auto pick = [](const std::vector<std::string>& v, int i) {
         return (i >= 0 && static_cast<size_t>(i) < v.size()) ? v[i] : std::string();
     };

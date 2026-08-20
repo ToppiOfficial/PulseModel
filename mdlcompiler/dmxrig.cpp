@@ -160,7 +160,6 @@ void AddQuatInterpBone(const dmx::Element* dag, float scale, cm::CompileInput& i
     cm::ProceduralBone pb;
     pb.helpername = name;
     pb.drivername = *control;
-    pb.absolutePose = !dag->GetBool("unlockBones", false);
 
     const dmx::Vector3 basePos = dag->GetVector3("basePos");
     for (size_t t = 0; t < count; ++t) {
@@ -178,6 +177,7 @@ void AddQuatInterpBone(const dmx::Element* dag, float scale, cm::CompileInput& i
             tolDeg = 1.0f;
         }
         cm::ProceduralBoneTrigger tr;
+        tr.absolutePose = !dag->GetBool("unlockBones", false);
         tr.tolerance = DegToRad(tolDeg);
         const dmx::Quaternion& q = (*triggers)[t];
         tr.trigger = {q.x, q.y, q.z, q.w};
@@ -256,7 +256,12 @@ pm::matrix3x4 DagLocal(const dmx::Element* dag, float scale) {
 // bone when the named one collapses.
 void WalkAttachments(const dmx::Element* dag, float scale, cm::CompileInput& in,
                      const std::string& boneName, const pm::matrix3x4& boneToDag) {
-    const bool isJoint = dag->className == "DmeJoint";
+    // a procedural joint (DmeJiggleBone / DmeQuatInterpBone / DmeAimAtBone) is
+    // a bone too - it survives the cull, so an attachment may name it directly
+    const bool isJoint = dag->className == "DmeJoint" ||
+                         dag->className == "DmeJiggleBone" ||
+                         dag->className == "DmeQuatInterpBone" ||
+                         dag->className == "DmeAimAtBone";
     const std::string& bone = isJoint ? dag->name : boneName;
     const pm::matrix3x4 local =
         isJoint ? pm::matrix3x4() : pm::ConcatTransforms(boneToDag, DagLocal(dag, scale));

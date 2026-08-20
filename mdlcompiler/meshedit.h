@@ -63,6 +63,14 @@ enum class SkinnedBoneCull { None, Tree, Aggressive };
 
 void CullUnskinnedBones(Source& src, SkinnedBoneCull mode);
 
+// $weld [seams] - merge vertices that share an exact position, within one
+// material and with identical bone weights. Normals are averaged, so hard-edge
+// splits collapse. `seams` also merges across differing UVs, which fuses
+// texture seams - without it a UV split still keeps its own vertex.
+enum class WeldMode { None, KeepSeams, All };
+
+void WeldVertices(Source& src, WeldMode mode);
+
 // Fuse several loaded render meshes into ONE drawable Source - what exporting
 // them together out of a single scene would have produced. Bones unify by name
 // (the first part that names a bone sets its bind pose), vertices and faces are

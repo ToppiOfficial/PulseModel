@@ -1,6 +1,7 @@
 // compile.cpp - the SimplifyModel pipeline. See compile.h.
 
 #include "compile.h"
+#include "perf.h"
 
 #include <algorithm>
 #include <cctype>
@@ -57,22 +58,7 @@ static constexpr float kMaxCoord = 16384.0f;  // MAX_COORD_INTEGER
 
 namespace {
 
-// PULSEMDL_TIMING=1 prints per-pass wall time. Profiling aid only.
-struct PassTimer {
-    const char* name;
-    std::chrono::steady_clock::time_point t0;
-    explicit PassTimer(const char* n)
-        : name(n), t0(std::chrono::steady_clock::now()) {}
-    ~PassTimer() {
-        if (!std::getenv("PULSEMDL_TIMING"))
-            return;
-        double ms = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - t0).count();
-        if (ms >= 1.0)
-            std::printf("[pass] %-28s %8.0f ms\n", name, ms);
-    }
-};
-#define PULSE_TIME_PASS(name) PassTimer pulse_pass_timer_(name)
+#define PULSE_TIME_PASS(name) PULSE_PERF("pass", name)
 
 // ---------------------------------------------------------------------------
 // small helpers
@@ -188,6 +174,11 @@ struct Ctx {
     RadianEuler defaultRotation; // (0,0,pi/2) or (pi/2,0,pi/2) for Y-up
     BoneEditState boneEdits;     // $transformbone
     int rootIndex = 0;           // $root, resolved in ProcessAnimations
+    // running mean of |z| over the eyeballs, in scaled model space, for
+    // $eyeposition autoheight - collected in SetupEyeballs before org goes
+    // into bone space
+    float eyeAbsZSum = 0.0f;
+    int eyeAbsZCount = 0;
 };
 
 int FindGlobalBone(const CompiledModel& m, const std::string& name) {
@@ -339,51 +330,16 @@ bool BoneIsProceduralControl(const Ctx& ctx, const char* pname) {
     return false;
 }
 
-// A procedural bone's dependencies must outlive the collapse or the constraint
-// resolves against nothing. Reference BoneIsProceduralParent.
-//
-// animconstraint (quatinterp): the helper's and the driver's named parents, and
-// whatever their CURRENT skeleton parents are - the triggers were authored in
-// those parents' spaces, so a collapse there silently changes the constraint.
-// aim-at: its named parent, the bone's own skeleton parent, and a
-// bone-flavoured aim target (an attachment target is already kept by
-// BoneHasAttachments).
-//
-// Both halves are gated on the driven bone still existing: once it is optimized
-// out there is no constraint left to keep anything alive for.
+// A procedural bone's aim target must outlive the collapse or the constraint
+// points at nothing. Reference BoneIsProceduralParent, minus the parent keeps -
+// a collapsing parent is re-solved by ResolveProceduralParentCollapse instead.
+// (A bone-flavoured aim target only; an attachment target is kept by
+// BoneHasAttachments.)
 bool BoneIsProceduralDependency(const Ctx& ctx, const char* pname) {
     const CompiledModel& m = *ctx.out;
-
-    // true when `pname` is the current skeleton parent of the named bone
-    auto isParentOf = [&](const std::string& childname, bool strict) {
-        const int child = FindProcBone(m, childname, strict);
-        if (child == -1)
-            return false;
-        const int parent = m.bones[child].parent;
-        return parent != -1 && _stricmp(m.bones[parent].name.c_str(), pname) == 0;
-    };
-    auto named = [&](const std::string& n, bool strict) {
-        return !n.empty() && ProcBoneNameMatches(n, pname, strict);
-    };
-
-    for (const ProceduralBone& pb : ctx.out->proceduralbones) {
-        if (FindProcBone(m, pb.helpername, pb.strictName) == -1)
-            continue;
-        if (named(pb.helperparentname, pb.strictName) ||
-            named(pb.driverparentname, pb.strictName))
-            return true;
-        if (isParentOf(pb.helpername, pb.strictName) ||
-            isParentOf(pb.drivername, pb.strictName))
-            return true;
-    }
-
     for (const AimAtBone& ab : ctx.out->aimatbones) {
         if (FindProcBone(m, ab.bonename, ab.strictName) == -1)
             continue;
-        if (named(ab.parentname, ab.strictName))
-            return true;
-        if (isParentOf(ab.bonename, ab.strictName))
-            return true;
         if (ProcBoneNameMatches(ab.aimname, pname, ab.strictName))
             return true;
     }
@@ -442,6 +398,14 @@ bool BoneIsPhysics(const Ctx& ctx, const char* pname) {
     for (const PhysicsCollidePair& p : ctx.in->physCollidePairs)
         if (_stricmp(p.a.c_str(), pname) == 0 || _stricmp(p.b.c_str(), pname) == 0)
             return true;
+    return false;
+}
+
+bool BoneHasHitbox(const Ctx& ctx, const char* pname) {
+    for (const HitboxSet& hs : ctx.in->hitboxsets)
+        for (const HitBox& hb : hs.hitboxes)
+            if (_stricmp(hb.bonename.c_str(), pname) == 0)
+                return true;
     return false;
 }
 
@@ -700,7 +664,7 @@ void MakeStaticProp(Ctx& ctx) {
         }
     }
 
-    // (flexkeys: none in this phase)
+    // (flexkeys: nothing to do here)
 
     // Recalc attachment points. Reference drops IS_FROM_SOURCE attachments only
     // on the $staticproppose path (not supported); plain $staticprop keeps all.
@@ -1010,20 +974,18 @@ bool MapProceduralBones(Ctx& ctx, std::string* err) {
 
         // Fold the helper's bind pose into the authored deltas, so from here on
         // pos/quat are absolute parent-relative - the form the writer needs.
-        // Reference does this under `$driverbone unlockbones`;
-        // here it is unconditional, which is what lets the script drop basepos.
-        // ...unless the pose is absolute already ($proceduralbones VRD and a
-        // DmeQuatInterpBone without unlockBones, both of which carry basepos).
-        if (!pb.absolutePose) {
-            Quaternion bindQuat;
-            pm::AngleQuaternion(ctx.out->bones[pb.helper].rot, bindQuat);
-            const Vector3& bindPos = ctx.out->bones[pb.helper].pos;
-            for (ProceduralBoneTrigger& tr : pb.triggers) {
-                Quaternion remapped;
-                pm::QuaternionMult(bindQuat, tr.quat, remapped);
-                tr.quat = remapped;
-                tr.pos = {bindPos.x + tr.pos.x, bindPos.y + tr.pos.y, bindPos.z + tr.pos.z};
-            }
+        // A trigger already flagged absolute carries its own base pose (the VRD
+        // forms, and any `posetrigger`) and is left alone.
+        Quaternion bindQuat;
+        pm::AngleQuaternion(ctx.out->bones[pb.helper].rot, bindQuat);
+        const Vector3& bindPos = ctx.out->bones[pb.helper].pos;
+        for (ProceduralBoneTrigger& tr : pb.triggers) {
+            if (tr.absolutePose)
+                continue;
+            Quaternion remapped;
+            pm::QuaternionMult(bindQuat, tr.quat, remapped);
+            tr.quat = remapped;
+            tr.pos = {bindPos.x + tr.pos.x, bindPos.y + tr.pos.y, bindPos.z + tr.pos.z};
         }
     }
     return true;
@@ -1527,6 +1489,77 @@ bool BoneHasChildren(const CompiledModel& m, int k) {
     return false;
 }
 
+// A procedural bone's parent can collapse. Bone k's own local bind is the
+// change of basis, so re-express the authored triggers/poses in the surviving
+// grandparent's space before k goes away.
+void ResolveProceduralParentCollapse(Ctx& ctx, int k) {
+    CompiledModel& m = *ctx.out;
+    const std::string gone = m.bones[k].name;
+    const std::string newparent =
+        m.bones[k].parent >= 0 ? m.bones[m.bones[k].parent].name : std::string();
+
+    // pos/rot are not filled until RebuildLocalPose and rawLocal goes stale
+    // once an ancestor collapses, so derive the local off boneToPose.
+    const int kparent = m.bones[k].parent;
+    const matrix3x4 L =
+        kparent >= 0 ? pm::ConcatTransforms(pm::MatrixInvert(m.bones[kparent].boneToPose),
+                                            m.bones[k].boneToPose)
+                     : m.bones[k].boneToPose;
+    Quaternion lq;
+    Vector3 lpos;
+    pm::MatrixAngles(L, lq, lpos);
+
+    // true when the collapsing bone is what the authored data is relative to:
+    // the named parent, or the current skeleton parent when none was named.
+    auto isAuthoredParent = [&](const std::string& named, const std::string& child,
+                                bool strict) {
+        if (!named.empty())
+            return _stricmp(named.c_str(), gone.c_str()) == 0;
+        const int c = FindProcBone(m, child, strict);
+        return c >= 0 && m.bones[c].parent == k;
+    };
+
+    for (ProceduralBone& pb : m.proceduralbones) {
+        if (FindProcBone(m, pb.helpername, pb.strictName) == -1)
+            continue;
+        if (isAuthoredParent(pb.driverparentname, pb.drivername, pb.strictName)) {
+            for (ProceduralBoneTrigger& tr : pb.triggers) {
+                Quaternion q;
+                pm::QuaternionMult(lq, tr.trigger, q);
+                tr.trigger = q;
+            }
+            pb.driverparentname = newparent;
+        }
+        if (isAuthoredParent(pb.helperparentname, pb.helpername, pb.strictName)) {
+            for (ProceduralBoneTrigger& tr : pb.triggers) {
+                if (tr.absolutePose) {
+                    Vector3 pos;
+                    pm::MatrixAngles(pm::ConcatTransforms(
+                                         L, pm::QuaternionMatrix(tr.quat, tr.pos)),
+                                     tr.quat, pos);
+                    tr.pos = pos;
+                } else {
+                    // still a helper-local delta: only its offset changes frame
+                    tr.pos = pm::VectorRotate(tr.pos, L);
+                }
+            }
+            pb.helperparentname = newparent;
+        }
+    }
+
+    for (AimAtBone& ab : m.aimatbones) {
+        if (FindProcBone(m, ab.bonename, ab.strictName) == -1)
+            continue;
+        if (!isAuthoredParent(ab.parentname, ab.bonename, ab.strictName))
+            continue;
+        ab.aimvector = pm::VectorRotate(ab.aimvector, L);
+        ab.upvector = pm::VectorRotate(ab.upvector, L);
+        if (!ab.autobasepos) // autobasepos is seeded from the final rest pose
+            ab.basepos = pm::VectorTransform(ab.basepos, L);
+        ab.parentname = newparent;
+    }
+}
+
 void CollapseBones(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
     const BoneCullType cull = ctx.in->boneCullType;
@@ -1562,6 +1595,7 @@ void CollapseBones(Ctx& ctx) {
                 BoneHasAnimation(ctx, m.bones[k].name.c_str()) ||
                 BoneIsIK(ctx, m.bones[k].name.c_str()) ||
                 BoneHasAttachments(ctx, m.bones[k].name.c_str()) ||
+                BoneHasHitbox(ctx, m.bones[k].name.c_str()) ||
                 BoneIsBonemerge(ctx, m.bones[k].name.c_str()) ||
                 BoneIsProcedural(ctx, m.bones[k].name.c_str()) ||
                 BoneIsProceduralControl(ctx, m.bones[k].name.c_str()) ||
@@ -1571,6 +1605,7 @@ void CollapseBones(Ctx& ctx) {
                 continue;
 
             // collapse: remove bone k, reparent children
+            ResolveProceduralParentCollapse(ctx, k);
             int mParent = m.bones[k].parent;
             std::printf("Collapsing bone \"%s\" into \"%s\"\n", m.bones[k].name.c_str(),
                         mParent >= 0 ? m.bones[mParent].name.c_str() : "<root>");
@@ -2242,6 +2277,9 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
         eye.radius *= scale;                                    // already halved by the loader
         eye.zoffset = std::tan(eye.zoffset * pm::kDeg2Rad);      // authored in degrees
         eye.iris_scale = eye.iris_scale != 0.0f ? 1.0f / (eye.iris_scale * scale) : 0.0f;
+
+        ctx.eyeAbsZSum += std::fabs(tmp.z);
+        ctx.eyeAbsZCount++;
 
         // translate eyeball into bone space, then derive up/forward by pushing
         // the world axes through defaultrotation and the same bone transform
@@ -3029,16 +3067,18 @@ struct DictIndex {
         Mix(h, v.tangentS.z); Mix(h, v.tangentS.w);
         // AreBoneWeightsEqual ignores order, so the hash must too
         const src::SrcBoneWeight& bw = v.boneweight;
-        std::vector<std::pair<int, float>> pairs;
-        for (int i = 0; i < bw.numbones; ++i)
-            pairs.emplace_back(bw.bone[i], bw.weight[i]);
-        std::sort(pairs.begin(), pairs.end(),
+        std::pair<int, float> pairs[lim::kMaxSrcBoneWeights];
+        const int n = bw.numbones < lim::kMaxSrcBoneWeights ? bw.numbones
+                                                          : lim::kMaxSrcBoneWeights;
+        for (int i = 0; i < n; ++i)
+            pairs[i] = {bw.bone[i], bw.weight[i]};
+        std::sort(pairs, pairs + n,
                   [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
                       return a.first < b.first;
                   });
-        for (const auto& p : pairs) {
-            h = (h ^ static_cast<uint32_t>(p.first)) * 0x100000001b3ull;
-            Mix(h, p.second);
+        for (int i = 0; i < n; ++i) {
+            h = (h ^ static_cast<uint32_t>(pairs[i].first)) * 0x100000001b3ull;
+            Mix(h, pairs[i].second);
         }
         return h;
     }
@@ -3173,9 +3213,15 @@ void UnifyModelLods(Ctx& ctx, Model& model) {
         // Lower LODs reuse root-LOD vertices wherever they match exactly, and
         // append to the shared pool where they do not. Built after
         // MarkRootLODBones, which rewrites the LOD0 bone weights in place.
+        // hashing the root LOD is only worth it if something looks it up
+        bool anyLowerLod = false;
+        for (int lodID = 1; lodID < nNumLODs && !anyLowerLod; ++lodID)
+            anyLowerLod = model.lodSources[lodID] != nullptr;
+
         DictIndex dictIndex;
-        dictIndex.Build(model.vertices, pVertexDictMesh->vertexoffset,
-                        pVertexDictMesh->vertexoffset + pVertexDictMesh->numvertices);
+        if (anyLowerLod)
+            dictIndex.Build(model.vertices, pVertexDictMesh->vertexoffset,
+                            pVertexDictMesh->vertexoffset + pVertexDictMesh->numvertices);
 
         for (int lodID = 1; lodID < nNumLODs; ++lodID) {
             const src::Source* pCurrLod = model.lodSources[lodID];
@@ -3520,10 +3566,9 @@ void BuildOutputMeshes(Ctx& ctx) {
 // Collision model (reference ProcessSingleBody / CreateCollide /
 // BuildConvexListForFaceList)
 //
-// Phase 4.0 builds the SINGLE-BODY case only. The .pulsemdl schema has no
-// $collisionmodel / $collisionjoints split: the bone set the collision geometry
-// resolves to decides which it is, and more than one bone means a ragdoll,
-// which is Phase 4.1.
+// This is the SINGLE-BODY path. There is no $collisionmodel / $collisionjoints
+// split: the bone set the collision geometry resolves to decides which it is,
+// and more than one bone means a ragdoll (below).
 // ---------------------------------------------------------------------------
 
 // Collision geometry lives in the source's global-pose vertices, which
@@ -3678,7 +3723,7 @@ void BucketByVertID(std::vector<int>& vertID, int totalSourceFaces,
 // piece.
 //
 // This is NOT convex decomposition - it splits geometry that is already
-// physically separate. Genuine concave-solid decomposition is Phase 4.2.
+// physically separate. Genuine concave-solid decomposition is not implemented.
 //
 // `faces` may be a subset of the source (the ragdoll path passes one bone's
 // faces), but the sentinel is keyed to the source's TOTAL face count, exactly
@@ -3866,7 +3911,7 @@ void WarnUnknownMarkupBones(const CompiledModel& m, const CompileInput& in) {
 }
 
 // ---------------------------------------------------------------------------
-// Ragdoll (phase 4.1) - reference ProcessJointedModel + FixCollisionHierarchy
+// Ragdoll - reference ProcessJointedModel + FixCollisionHierarchy
 //
 // Two things differ from the single-body path and drive everything else:
 //   1. Geometry is partitioned per bone (a face joins the bone its verts are
@@ -10291,6 +10336,23 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     out.eyeposition = {input.eyeposition.x * input.scale,
                        input.eyeposition.y * input.scale,
                        input.eyeposition.z * input.scale};
+
+    // autoheight: rounded mean |z| of the eyeballs, with the authored Z as an
+    // offset on top of it
+    if (input.eyepositionAutoHeight) {
+        if (ctx.eyeAbsZCount == 0) {
+            if (err) *err = "$eyeposition autoheight needs at least one $eyeball";
+            return false;
+        }
+        out.eyeposition.z += std::round(ctx.eyeAbsZSum / ctx.eyeAbsZCount);
+    } else if (ctx.eyeAbsZCount > 0 && out.eyeposition.x == 0.0f &&
+               out.eyeposition.y == 0.0f && out.eyeposition.z == 0.0f) {
+        // an unset $eyeposition is indistinguishable from "0 0 0" on disk, and
+        // on a face model that puts the engine's eye point at the origin
+        std::printf("WARNING: model has eyeballs but $eyeposition is 0 0 0 - the "
+                    "engine eye point sits at the model origin. Use "
+                    "\"$eyeposition 0 0 0 autoheight\" to derive it.\n");
+    }
     out.maxEyeDeflection = input.maxEyeDeflection;
 
     // SetSkinValues + Cmd_CDMaterials

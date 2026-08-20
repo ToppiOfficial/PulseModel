@@ -970,11 +970,13 @@ bool LoadVtaMorphs(const std::string& path, Source& out, float scale,
             if (err) *err = "flex \"" + opt.name + "\": frame 0 is the basis";
             return false;
         }
+        // a flex naming a frame the file does not have just makes no deltas -
+        // the reference leaves the empty flexkey to be pruned later
         const VtaFrame* frame = bind.Frame(opt.frame);
         if (!frame) {
-            if (err) *err = "flex \"" + opt.name + "\": no frame " + std::to_string(opt.frame) +
-                            " in this .vta";
-            return false;
+            std::fprintf(stderr, "warning: flex \"%s\": no frame %d in %s - skipped\n",
+                         opt.name.c_str(), opt.frame, path.c_str());
+            continue;
         }
         for (const SrcMorphAnim& m : out.morphs)
             if (_stricmp(m.name.c_str(), opt.name.c_str()) == 0) {

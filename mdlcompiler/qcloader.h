@@ -25,8 +25,14 @@ using ScriptVars = std::vector<std::pair<std::string, std::string>>;
 
 // Parse the script + load referenced DMX sources (paths relative to the
 // script's directory). Returns false + err on failure.
+// -includesearchdir / -filesearchdir entries: extra fallback dirs in effect
+// before the first line, for $include and for source files respectively. A
+// relative dir resolves against the working directory.
+using SearchDirs = std::vector<std::string>;
+
 bool LoadQcScript(const char* path, compile::CompileInput& out, std::string* err,
-                  const ScriptVars& defvars = {});
+                  const ScriptVars& defvars = {}, const SearchDirs& includeDirs = {},
+                  const SearchDirs& fileDirs = {});
 
 // True when the path's extension selects this front end (.pulseqc / .qc).
 bool IsQcScriptPath(const char* path);

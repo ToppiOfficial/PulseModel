@@ -9,15 +9,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <filesystem>
 #include <new>
 #include <string>
+#include <vector>
 
 #include "compile.h"
 #include "fatalerror.h"
-#ifdef PULSE_HAVE_IMPORTQC
-#include "importqc.h"
-#endif
+#include "perf.h"
 #include "pulselimits.h"
 #include "qcloader.h"
 #include "writer.h"
@@ -44,15 +42,19 @@ static int Usage() {
     std::printf("  -defvar <name> <value>\n");
     std::printf("                define a .pulseqc script variable ($name$) before the\n");
     std::printf("                script runs; repeatable. The script cannot override it\n");
+    std::printf("  -includesearchdir <dir>\n");
+    std::printf("                extra fallback dir for $include, searched after any\n");
+    std::printf("                $addincludesearchdir; repeatable\n");
+    std::printf("  -filesearchdir <dir>\n");
+    std::printf("                extra fallback dir for source files, searched after\n");
+    std::printf("                any $addsearchdir; repeatable\n");
     std::printf("  -vtxformat <0|1>\n");
     std::printf("                .vtx layout, overriding the script's $vtxformat.\n");
     std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and\n");
     std::printf("                stop - no .mdl/.vvd/.vtx/.phy is written\n");
-    std::printf("  -studiomdl    treat the script as a stock studiomdl .qc: importqc\n");
-    std::printf("                rewrites a copy as .pulseqc and that is what compiles.\n");
-    std::printf("                Implied by a .qc extension\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
+    std::printf("  -perfmetrics  print wall time in ms for each stage of the compile\n");
     std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
     std::printf("  -editorinfo <path>\n");
     std::printf("                write a JSON report of the compile (files read, files\n");
@@ -165,15 +167,6 @@ static void DumpDefineBones(const pulse::compile::CompiledModel& model) {
     std::printf("\n------------------------------------------------------------\n");
 }
 
-// A stock studiomdl script, by extension: .pulseqc is ours, a bare .qc is
-// stock's and goes through importqc first.
-static bool IsStockQc(const char* path) {
-    std::string ext = std::filesystem::path(path).extension().string();
-    for (char& c : ext)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return ext == ".qc";
-}
-
 static int RunCompile(int argc, char** argv) {
     if (argc < 2)
         return Usage();
@@ -184,8 +177,8 @@ static int RunCompile(int argc, char** argv) {
     std::string outdir;
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
     bool definebones = false;
-    bool studiomdl = false; // -studiomdl: run the script through importqc first
     pulse::loader::ScriptVars defvars;
+    pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
         // -game is studiomdl's name for it: the mod dir the model installs
         // into. The writer already roots output at <dir>/models, so it is the
@@ -199,6 +192,14 @@ static int RunCompile(int argc, char** argv) {
                 return Fail("bad option", "-defvar needs two arguments: <name> <value>");
             defvars.emplace_back(argv[i + 1], argv[i + 2]);
             i += 2;
+        } else if (std::strcmp(argv[i], "-includesearchdir") == 0) {
+            if (i + 1 >= argc)
+                return Fail("bad option", "-includesearchdir needs a directory");
+            includeDirs.emplace_back(argv[++i]);
+        } else if (std::strcmp(argv[i], "-filesearchdir") == 0) {
+            if (i + 1 >= argc)
+                return Fail("bad option", "-filesearchdir needs a directory");
+            fileDirs.emplace_back(argv[++i]);
         } else if (std::strcmp(argv[i], "-vtxformat") == 0 && i + 1 < argc) {
             vtxFormat = std::atoi(argv[++i]);
             if (vtxFormat != 0 && vtxFormat != 1)
@@ -208,8 +209,8 @@ static int RunCompile(int argc, char** argv) {
             info.path = argv[++i];
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
             definebones = true;
-        } else if (std::strcmp(argv[i], "-studiomdl") == 0) {
-            studiomdl = true;
+        } else if (std::strcmp(argv[i], "-perfmetrics") == 0) {
+            pulse::perf::g_enabled = true;
         } else if (std::strcmp(argv[i], "-pause") == 0) {
             pulse::fatal::g_pause = true;
         } else if (argv[i][0] == '-') {
@@ -225,29 +226,10 @@ static int RunCompile(int argc, char** argv) {
     if (!script)
         return Usage();
 
-    // A stock studiomdl .qc is rewritten into a .pulseqc beside it and the copy
-    // is what compiles - the original is never written to. A build without the
-    // importqc subtool skips the pass and feeds the .qc to the loader as-is.
-    std::string converted;
-    if (studiomdl || IsStockQc(script)) {
-#ifdef PULSE_HAVE_IMPORTQC
-        g_stage = "qc import";
-        converted = pulse::importqc::DefaultOutput(script);
-        std::string importErr;
-        if (!pulse::importqc::Convert(script, converted, &importErr)) {
-            info.error = importErr;
-            return Fail("import error", importErr);
-        }
-        script = converted.c_str();
-#else
-        std::printf("warning: built without importqc - compiling %s as .pulseqc\n", script);
-#endif
-    }
-
     std::printf("Compiling: %s\n", script);
 
     using Clock = std::chrono::steady_clock;
-    const bool timing = std::getenv("PULSEMDL_TIMING") != nullptr;
+    const bool timing = pulse::perf::g_enabled;
     auto t0 = Clock::now();
     auto ms = [](Clock::time_point a, Clock::time_point b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
@@ -262,7 +244,7 @@ static int RunCompile(int argc, char** argv) {
     std::string err;
     pulse::compile::CompileInput input;
     g_stage = "script load";
-    if (!pulse::loader::LoadQcScript(script, input, &err, defvars)) {
+    if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs)) {
         info.error = err;
         return Fail("script error", err);
     }
@@ -315,11 +297,68 @@ static int RunCompile(int argc, char** argv) {
     std::printf("compile time: %.2f s\n", ms(t0, tWrite) / 1000.0);
 
     if (timing) {
-        std::printf("[timing] load %.0f ms | compile %.0f ms | write %.0f ms | total %.0f ms\n",
-                    ms(t0, tLoad), ms(tLoad, tCompile), ms(tCompile, tWrite), ms(t0, tWrite));
+        pulse::perf::Record("total", "script load", ms(t0, tLoad));
+        pulse::perf::Record("total", "compile", ms(tLoad, tCompile));
+        pulse::perf::Record("total", "write", ms(tCompile, tWrite));
+        pulse::perf::Record("total", "whole compile", ms(t0, tWrite));
+        pulse::perf::Report();
     }
     return 0;
 }
+
+namespace pulse::perf {
+
+bool g_enabled = false;
+
+namespace {
+struct Entry {
+    const char* tag;
+    const char* name;
+    double ms = 0;
+    int calls = 0;
+};
+std::vector<Entry> g_entries;
+} // namespace
+
+void Record(const char* tag, const char* name, double ms) {
+    for (Entry& e : g_entries) {
+        if (std::strcmp(e.tag, tag) == 0 && std::strcmp(e.name, name) == 0) {
+            e.ms += ms;
+            e.calls++;
+            return;
+        }
+    }
+    g_entries.push_back({tag, name, ms, 1});
+}
+
+// One table at the end, grouped by tag in the order the tags first appeared.
+// A stage under 1 ms is dropped - it is noise next to the ones that matter.
+void Report() {
+    if (!g_enabled)
+        return;
+    std::printf("---------------------\n-perfmetrics\n");
+    std::vector<const char*> tags;
+    for (const Entry& e : g_entries) {
+        bool seen = false;
+        for (const char* t : tags)
+            seen = seen || std::strcmp(t, e.tag) == 0;
+        if (!seen)
+            tags.push_back(e.tag);
+    }
+    for (const char* tag : tags) {
+        std::printf("  [%s]\n", tag);
+        for (const Entry& e : g_entries) {
+            if (std::strcmp(e.tag, tag) != 0 || e.ms < 1.0)
+                continue;
+            if (e.calls > 1)
+                std::printf("    %-30s %9.1f ms  (%d calls)\n", e.name, e.ms, e.calls);
+            else
+                std::printf("    %-30s %9.1f ms\n", e.name, e.ms);
+        }
+    }
+}
+
+} // namespace pulse::perf
 
 int main(int argc, char** argv) {
     // progress lines are useless if they sit in the CRT buffer until exit -

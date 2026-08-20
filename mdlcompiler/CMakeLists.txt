@@ -4,7 +4,7 @@ add_executable(mdlcompiler main.cpp dmxloader.cpp dmxrig.cpp smdloader.cpp
                fbxloader.cpp meshedit.cpp compile.cpp facemarkup.cpp
                flexreg.cpp qcloader.cpp writemdl.cpp writevtx.cpp writephy.cpp)
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 0.6.1)
+set(TOOL_VERSION 0.7.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(mdlcompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 
@@ -18,8 +18,3 @@ endif()
 # stage calls the decomposition API for PhysicsShapeFromRender.
 target_link_libraries(mdlcompiler PRIVATE pulse_libs pulse_dmx pulse_math pulse_meshopt
                                           pulse_phys pulse_vhacd pulse_ufbx)
-# importqc is optional - without it a .qc compiles as-is, no conversion pass.
-if(TARGET pulse_importqc)
-    target_link_libraries(mdlcompiler PRIVATE pulse_importqc)
-    target_compile_definitions(mdlcompiler PRIVATE PULSE_HAVE_IMPORTQC)
-endif()

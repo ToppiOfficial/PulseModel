@@ -140,7 +140,7 @@ struct BoneTransformEdit {
     int line = 0;                 // script line, for diagnostics
 };
 
-// ---- phase 5: procedural bones -------------------------------------------
+// ---- procedural bones ----------------------------------------------------
 
 // JiggleBone::flags (format/mdl.h JIGGLE_*, mirrored like the other flag sets
 // in this header so compile.h stays free of the format headers).
@@ -226,6 +226,10 @@ struct ProceduralBoneTrigger {
     // pose in, so from that pass onward these are absolute parent-relative.
     Vector3 pos{};
     Quaternion quat{0.0f, 0.0f, 0.0f, 1.0f};
+    // pos/quat are already parent-relative in full, so skip the bind-pose fold.
+    // Per-trigger: one $driverbone block can mix `trigger` (the block's
+    // relative/absolute mode) with `posetrigger` (always absolute).
+    bool absolutePose = false;
 };
 
 // one `animconstraintlist` entry (QC $driverbone / VRD <helper>, reference
@@ -247,10 +251,6 @@ struct ProceduralBone {
     // collapsed out from under the constraint.
     std::string helperparentname;
     std::string driverparentname;
-
-    // The VRD form ($proceduralbones) authors pos/quat ABSOLUTE, so
-    // MapProceduralBones must not fold the helper's bind pose in again.
-    bool absolutePose = false;
 
     // false lets a name match a skeleton bone's dotted suffix ("Bip01_R_Thigh"
     // resolves "ValveBiped.Bip01_R_Thigh") - the VRD form only.
@@ -703,7 +703,7 @@ struct BoneFlexDriver {
     std::vector<BoneFlexDriverControl> controls;
 };
 
-// ---- phase 4: physics ----------------------------------------------------
+// ---- physics -------------------------------------------------------------
 // The .pulsemdl schema drops QC's $collisionmodel / $collisionjoints split.
 // There is one set of lists, and the compile stage auto-detects: collision
 // geometry resolving to a single physics bone is a single body, more than one
@@ -776,8 +776,8 @@ struct PhysicsJointAxis {
     float friction = 1.0f; // an omitted `friction` on an axis, not "no friction"
 };
 
-// one `PhysicsJoint` - ragdoll constraint on a bone. Parsed in phase 4.0,
-// consumed in 4.1.
+// one `PhysicsJoint` - ragdoll constraint on a bone. Parsed by the loader,
+// consumed when the ragdoll is built.
 struct PhysicsJoint {
     std::string bonename;
     int bone = -1; // resolved by BuildCollisionModel
@@ -788,7 +788,7 @@ struct PhysicsJoint {
 // the bone is optional and falls back to the physicsmodifierlist default, so
 // each carries a *Set flag: an authored 0 must beat the default.
 //
-// Phase 4.1 adds the ragdoll body-partitioning fields. They live here rather
+// The ragdoll body-partitioning fields live here rather
 // than on PhysicsJoint because "this bone does / does not get its own body" is
 // a body decision, and a markup child is already the one-entry-per-bone place
 // to say it. QC authored the merge on the parent ($jointmerge parent child);
@@ -1029,7 +1029,7 @@ struct CompiledModel {
     std::string physName;        // .phy filename override, empty = outname
     bool physConcave = false;    // reported in editparams
     bool physNoSelfCollisions = false;
-    // ragdoll (phase 4.1). Pairs are resolved to solid indices once the solid
+    // ragdoll. Pairs are resolved to solid indices once the solid
     // order is final, so the writer only formats them.
     std::vector<std::pair<int, int>> physCollisionPairs;
     std::vector<std::pair<std::string, std::string>> physJointMerges; // parent,child
@@ -1044,7 +1044,7 @@ struct CompiledModel {
     std::vector<std::string> cdtextures;
     int numskinfamilies = 1;
     int numskinref = 0;
-    // skinref[family][ref], identity for phase 1
+    // skinref[family][ref], identity unless $texturegroup adds families
     std::vector<std::vector<int16_t>> skinref;
 
     int FindBone(const char* name) const; // case-insensitive, -1 if absent
@@ -1112,6 +1112,8 @@ struct CompileInput {
     // $eyeposition, the point the engine looks from. Unlike $illumposition it
     // IS scaled by $scale, applied in the compile stage.
     Vector3 eyeposition;
+    // `autoheight`: Z is an offset from the rounded mean |z| of the eyeballs
+    bool eyepositionAutoHeight = false;
     // $maxeyedeflection, pre-converted to the cosine the header stores
     // (Cmd_MaxEyeDeflection). 0 = unset, which the engine reads as cos(30).
     float maxEyeDeflection = 0.0f;
@@ -1147,7 +1149,7 @@ struct CompileInput {
     // Unset (or unresolvable) means bone 0.
     std::string primaryRootBone;
 
-    // phase 2: weightlists (index 0 = the default list, entries from the
+    // weightlists (index 0 = the default list, entries from the
     // script start at 1), pose parameters, ik data
     // $defaultweightlist: authored entries for slot 0 (empty = plain all-1s)
     std::vector<WeightList::Entry> defaultWeights;
@@ -1156,7 +1158,7 @@ struct CompileInput {
     std::vector<IkChain> ikchains;
     std::vector<IkLock> ikautoplaylocks;
 
-    // phase 3: flex/morph global tables, fully registered by the loader
+    // flex/morph global tables, fully registered by the loader
     // (auto per-body DMX combination data + top-level morphcontrollerlist /
     // morphrulelist). Compile() moves them into CompiledModel and fills the
     // per-key vanims (RemapVertexAnimations).
@@ -1189,17 +1191,17 @@ struct CompileInput {
     };
     std::vector<FixedFlex> fixedFlexes;
 
-    // phase 3.5: skeleton/bonemorphdriverlist ($boneflexdriver)
+    // skeleton/bonemorphdriverlist ($boneflexdriver)
     std::vector<BoneFlexDriver> boneflexdrivers;
 
-    // phase 5: skeleton/jigglebonelist ($jigglebone)
+    // skeleton/jigglebonelist ($jigglebone)
     std::vector<JiggleBone> jigglebones;
-    // phase 5.1: animconstraintlist ($driverbone / VRD quatinterp helpers)
+    // animconstraintlist ($driverbone / VRD quatinterp helpers)
     std::vector<ProceduralBone> proceduralbones;
     // aim-at helpers ($driveraimat / VRD <aimconstraint>)
     std::vector<AimAtBone> aimatbones;
 
-    // phase 4: physics. physicsshapelist / physicsjointlist /
+    // physics. physicsshapelist / physicsjointlist /
     // physicsmarkuplist. No shapes = no .phy.
     std::vector<PhysicsShape> physShapes;
     std::vector<PhysicsJoint> physJoints;
