@@ -7,6 +7,8 @@
 #include <cstring>
 
 #include "math/math.h"
+#include "meshoptimizer.h"
+#include "pulselimits.h"
 
 namespace pulse::source {
 
@@ -309,6 +311,77 @@ void CullUnskinnedBones(Source& src, SkinnedBoneCull mode) {
 // ---------------------------------------------------------------------------
 // MergeSources - see meshedit.h.
 // ---------------------------------------------------------------------------
+
+void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder,
+                   const std::vector<bool>* skipMaterial) {
+    // globalVertices is empty until RemapVerticesToGlobalBones, so the
+    // simplifier normally sees bind-space positions - the same input the
+    // reference LOD path feeds it.
+    const bool haveGlobal = src.globalVertices.size() >= src.vertex.size();
+    const SrcVertex* pVertBase =
+        haveGlobal ? src.globalVertices.data() : src.vertex.data();
+    const size_t nAvailVerts =
+        haveGlobal ? src.globalVertices.size() : src.vertex.size();
+
+    const unsigned int options = lockBorder ? meshopt_SimplifyLockBorder : 0u;
+
+    // heap, not stack - kMaxSkins vectors is far past a thread's stack
+    std::vector<std::vector<SrcFace>> meshFaces(lim::kMaxSkins);
+    float resultError = 0.0f;
+
+    for (int mi = 0; mi < src.nummeshes; mi++) {
+        const int matID = src.meshindex[mi];
+        const SrcMesh& srcMesh = src.mesh[matID];
+        if (srcMesh.numfaces == 0 || srcMesh.numvertices == 0 || nAvailVerts == 0)
+            continue;
+        if (skipMaterial && matID < static_cast<int>(skipMaterial->size()) &&
+            (*skipMaterial)[matID])
+            continue;
+
+        // face indices are mesh-local, so hand over the mesh's own vertex slice.
+        // SrcVertex leads with position, so &position + sizeof(SrcVertex) stride
+        // walks the array correctly.
+        const float* pPositions =
+            reinterpret_cast<const float*>(&pVertBase[srcMesh.vertexoffset].position);
+
+        const size_t nSrcIndices = static_cast<size_t>(srcMesh.numfaces) * 3;
+        std::vector<unsigned int> srcIdx(nSrcIndices), dstIdx(nSrcIndices);
+        for (int fi = 0; fi < srcMesh.numfaces; fi++) {
+            const SrcFace& f = src.face[srcMesh.faceoffset + fi];
+            srcIdx[fi * 3 + 0] = f.a;
+            srcIdx[fi * 3 + 1] = f.b;
+            srcIdx[fi * 3 + 2] = f.c;
+        }
+
+        size_t targetIdx = static_cast<size_t>(static_cast<float>(nSrcIndices) * factor);
+        targetIdx = (targetIdx / 3) * 3;
+        if (targetIdx < 3)
+            targetIdx = 3;
+
+        const size_t newIdxCount = meshopt_simplify(
+            dstIdx.data(), srcIdx.data(), nSrcIndices,
+            pPositions, static_cast<size_t>(srcMesh.numvertices), sizeof(SrcVertex),
+            targetIdx, 1.0f, options, &resultError);
+
+        for (size_t fi = 0; fi < newIdxCount / 3; fi++) {
+            SrcFace face;
+            face.a = dstIdx[fi * 3 + 0];
+            face.b = dstIdx[fi * 3 + 1];
+            face.c = dstIdx[fi * 3 + 2];
+            meshFaces[matID].push_back(face);
+        }
+    }
+
+    // flatten back into one face array, meshes in the source's own order
+    dst.face.clear();
+    for (int mi = 0; mi < src.nummeshes; mi++) {
+        const int matID = src.meshindex[mi];
+        SrcMesh& dstMesh = dst.mesh[matID];
+        dstMesh.faceoffset = static_cast<int>(dst.face.size());
+        dstMesh.numfaces = static_cast<int>(meshFaces[matID].size());
+        dst.face.insert(dst.face.end(), meshFaces[matID].begin(), meshFaces[matID].end());
+    }
+}
 
 bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* err) {
     auto fail = [&](const std::string& m) {

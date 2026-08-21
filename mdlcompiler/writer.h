@@ -21,11 +21,6 @@ namespace pulse::writer {
 // output path is not resolved until save time.
 extern std::vector<std::string> g_vtxReport;
 
-// Every file WriteModelFiles saved, in write order, for -editorinfo. The .mdl
-// name comes from $modelname, which is variable-driven, so a caller cannot
-// predict the paths.
-extern std::vector<std::string> g_writtenFiles;
-
 // Build the .dx90.vtx buffer (reference OptimizedModel::OptimizeFromStudioHdr,
 // dx90 params: vertcache 24, 3 bones/vert, 9/tri, 53/strip, hw flex).
 // `mdlBuf` is the already-built .mdl buffer (the vtx builder reads the

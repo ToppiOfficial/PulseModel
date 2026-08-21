@@ -41,18 +41,6 @@ bool IsQcScriptPath(const char* path);
 // the spec, so tools read the surface from the binary instead of a copy of it.
 void PrintCommandNames();
 
-// Absolute paths of every script, include and source file the last load
-// resolved, for -editorinfo. A watcher needs this from the compiler: $include
-// paths are built from variables and resolved through $addsearchdir, so the set
-// cannot be derived by reading the script.
-extern std::vector<std::string> g_openedFiles;
-
-// Line ranges in the ROOT script that a conditional skipped, for -editorinfo.
-// Losers, not survivors: an editor dims exactly these and leaves the rest
-// alone, so it needs no notion of a chain's full span. Inclusive, 1-based, and
-// they nest - a skipped clause reports its whole body, inner chains included.
-extern std::vector<std::pair<int, int>> g_inactiveRanges;
-
 } // namespace pulse::loader
 
 #endif // PULSEMDL_QCLOADER_H

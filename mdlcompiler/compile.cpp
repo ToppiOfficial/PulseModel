@@ -2772,75 +2772,14 @@ src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float fa
     pDst->isActiveModel = false; // LOD geometry, never a bodygroup choice itself
     ctx.in->sources.push_back(std::move(owned));
 
-    // globalVertices is still empty this early for every source, so the
-    // simplifier sees bind-space positions - which is what the reference feeds
-    // it too (LoadLODSources runs before RemapVerticesToGlobalBones).
-    const bool haveGlobal = pSrc->globalVertices.size() >= pSrc->vertex.size();
-    const src::SrcVertex* pVertBase =
-        haveGlobal ? pSrc->globalVertices.data() : pSrc->vertex.data();
-    const size_t nAvailVerts =
-        haveGlobal ? pSrc->globalVertices.size() : pSrc->vertex.size();
+    // no point simplifying geometry this LOD is about to drop
+    std::vector<bool> skip(lim::kMaxSkins, false);
+    for (int matID = 0; matID < lim::kMaxSkins; matID++)
+        skip[matID] = IsMeshRemoved(ctx, lod, matID);
 
     // static props have no skeleton to hold a seam together, so pin the border
-    const unsigned int options =
-        ctx.in->archetype == Archetype::Static ? meshopt_SimplifyLockBorder : 0u;
-
-    // heap, not stack - kMaxSkins vectors is far past a thread's stack
-    std::vector<std::vector<src::SrcFace>> meshFaces(lim::kMaxSkins);
-    float resultError = 0.0f;
-
-    for (int mi = 0; mi < pSrc->nummeshes; mi++) {
-        const int matID = pSrc->meshindex[mi];
-        const src::SrcMesh& srcMesh = pSrc->mesh[matID];
-        if (srcMesh.numfaces == 0 || srcMesh.numvertices == 0 || nAvailVerts == 0)
-            continue;
-        // no point simplifying geometry this LOD is about to drop
-        if (IsMeshRemoved(ctx, lod, matID))
-            continue;
-
-        // face indices are mesh-local, so hand over the mesh's own vertex slice.
-        // SrcVertex leads with position, so &position + sizeof(SrcVertex) stride
-        // walks the array correctly.
-        const float* pPositions =
-            reinterpret_cast<const float*>(&pVertBase[srcMesh.vertexoffset].position);
-
-        const size_t nSrcIndices = static_cast<size_t>(srcMesh.numfaces) * 3;
-        std::vector<unsigned int> srcIdx(nSrcIndices), dstIdx(nSrcIndices);
-        for (int fi = 0; fi < srcMesh.numfaces; fi++) {
-            const src::SrcFace& f = pSrc->face[srcMesh.faceoffset + fi];
-            srcIdx[fi * 3 + 0] = f.a;
-            srcIdx[fi * 3 + 1] = f.b;
-            srcIdx[fi * 3 + 2] = f.c;
-        }
-
-        size_t targetIdx = static_cast<size_t>(static_cast<float>(nSrcIndices) * factor);
-        targetIdx = (targetIdx / 3) * 3;
-        if (targetIdx < 3)
-            targetIdx = 3;
-
-        const size_t newIdxCount = meshopt_simplify(
-            dstIdx.data(), srcIdx.data(), nSrcIndices,
-            pPositions, static_cast<size_t>(srcMesh.numvertices), sizeof(src::SrcVertex),
-            targetIdx, 1.0f, options, &resultError);
-
-        for (size_t fi = 0; fi < newIdxCount / 3; fi++) {
-            src::SrcFace face;
-            face.a = dstIdx[fi * 3 + 0];
-            face.b = dstIdx[fi * 3 + 1];
-            face.c = dstIdx[fi * 3 + 2];
-            meshFaces[matID].push_back(face);
-        }
-    }
-
-    // flatten back into one face array, meshes in the source's own order
-    pDst->face.clear();
-    for (int mi = 0; mi < pSrc->nummeshes; mi++) {
-        const int matID = pSrc->meshindex[mi];
-        src::SrcMesh& dstMesh = pDst->mesh[matID];
-        dstMesh.faceoffset = static_cast<int>(pDst->face.size());
-        dstMesh.numfaces = static_cast<int>(meshFaces[matID].size());
-        pDst->face.insert(pDst->face.end(), meshFaces[matID].begin(), meshFaces[matID].end());
-    }
+    src::SimplifyFaces(*pDst, *pSrc, factor,
+                       ctx.in->archetype == Archetype::Static, &skip);
     return pDst;
 }
 
@@ -6383,6 +6322,88 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
             }
             case AnimCmd::IkFixup:
                 break; // baked in ProcessIKRules, after all motion extraction
+            case AnimCmd::LocalHierarchy: {
+                // localHierarchy: sample the bone in the new
+                // parent's space straight off the raw source, per frame.
+                src::SourceAnim* pSourceAnim =
+                    panim.src ? src::FindSourceAnim(*panim.src, panim.animationname.c_str())
+                              : nullptr;
+                if (!pSourceAnim) {
+                    if (err) *err = "localhierarchy needs a source animation in " + panim.name;
+                    return false;
+                }
+                LocalHierarchy rule;
+                rule.start = cmd.driverStart;
+                rule.peak = cmd.driverPeak;
+                rule.tail = cmd.driverTail;
+                rule.end = cmd.driverEnd;
+                if (rule.start == 0 && rule.peak == 0 && rule.tail == 0 && rule.end == 0) {
+                    rule.tail = panim.numframes - 1;
+                    rule.end = panim.numframes - 1;
+                }
+                if (rule.start != -1 && rule.peak == -1 && rule.tail == -1 && rule.end != -1) {
+                    rule.peak = (rule.start + rule.end) / 2;
+                    rule.tail = (rule.start + rule.end) / 2;
+                }
+                if (rule.start != -1 && rule.peak == -1 && rule.tail != -1)
+                    rule.peak = (rule.start + rule.tail) / 2;
+                if (rule.peak != -1 && rule.tail == -1 && rule.end != -1)
+                    rule.tail = (rule.peak + rule.end) / 2;
+                if (rule.peak == -1) {
+                    rule.start = 0;
+                    rule.peak = 0;
+                }
+                if (rule.tail == -1) {
+                    rule.tail = panim.numframes - 1;
+                    rule.end = panim.numframes - 1;
+                }
+                if (rule.peak < rule.start) rule.peak += panim.numframes - 1;
+                if (rule.tail < rule.peak) rule.tail += panim.numframes - 1;
+                if (rule.end < rule.tail) rule.end += panim.numframes - 1;
+
+                rule.bone = FindGlobalBone(m, cmd.alignBone);
+                if (rule.bone == -1) {
+                    if (err) *err = "anim '" + panim.name + "' references unknown bone '" +
+                                    cmd.alignBone + "' in localhierarchy";
+                    return false;
+                }
+                if (!cmd.parentBone.empty()) {
+                    rule.newparent = FindGlobalBone(m, cmd.parentBone);
+                    if (rule.newparent == -1) {
+                        if (err) *err = "anim '" + panim.name + "' references unknown bone '" +
+                                        cmd.parentBone + "' in localhierarchy";
+                        return false;
+                    }
+                }
+
+                int numerror = rule.end - rule.start + 1;
+                if (rule.end >= panim.numframes)
+                    numerror += 2;
+                rule.localData.error.resize(numerror);
+                for (int k = 0; k < numerror; k++) {
+                    std::vector<matrix3x4> srcBoneToWorld, boneToWorld;
+                    BuildRawTransforms(panim.src, pSourceAnim,
+                                       k + rule.start + panim.startframe -
+                                           pSourceAnim->startframe,
+                                       panim.ignorescale ? panim.scale / ctx.in->scale
+                                                         : panim.scale,
+                                       panim.adjust, panim.rotation, srcBoneToWorld);
+                    TranslateAnimations(ctx, panim.src, srcBoneToWorld, boneToWorld);
+
+                    matrix3x4 local;
+                    if (rule.newparent != -1) {
+                        const matrix3x4 worldToBone =
+                            pm::MatrixInvert(boneToWorld[rule.newparent]);
+                        local = pm::ConcatTransforms(worldToBone, boneToWorld[rule.bone]);
+                    } else {
+                        local = boneToWorld[rule.bone];
+                    }
+                    pm::MatrixAngles(local, rule.localData.error[k].q,
+                                     rule.localData.error[k].pos);
+                }
+                panim.localhierarchy.push_back(std::move(rule));
+                break;
+            }
             case AnimCmd::Reverse: {
                 int iCountFrames = panim.numframes - 1;
                 for (int f = 0; f < iCountFrames / 2; f++) {
@@ -7844,10 +7865,14 @@ void CompressSingle(AnimStream& stream) {
 
 void CompressIKErrors(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
-    for (Anim& panim : m.anims)
+    for (Anim& panim : m.anims) {
         for (IkRule& rule : panim.ikrules)
             if (!rule.errorData.error.empty())
                 CompressSingle(rule.errorData);
+        for (LocalHierarchy& rule : panim.localhierarchy)
+            if (!rule.localData.error.empty())
+                CompressSingle(rule.localData);
+    }
 }
 
 // CalcSequenceBoundingBoxes
@@ -8948,6 +8973,7 @@ static std::string AnimSignature(const Anim& a) {
         SigVal(s, c.ikfixup.tail);
         SigVal(s, c.ikfixup.end);
         SigVal(s, c.ikfixup.contact);
+        SigStr(s, c.parentBone); // LocalHierarchy; the rest reuses driver*/alignBone
     }
     SigVal(s, static_cast<uint32_t>(a.ikrules.size()));
     for (const IkRule& r : a.ikrules) {
@@ -9638,6 +9664,15 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 if (!ConvertIkRule(input, ic.ikfixup, a.name, cmd.ikfixup, err))
                     return false;
                 break;
+            case InCmd::LocalHierarchy:
+                cmd.kind = AnimCmd::LocalHierarchy;
+                cmd.alignBone = ic.alignBone;
+                cmd.parentBone = ic.name;
+                cmd.driverStart = ic.driverStart;
+                cmd.driverPeak = ic.driverPeak;
+                cmd.driverTail = ic.driverTail;
+                cmd.driverEnd = ic.driverEnd;
+                break;
             case InCmd::NumFrames:
                 cmd.kind = AnimCmd::NumFrames;
                 cmd.numframes = ic.numframes;
@@ -9696,6 +9731,15 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                         return false;
                     }
                 }
+                // copypose reads the source clip as it stands when this clip
+                // is processed, and clips process in declaration order - so a
+                // source declared later is copied before its own commands ran.
+                // A bindpose clip is filled before any of that, so it is exempt.
+                if (ref > static_cast<int>(i) && !out.anims[ref].isBindPose)
+                    std::printf("WARNING: copypose \"%s\" in %s: source is declared after "
+                                "this animation, so its own commands have not run yet - "
+                                "move it above to copy the finished clip\n",
+                                ic.name.c_str(), a.name.c_str());
                 cmd.kind = AnimCmd::CopyPose;
                 cmd.copyBindPose = ic.copyBindPose;
                 cmd.refAnim = ref;

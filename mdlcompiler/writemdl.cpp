@@ -42,7 +42,6 @@ namespace lim = pulse::limits;
 
 // filled by BuildVtx in writevtx.cpp, printed by WriteModelFiles below
 std::vector<std::string> g_vtxReport;
-std::vector<std::string> g_writtenFiles;
 
 namespace {
 
@@ -816,6 +815,65 @@ void WriteIkErrors(cm::Anim& srcanim, Buf& buf) {
 }
 
 // ---------------------------------------------------------------------------
+// WriteLocalHierarchy: rule array + ALIGN4, then per rule the compressed pose
+// header + streams. Offsets are rule-relative, so either buffer works.
+// ---------------------------------------------------------------------------
+void WriteLocalHierarchy(cm::Anim& srcanim, Buf& buf) {
+    if (srcanim.localhierarchy.empty())
+        return;
+
+    fmt::mstudiolocalhierarchy_t* pData =
+        reinterpret_cast<fmt::mstudiolocalhierarchy_t*>(buf.p());
+    buf.pos += srcanim.localhierarchy.size() * sizeof(*pData);
+    buf.Align4();
+
+    for (size_t j = 0; j < srcanim.localhierarchy.size(); j++) {
+        const cm::LocalHierarchy& rule = srcanim.localhierarchy[j];
+        fmt::mstudiolocalhierarchy_t* pHierarchy = &pData[j];
+
+        pHierarchy->iBone = rule.bone;
+        pHierarchy->iNewParent = rule.newparent;
+        if (srcanim.numframes > 1) {
+            pHierarchy->start = rule.start / (srcanim.numframes - 1.0f);
+            pHierarchy->peak = rule.peak / (srcanim.numframes - 1.0f);
+            pHierarchy->tail = rule.tail / (srcanim.numframes - 1.0f);
+            pHierarchy->end = rule.end / (srcanim.numframes - 1.0f);
+        } else {
+            pHierarchy->start = 0.0f;
+            pHierarchy->peak = 0.0f;
+            pHierarchy->tail = 1.0f;
+            pHierarchy->end = 1.0f;
+        }
+        pHierarchy->iStart = rule.start;
+
+        int k = 0;
+        for (; k < 6; k++)
+            if (rule.localData.numanim[k])
+                break;
+        if (k == 6)
+            continue;
+
+        pHierarchy->localanimindex =
+            static_cast<int32_t>(buf.p() - reinterpret_cast<uint8_t*>(pHierarchy));
+        fmt::mstudiocompressedikerror_t* pCompressed =
+            reinterpret_cast<fmt::mstudiocompressedikerror_t*>(buf.p());
+        buf.pos += sizeof(*pCompressed);
+
+        for (k = 0; k < 6; k++) {
+            pCompressed->scale[k] = rule.localData.scale[k];
+            pCompressed->offset[k] =
+                static_cast<int16_t>(buf.p() - reinterpret_cast<uint8_t*>(pCompressed));
+            size_t size = rule.localData.numanim[k] * sizeof(uint16_t);
+            if (size)
+                memcpy(buf.p(), rule.localData.data[k].data(), size);
+            buf.pos += size;
+        }
+
+        buf.Align4();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WriteAnimationData: route each section of one animation to
 // either the .mdl (local) or the .ani (demand loaded), and record where it
 // landed in the section table. `ext` is null when there is no .ani at all.
@@ -928,7 +986,7 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
         if (blockBuf)
             blockBuf->pos = blockData;
 
-        size_t pAnimData = 0, pIkData = 0;
+        size_t pAnimData = 0, pIkData = 0, pHierData = 0;
 
         // !blockBuf is redundant with disableAnimblocks (ResolveAnimBlockPolicy
         // sets it for every clip when there is no .ani) - stated so the else
@@ -939,6 +997,8 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
             WriteAnimationData(m, srcanim, destanim, destanimOff, buf, blockBuf, pSections);
             pIkData = buf.pos;
             WriteIkErrors(srcanim, buf);
+            pHierData = buf.pos;
+            WriteLocalHierarchy(srcanim, buf);
         } else {
             pAnimData = blockBuf->pos;
             WriteAnimationData(m, srcanim, destanim, destanimOff, buf, blockBuf, pSections);
@@ -949,10 +1009,9 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
             destanim->animblock = static_cast<int32_t>(g_animblocks.count - 1);
             pIkData = blockBuf->pos;
             WriteIkErrors(srcanim, *blockBuf);
+            pHierData = blockBuf->pos;
+            WriteLocalHierarchy(srcanim, *blockBuf);
         }
-        // TODO: localhierarchy. A $sequence/$animation option that reparents a
-        // bone to another for a frame range (start/peak/tail/end ramp, pose
-        // compressed like IK error). Unparsed, so numlocalhierarchy stays 0.
 
         if (blockBuf && blockData != blockBuf->pos &&
             blockBuf->pos - g_animblocks.blocks[g_animblocks.count - 1].start >
@@ -974,6 +1033,12 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
                 destanim->ikruleindex = off;
             else
                 destanim->animblockikruleindex = off;
+        }
+
+        if (!srcanim.localhierarchy.empty()) {
+            destanim->numlocalhierarchy = static_cast<int32_t>(srcanim.localhierarchy.size());
+            destanim->localhierarchyindex = static_cast<int32_t>(
+                pHierData - g_animblocks.blocks[destanim->animblock].start);
         }
 
         if (g_animblocks.count) {
@@ -2719,7 +2784,6 @@ bool SaveFile(const std::filesystem::path& path, const void* data, size_t len, s
     }
     fwrite(data, 1, len, f);
     fclose(f);
-    g_writtenFiles.push_back(path.string());
     return true;
 }
 

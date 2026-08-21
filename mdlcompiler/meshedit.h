@@ -71,6 +71,13 @@ enum class WeldMode { None, KeepSeams, All };
 
 void WeldVertices(Source& src, WeldMode mode);
 
+// meshoptimizer decimation to `factor` (0,1] of each mesh's index count.
+// dst may alias src - faces are rebuilt only after every mesh is simplified.
+// The vertex pool is untouched, so the result stays rigged. `skipMaterial`, if
+// given, is indexed by material ID and keeps those meshes at full detail.
+void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder,
+                   const std::vector<bool>* skipMaterial = nullptr);
+
 // Fuse several loaded render meshes into ONE drawable Source - what exporting
 // them together out of a single scene would have produced. Bones unify by name
 // (the first part that names a bone sets its bind pose), vertices and faces are

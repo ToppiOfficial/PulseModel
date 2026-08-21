@@ -56,95 +56,8 @@ static int Usage() {
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms for each stage of the compile\n");
     std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
-    std::printf("  -editorinfo <path>\n");
-    std::printf("                write a JSON report of the compile (files read, files\n");
-    std::printf("                written, errors, timing) for an editor to consume\n");
     return 1;
 }
-
-static std::string JsonEscape(const std::string& s) {
-    std::string out;
-    for (char ch : s) {
-        if (ch == '"' || ch == '\\') { out += '\\'; out += ch; }
-        else if (ch == '\n') out += "\\n";
-        else if (ch == '\r') out += "\\r";
-        else if (ch == '\t') out += "\\t";
-        else out += ch;
-    }
-    return out;
-}
-
-// Split a loader error, which reads `file(line): message`. Anything else is
-// reported whole with no line, so a compile/write error still comes through.
-static void SplitError(const std::string& e, std::string& file, int& line, std::string& msg) {
-    file.clear();
-    line = 0;
-    msg = e;
-    const size_t sep = e.find("): ");
-    const size_t open = e.rfind('(', sep);
-    if (sep == std::string::npos || open == std::string::npos)
-        return;
-    const std::string num = e.substr(open + 1, sep - open - 1);
-    if (num.empty() || num.find_first_not_of("0123456789") != std::string::npos)
-        return;
-    file = e.substr(0, open);
-    line = std::atoi(num.c_str());
-    msg = e.substr(sep + 3);
-}
-
-// -editorinfo <path>: one JSON per compile for an editor - what the compile
-// read, what it wrote, why it failed, how long it took. Written from the
-// destructor so every early `return Fail(...)` still reports the error.
-struct EditorInfo {
-    std::string path; // empty when the flag was not given - then nothing is written
-    std::string error;
-    double load = 0, compile = 0, write = 0, total = 0;
-
-    ~EditorInfo() {
-        if (path.empty())
-            return;
-        FILE* f = nullptr;
-#ifdef _WIN32
-        fopen_s(&f, path.c_str(), "wb");
-#else
-        f = fopen(path.c_str(), "wb");
-#endif
-        if (!f) {
-            std::printf("warning: -editorinfo: cannot write %s\n", path.c_str());
-            return;
-        }
-        auto list = [f](const char* key, const std::vector<std::string>& v, bool comma) {
-            std::fprintf(f, "  \"%s\": [", key);
-            for (size_t i = 0; i < v.size(); ++i)
-                std::fprintf(f, "%s\n    \"%s\"", i ? "," : "", JsonEscape(v[i]).c_str());
-            std::fprintf(f, "%s]%s\n", v.empty() ? "" : "\n  ", comma ? "," : "");
-        };
-        std::fprintf(f, "{\n");
-        list("files", pulse::loader::g_openedFiles, true);
-        list("output", pulse::writer::g_writtenFiles, true);
-        std::fprintf(f, "  \"errors\": [");
-        if (!error.empty()) {
-            std::string file, msg;
-            int line = 0;
-            SplitError(error, file, line, msg);
-            std::fprintf(f, "\n    { \"file\": \"%s\", \"line\": %d, \"msg\": \"%s\" }\n  ",
-                         JsonEscape(file).c_str(), line, JsonEscape(msg).c_str());
-        }
-        std::fprintf(f, "],\n");
-        std::fprintf(f, "  \"inactive\": [");
-        {
-            const auto& r = pulse::loader::g_inactiveRanges;
-            for (size_t i = 0; i < r.size(); ++i)
-                std::fprintf(f, "%s\n    [%d, %d]", i ? "," : "", r[i].first, r[i].second);
-            std::fprintf(f, "%s],\n", r.empty() ? "" : "\n  ");
-        }
-        std::fprintf(f,
-                     "  \"timing\": { \"load\": %.0f, \"compile\": %.0f, \"write\": %.0f, "
-                     "\"total\": %.0f }\n}\n",
-                     load, compile, write, total);
-        std::fclose(f);
-    }
-};
 
 // -definebones: dump the final bone table in $definebone form so it can be
 // pasted back into the script and pin the skeleton (reference DumpDefineBones).
@@ -172,7 +85,6 @@ static int RunCompile(int argc, char** argv) {
         return Usage();
 
     g_stage = "command line";
-    EditorInfo info; // writes on scope exit, including every error path below
     const char* script = nullptr;
     std::string outdir;
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
@@ -205,8 +117,6 @@ static int RunCompile(int argc, char** argv) {
             if (vtxFormat != 0 && vtxFormat != 1)
                 return Fail("bad option", std::string("-vtxformat must be 0 or 1, got \"") +
                                               argv[i] + "\"");
-        } else if (std::strcmp(argv[i], "-editorinfo") == 0 && i + 1 < argc) {
-            info.path = argv[++i];
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
             definebones = true;
         } else if (std::strcmp(argv[i], "-perfmetrics") == 0) {
@@ -244,24 +154,17 @@ static int RunCompile(int argc, char** argv) {
     std::string err;
     pulse::compile::CompileInput input;
     g_stage = "script load";
-    if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs)) {
-        info.error = err;
+    if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs))
         return Fail("script error", err);
-    }
     auto tLoad = Clock::now();
-    info.load = ms(t0, tLoad);
     if (vtxFormat >= 0)
         input.vtxArchetype = vtxFormat;
 
     pulse::compile::CompiledModel model;
     g_stage = "compile";
-    if (!pulse::compile::Compile(input, model, &err)) {
-        info.error = err;
+    if (!pulse::compile::Compile(input, model, &err))
         return Fail("compile error", err);
-    }
-
     auto tCompile = Clock::now();
-    info.compile = ms(tLoad, tCompile);
 
     if (definebones) {
         g_stage = "definebones";
@@ -271,13 +174,9 @@ static int RunCompile(int argc, char** argv) {
 
     g_stage = "write";
     if (!pulse::writer::WriteModelFiles(model, outdir,
-                                        /*legacyVtx=*/input.vtxArchetype == 0, &err)) {
-        info.error = err;
+                                        /*legacyVtx=*/input.vtxArchetype == 0, &err))
         return Fail("write error", err);
-    }
     auto tWrite = Clock::now();
-    info.write = ms(tCompile, tWrite);
-    info.total = ms(t0, tWrite);
     g_stage = "done";
 
     // lodFlag is a bit per LOD. The pool is shared, so a decimated LOD adds no

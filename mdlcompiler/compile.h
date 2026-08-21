@@ -423,6 +423,15 @@ struct IkRule {
     AnimStream errorData;
 };
 
+// `localhierarchy <bone> <parent>`: reparent one bone to another over a frame
+// range. The pose in the new parent's space is compressed like ik error.
+struct LocalHierarchy {
+    int bone = -1;
+    int newparent = -1; // -1 = worldspace
+    int start = -1, peak = -1, tail = -1, end = -1; // frames (-1 = unset)
+    AnimStream localData;
+};
+
 // autolayer spec (reference s_autolayer_t)
 struct AutoLayer {
     std::string name; // target sequence name
@@ -449,7 +458,7 @@ struct AnimCmd {
     enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
-                IkFixup } kind = Weights;
+                IkFixup, LocalHierarchy } kind = Weights;
     int weightlistIndex = 0; // Weights: index into CompileInput::weightlists+1 space
     int numframes = 0;       // NumFrames: the length to clip or pad to
     int subtractAnim = -1;   // Subtract: index into CompiledModel::anims
@@ -489,6 +498,9 @@ struct AnimCmd {
     bool copyPos = true, copyRot = true;
     AnimBoneTransform xform; // TransformBone
     IkRule ikfixup;          // IkFixup: the rule this command bakes in
+    // LocalHierarchy: alignBone is the bone, parentBone its new parent
+    // ("" = worldspace), driverStart/Peak/Tail/End the frame range (-1 = unset)
+    std::string parentBone;
 };
 
 // one extracted motion segment (reference s_linearmove_t) - written as
@@ -546,6 +558,7 @@ struct Anim {
     float motionrollback = 0.3f;
     std::vector<AnimCmd> cmds; // executed in order by ProcessAnimations
     std::vector<IkRule> ikrules;
+    std::vector<LocalHierarchy> localhierarchy;
     Vector3 adjust;       // $origin shift
     RadianEuler rotation; // g_defaultrotation unless delta
     std::vector<float> weight;    // per global bone
@@ -1319,7 +1332,7 @@ struct CompileInput {
             enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
-                IkFixup } kind = Weights;
+                IkFixup, LocalHierarchy } kind = Weights;
             std::string name;   // Weights: weightlist; Subtract/Align/Match: animation
                                 // CopyPose: an animation OR a sequence
             int frame = 0;      // Subtract: reference frame
@@ -1346,6 +1359,8 @@ struct CompileInput {
             bool copyPos = true, copyRot = true;
             AnimBoneTransform xform; // TransformBone
             InIkRule ikfixup;        // IkFixup
+            // LocalHierarchy: bone in `alignBone`, new parent in `name`
+            // ("" = worldspace), range in driverStart/Peak/Tail/End (-1 unset)
         };
         std::vector<InCmd> cmds;
         // clip trim (`frame <a> <b>` / `framestart <a>`). endframe -1 = run to

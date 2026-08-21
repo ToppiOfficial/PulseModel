@@ -517,6 +517,21 @@ struct mstudioikrule_t {
 };
 static_assert(sizeof(mstudioikrule_t) == 152, "mstudioikrule_t layout");
 
+// one animation-time reparent (localhierarchy). localanimindex points at a
+// mstudiocompressedikerror_t holding the bone's pose in the new parent's space.
+struct mstudiolocalhierarchy_t {
+    int32_t iBone;
+    int32_t iNewParent;
+    float start; // normalized 0..1 phases, as in mstudioikrule_t
+    float peak;
+    float tail;
+    float end;
+    int32_t iStart; // raw integer start frame
+    int32_t localanimindex;
+    int32_t unused[4];
+};
+static_assert(sizeof(mstudiolocalhierarchy_t) == 48, "mstudiolocalhierarchy_t layout");
+
 struct mstudioikrulezeroframe_t {
     int16_t chain;
     int16_t slot;
