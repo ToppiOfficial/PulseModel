@@ -18,7 +18,7 @@ jobs:
             ext: .exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         # no -G: use whatever toolchain the runner image ships
@@ -31,13 +31,15 @@ jobs:
         shell: bash
         run: |
           sha=$(echo "${{ github.sha }}" | cut -c1-7)
-          # both tools ship in one PulseModel/ folder inside the archive
+          # both tools ship in one PulseModel/ folder inside the archive, with
+          # the subtools in their own folder under it
           mkdir -p PulseModel
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE README.md PulseModel/
+          cp -r dist/subtools PulseModel/
           7z a -tzip "pulsemodel-${{ matrix.plat }}-$sha.zip" PulseModel/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: dev-${{ matrix.plat }}
           path: pulsemodel-*.zip
@@ -46,8 +48,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
         with:
           pattern: dev-*
           merge-multiple: true

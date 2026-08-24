@@ -2332,6 +2332,14 @@ bool CmdFlexRule(Ctx& c, const Token& cmd) {
     if (!c.Want("a morph name", cmd, name))
         return false;
 
+    // Accept the studiomdl `%morph = rule` spelling; the '%' may lex separately.
+    if (name == "%") {
+        if (!c.Want("a morph name after '%'", cmd, name))
+            return false;
+    } else if (name.size() > 1 && name[0] == '%') {
+        name.erase(0, 1);
+    }
+
     std::string eq;
     if (!c.Want("'=' after the morph name", cmd, eq))
         return false;
@@ -5011,10 +5019,6 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             lod.meshWordRemovals.push_back(std::move(r));
         } else if (opt == "nomorphs" || opt == "nofacial") {
             lod.facialAnimation = false;
-        } else if (opt == "facial") {
-            if (isShadow)
-                return c.Fail(t.line, "$shadowlod: facial animation is not allowed on a shadow LOD");
-            lod.facialAnimation = true;
         } else if (opt == "use_shadowlod_materials") {
             // silently ignored on a plain $lod, the way the reference does it -
             // the flag is model-wide and only means anything for the shadow LOD
@@ -6079,6 +6083,8 @@ bool CmdInclude(Ctx& c, const Token& cmd) {
     buf << f.rdbuf();
     std::string text = buf.str();
     StripUtf8Bom(text);
+
+    std::printf("$include: Including %s...\n", full.string().c_str());
 
     const std::string name = full.filename().string();
     std::vector<Token> toks;

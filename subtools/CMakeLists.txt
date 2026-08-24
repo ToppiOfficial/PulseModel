@@ -5,3 +5,6 @@
 # if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/importqc/CMakeLists.txt")
 #     add_subdirectory(importqc)
 # endif()
+
+add_subdirectory(l4d_animswap)
+add_subdirectory(meshtool)

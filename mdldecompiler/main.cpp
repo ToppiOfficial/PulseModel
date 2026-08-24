@@ -29,6 +29,7 @@
 #include "dmxwrite.h"
 #include "fatalerror.h"
 #include "flexrig.h"
+#include "goldsrc.h"
 #include "format/phy.h"
 #include "mdlfile.h"
 
@@ -2681,8 +2682,31 @@ int FailCaught() {
     }
 }
 
+// Everything a decompile produces goes in its own folder named after the model,
+// next to the .mdl or under -outdir (relative paths are off the cwd). -o is an
+// explicit override for the script path and is used verbatim.
+std::string OutFolder(const std::string& in, const char* outDir) {
+    return outDir ? (std::filesystem::path(outDir) / BaseName(StripExt(in))).string()
+                  : StripExt(in);
+}
+
+std::string OutScript(const std::string& dir, const char* out) {
+    return out ? out
+               : (std::filesystem::path(dir) / (BaseName(dir) + (g_studiomdl ? ".qc" : ".pulseqc")))
+                     .string();
+}
+
 int DecompileOne(const std::string& in, const char* out, const char* outDir, int forceVersion) {
     std::printf("Decompiling: %s\n", in.c_str());
+
+    // GoldSrc shares only the "IDST" magic with v44+; it has its own reader.
+    if (IsGoldSrcMdl(in)) {
+        pulse::fatal::g_stage = "goldsrc";
+        const std::string dir = OutFolder(in, outDir);
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        return DecompileGoldSrc(in, dir, OutScript(dir, out));
+    }
 
     pulse::fatal::g_stage = "read";
     Mdl m;
@@ -2698,18 +2722,11 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
                 h.numflexcontrollers, h.numlocalattachments, h.numhitboxsets);
     STAGE(PrintMaterials, m);
 
-    // everything a decompile produces goes in its own folder named after the
-    // model, next to the .mdl or under -outdir (relative paths are off the cwd).
-    // -o is an explicit override for the script path and is used verbatim.
     pulse::fatal::g_stage = "output folder";
-    const std::string dir =
-        outDir ? (std::filesystem::path(outDir) / BaseName(StripExt(in))).string() : StripExt(in);
+    const std::string dir = OutFolder(in, outDir);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    const std::string outPath =
-        out ? out
-            : (std::filesystem::path(dir) / (BaseName(dir) + (g_studiomdl ? ".qc" : ".pulseqc")))
-                  .string();
+    const std::string outPath = OutScript(dir, out);
     std::FILE* f = std::fopen(outPath.c_str(), "wb");
     if (!f)
         return Fail("write error",

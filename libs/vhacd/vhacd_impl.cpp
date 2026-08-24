@@ -93,7 +93,7 @@ namespace
 bool DecomposeConvex( const float *verts, int numVerts,
                       const int *tris, int numTris,
                       float concavity, int maxHulls, float decimate,
-                      std::vector<DecomposedHull> &out )
+                      std::vector<DecomposedHull> &out, int resolution )
 {
 	out.clear();
 
@@ -143,11 +143,16 @@ bool DecomposeConvex( const float *verts, int numVerts,
 	params.m_maxConvexHulls = unlimitedHulls ? 0xFFFFFFFFu : (uint32_t)maxHulls;
 
 	// The voxel grid decides how faithfully the shape is captured and where the
-	// split planes land, so it runs at full detail and scales up with hull
-	// count - more pieces need a finer grid to separate cleanly. Uncapped means
-	// "however many it finds", which wants the finest grid on offer.
+	// split planes land, and it is the whole running cost - flat in triangle
+	// count. Left to itself it runs at full detail and scales up with hull count,
+	// since more pieces need a finer grid to separate cleanly; a caller that
+	// states one is trading fidelity for time.
 	uint32_t res = 1000000u;
-	if ( !unlimitedHulls )
+	if ( resolution > 0 )
+	{
+		res = (uint32_t)resolution;
+	}
+	else if ( !unlimitedHulls )
 	{
 		res = 400000u + (uint32_t)( maxHulls - 1 ) * 100000u;
 		if ( res > 1000000u ) res = 1000000u;
