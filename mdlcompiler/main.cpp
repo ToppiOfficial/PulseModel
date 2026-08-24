@@ -48,6 +48,7 @@ static int Usage() {
     std::printf("  -filesearchdir <dir>\n");
     std::printf("                extra fallback dir for source files, searched after\n");
     std::printf("                any $addsearchdir; repeatable\n");
+    std::printf("  -modelname <path>   overrides $modelname\n");
     std::printf("  -vtxformat <0|1>\n");
     std::printf("                .vtx layout, overriding the script's $vtxformat.\n");
     std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
@@ -87,6 +88,7 @@ static int RunCompile(int argc, char** argv) {
     g_stage = "command line";
     const char* script = nullptr;
     std::string outdir;
+    std::string modelname; // -modelname: overrides the script's $modelname
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
     bool definebones = false;
     pulse::loader::ScriptVars defvars;
@@ -98,6 +100,10 @@ static int RunCompile(int argc, char** argv) {
         if ((std::strcmp(argv[i], "-game") == 0 || std::strcmp(argv[i], "-outdir") == 0) &&
             i + 1 < argc) {
             outdir = argv[++i];
+        } else if (std::strcmp(argv[i], "-modelname") == 0) {
+            if (i + 1 >= argc)
+                return Fail("bad option", "-modelname needs a model path");
+            modelname = argv[++i];
         } else if (std::strcmp(argv[i], "-defvar") == 0) {
             // a .pulseqc $definevariable, set from the launch line and pinned
             if (i + 2 >= argc)
@@ -153,10 +159,20 @@ static int RunCompile(int argc, char** argv) {
 
     std::string err;
     pulse::compile::CompileInput input;
+    // pre-seeded so a script without $modelname still loads under -modelname
+    input.outname = modelname;
     g_stage = "script load";
     if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs))
         return Fail("script error", err);
     auto tLoad = Clock::now();
+    if (!modelname.empty()) {
+        // -modelname wins over $modelname; extension stripped the same way
+        const size_t dot = modelname.find_last_of('.');
+        const size_t sep = modelname.find_last_of("/\\");
+        input.outname = (dot != std::string::npos && (sep == std::string::npos || dot > sep))
+                            ? modelname.substr(0, dot)
+                            : modelname;
+    }
     if (vtxFormat >= 0)
         input.vtxArchetype = vtxFormat;
 
