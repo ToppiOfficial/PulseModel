@@ -65,16 +65,25 @@ unrecognized `$command` is a hard error rather than a warning.
 ### Usage
 
 ```
-mdlcompiler <file.pulseqc> [-game <dir>] [-defvar <name> <value>]
-            [-vtxformat <0|1>] [-definebones]
+mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
+            [-includesearchdir <dir>] [-filesearchdir <dir>] [-vtxformat <0|1>]
+            [-definebones] [-perfmetrics] [-dumpcommands] [-pause]
 ```
+
+A `.qc` input is converted to `.pulseqc` in-process before the loader runs.
 
 | Option | Meaning |
 | --- | --- |
 | `-game <dir>` | Mod directory to install into; output lands in `<dir>/models/<modelname>.mdl`. `-outdir` is a synonym. |
+| `-modelname <path>` | Overrides the script's `$modelname`. |
 | `-defvar <name> <value>` | Define a script variable (`$name$`) before the script runs. Repeatable; the script cannot override it. |
+| `-includesearchdir <dir>` | Extra fallback directory for `$include`, searched after any `$addincludesearchdir`. Repeatable. |
+| `-filesearchdir <dir>` | Extra fallback directory for source files, searched after any `$addsearchdir`. Repeatable. |
 | `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. 0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW). |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
+| `-perfmetrics` | Print wall time in ms for each stage of the compile. |
+| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
+| `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
 ## mdldecompiler
 
@@ -95,8 +104,8 @@ back into `mdlcompiler`.
 ### Usage
 
 ```
-mdldecompiler <file.mdl|folder> ... [-o <file>] [-forceversion <n>]
-              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-studiomdl]
+mdldecompiler <file.mdl|folder> ... [-o <file>] [-outdir <dir>] [-forceversion <n>]
+              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-studiomdl] [-pause]
 ```
 
 Several inputs may be given at once (drag-and-drop works); a folder decompiles
@@ -105,11 +114,13 @@ every `.mdl` under it, recursively.
 | Option | Meaning |
 | --- | --- |
 | `-o <file>` | Script to write. Defaults to a folder named after the `.mdl`, next to it, holding the script and its meshes. Ignored with more than one model. |
+| `-outdir <dir>` | Put those per-model folders under `<dir>` instead of beside the `.mdl`; absolute, or relative to the current directory. |
 | `-forceversion <n>` | Read the file as version `<n>` and ignore the header's version field. |
 | `-dmxencoding <enc>` | How the `.dmx` meshes are encoded: `binary` (default) or `keyvalues2` text. |
 | `-dmxmodel <n>` | The `format model` version they declare: 15 (default), 1, 18, or 22 (Source 2 ModelDoc). |
 | `-smdanimation` | Write animation clips as `.smd` instead of `.dmx`. |
 | `-studiomdl` | Write a stock-studiomdl `.qc` instead of a `.pulseqc`. |
+| `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
 `-forceversion` exists because some models carry a header version that does not
 match their actual layout - a trick used to make them unreadable to decompilers.

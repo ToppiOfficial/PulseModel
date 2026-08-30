@@ -16,6 +16,7 @@
 
 #include "dmx/dmx.h"
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -47,6 +48,25 @@ public:
         }
     }
 
+    // Fast scanner for numeric arrays: classifies the next array token and, for
+    // a quoted entry, hands back its raw interior [b,e) with no copy or
+    // unescaping. Numeric DMX values never contain escapes.
+    enum class Arr { Str, RBracket, Comma, End, Other };
+    Arr NextArrayToken(const char*& b, const char*& e) {
+        SkipTrivia();
+        if (p_ >= end_) return Arr::End;
+        char c = *p_;
+        if (c == ']') { ++p_; return Arr::RBracket; }
+        if (c == ',') { ++p_; return Arr::Comma; }
+        if (c != '"') return Arr::Other;
+        ++p_;
+        b = p_;
+        while (p_ < end_ && *p_ != '"') ++p_;
+        e = p_;
+        if (p_ < end_) ++p_;
+        return Arr::Str;
+    }
+
     // Look at the next token without consuming.
     Tok Peek(std::string& str) {
         const char* save = p_;
@@ -63,8 +83,10 @@ private:
             while (p_ < end_ && (*p_ == ' ' || *p_ == '\t' || *p_ == '\r' ||
                                  *p_ == '\n'))
                 ++p_;
-            // "<!-- ... -->" comments.
-            if (end_ - p_ >= 4 && std::strncmp(p_, "<!--", 4) == 0) {
+            // "<!-- ... -->" comments. Guard on '<' so the common token path
+            // never pays for the strncmp.
+            if (p_ < end_ && *p_ == '<' && end_ - p_ >= 4 &&
+                std::strncmp(p_, "<!--", 4) == 0) {
                 const char* e = p_;
                 while (e + 3 <= end_ && std::strncmp(e, "-->", 3) != 0) ++e;
                 p_ = (e + 3 <= end_) ? e + 3 : end_;
@@ -75,8 +97,18 @@ private:
     }
 
     Tok ReadString(std::string& str) {
-        str.clear();
         ++p_; // opening quote
+        // Fast path: scan for the closing quote; if no escape intervenes, bulk
+        // assign the whole span. This is every numeric mesh-array entry.
+        const char* start = p_;
+        while (p_ < end_ && *p_ != '"' && *p_ != '\\') ++p_;
+        if (p_ < end_ && *p_ == '"') {
+            str.assign(start, static_cast<size_t>(p_ - start));
+            ++p_;
+            return Tok::String;
+        }
+        // Slow path: contains escapes (or ran off the end).
+        str.assign(start, static_cast<size_t>(p_ - start));
         while (p_ < end_) {
             char c = *p_++;
             if (c == '\\' && p_ < end_) {
@@ -116,17 +148,24 @@ private:
 };
 
 // ---- scalar string -> value helpers ----
-int ParseFloats(const std::string& s, float* out, int n) {
-    const char* p = s.c_str();
+// from_chars is locale-independent and much faster than strtof/strtol; it does
+// not skip leading whitespace or a leading '+', so do that by hand.
+int ParseFloats(const char* p, const char* end, float* out, int n) {
     int i = 0;
     while (i < n) {
-        char* e = nullptr;
-        float v = std::strtof(p, &e);
-        if (e == p) break;
+        while (p < end && (*p == ' ' || *p == '\t')) ++p;
+        if (p < end && *p == '+') ++p; // from_chars rejects a leading '+'
+        if (p >= end) break;
+        float v;
+        auto r = std::from_chars(p, end, v);
+        if (r.ptr == p) break;
         out[i++] = v;
-        p = e;
+        p = r.ptr;
     }
     return i;
+}
+int ParseFloats(const std::string& s, float* out, int n) {
+    return ParseFloats(s.data(), s.data() + s.size(), out, n);
 }
 
 // Valve's text unserializer normalizes every parsed quaternion
@@ -146,8 +185,15 @@ Quaternion NormalizeParsedQuat(Quaternion q) {
     return q;
 }
 
+int32_t ParseInt(const char* p, const char* end) {
+    while (p < end && (*p == ' ' || *p == '\t')) ++p;
+    if (p < end && *p == '+') ++p; // from_chars rejects a leading '+'
+    int32_t v = 0;
+    std::from_chars(p, end, v); // v stays 0 on failure, matching strtol
+    return v;
+}
 int32_t ParseInt(const std::string& s) {
-    return static_cast<int32_t>(std::strtol(s.c_str(), nullptr, 10));
+    return ParseInt(s.data(), s.data() + s.size());
 }
 
 bool ParseBool(const std::string& s) {
@@ -377,46 +423,65 @@ private:
             return true;
         }
 
-        // Scalar arrays: collect quoted entries until ']'.
-        AttrType st = ScalarOfArray(type);
-        std::vector<std::string> raw;
+        // Scalar arrays: parse each entry straight into the typed vector. The
+        // big numeric arrays parse from the raw buffer span (no string copy);
+        // string/binary/bool/color keep the escape-aware string path.
+        using B = const char*;
+        switch (ScalarOfArray(type)) {
+            case AttrType::Int: return ReadNum<int32_t>(attr, err, [](B b, B e) { return ParseInt(b, e); });
+            case AttrType::Float: return ReadNum<float>(attr, err, [](B b, B e) { float f; ParseFloats(b, e, &f, 1); return f; });
+            case AttrType::Time: return ReadNum<Time>(attr, err, [](B b, B e) { float f; ParseFloats(b, e, &f, 1); return Time{f}; });
+            case AttrType::Vector2: return ReadNum<Vector2>(attr, err, [](B b, B e) { float f[2] = {}; ParseFloats(b, e, f, 2); return Vector2{f[0], f[1]}; });
+            case AttrType::Vector3: return ReadNum<Vector3>(attr, err, [](B b, B e) { float f[3] = {}; ParseFloats(b, e, f, 3); return Vector3{f[0], f[1], f[2]}; });
+            case AttrType::Vector4: return ReadNum<Vector4>(attr, err, [](B b, B e) { float f[4] = {}; ParseFloats(b, e, f, 4); return Vector4{f[0], f[1], f[2], f[3]}; });
+            case AttrType::QAngle: return ReadNum<QAngle>(attr, err, [](B b, B e) { float f[3] = {}; ParseFloats(b, e, f, 3); return QAngle{f[0], f[1], f[2]}; });
+            case AttrType::Quaternion: return ReadNum<Quaternion>(attr, err, [](B b, B e) { float f[4] = {}; ParseFloats(b, e, f, 4); return NormalizeParsedQuat(Quaternion{f[0], f[1], f[2], f[3]}); });
+            case AttrType::Matrix: return ReadNum<Matrix>(attr, err, [](B b, B e) { Matrix m; ParseFloats(b, e, m.m, 16); return m; });
+            case AttrType::Bool: return ReadInto<bool>(attr, err, [](const std::string& s) { return ParseBool(s); });
+            case AttrType::String: return ReadInto<std::string>(attr, err, [](const std::string& s) { return s; });
+            case AttrType::Binary: return ReadInto<Binary>(attr, err, [](const std::string& s) { return ParseBinaryHex(s); });
+            case AttrType::Color: return ReadInto<Color>(attr, err, [](const std::string& s) { return ParseColor(s); });
+            default: break;
+        }
+        // Unknown scalar type: drain to the matching ']' so parsing stays sane.
+        for (;;) {
+            Tok t = lex_.Next(s);
+            if (t == Tok::RBracket || t == Tok::End) break;
+        }
+        return true;
+    }
+
+    // Numeric arrays: lex raw spans until ']', parsing each with `f` in place.
+    template <typename T, typename F>
+    bool ReadNum(Attribute& attr, std::string* err, F f) {
+        std::vector<T> v;
+        const char* b;
+        const char* e;
+        for (;;) {
+            Lexer::Arr t = lex_.NextArrayToken(b, e);
+            if (t == Lexer::Arr::RBracket) break;
+            if (t == Lexer::Arr::Comma) continue;
+            if (t != Lexer::Arr::Str) return Fail(err, "bad array entry");
+            v.push_back(f(b, e));
+        }
+        attr.value = std::move(v);
+        return true;
+    }
+
+    // Lex entries until ']', parsing each with `f` into a vector<T> in place.
+    template <typename T, typename F>
+    bool ReadInto(Attribute& attr, std::string* err, F f) {
+        std::string s;
+        std::vector<T> v;
         for (;;) {
             Tok t = lex_.Next(s);
             if (t == Tok::RBracket) break;
             if (t == Tok::Comma) continue;
             if (t != Tok::String) return Fail(err, "bad array entry");
-            raw.push_back(s);
+            v.push_back(f(s));
         }
-        BuildScalarArray(attr, st, raw);
+        attr.value = std::move(v);
         return true;
-    }
-
-    template <typename T, typename F>
-    static std::vector<T> Map(const std::vector<std::string>& raw, F f) {
-        std::vector<T> v;
-        v.reserve(raw.size());
-        for (const auto& s : raw) v.push_back(f(s));
-        return v;
-    }
-
-    void BuildScalarArray(Attribute& attr, AttrType st,
-                          const std::vector<std::string>& raw) {
-        switch (st) {
-            case AttrType::Int: attr.value = Map<int32_t>(raw, [](const std::string& s) { return ParseInt(s); }); break;
-            case AttrType::Float: attr.value = Map<float>(raw, [](const std::string& s) { float f; ParseFloats(s, &f, 1); return f; }); break;
-            case AttrType::Bool: attr.value = Map<bool>(raw, [](const std::string& s) { return ParseBool(s); }); break;
-            case AttrType::String: attr.value = raw; break;
-            case AttrType::Binary: attr.value = Map<Binary>(raw, [](const std::string& s) { return ParseBinaryHex(s); }); break;
-            case AttrType::Time: attr.value = Map<Time>(raw, [](const std::string& s) { float f; ParseFloats(s, &f, 1); return Time{f}; }); break;
-            case AttrType::Color: attr.value = Map<Color>(raw, [](const std::string& s) { return ParseColor(s); }); break;
-            case AttrType::Vector2: attr.value = Map<Vector2>(raw, [](const std::string& s) { float f[2] = {}; ParseFloats(s, f, 2); return Vector2{f[0], f[1]}; }); break;
-            case AttrType::Vector3: attr.value = Map<Vector3>(raw, [](const std::string& s) { float f[3] = {}; ParseFloats(s, f, 3); return Vector3{f[0], f[1], f[2]}; }); break;
-            case AttrType::Vector4: attr.value = Map<Vector4>(raw, [](const std::string& s) { float f[4] = {}; ParseFloats(s, f, 4); return Vector4{f[0], f[1], f[2], f[3]}; }); break;
-            case AttrType::QAngle: attr.value = Map<QAngle>(raw, [](const std::string& s) { float f[3] = {}; ParseFloats(s, f, 3); return QAngle{f[0], f[1], f[2]}; }); break;
-            case AttrType::Quaternion: attr.value = Map<Quaternion>(raw, [](const std::string& s) { float f[4] = {}; ParseFloats(s, f, 4); return NormalizeParsedQuat(Quaternion{f[0], f[1], f[2], f[3]}); }); break;
-            case AttrType::Matrix: attr.value = Map<Matrix>(raw, [](const std::string& s) { Matrix m; ParseFloats(s, m.m, 16); return m; }); break;
-            default: break;
-        }
     }
 
     void Register(Element* e, const Guid& g) { dm_.IndexElement(e, g); }

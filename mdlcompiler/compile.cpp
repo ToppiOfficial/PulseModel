@@ -3395,6 +3395,21 @@ void BuildOutputMeshes(Ctx& ctx) {
         const bool unified = model.meshVertIndexMaps.size() == static_cast<size_t>(numLODs);
         const int nummeshes = model.source->nummeshes;
 
+        // $meshsortorder. Permuting here is free: the pool rebuild below
+        // already recomputes vertexoffset and remaps flexes and eyeballs.
+        std::vector<int> order(nummeshes);
+        for (int i = 0; i < nummeshes; i++)
+            order[i] = i;
+        bool reordered = false;
+        if (!ctx.in->meshSortOrder.empty()) {
+            std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+                return MeshSortRank(*ctx.in, model.source->meshindex[a]) <
+                       MeshSortRank(*ctx.in, model.source->meshindex[b]);
+            });
+            for (int i = 0; i < nummeshes; i++)
+                reordered = reordered || order[i] != i;
+        }
+
         std::vector<LodVertex> newVerts;
         newVerts.reserve(model.vertices.size());
         // old pool index -> its copies in the new pool; more than one only for a
@@ -3403,7 +3418,7 @@ void BuildOutputMeshes(Ctx& ctx) {
         std::vector<int> firstOutMesh(nummeshes, 0); // old mesh ordinal -> new
         bool split = false;
 
-        for (int meshID = 0; meshID < nummeshes; meshID++) {
+        for (int meshID : order) {
             const int matID = model.source->meshindex[meshID];
             const src::SrcMesh& range = model.meshes[matID];
             firstOutMesh[meshID] = static_cast<int>(model.outMeshes.size());
@@ -3465,7 +3480,7 @@ void BuildOutputMeshes(Ctx& ctx) {
                         total - range.numvertices);
         }
 
-        if (!split)
+        if (!split && !reordered)
             continue; // pool untouched, so leave the vertices and deltas alone
 
         model.vertices.swap(newVerts);
@@ -9317,6 +9332,25 @@ bool GenerateVertexAveragedAttachments(Ctx& ctx, std::string* err) {
 }
 
 } // namespace
+
+std::string MeshSortMaterialName(const CompileInput& in, int matID) {
+    if (matID < 0 || matID >= static_cast<int>(in.mats.materialToTexture.size()))
+        return std::string();
+    return FileBaseName(in.mats.textures[in.mats.materialToTexture[matID]].name);
+}
+
+// $meshsortorder rank: the material's position in the script's list, or -1 for
+// one it does not name. Ranks feed stable sorts, so unnamed materials draw
+// first and keep their existing relative order.
+int MeshSortRank(const CompileInput& in, int matID) {
+    const std::string base = MeshSortMaterialName(in, matID);
+    if (in.meshSortOrder.empty() || base.empty())
+        return -1;
+    for (size_t i = 0; i < in.meshSortOrder.size(); i++)
+        if (_stricmp(FileBaseName(in.meshSortOrder[i]).c_str(), base.c_str()) == 0)
+            return static_cast<int>(i);
+    return -1;
+}
 
 std::string ChoiceName(const std::vector<std::string>& meshRefs) {
     std::string s;

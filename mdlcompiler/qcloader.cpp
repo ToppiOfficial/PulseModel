@@ -5067,6 +5067,82 @@ bool CmdTextureGroup(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $meshsortorder also orders the bodyparts, since the renderer's outer draw
+// loop is the bodypart array. A part ranks by the last-drawn material it holds.
+// The choice list inside a part is never touched, so `mesh`/`studio`/`blank`
+// keep the indices SetBodygroup's second argument addresses.
+void SortBodyPartsForMeshOrder(Ctx& c) {
+    if (c.in.meshSortOrder.empty())
+        return;
+
+    auto partRank = [&](const cm::CompileInput::InBodyPart& bp) {
+        int rank = -1;
+        for (const auto& im : bp.models)
+            for (int mi = 0; im.source && mi < im.source->nummeshes; mi++)
+                rank = std::max(rank, cm::MeshSortRank(c.in, im.source->meshindex[mi]));
+        return rank;
+    };
+
+    std::vector<std::string> before;
+    for (const auto& bp : c.in.bodyparts)
+        before.push_back(bp.name);
+
+    std::stable_sort(c.in.bodyparts.begin(), c.in.bodyparts.end(),
+                     [&](const cm::CompileInput::InBodyPart& a,
+                         const cm::CompileInput::InBodyPart& b) {
+                         return partRank(a) < partRank(b);
+                     });
+
+    for (size_t i = 0; i < before.size(); i++) {
+        if (before[i] == c.in.bodyparts[i].name)
+            continue;
+        std::printf("$meshsortorder reordered $modelgroups - the index SetBodygroup's "
+                    "first argument takes has changed:\n");
+        for (size_t j = 0; j < c.in.bodyparts.size(); j++) {
+            const auto it = std::find(before.begin(), before.end(), c.in.bodyparts[j].name);
+            std::printf("  %s: %d -> %d\n", c.in.bodyparts[j].name.c_str(),
+                        static_cast<int>(it - before.begin()), static_cast<int>(j));
+        }
+        break;
+    }
+}
+
+// A $meshsortorder name no drawn mesh carries orders nothing. Silence there
+// would hide a typo as "my layering just didn't work".
+void CheckMeshSortOrder(Ctx& c) {
+    for (const std::string& want : c.in.meshSortOrder) {
+        bool found = false;
+        for (const auto& bp : c.in.bodyparts)
+            for (const auto& im : bp.models)
+                for (int mi = 0; im.source && mi < im.source->nummeshes; mi++)
+                    found = found || _stricmp(cm::MeshSortMaterialName(
+                                                  c.in, im.source->meshindex[mi]).c_str(),
+                                              StripExtension(want).c_str()) == 0;
+        if (!found)
+            std::printf("WARNING: $meshsortorder \"%s\" matches no material on any mesh; "
+                        "it orders nothing.\n",
+                        want.c_str());
+    }
+}
+
+// $meshsortorder { <material> ... } - draw order for the meshes of every
+// submodel, and for the $modelgroups holding them. The engine never sorts
+// meshes, so this is the only handle on which translucent surface lands on top.
+bool CmdMeshSortOrder(Ctx& c, const Token& cmd) {
+    if (!WantOpenBrace(c, cmd, cmd.text))
+        return false;
+
+    while (true) {
+        if (c.Eof())
+            return c.Fail(cmd.line, "$meshsortorder: missing '}'");
+        const Token t = c.toks[c.pos++];
+        if (!t.quoted && t.text == "}")
+            break;
+        c.in.meshSortOrder.push_back(StripExtension(t.text));
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Hitboxes - $hitboxset { $hbox ... }. Stock QC lets a bare $hbox fall into an
 // implicit "default" set; here the set is always explicit, so which set a box
@@ -6838,6 +6914,7 @@ constexpr Command kCommands[] = {
     {"$renamematerial", CmdRenameMaterial},
     {"$overridematerial", CmdOverrideMaterial},
     {"$texturegroup", CmdTextureGroup},
+    {"$meshsortorder", CmdMeshSortOrder},
     {"$lod", CmdLod},
     {"$shadowlod", CmdLod},
 };
@@ -6990,6 +7067,12 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
                 return c.Fail(w.line, "$wrinklescale names \"" + w.shape +
                                           "\", which is not a morph in any $rendermesh");
     }
+
+    // both need every $modelgroup parsed. The sort must run HERE: RegisterFlex
+    // below flattens model indices by walking c.in.bodyparts, so permuting them
+    // any later leaves every FlexKey::imodel pointing at the wrong model.
+    CheckMeshSortOrder(c);
+    SortBodyPartsForMeshOrder(c);
 
     // flex/morph: the automatic per-body DMX rig plus the $flexcontroller /
     // $flexlocalvar / $flexrule / $flexcorrective block. Needs the finished

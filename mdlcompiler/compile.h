@@ -1282,6 +1282,11 @@ struct CompileInput {
     std::vector<std::unique_ptr<source::Source>> sources; // all loaded DMX
     source::MaterialTable mats;
 
+    // $meshsortorder - extension-stripped material names in draw order, applied
+    // to meshes within a submodel and to the bodypart array holding them. A
+    // material not listed ranks before every listed one.
+    std::vector<std::string> meshSortOrder;
+
     struct InModel {
         std::string name;     // choice name or "blank"
         source::Source* source = nullptr; // null = blank
@@ -1489,6 +1494,11 @@ std::string ChoiceName(const std::vector<std::string>& meshRefs);
 // Run the pipeline. Returns false + err on hard errors (limits, bad references).
 // `input` is mutated: with no sequences and no $includemodel a "reference"
 // bind-pose sequence is appended, since Source needs one or the other to load.
+// path- and extension-stripped name of a material, "" when matID is out of range
+std::string MeshSortMaterialName(const CompileInput& in, int matID);
+// $meshsortorder rank of a material: its place in the list, -1 when unlisted
+int MeshSortRank(const CompileInput& in, int matID);
+
 bool Compile(CompileInput& input, CompiledModel& out, std::string* err);
 
 } // namespace pulse::compile

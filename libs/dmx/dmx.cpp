@@ -208,12 +208,15 @@ std::unique_ptr<Datamodel> Datamodel::Load(const std::string& path,
     }
     std::streamsize n = f.tellg();
     f.seekg(0);
-    std::vector<uint8_t> buf(static_cast<size_t>(n));
-    if (n > 0 && !f.read(reinterpret_cast<char*>(buf.data()), n)) {
+    // Uninitialized buffer: read() overwrites it whole, so skip the zero-fill a
+    // sized vector would do (the source file can be hundreds of MB).
+    size_t sz = static_cast<size_t>(n);
+    std::unique_ptr<uint8_t[]> buf(new uint8_t[sz]);
+    if (n > 0 && !f.read(reinterpret_cast<char*>(buf.get()), n)) {
         if (err) *err = "read error: " + path;
         return nullptr;
     }
-    return LoadFromMemory(buf.data(), buf.size(), err);
+    return LoadFromMemory(buf.get(), sz, err);
 }
 
 } // namespace pulse::dmx
