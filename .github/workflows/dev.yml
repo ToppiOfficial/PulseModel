@@ -11,12 +11,19 @@ permissions:
 jobs:
   build:
     strategy:
+      # a Linux failure must not cancel win64 or block the dev release
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             plat: win64
             ext: .exe
+          - os: ubuntu-latest
+            plat: linux64
+            ext: ""
     runs-on: ${{ matrix.os }}
+    # linux64 is best-effort: a failure still zips/publishes what built
+    continue-on-error: ${{ matrix.plat == 'linux64' }}
     steps:
       - uses: actions/checkout@v5
 

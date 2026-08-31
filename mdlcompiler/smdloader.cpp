@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "math/math.h"
+#include "meshedit.h"
 #include "pulselimits.h"
 
 namespace pm = pulse::math;
@@ -480,8 +481,8 @@ void SkipBlock(LineReader& r) {
     }
 }
 
-bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats, Source& out,
-                   std::string* err) {
+bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
+                   const MeshFilter* filter, Source& out, std::string* err) {
     std::vector<TriInput> tris;
 
     for (;;) {
@@ -498,6 +499,11 @@ bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
         }
         if (_stricmp(tex.c_str(), "null.bmp") == 0 || _stricmp(tex.c_str(), "null.tga") == 0 ||
             _stricmp(tex.c_str(), "debug/debugempty") == 0) {
+            for (int k = 0; k < 3; ++k) r.Next();
+            continue;
+        }
+        // $removemeshword: skip this material's triangle (verts unify off faces).
+        if (filter && filter->MaterialRemoved(tex)) {
             for (int k = 0; k < 3; ++k) r.Next();
             continue;
         }
@@ -623,7 +629,8 @@ void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
 }
 
 bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, float scale,
-                   std::string* err, bool /*morphSource*/, bool animOnly) {
+                   std::string* err, bool /*morphSource*/, const MeshFilter* filter,
+                   bool animOnly) {
     LineReader r;
     if (!ReadAllLines(path, r, err))
         return false;
@@ -668,7 +675,7 @@ bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, fl
                 SkipBlock(r); // geometry is model data - see LoadDmxSource
                 continue;
             }
-            if (!GrabTriangles(r, version, scale, mats, out, err))
+            if (!GrabTriangles(r, version, scale, mats, filter, out, err))
                 return false;
         } else if (_stricmp(cmd, "vertexanimation") == 0) {
             SkipBlock(r); // morphs arrive through $vta -> LoadVtaMorphs, not here

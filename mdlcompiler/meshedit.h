@@ -29,14 +29,20 @@ struct MeshFilter {
     };
     std::vector<Entry> names;
     bool exclusive = false;
+    // $removemeshword: drop every face whose material name contains one of these
+    // (case-insensitive substring). Repeatable and independent of $exceptionlist.
+    std::vector<std::string> removeWords;
 
-    bool empty() const { return names.empty(); }
+    bool empty() const { return names.empty(); } // $exceptionlist only
 
     // Filter one mesh dag, recording which entries hit.
     bool Keep(const std::string& meshName, const std::string& dagName);
 
     // First entry that never matched a mesh, or null.
     const std::string* Unmatched() const;
+
+    // True if the material name contains any $removemeshword keyword.
+    bool MaterialRemoved(const std::string& materialName) const;
 };
 
 // $wrinklescale <morph> <scale> - what dmxedit's SetWrinkleScale would have

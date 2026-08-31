@@ -312,26 +312,38 @@ bool LoadFbxSource(const std::string& path, Source& out, MaterialTable& mats, fl
         const ufbx_material_list& matList =
             node->materials.count ? node->materials : mesh->materials;
         std::vector<int> materialIndex(matList.count, 0);
+        std::vector<char> materialRemoved(matList.count, 0);
         for (size_t m = 0; m < matList.count; ++m) {
             const ufbx_string& name = matList.data[m]->name;
+            std::string nm(name.data, name.length);
+            // $removemeshword: leave the slot out of the table; faces referencing
+            // it are dropped below, so its verts never unify.
+            if (filter && filter->MaterialRemoved(nm)) {
+                materialRemoved[m] = 1;
+                continue;
+            }
             // Relative-path flagged like DMX: no derived "models/<outname>/",
             // the empty cdmaterials entry resolves the name as authored.
-            materialIndex[m] =
-                mats.UseTextureAsMaterial(mats.LookupTexture(
-                    std::string(name.data, name.length).c_str()));
+            materialIndex[m] = mats.UseTextureAsMaterial(mats.LookupTexture(nm.c_str()));
         }
 
         triIndices.resize(mesh->max_face_triangles * 3);
         for (size_t f = 0; f < mesh->faces.count; ++f) {
             const ufbx_face face = mesh->faces.data[f];
             int material = 0;
+            bool removed = false;
             if (mesh->face_material.count && !materialIndex.empty()) {
                 const uint32_t mi = mesh->face_material.data[f];
-                if (mi < materialIndex.size())
+                if (mi < materialIndex.size()) {
                     material = materialIndex[mi];
+                    removed = materialRemoved[mi];
+                }
             } else if (!materialIndex.empty()) {
                 material = materialIndex[0];
+                removed = materialRemoved[0];
             }
+            if (removed)
+                continue;
 
             const uint32_t numTris =
                 ufbx_triangulate_face(triIndices.data(), triIndices.size(), mesh, face);

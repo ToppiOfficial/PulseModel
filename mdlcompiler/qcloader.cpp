@@ -528,7 +528,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             return nullptr;
         }
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
-                                   morphSource, animOnly)) {
+                                   morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
             return nullptr;
         }
@@ -683,6 +683,16 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            // $removemeshword <keyword> - drop every mesh whose material name
+            // contains the keyword (case-insensitive substring). Repeatable.
+            if (o == "$removemeshword") {
+                std::string word;
+                if (!c.Want("a material keyword", *t, word))
+                    return false;
+                edit.filter.removeWords.push_back(word);
+                continue;
+            }
+
             if (o == "$weld") {
                 edit.weld = source::WeldMode::KeepSeams;
                 if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "seams") {
@@ -776,9 +786,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            return c.Fail(t->line, where + ": expected $exceptionlist, $skinnedbonecull, "
-                                           "$weld, $decimate, $nomorph, $vta, $vca or '}', got \"" +
-                                       t->text + "\"");
+            return c.Fail(t->line, where + ": expected $exceptionlist, $removemeshword, "
+                                           "$skinnedbonecull, $weld, $decimate, $nomorph, $vta, "
+                                           "$vca or '}', got \"" + t->text + "\"");
         }
     }
 

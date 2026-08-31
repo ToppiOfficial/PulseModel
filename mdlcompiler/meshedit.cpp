@@ -3,6 +3,7 @@
 #include "meshedit.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -63,6 +64,20 @@ const std::string* MeshFilter::Unmatched() const {
         if (!e.matched)
             return &e.name;
     return nullptr;
+}
+
+bool MeshFilter::MaterialRemoved(const std::string& materialName) const {
+    if (removeWords.empty())
+        return false;
+    std::string hay = materialName;
+    std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
+    for (const std::string& w : removeWords) {
+        std::string needle = w;
+        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+        if (!needle.empty() && hay.find(needle) != std::string::npos)
+            return true;
+    }
+    return false;
 }
 
 namespace {

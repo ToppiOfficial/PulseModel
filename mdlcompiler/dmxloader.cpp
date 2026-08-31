@@ -1303,6 +1303,11 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                 continue;
         }
 
+        // $removemeshword: drop this material's faces (and, since verts unify off
+        // faces, its geometry and texture) before it reaches the table.
+        if (info.filter && info.filter->MaterialRemoved(textureName))
+            continue;
+
         int texture = info.mats->LookupTexture(textureName.c_str());
         int material = info.mats->UseTextureAsMaterial(texture);
 
