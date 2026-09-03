@@ -25,7 +25,7 @@ jobs:
     # linux64 is best-effort: a failure still zips/publishes what built
     continue-on-error: ${{ matrix.plat == 'linux64' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Configure
         # no -G: use whatever toolchain the runner image ships
@@ -46,7 +46,7 @@ jobs:
           cp -r dist/subtools PulseModel/
           7z a -tzip "pulsemodel-${{ matrix.plat }}-$sha.zip" PulseModel/
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: dev-${{ matrix.plat }}
           path: pulsemodel-*.zip
@@ -55,8 +55,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v6
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dev-*
           merge-multiple: true

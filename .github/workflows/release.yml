@@ -19,7 +19,7 @@ jobs:
             ext: .exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Configure
         # no -G: use whatever toolchain the runner image ships
@@ -39,7 +39,7 @@ jobs:
           cp -r dist/subtools PulseModel/
           7z a -tzip "pulsemodel-${{ matrix.plat }}.zip" PulseModel/
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.plat }}
           path: pulsemodel-*.zip
@@ -48,8 +48,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v6
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
@@ -62,14 +64,18 @@ jobs:
           v=$(sed -n 's/^set(TOOL_VERSION \([0-9.]*\)).*/\1/p' mdlcompiler/CMakeLists.txt)
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
+      - name: Build notes
+        shell: bash
+        run: |
+          # only v* tags count as a release; 'dev' and drafts never match
+          prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          [ -n "$prev" ] && range="$prev..HEAD" || range="HEAD"
+          git log --reverse --pretty=format:%x00%B "$range" | python3 .github/scripts/release-notes.py > notes.txt
+          cat notes.txt
+
       - name: Create draft release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git log -1 --pretty=%B > notes.txt
-          gh release create "v${{ steps.ver.outputs.version }}" pulsemodel-*.zip \
-            --target "${{ github.sha }}" \
-            --title "v${{ steps.ver.outputs.version }}" \
-            --notes-file notes.txt \
-            --draft
+          gh release create "v${{ steps.ver.outputs.version }}" pulsemodel-*.zip --target "${{ github.sha }}" --title "release-$(date -u +%-m/%-d/%Y)" --notes-file notes.txt --draft
