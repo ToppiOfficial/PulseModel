@@ -163,8 +163,11 @@ bool ParseMorphRuleExpr(cm::CompileInput& in, const std::string& flexName,
     // dedup per desc (the reference drains the expression tokens; a string
     // input can simply be skipped)
     for (const cm::FlexRule& r : in.flexrules)
-        if (r.flex == flexdesc)
+        if (r.flex == flexdesc) {
+            std::fprintf(stderr, "warning: morph \"%s\" already has a rule, ignoring\n",
+                         flexName.c_str());
             return true;
+        }
 
     if (in.flexrules.size() >= static_cast<size_t>(lim::kMaxFlexRules)) {
         if (err) *err = "too many flex rules (max " + std::to_string(lim::kMaxFlexRules) + ")";

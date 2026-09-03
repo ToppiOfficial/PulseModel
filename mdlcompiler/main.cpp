@@ -35,7 +35,7 @@ static void PrintHeader() {
 }
 
 static int Usage() {
-    std::printf("usage: mdlcompiler <file.pulseqc> [-game <dir>]   (a .qc is imported first)\n");
+    std::printf("usage: mdlcompiler <file.pulseqc> [-game <dir>]   (.qc is the same format)\n");
     std::printf("\n");
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
