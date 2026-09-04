@@ -42,7 +42,7 @@ jobs:
           # the subtools in their own folder under it
           mkdir -p PulseModel
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
-             LICENSE README.md PulseModel/
+             LICENSE PulseModel/
           cp -r dist/subtools PulseModel/
           7z a -tzip "pulsemodel-${{ matrix.plat }}-$sha.zip" PulseModel/
 
