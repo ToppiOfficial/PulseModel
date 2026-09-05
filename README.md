@@ -1,7 +1,6 @@
 <h1 align="center">PulseModel</h1>
 
 <p align="center">
-<img alt="status" src="https://img.shields.io/badge/status-beta-orange?style=for-the-badge">
 <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20x64-blue?style=for-the-badge&logo=windows&logoColor=white">
 <img alt="Linux" src="https://img.shields.io/badge/linux-untested-lightgrey?style=for-the-badge&logo=linux&logoColor=white">
 <img alt="model version" src="https://img.shields.io/badge/model%20version-49-informational?style=for-the-badge">
