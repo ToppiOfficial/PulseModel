@@ -853,21 +853,9 @@ source::Source* MergeRenderMeshes(Ctx& c, const std::vector<source::Source*>& re
     return c.in.sources.back().get();
 }
 
-// $modelgroup <name> { mesh [<display>] <rendermesh>... [name <display>] | blank ... }
-// $modelgroup <name> <rendermesh>... [name <display>]
-//
-// The second form is the shorthand for a single, non-swappable bodypart: one
-// choice, drawn from the meshes on the line, named after the group by default.
-//
-// `studio` is an accepted spelling of `mesh`, for $bodygroup muscle memory.
-//
-// One `mesh` line is one bodygroup choice. Listing several $rendermesh names
-// draws them as ONE model, so a script mixes and matches meshes it already has
-// instead of exporting a combined file per combination. The choice's studio name
-// - what SFM shows - is `name <display>` (anywhere on the line) or a leading
-// word that is not a $rendermesh, else the render-mesh names joined with '_'
-// (compile::ChoiceName). A display name that collides with a $rendermesh name
-// has to use `name`.
+// $modelgroup/$model <name> <refs...> or { mesh <refs...> | blank ... }.
+// Refs are render-mesh aliases or explicit .dmx/.smd/.fbx files.
+// Use `name <display>` to disambiguate display names from refs.
 bool CmdModelGroup(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
@@ -917,24 +905,35 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
                 continue;
             }
             auto it = c.rendermeshes.find(r.text);
-            if (it == c.rendermeshes.end()) {
-                // a leading word that is not a $rendermesh is the display
-                // name; a name that collides with one needs `name`
+            source::Source* src = it != c.rendermeshes.end() ? it->second : nullptr;
+            const std::string ext = Lower(fs::path(r.text).extension().string());
+            if (!src && (ext == ".dmx" || ext == ".smd" || ext == ".fbx")) {
+                if (std::find(refNames.begin(), refNames.end(), r.text) != refNames.end())
+                    return c.Fail(r.line, where + ": mesh \"" + r.text + "\" is listed twice");
+                MeshEdit edit;
+                edit.name = r.text;
+                src = LoadSource(c, r.text, r.line, /*morphSource=*/true, &edit);
+                if (!src)
+                    return false;
+            }
+            if (!src) {
+                // A leading non-reference word is the display name.
                 if (!named && refs.empty() && defName.empty()) {
                     studio = r.text;
                     named = true;
                     continue;
                 }
                 return c.Fail(r.line,
-                              where + " references unknown rendermesh \"" + r.text + "\"");
+                              where + " references unknown rendermesh \"" + r.text +
+                              "\"; direct source files require .smd, .dmx or .fbx");
             }
-            if (std::find(refs.begin(), refs.end(), it->second) != refs.end())
+            if (std::find(refs.begin(), refs.end(), src) != refs.end())
                 return c.Fail(r.line, where + ": mesh \"" + r.text + "\" is listed twice");
-            refs.push_back(it->second);
+            refs.push_back(src);
             refNames.push_back(r.text);
         }
         if (refs.empty())
-            return c.Fail(line, where + ": mesh expects at least one $rendermesh name");
+            return c.Fail(line, where + ": mesh expects a $rendermesh name or .smd/.dmx/.fbx file");
 
         cm::CompileInput::InModel model;
         model.name = named ? studio
@@ -2276,12 +2275,8 @@ bool CmdKeyValues(Ctx& c, const Token& cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Flex / morph. Unlike stock these are TOP-LEVEL and GLOBAL, not $model options
-// - there is no $model/$body here. Every mesh a $modelgroup actually uses gets
-// the whole rig; a $rendermesh with delta states that no $modelgroup references
-// contributes nothing. Everything is stashed on Ctx::manual and registered in
-// one pass at the end of the script, since the registration ORDER (and so the
-// on-disk table indices) depends on the finished bodygroup list.
+// Flex / morph commands are global. Only meshes used by bodygroups contribute.
+// Ctx::manual is registered after parsing, in finished bodygroup order.
 // ---------------------------------------------------------------------------
 
 // $flexcontroller <group> [range <min> <max>] <name> [<name>...]
@@ -2373,10 +2368,8 @@ bool CmdFlexRule(Ctx& c, const Token& cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Face markup. Top-level and global like the flex commands, and for the same
-// reason - there is no $model to hang them on. ORDER IS SIGNIFICANT across all
-// three: $eyeball order fixes the index an $eyelid names, and $mouth/$eyelid
-// both append to the global flexdesc table. One shared list preserves it.
+// Face markup is global. A shared list preserves command order: $eyelid names
+// $eyeball indices, and $mouth/$eyelid append to the global flexdesc table.
 // ---------------------------------------------------------------------------
 
 // $eyeball <name> bone <b> origin <x y z> material <m> [diameter <d>]
@@ -6826,6 +6819,7 @@ constexpr Command kCommands[] = {
     {"$modelname", CmdModelName},
     {"$rendermesh", CmdRenderMesh},
     {"$modelgroup", CmdModelGroup},
+    {"$model", CmdModelGroup},
     {"$modelgrouppreset", CmdModelGroupPreset},
     {"$datamodeljoints", CmdDataModelJoints},
     {"$datamodelflexes", CmdDataModelFlexes},
