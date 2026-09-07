@@ -47,7 +47,7 @@ namespace {
 void PrintHeader() {
     std::printf("-------------------------------\n");
     std::printf("PulseModel [Model Decompiler]\n");
-    std::printf("version:   %s (model version 44-49)\n", kAppVersion);
+    std::printf("version:   %s (model version 10-49)\n", kAppVersion);
     std::printf("developer: Toppi\n");
     std::printf("-------------------------------\n");
 }
