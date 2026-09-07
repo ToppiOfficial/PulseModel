@@ -1,8 +1,8 @@
 <h1 align="center">PulseModel</h1>
 
 <p align="center">
-<img alt="platform" src="https://img.shields.io/badge/platform-Windows%20x64-blue?style=for-the-badge&logo=windows&logoColor=white">
-<img alt="Linux" src="https://img.shields.io/badge/linux-untested-lightgrey?style=for-the-badge&logo=linux&logoColor=white">
+<img alt="Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-blue?style=for-the-badge&logo=windows&logoColor=white">
+<img alt="Linux x64" src="https://img.shields.io/badge/platform-Linux%20x64-blue?style=for-the-badge&logo=linux&logoColor=white">
 <img alt="model version" src="https://img.shields.io/badge/model%20version-49-informational?style=for-the-badge">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-success?style=for-the-badge">
 </p>
@@ -15,9 +15,8 @@ GMod, CS:S, SFM). One build produces two executables:
 - **`mdldecompiler`** - an existing `.mdl` -> a compile script with `.dmx`
   meshes and animations beside it.
 
-> **Beta, Windows only.** It compiles models that load and render in-engine, but
-> expect rough edges and script-command changes between versions. The code avoids
-> Windows-only APIs, so a Linux build should work, but it is untested.
+> **Beta, Windows and Linux.** It compiles models that load and render in-engine, but
+> expect rough edges and script-command changes between versions.
 
 ## mdlcompiler
 
@@ -98,7 +97,9 @@ every `.mdl` under it, recursively.
 
 ## Building
 
-CMake + Ninja + MSVC, 64-bit only. Dependencies are vendored - no vcpkg, no conan.
+64-bit Windows and Linux. Dependencies are vendored - no vcpkg, no conan.
+
+Windows (CMake + Ninja + MSVC):
 
 ```
 cmake --preset x64-release
@@ -106,6 +107,15 @@ cmake --build --preset x64-release
 ```
 
 Both binaries land in `out/build/x64-release/PulseModel/`.
+
+Linux (CMake + GCC + Make):
+
+```
+cmake -S . -B ~/pulsemodel-build -DCMAKE_BUILD_TYPE=Release
+cmake --build ~/pulsemodel-build -j2
+```
+
+Both binaries land in `~/pulsemodel-build/PulseModel/`.
 
 ## Layout
 
