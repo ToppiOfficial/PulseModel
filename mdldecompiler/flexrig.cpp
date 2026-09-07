@@ -6,6 +6,8 @@
 // an n-way), and the driven delta's NAME is the underscore join of its raw
 // control names - so the names come back off the rules that use them.
 
+#include "strcompat.h"
+
 #include "flexrig.h"
 
 #include <algorithm>

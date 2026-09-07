@@ -4,6 +4,8 @@
 // Source. The corner unify/sort/mesh build is shared with the SMD path
 // (BuildUnifiedMeshes in source.h).
 
+#include "strcompat.h"
+
 #include "fbxloader.h"
 
 #include <cstdio>

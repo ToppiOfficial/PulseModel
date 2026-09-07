@@ -2,6 +2,8 @@
 // v44+ past the "IDST" magic, so it gets its own reader and writes the sources
 // GoldSrc authored from: SMD meshes, SMD animations and 8-bit .bmp textures.
 
+#include "strcompat.h"
+
 #include "goldsrc.h"
 
 #include <algorithm>

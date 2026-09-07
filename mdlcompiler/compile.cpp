@@ -1,5 +1,7 @@
 // compile.cpp - the SimplifyModel pipeline. See compile.h.
 
+#include "strcompat.h"
+
 #include "compile.h"
 #include "perf.h"
 

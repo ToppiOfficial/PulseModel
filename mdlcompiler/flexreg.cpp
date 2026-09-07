@@ -12,6 +12,8 @@
 // ManualFlex block, standing in for the manual $model flexcontroller/%rule
 // block] -> AddBodyFlexRules.
 
+#include "strcompat.h"
+
 #include "flexreg.h"
 
 #include <cctype>

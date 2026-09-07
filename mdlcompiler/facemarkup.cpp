@@ -2,6 +2,8 @@
 //
 // Ports of Option_Eyeball, Option_Mouth and Option_DmxEyelid.
 
+#include "strcompat.h"
+
 #include "facemarkup.h"
 
 #include <cmath>

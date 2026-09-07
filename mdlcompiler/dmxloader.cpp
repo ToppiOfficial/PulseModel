@@ -1,8 +1,11 @@
 // dmxloader.cpp - DMX document -> per-file Source. See dmxloader.h.
 
+#include "strcompat.h"
+
 #include "perf.h"
 #include "dmxloader.h"
 
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>

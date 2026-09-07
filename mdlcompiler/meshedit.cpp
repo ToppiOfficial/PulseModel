@@ -1,5 +1,7 @@
 // meshedit.cpp - $rendermesh edit options. See meshedit.h.
 
+#include "strcompat.h"
+
 #include "meshedit.h"
 
 #include <algorithm>

@@ -1,5 +1,7 @@
 // pulseloader.cpp - .pulsemdl compile-script loader. See pulseloader.h.
 
+#include "strcompat.h"
+
 #include "pulseloader.h"
 
 #include <cctype>

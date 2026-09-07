@@ -1,5 +1,7 @@
 // dmxrig.cpp - $datamodeljoints DME bone markup reader. See dmxrig.h.
 
+#include "strcompat.h"
+
 #include "dmxrig.h"
 
 #include <cmath>

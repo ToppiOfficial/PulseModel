@@ -1,5 +1,7 @@
 // qcloader.cpp - keyvalues1 compile-script loader. See qcloader.h.
 
+#include "strcompat.h"
+
 #include "perf.h"
 #include "qcloader.h"
 

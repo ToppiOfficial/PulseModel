@@ -4,6 +4,8 @@
 // vcache+overdraw ordering, PostProcessStripGroup, the offset-computed file
 // layout, and MapGlobalBonesToHardwareBoneIDs.
 
+#include "strcompat.h"
+
 #include "perf.h"
 #include "writer.h"
 

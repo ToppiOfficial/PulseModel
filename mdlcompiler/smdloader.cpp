@@ -4,6 +4,8 @@
 // (Load_SMD/Grab_Triangles, Grab_Nodes/Grab_Animation/Build_Reference).
 // Studied for behavior, re-typed clean.
 
+#include "strcompat.h"
+
 #include "smdloader.h"
 
 #include <cmath>

@@ -5,6 +5,8 @@
 // FixupToSortedLODVertexes). Block order, alignment macros, string-table
 // insertion order and the checksum-before-fixup sequencing are all load-bearing.
 
+#include "strcompat.h"
+
 #include "writer.h"
 #include "perf.h"
 

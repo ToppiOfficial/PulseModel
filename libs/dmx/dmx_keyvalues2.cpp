@@ -17,6 +17,7 @@
 #include "dmx/dmx.h"
 
 #include <charconv>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -175,7 +176,7 @@ int ParseFloats(const std::string& s, float* out, int n) {
 Quaternion NormalizeParsedQuat(Quaternion q) {
     float radius = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
     if (radius) {
-        radius = static_cast<float>(sqrt(static_cast<double>(radius)));
+        radius = static_cast<float>(std::sqrt(static_cast<double>(radius)));
         float iradius = 1.0f / radius;
         q.w *= iradius;
         q.z *= iradius;
