@@ -29,6 +29,7 @@
 #include "format/vvd.h"
 #include "math/compressed.h"
 #include "minicollision/ivp_compact.h"
+#include "strcompat.h"
 
 namespace mdldecompiler {
 namespace {
@@ -41,6 +42,15 @@ std::string G(float v) {
     char b[32];
     std::snprintf(b, sizeof b, "%.9g", v);
     return b;
+}
+
+std::string MeshDagName(const Mdl& m, std::string name) {
+    const std::vector<std::string> bones = BoneNames(m);
+    while (std::any_of(bones.begin(), bones.end(), [&](const std::string& bone) {
+        return _stricmp(bone.c_str(), name.c_str()) == 0;
+    }))
+        name += "_mesh";
+    return name;
 }
 
 // --- .vvd -------------------------------------------------------------------
@@ -1210,7 +1220,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     WriteSkel(q, m, skel, meshName, idMeshDag, idCombo);
 
     // ---- the mesh ----
-    q.Begin("DmeDag", idMeshDag, meshName);
+    q.Begin("DmeDag", idMeshDag, MeshDagName(m, meshName));
     q.Ref("transform", idMeshXform);
     q.Ref("shape", idMesh);
     q.End();
@@ -1750,7 +1760,7 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
 
     WriteSkel(q, m, skel, name, idMeshDag, std::string());
 
-    q.Begin("DmeDag", idMeshDag, name);
+    q.Begin("DmeDag", idMeshDag, MeshDagName(m, name));
     q.Ref("transform", idMeshXform);
     q.Ref("shape", idMesh);
     q.End();

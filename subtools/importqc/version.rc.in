@@ -12,7 +12,7 @@ FILETYPE       0x1L        // VFT_APP
             VALUE "FileDescription",  "Stock studiomdl .qc importer (.qc -> .pulseqc)"
             VALUE "FileVersion",      "@TOOL_VERSION@"
             VALUE "InternalName",     "importqc"
-            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi - MIT License"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi"
             VALUE "OriginalFilename", "importqc.exe"
             VALUE "ProductName",      "PulseModel"
             VALUE "ProductVersion",   "@TOOL_VERSION@"

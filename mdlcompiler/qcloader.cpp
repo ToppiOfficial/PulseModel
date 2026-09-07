@@ -5600,16 +5600,15 @@ bool WantVec3(Ctx& c, const Token& cmd, pm::Vector3& v) {
 }
 
 // $physicsshape fromfile <file> { }, fromrendermesh <$rendermesh> { }, or
-// fromrender { }. `kind` and `ref` are set by the caller; fromfile and
-// fromrendermesh differ only in where the authored geometry comes from (disk vs
-// a $rendermesh), so both are kind FromFile.
+// fromrender { }. Render modes share generation options; fromrendermesh
+// limits generation to the named source.
 //
 // The shape name is not authored - a body is named by its BONE everywhere in
 // the .phy, so the name is only ever a diagnostic label and is taken from
 // whatever identifies the shape (its bone, its rendermesh, its file).
 bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
                     const std::string& ref, cm::PhysicsShape& sh) {
-    const bool fromRender = mode == "fromrender";
+    const bool fromRender = mode != "fromfile";
     const bool fromMesh   = mode == "fromrendermesh";
     const std::string where = "$physicsshape " + mode;
     // the block is optional - every option in it has a default, so
@@ -5659,11 +5658,15 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
             if (!c.WantFloat("a concavity", sub, sh.concavity)) return false;
         } else if (fromRender && o == "maxhulls") {
             if (!c.WantInt("a hull count", sub, sh.maxHulls)) return false;
+        } else if (fromRender && o == "maxdepth") {
+            if (!c.WantInt("a recursion depth", sub, sh.maxDepth)) return false;
+            if (sh.maxDepth < 0 || sh.maxDepth > 10)
+                return c.Fail(t.line, where + ": maxdepth must be between 0 and 10");
         } else if (fromRender && o == "extrabone") {
             std::string bone;
             if (!c.Want("a bone name", sub, bone)) return false;
             sh.extraSkinnedBones.push_back(std::move(bone));
-        } else if (fromRender && o == "excludemesh") {
+        } else if (fromRender && !fromMesh && o == "excludemesh") {
             std::string mesh;
             if (!c.Want("a $rendermesh name", sub, mesh)) return false;
             sh.exceptionMeshNames.push_back(std::move(mesh));
@@ -5675,11 +5678,19 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
     if (sh.importScale <= 0.0f)
         return c.Fail(cmd.line, where + ": importscale must be greater than 0");
 
+    if (fromMesh) {
+        auto it = c.rendermeshes.find(ref);
+        if (it == c.rendermeshes.end())
+            return c.Fail(cmd.line, where + ": references unknown rendermesh \"" +
+                                    ref + "\"");
+        sh.source = it->second;
+    }
+
     if (fromRender) {
         // parentbone carves ONE body out of a skinned character. A prop has no
         // bone to cull against, so omitting it means "the whole render mesh",
         // bound to the root - and extrabone/cullweight go unused.
-        sh.name = sh.parentBone.empty() ? "generated" : sh.parentBone;
+        sh.name = fromMesh ? ref : (sh.parentBone.empty() ? "generated" : sh.parentBone);
         if (sh.decimationFactor > 1.0f) sh.decimationFactor = 1.0f;
         if (sh.decimationFactor > 0.0f && sh.decimationFactor < 0.1f)
             sh.decimationFactor = 0.1f;
@@ -5710,14 +5721,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         return true;
     }
 
-    if (fromMesh) {
-        auto it = c.rendermeshes.find(ref);
-        if (it == c.rendermeshes.end())
-            return c.Fail(cmd.line, where + ": references unknown rendermesh \"" +
-                                    ref + "\"");
-        sh.source = it->second;
-        sh.name = ref;
-    } else {
+    {
         // a collision-only source, loaded straight from disk with no
         // $rendermesh in front of it. Same loader as everything else, so .smd
         // and .dmx both work; morphSource stays off, so its delta shapes are
@@ -5918,8 +5922,8 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
                                           ": expected a name before '{'");
             }
             cm::PhysicsShape sh;
-            sh.kind = mode == "fromrender" ? cm::PhysicsShapeKind::FromRender
-                                           : cm::PhysicsShapeKind::FromFile;
+            sh.kind = mode == "fromfile" ? cm::PhysicsShapeKind::FromFile
+                                         : cm::PhysicsShapeKind::FromRender;
             if (!ParsePhysShape(c, t, mode, ref, sh))
                 return false;
             c.in.physShapes.push_back(std::move(sh));

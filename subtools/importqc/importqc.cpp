@@ -898,11 +898,7 @@ bool CollisionModel(Conv& c) {
 
     std::vector<std::string> out{"$physicsmodel {"};
     for (const std::string& f : files) {
-        // a name that matches a $rendermesh reuses that mesh instead of loading
-        // the file a second time
-        const std::string from =
-            c.usedNames.count(Lower(f)) ? "fromrendermesh " + Q(f) : "fromfile " + Q(f);
-        out.push_back("    $physicsshape " + from + (shape.empty() ? "" : " {"));
+        out.push_back("    $physicsshape fromfile " + Q(f) + (shape.empty() ? "" : " {"));
         out.insert(out.end(), shape.begin(), shape.end());
         if (!shape.empty())
             out.push_back("    }");

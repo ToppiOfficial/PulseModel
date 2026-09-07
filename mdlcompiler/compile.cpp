@@ -4058,6 +4058,10 @@ struct GeneratedShape {
 // contribute its geometry twice).
 void CollectRenderSources(const CompiledModel& m, const PhysicsShape& shape,
                           std::vector<const src::Source*>& out) {
+    if (shape.source) {
+        out.push_back(shape.source);
+        return;
+    }
     for (const Model& model : m.models) {
         const src::Source* ps = model.source;
         if (!ps)
@@ -4210,7 +4214,7 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
         if (!VHACDHull::DecomposeConvex(verts.data(), static_cast<int>(verts.size() / 3),
                                         tris.data(), static_cast<int>(tris.size() / 3),
                                         shape.concavity, shape.maxHulls,
-                                        shape.decimationFactor, hulls)) {
+                                        shape.decimationFactor, hulls, 0, shape.maxDepth)) {
             if (err) *err = "PhysicsShapeFromRender \"" + shape.name +
                             "\" could not decompose the render geometry on bone \"" +
                             shape.parentBone + "\"";
@@ -4313,10 +4317,16 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
     // ---- generated shapes -------------------------------------------------
     // Their hulls arrive in global pose space, so each moves into its own
     // bone's space here - the same space the authored path builds in.
+    matrix3x4 modelXform;
+    pm::AngleMatrix(ctx.defaultRotation, modelXform);
+    MatrixSetColumn(pm::VectorRotate({-in.adjust.x, -in.adjust.y, -in.adjust.z}, modelXform),
+                    3, modelXform);
     for (const GeneratedShape& gen : generated) {
         maxConvexPieces = std::max(maxConvexPieces, gen.maxConvex);
         std::vector<phys::Convex*> convexes;
-        if (!ConvexesFromGenerated(gen, &m.bones[gen.globalBone].boneToPose,
+        const matrix3x4 boneToPose =
+            pm::ConcatTransforms(modelXform, m.bones[gen.globalBone].boneToPose);
+        if (!ConvexesFromGenerated(gen, &boneToPose,
                                    static_cast<unsigned int>(gen.globalBone) + 1,
                                    convexes, err)) {
             for (phys::Convex* c : convexes)
@@ -4722,7 +4732,6 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
                     m.physSolids[i0].name.c_str(), i0,
                     m.physSolids[i1].name.c_str(), i1);
     }
-
     // ---- model-level settings ---------------------------------------------
     AssignPhysicsBones(m);
     m.physTotalMass = in.physAutoMass ? -1.0f : in.physMass;

@@ -93,11 +93,11 @@ namespace
 bool DecomposeConvex( const float *verts, int numVerts,
                       const int *tris, int numTris,
                       float concavity, int maxHulls, float decimate,
-                      std::vector<DecomposedHull> &out, int resolution )
+                      std::vector<DecomposedHull> &out, int resolution, int maxDepth )
 {
 	out.clear();
 
-	if ( !verts || !tris || numVerts < 4 || numTris < 1 )
+	if ( !verts || !tris || numVerts < 4 || numTris < 1 || maxDepth < 0 || maxDepth > 10 )
 		return false;
 
 	std::vector<double> points;
@@ -125,6 +125,7 @@ bool DecomposeConvex( const float *verts, int numVerts,
 	VHACD::IVHACD::Parameters params;
 	params.m_logger     = &logger;
 	params.m_shrinkWrap = true;
+	params.m_maxRecursionDepth = (uint32_t)maxDepth;
 
 	// High enough that it never shapes the result - it only stops a hull from
 	// exceeding what IVP can index.

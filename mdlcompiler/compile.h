@@ -756,8 +756,10 @@ struct PhysicsShape {
     // FromFile under import types 1 and 2.
     std::string parentBone;
 
+    // Authored collision source, or the selected render source; null uses all render sources.
+    source::Source* source = nullptr;
+
     // ---- FromFile ---------------------------------------------------------
-    source::Source* source = nullptr; // resolved from the rendermesh reference
     PhysicsImportType importType = PhysicsImportType::Skinned;
     bool concave = false;             // split disjoint mesh islands into pieces
     int maxConvex = lim::kMaxConvexPieces;
@@ -769,6 +771,7 @@ struct PhysicsShape {
     float decimationFactor = 0.22f;
     float concavity = 0.04f;          // [0..1], lower = tighter fit, more pieces
     int maxHulls = 0;                 // piece ceiling, not a target; 0 = uncapped
+    int maxDepth = 4;
     // minimum weight a vertex must carry on a kept bone for its face to join
     // this body. Smooth-skinned meshes need this well below the default.
     float cullWeight = 0.42f;

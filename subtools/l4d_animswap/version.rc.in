@@ -12,7 +12,7 @@ FILETYPE       0x1L        // VFT_APP
             VALUE "FileDescription",  "L4D2 survivor $declaresequence swap generator"
             VALUE "FileVersion",      "@TOOL_VERSION@"
             VALUE "InternalName",     "l4d_animswap"
-            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi - MIT License"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Toppi"
             VALUE "OriginalFilename", "l4d_animswap.exe"
             VALUE "ProductName",      "PulseModel"
             VALUE "ProductVersion",   "@TOOL_VERSION@"

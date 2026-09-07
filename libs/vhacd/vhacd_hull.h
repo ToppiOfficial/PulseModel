@@ -40,9 +40,8 @@ struct DecomposedHull
 //              lifts the cap entirely - keep whatever the split produced.
 //   decimate   (0..1] fraction of each finished hull's *natural* vert count to
 //              keep, applied per hull afterwards. <=0 skips the pass.
-//   resolution voxels the shape is captured at. This is the whole running cost -
-//              it is flat in triangle count - so a preview lowers it. 0 takes
-//              the compiler's own scaling off maxHulls.
+//   resolution voxel budget; 0 scales it from maxHulls.
+//   maxDepth   recursion limit [0..10]; lower values reduce intermediate pieces.
 //
 // Hulls are ceilinged at pulse::limits::kMaxHullVerts.
 //
@@ -50,7 +49,8 @@ struct DecomposedHull
 bool DecomposeConvex( const float *verts, int numVerts,
                       const int *tris, int numTris,
                       float concavity, int maxHulls, float decimate,
-                      std::vector<DecomposedHull> &out, int resolution = 0 );
+                      std::vector<DecomposedHull> &out, int resolution = 0,
+                      int maxDepth = 10 );
 
 } // namespace VHACDHull
 
