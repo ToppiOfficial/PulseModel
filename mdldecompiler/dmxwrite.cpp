@@ -242,6 +242,9 @@ bool ExtractTris(const std::vector<char>& buf, const Mdl& m, size_t sgStride, in
                     const auto& sg = *reinterpret_cast<const vtx::LegacyStripGroupHeader_t*>(sgp);
                     if (sg.numVerts < 0 || sg.numIndices < 0)
                         return false;
+                    // An indexed group needs vertices, even during layout probing.
+                    if (sg.numVerts == 0 && sg.numIndices > 0)
+                        return false;
                     if (sg.numVerts == 0 || sg.numIndices < 3)
                         continue;
                     const char* vRaw = at(sgp, sg.vertOffset,
