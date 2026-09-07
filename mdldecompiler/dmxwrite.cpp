@@ -241,14 +241,14 @@ bool ExtractTris(const std::vector<char>& buf, const Mdl& m, size_t sgStride, in
                     if (!vRaw || !iRaw)
                         return false;
                     const auto* sgVerts = reinterpret_cast<const vtx::Vertex_t*>(vRaw);
-                    const auto* idx = reinterpret_cast<const uint16_t*>(iRaw);
 
                     // Strips within a group are consecutive runs of the same
                     // index array and are all trilists, so the group's whole
                     // index array reads as triangles without walking them.
                     for (int n = 0; n + 2 < sg.numIndices; n += 3) {
                         for (int c = 0; c < 3; ++c) {
-                            const uint16_t vi = idx[n + c];
+                            uint16_t vi;
+                            std::memcpy(&vi, iRaw + sizeof(vi) * (n + c), sizeof(vi));
                             if (vi >= sg.numVerts)
                                 return false;
                             const int mv = sgVerts[vi].origMeshVertID;

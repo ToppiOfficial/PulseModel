@@ -92,8 +92,11 @@ void DecodeRle(const Block& blk, const char* sect, const fm::mstudiobone_t* bone
         // rotation always comes first, raw or as a value-pointer block
         const fm::mstudioanim_valueptr_t* rotv = nullptr;
         if (e->flags & fm::STUDIO_ANIM_RAWROT2) {
-            if (const auto* q = blk.At<pm::Quaternion64>(d, 0))
-                pm::QuaternionAngles(q->Get(), o.rot);
+            if (const auto* raw = blk.At<char>(d, 0, sizeof(pm::Quaternion64))) {
+                pm::Quaternion64 q;
+                std::memcpy(&q, raw, sizeof(q));
+                pm::QuaternionAngles(q.Get(), o.rot);
+            }
             d += sizeof(pm::Quaternion64);
         } else if (e->flags & fm::STUDIO_ANIM_RAWROT) {
             if (const auto* q = blk.At<pm::Quaternion48>(d, 0))
