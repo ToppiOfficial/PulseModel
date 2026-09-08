@@ -1,8 +1,6 @@
 name: Release
 
-# Manual only. Tags with mdlcompiler's TOOL_VERSION and creates a DRAFT release
-# seeded with the commit message - nothing is published until you edit the notes
-# and hit publish yourself.
+# Manual only. Creates one DRAFT release containing every tool.
 on:
   workflow_dispatch:
 
@@ -61,19 +59,12 @@ jobs:
           pattern: release-*
           merge-multiple: true
 
-      - name: Read version
-        id: ver
-        shell: bash
-        run: |
-          # each tool owns its version; the repo release tracks mdlcompiler's
-          v=$(sed -n 's/^set(TOOL_VERSION \([0-9.]*\)).*/\1/p' mdlcompiler/CMakeLists.txt)
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-
       - name: Build notes
         shell: bash
         run: |
-          # only v* tags count as a release; 'dev' and drafts never match
-          prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          prev=$(git describe --tags --abbrev=0 --match 'release-*' 2>/dev/null || true)
+          # Fall back to the old tags for the first numbered release.
+          [ -z "$prev" ] && prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
           [ -n "$prev" ] && range="$prev..HEAD" || range="HEAD"
           git log --reverse --pretty=format:%x00%B "$range" | python3 .github/scripts/release-notes.py > notes.txt
           cat notes.txt
@@ -83,4 +74,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ steps.ver.outputs.version }}" pulsemodel-*.zip --target "${{ github.sha }}" --title "release-$(date -u +%-m/%-d/%Y)" --notes-file notes.txt --draft
+          gh release create "release-${{ github.run_number }}" pulsemodel-*.zip --target "${{ github.sha }}" --title "release-$(date -u +%-m/%-d/%Y)" --notes-file notes.txt --draft
