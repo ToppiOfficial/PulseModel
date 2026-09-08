@@ -2815,8 +2815,8 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
     STAGE(WriteAnimations, q, m);
     STAGE(WriteSequences, q, m);
     STAGE(WriteIncludeModels, q, m);
-    STAGE(WriteKeyValues, q, m);
     STAGE(WritePhysics, q, m, in, dir);
+    STAGE(WriteKeyValues, q, m);
     std::fclose(f);
 
     if (h.numlocalanim > 0)

@@ -291,6 +291,17 @@ FlexRig BuildFlexRig(const Mdl& m) {
         if (uiToControl.count(uiIdx))
             continue;
         const Ui& u = uis[uiIdx];
+        // Imported controls must recreate the names used by the model's rules.
+        auto matches = [&](int idx, const std::string& name) {
+            return fc && idx >= 0 && idx < h.numflexcontrollers &&
+                   name == m.Str(&fc[idx], fc[idx].sznameindex);
+        };
+        if (!matches(u.slot0, u.stereo ? "left_" + u.name : u.name) ||
+            (u.stereo && !matches(u.slot1, "right_" + u.name)) ||
+            ((u.remaptype == fm::FLEXCONTROLLER_REMAP_NWAY ||
+              u.remaptype == fm::FLEXCONTROLLER_REMAP_EYELID) &&
+             !matches(u.multi, "multi_" + u.name)))
+            continue;
         int slots = 1;
         switch (u.remaptype) {
             case fm::FLEXCONTROLLER_REMAP_PASSTHRU: slots = 1; break;
