@@ -223,6 +223,44 @@ void WeldVertices(Source& src, WeldMode mode) {
     CalcModelTangentSpaces(src);
 }
 
+void InflateVertices(Source& src, float amount) {
+    if (amount == 0.0f)
+        return;
+    for (SrcMorphAnim& morph : src.morphs) {
+        for (SrcVertAnim& va : morph.vanims) {
+            if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= src.vertex.size())
+                continue;
+            Vector3 base = src.vertex[va.vertex].normal;
+            Vector3 target{base.x + va.normal.x, base.y + va.normal.y, base.z + va.normal.z};
+            pm::VectorNormalize(base);
+            pm::VectorNormalize(target);
+            va.pos.x += amount * (target.x - base.x);
+            va.pos.y += amount * (target.y - base.y);
+            va.pos.z += amount * (target.z - base.z);
+        }
+    }
+    for (SrcVertex& v : src.vertex) {
+        Vector3 normal = v.normal;
+        pm::VectorNormalize(normal);
+        v.position.x += amount * normal.x;
+        v.position.y += amount * normal.y;
+        v.position.z += amount * normal.z;
+    }
+    CalcModelTangentSpaces(src);
+}
+
+void FlipNormals(Source& src) {
+    for (SrcVertex& v : src.vertex) {
+        v.normal = {-v.normal.x, -v.normal.y, -v.normal.z};
+        v.tangentS.w = -v.tangentS.w;
+    }
+    for (SrcMorphAnim& morph : src.morphs)
+        for (SrcVertAnim& va : morph.vanims)
+            va.normal = {-va.normal.x, -va.normal.y, -va.normal.z};
+    for (SrcFace& face : src.face)
+        std::swap(face.b, face.c);
+}
+
 void CullUnskinnedBones(Source& src, SkinnedBoneCull mode) {
     if (mode == SkinnedBoneCull::None || src.numbones <= 0)
         return;

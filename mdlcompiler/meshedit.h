@@ -77,6 +77,12 @@ enum class WeldMode { None, KeepSeams, All };
 
 void WeldVertices(Source& src, WeldMode mode);
 
+// Offset vertices and morph targets along their unit normals, in model units.
+void InflateVertices(Source& src, float amount);
+
+// Reverse normals, morph normal deltas and triangle winding.
+void FlipNormals(Source& src);
+
 // meshoptimizer decimation to `factor` (0,1] of each mesh's index count.
 // dst may alias src - faces are rebuilt only after every mesh is simplified.
 // The vertex pool is untouched, so the result stays rigged. `skipMaterial`, if

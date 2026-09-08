@@ -259,7 +259,12 @@ void BuildRawTransforms(const src::Source* psource, src::SourceAnim* pSourceAnim
     }
 }
 
-void BuildRawTransformsBind(const src::Source* psource, std::vector<matrix3x4>& boneToWorld) {
+void BuildRawTransformsBind(const Ctx& ctx, const src::Source* psource,
+                            std::vector<matrix3x4>& boneToWorld) {
+    if (ctx.in->bindPoseSource && !ctx.in->bindPoseMeshOnly) {
+        boneToWorld = psource->boneToPose;
+        return;
+    }
     src::SourceAnim* bind = src::FindSourceAnim(*const_cast<src::Source*>(psource), "BindPose");
     if (!bind && !psource->anims.empty())
         bind = const_cast<src::SourceAnim*>(&psource->anims[0]);
@@ -442,15 +447,8 @@ bool BoneIsIK(const Ctx& ctx, const char* pname) {
 }
 
 // ---------------------------------------------------------------------------
-// $setbindpose / $setflex (reference ApplyStaticPropPose)
-//
-// Re-skin every source vertex to one frame of a named animation and add fixed
-// morph amounts, baking both into the rest mesh. Unlike the reference's
-// $staticproppose neither sets the static-prop flag nor collapses the skeleton -
-// `$modelarchetype static` is asked for separately when that is wanted.
-//
-// The bone table is NOT moved to match, so on a model that keeps its skeleton
-// the rest mesh is the pose and any animation plays on top of it.
+// $setbindpose / $setflex bake the rest mesh, with an optional skeleton update.
+// Animation frames stay in their source poses.
 // ---------------------------------------------------------------------------
 src::SrcMorphAnim* FindSourceMorph(src::Source* pSource, const char* name);
 
@@ -493,19 +491,28 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
 
     for (auto& sp : ctx.in->sources) {
         src::Source* psource = sp.get();
-        if (psource->vertex.empty())
+        if (psource->numbones == 0)
             continue;
 
-        // per source bone: bind pose -> posed. Identity for a bone the pose
-        // source does not have, and for every bone when there is no $setbindpose.
+        // Unmatched bones inherit the posed parent while retaining their local pose.
+        // meshonly leaves unmatched bones in their source pose.
+        std::vector<matrix3x4> posedBones = psource->boneToPose;
         std::vector<matrix3x4> skinMat(psource->numbones);
         if (poseClip) {
             for (int k = 0; k < psource->numbones; k++) {
                 const int poseIdx =
                     FindLocalBoneNamed(poseSrc, psource->localBone[k].name.c_str());
-                if (poseIdx == -1)
-                    continue; // expected - a pose usually covers a subset of bones
-                skinMat[k] = pm::ConcatTransforms(targetBoneToWorld[poseIdx],
+                const int parent = psource->localBone[k].parent;
+                if (poseIdx != -1) {
+                    posedBones[k] = targetBoneToWorld[poseIdx];
+                } else if (!in.bindPoseMeshOnly && parent != -1) {
+                    const matrix3x4 local = pm::ConcatTransforms(
+                        pm::MatrixInvert(psource->boneToPose[parent]), psource->boneToPose[k]);
+                    posedBones[k] = pm::ConcatTransforms(posedBones[parent], local);
+                } else {
+                    continue;
+                }
+                skinMat[k] = pm::ConcatTransforms(posedBones[k],
                                                   pm::MatrixInvert(psource->boneToPose[k]));
             }
 
@@ -575,6 +582,8 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
                 }
             }
         }
+        if (poseClip && !in.bindPoseMeshOnly)
+            psource->boneToPose = std::move(posedBones);
     }
 
     for (size_t f = 0; f < in.fixedFlexes.size(); f++)
@@ -1354,7 +1363,7 @@ bool BuildGlobalBonetable(Ctx& ctx, std::string* err) {
             continue;
 
         std::vector<matrix3x4> srcBoneToWorld;
-        BuildRawTransformsBind(psource, srcBoneToWorld);
+        BuildRawTransformsBind(ctx, psource, srcBoneToWorld);
 
         src::SourceAnim* bind = src::FindSourceAnim(*psource, "BindPose");
         if (!bind && !psource->anims.empty())
@@ -1386,7 +1395,13 @@ bool BuildGlobalBonetable(Ctx& ctx, std::string* err) {
                 b.flags = psource->boneflags[j];
                 b.isNonSkeletal = psource->localBone[j].isNonSkeletal;
                 if (b.parent == -1 || !m.bones[b.parent].bPreAligned) {
-                    pm::AngleMatrix(bind->frames[0][j].rot, bind->frames[0][j].pos, b.rawLocal);
+                    if (ctx.in->bindPoseSource && !ctx.in->bindPoseMeshOnly) {
+                        b.rawLocal = n == -1 ? srcBoneToWorld[j] :
+                            pm::ConcatTransforms(pm::MatrixInvert(srcBoneToWorld[n]),
+                                                 srcBoneToWorld[j]);
+                    } else {
+                        pm::AngleMatrix(bind->frames[0][j].rot, bind->frames[0][j].pos, b.rawLocal);
+                    }
                 } else {
                     // convert the local relative position into a realigned
                     // relative position
@@ -2483,7 +2498,7 @@ void RemapVertices(Ctx& ctx) {
             continue;
 
         std::vector<matrix3x4> srcBoneToWorld;
-        BuildRawTransformsBind(pSource, srcBoneToWorld);
+        BuildRawTransformsBind(ctx, pSource, srcBoneToWorld);
         std::vector<matrix3x4> destBoneToWorld;
         TranslateAnimations(ctx, pSource, srcBoneToWorld, destBoneToWorld);
 
@@ -6921,6 +6936,20 @@ bool SetupHitBoxes(Ctx& ctx, std::string* err) {
                     hb.bmax = {hb.bmax.x + shift.x, hb.bmax.y + shift.y, hb.bmax.z + shift.z};
                     hb.angOffset = pm::MatrixAnglesDeg(M);
                 }
+                if (hb.capsuleRadius <= 0.0f &&
+                    (!std::isfinite(hb.bmin.x) || !std::isfinite(hb.bmin.y) ||
+                     !std::isfinite(hb.bmin.z) || !std::isfinite(hb.bmax.x) ||
+                     !std::isfinite(hb.bmax.y) || !std::isfinite(hb.bmax.z) ||
+                     hb.bmin.x >= hb.bmax.x || hb.bmin.y >= hb.bmax.y ||
+                     hb.bmin.z >= hb.bmax.z)) {
+                    std::fprintf(stderr,
+                                 "WARNING: box hitbox \"%s\" in set \"%s\" on bone \"%s\" "
+                                 "has invalid bounds: min (%g, %g, %g), max (%g, %g, %g); "
+                                 "bounds must be finite with min < max on every axis\n",
+                                 hb.name.c_str(), s.name.c_str(), hb.bonename.c_str(),
+                                 hb.bmin.x, hb.bmin.y, hb.bmin.z,
+                                 hb.bmax.x, hb.bmax.y, hb.bmax.z);
+                }
             }
         }
         MarkHitboxBones(m);
@@ -7961,6 +7990,11 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
 
         if (bmin.x < -kMaxCoord || bmin.y < -kMaxCoord || bmin.z < -kMaxCoord ||
             bmax.x > kMaxCoord || bmax.y > kMaxCoord || bmax.z > kMaxCoord) {
+            std::fprintf(stderr,
+                         "WARNING: animation \"%s\" bounding box min (%g, %g, %g), "
+                         "max (%g, %g, %g) exceeds coordinate range [%g, %g]; clamping\n",
+                         panim.name.c_str(), bmin.x, bmin.y, bmin.z,
+                         bmax.x, bmax.y, bmax.z, -kMaxCoord, kMaxCoord);
             bmin = VecMax(bmin, Vector3{-kMaxCoord, -kMaxCoord, -kMaxCoord});
             bmax = VecMin(bmax, Vector3{kMaxCoord, kMaxCoord, kMaxCoord});
         }
@@ -10237,6 +10271,19 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     FixupReplacedBones(ctx);
 
     { PULSE_TIME_PASS("RemapVertices"); RemapVertices(ctx); }
+    if (!input.bboxMeshes.empty()) {
+        out.bbox[0] = out.bbox[1] = input.bboxMeshes.front()->globalVertices.front().position;
+        for (const src::Source* mesh : input.bboxMeshes) {
+            for (const src::SrcVertex& vertex : mesh->globalVertices) {
+                const Vector3& p = vertex.position;
+                out.bbox[0] = {std::min(out.bbox[0].x, p.x), std::min(out.bbox[0].y, p.y),
+                               std::min(out.bbox[0].z, p.z)};
+                out.bbox[1] = {std::max(out.bbox[1].x, p.x), std::max(out.bbox[1].y, p.y),
+                               std::max(out.bbox[1].z, p.z)};
+            }
+        }
+        out.bboxset = true;
+    }
     // reassign vertex weight off moved bones onto their residual bone, then clip
     // every vertex to the hardware influence limit
     ApplyMoveWeightQueue(ctx);

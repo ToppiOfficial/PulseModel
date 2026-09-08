@@ -1114,6 +1114,7 @@ struct CompileInput {
     // defaults: the hull comes from sequence 0, the view box stays zero.
     Vector3 bbox[2];
     bool bboxSet = false;
+    std::vector<source::Source*> bboxMeshes;
     Vector3 cbox[2];
     bool cboxSet = false;
 
@@ -1191,13 +1192,11 @@ struct CompileInput {
     // bone alive (reference culls before RemapBones for the same reason)
     AnimCullMethod animCullMethod = AnimCullMethod::Aggressive;
 
-    // $setbindpose <file> <frame>: re-skin every source vertex to that frame of
-    // the file's animation, baking the pose into the rest mesh (reference
-    // ApplyStaticPropPose). Loaded as an ANIMATION source, so
-    // the pose file contributes no geometry and no materials. Null = unset; the
-    // frame is clamped to the clip.
+    // $setbindpose <file> <frame> [meshonly]: bake the mesh and rest skeleton.
+    // meshonly keeps the source skeleton. Null = unset; frame clamps to the clip.
     source::Source* bindPoseSource = nullptr;
     int bindPoseFrame = 0;
+    bool bindPoseMeshOnly = false;
     // $setflex <morph> <strength>: fixed morph amounts baked into the rest mesh,
     // in script order, on top of any $setbindpose. Strength clamps to [0,1].
     struct FixedFlex {

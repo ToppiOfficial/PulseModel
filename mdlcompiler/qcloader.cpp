@@ -159,7 +159,7 @@ bool Tokenize(const std::string& s, const std::string& file,
 
 struct Ctx {
     cm::CompileInput& in;
-    fs::path scriptDir; // root script's directory; every source path is relative to it
+    fs::path scriptDir; // root script's directory
     std::string file;
     std::string rootFile; // `file` for the root script; an $include changes `file`, not this
     std::vector<Token> toks;
@@ -168,6 +168,7 @@ struct Ctx {
     fs::path curDir; // dir of the file currently being parsed ($include is relative to it)
     std::vector<std::string> includeStack; // cycle guard
     std::vector<fs::path> includeDirs; // $addincludesearchdir
+    std::vector<fs::path> sourceDirStack; // root script dir plus nested $pushd dirs
     std::vector<fs::path> searchDirs;  // $addsearchdir, for source files - never mixed with includeDirs
     // -includesearchdir / -filesearchdir: searched only after the script's own
     // dirs, so a script command always wins.
@@ -185,6 +186,7 @@ struct Ctx {
     std::map<std::string, std::string> variables; // $definevariable, case-sensitive, shared across $include
     struct Macro {
         std::vector<std::string> params;
+        std::map<std::string, std::string> defaults;
         std::vector<Token> body;
     };
     std::map<std::string, Macro> macros; // keyed lowercased
@@ -198,6 +200,7 @@ struct Ctx {
     bool lcaseSequences = false;
     std::vector<std::string> allowedActivities; // $allowactivityname, exact-case
     bool unlockDefineBones = false;
+    int activeHitboxSet = -1;
 
     // $attachment, held raw: its matrix needs the model's final default rotation,
     // not known until every source and $transformmodel angle has been seen
@@ -348,11 +351,9 @@ std::string LookedIn(const std::vector<fs::path>& tried) {
     return s;
 }
 
-// Where a source file (.dmx/.smd/.vrd) actually is: the ROOT script's
-// directory first, then each $addsearchdir dir in registration order (stock
-// searches cddir then g_addSearchDirs, joining the name as written - no
-// basename flattening, unlike $include). Empty return = nowhere, and `tried`
-// then holds every candidate for the error message.
+// Where a source file (.dmx/.smd/.vrd) actually is: the current $pushd
+// directory first, then each $addsearchdir dir in registration order.
+// Empty return = nowhere, and `tried` then holds every candidate.
 fs::path FindSourceFile(const Ctx& c, const std::string& filename,
                         std::vector<fs::path>* tried) {
     const fs::path rel(filename);
@@ -360,7 +361,7 @@ fs::path FindSourceFile(const Ctx& c, const std::string& filename,
     if (rel.is_absolute()) {
         cands.push_back(rel);
     } else {
-        cands.push_back(c.scriptDir / rel);
+        cands.push_back(c.sourceDirStack.back() / rel);
         for (const fs::path& dir : c.searchDirs)
             cands.push_back(dir / rel);
         for (const fs::path& dir : c.launchSearchDirs)
@@ -447,6 +448,8 @@ struct MeshEdit {
     source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
     source::WeldMode weld = source::WeldMode::None;
     bool noMorph = false;
+    float inflate = 0.0f;
+    bool flipNormals = false;
     float decimate = 1.0f; // $decimate: face-count fraction, 1 = untouched
     std::string vta; // $vta: a legacy morph file for an SMD mesh
     int vtaLine = 0;
@@ -695,6 +698,19 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            if (o == "$inflate") {
+                if (!c.WantFloat("an inflation amount", *t, edit.inflate))
+                    return false;
+                if (!std::isfinite(edit.inflate))
+                    return c.Fail(t->line, where + ": $inflate amount must be finite");
+                continue;
+            }
+
+            if (o == "$flipnormals") {
+                edit.flipNormals = true;
+                continue;
+            }
+
             if (o == "$weld") {
                 edit.weld = source::WeldMode::KeepSeams;
                 if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "seams") {
@@ -789,7 +805,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $exceptionlist, $removemeshword, "
-                                           "$skinnedbonecull, $weld, $decimate, $nomorph, $vta, "
+                                           "$skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $nomorph, $vta, "
                                            "$vca or '}', got \"" + t->text + "\"");
         }
     }
@@ -831,6 +847,10 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         if (!ok)
             return c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
     }
+
+    source::InflateVertices(*src, edit.inflate);
+    if (edit.flipNormals)
+        source::FlipNormals(*src);
 
     if (edit.decimate < 1.0f)
         source::SimplifyFaces(*src, *src, edit.decimate,
@@ -3309,8 +3329,8 @@ bool CmdModelBudget(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $renderpass <name> - replaces QC's $opaque / $mostlyopaque flags. "none" is
-// authorable, so the no-flag default can be written down explicitly.
+// $renderpass <name> selects the model's render pass.
+// "none" makes the no-flag default authorable.
 bool CmdRenderPass(Ctx& c, const Token& cmd) {
     std::string p;
     if (!c.Want("a render pass name", cmd, p))
@@ -3327,9 +3347,8 @@ bool CmdRenderPass(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $setbindpose <file> <frame> - bake one frame of a pose file into the rest
-// mesh. Loaded as an ANIMATION source (bones + animation only), so the pose file
-// contributes no geometry and no materials.
+// $setbindpose <file> <frame> [meshonly] - bake the rest mesh and skeleton.
+// The pose file contributes no geometry or materials.
 bool CmdSetBindPose(Ctx& c, const Token& cmd) {
     std::string file;
     if (!c.Want("a pose source filename", cmd, file))
@@ -3346,6 +3365,11 @@ bool CmdSetBindPose(Ctx& c, const Token& cmd) {
         return false;
     c.in.bindPoseSource = src;
     c.in.bindPoseFrame = frame;
+    if (!c.Eof() && c.Cur().line == cmd.line &&
+        _stricmp(c.Cur().text.c_str(), "meshonly") == 0) {
+        c.in.bindPoseMeshOnly = true;
+        ++c.pos;
+    }
     return true;
 }
 
@@ -4664,10 +4688,29 @@ bool CmdSkipBoneInBBox(Ctx& c, const Token&) {
     return true;
 }
 
-// $bbox <minx miny minz> <maxx maxy maxz> (Cmd_BBox): pins the render/culling
-// hull instead of taking sequence 0's box. Six raw floats - the reference
-// applies neither $scale nor the model rotation to them.
+// $bbox accepts six raw coordinates or declared render mesh names.
+// Mesh bounds are calculated in model space during compilation.
 bool CmdBBox(Ctx& c, const Token& cmd) {
+    c.in.bboxMeshes.clear();
+    if (!c.AtCommand()) {
+        char* end = nullptr;
+        const char* first = c.Cur().text.c_str();
+        std::strtof(first, &end);
+        if ((c.Cur().quoted && c.rendermeshes.count(c.Cur().text)) ||
+            end == first || *end != '\0') {
+            while (!c.AtCommand()) {
+                const Token mesh = c.toks[c.pos++];
+                auto it = c.rendermeshes.find(mesh.text);
+                if (it == c.rendermeshes.end())
+                    return c.Fail(mesh.line, "$bbox references unknown rendermesh \"" + mesh.text + "\"");
+                if (it->second->vertex.empty())
+                    return c.Fail(mesh.line, "$bbox references empty rendermesh \"" + mesh.text + "\"");
+                c.in.bboxMeshes.push_back(it->second);
+            }
+            c.in.bboxSet = false;
+            return true;
+        }
+    }
     if (!c.WantFloat("a min x", cmd, c.in.bbox[0].x) ||
         !c.WantFloat("a min y", cmd, c.in.bbox[0].y) ||
         !c.WantFloat("a min z", cmd, c.in.bbox[0].z) ||
@@ -5149,9 +5192,8 @@ bool CmdMeshSortOrder(Ctx& c, const Token& cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Hitboxes - $hitboxset { $hbox ... }. Stock QC lets a bare $hbox fall into an
-// implicit "default" set; here the set is always explicit, so which set a box
-// lands in is read off the script instead of inferred from command order.
+// Hitboxes - $hitboxset may use a body or select a set for following top-level
+// $hbox commands. A bare $hbox falls into an implicit "default" set.
 // ---------------------------------------------------------------------------
 
 // One $hbox inside a $hitboxset body:
@@ -5204,41 +5246,49 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
     return true;
 }
 
-// $hitboxset <name> { $hbox ... }  (Cmd_HitboxSet + Cmd_Hitbox), also spelled
-// $hboxset - stock's name for the same command. Declaring any set turns the
-// auto-generated one off entirely: the model gets exactly the sets written
-// here, in script order.
+// $hitboxset <name> [{ $hbox ... }] also accepts stock's flat, order-dependent
+// form. Declaring any set turns automatic hitbox generation off entirely.
 bool CmdHitboxSet(Ctx& c, const Token& cmd) {
     cm::HitboxSet set;
     if (!c.Want("a set name", cmd, set.name))
         return false;
-    if (!WantOpenBrace(c, cmd, cmd.text))
-        return false;
 
-    while (true) {
-        if (c.Eof())
-            return c.Fail(cmd.line, cmd.text + " \"" + set.name + "\": missing '}'");
-        const Token t = c.toks[c.pos++];
-        if (!t.quoted && t.text == "}")
-            break;
-        if (t.quoted || _stricmp(t.text.c_str(), "$hbox") != 0)
-            return c.Fail(t.line, cmd.text + " \"" + set.name +
-                                  "\": expected $hbox or '}', got \"" + t.text + "\"");
-        if (!ParseHbox(c, t, set))
-            return false;
+    if (!c.AtCommand()) {
+        if (c.Cur().quoted || c.Cur().text != "{")
+            return c.Fail(c.Cur().line, cmd.text + " \"" + set.name +
+                                        "\": expected '{' or the next $command");
+        c.pos++;
+        while (true) {
+            if (c.Eof())
+                return c.Fail(cmd.line, cmd.text + " \"" + set.name + "\": missing '}'");
+            const Token t = c.toks[c.pos++];
+            if (!t.quoted && t.text == "}")
+                break;
+            if (t.quoted || _stricmp(t.text.c_str(), "$hbox") != 0)
+                return c.Fail(t.line, cmd.text + " \"" + set.name +
+                                      "\": expected $hbox or '}', got \"" + t.text + "\"");
+            if (!ParseHbox(c, t, set))
+                return false;
+        }
     }
 
     c.in.hitboxsets.push_back(std::move(set));
     if (c.in.hitboxsets.size() > static_cast<size_t>(pulse::limits::kMaxHitboxSets))
         return c.Fail(cmd.line, "too many hitbox sets");
+    c.activeHitboxSet = static_cast<int>(c.in.hitboxsets.size() - 1);
     return true;
 }
 
-// A top-level $hbox. Listed in the command table only so it reports what is
-// actually wrong instead of "unknown command".
 bool CmdHboxOutsideSet(Ctx& c, const Token& cmd) {
-    return c.Fail(cmd.line, "$hbox must appear inside a $hitboxset / $hboxset "
-                            "{ } block - there is no implicit \"default\" set");
+    if (c.activeHitboxSet < 0) {
+        std::printf("WARNING: %s(%d): $hbox has no preceding $hboxset; using set \"default\"\n",
+                    c.file.c_str(), cmd.line);
+        c.in.hitboxsets.push_back({"default", {}});
+        if (c.in.hitboxsets.size() > static_cast<size_t>(pulse::limits::kMaxHitboxSets))
+            return c.Fail(cmd.line, "too many hitbox sets");
+        c.activeHitboxSet = static_cast<int>(c.in.hitboxsets.size() - 1);
+    }
+    return ParseHbox(c, cmd, c.in.hitboxsets[static_cast<size_t>(c.activeHitboxSet)]);
 }
 
 // $renamehboxset <target> <newname> - rename an already-declared set.
@@ -5893,6 +5943,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
     if (!WantOpenBrace(c, cmd, cmd.text))
         return false;
 
+    const size_t shapesBefore = c.in.physShapes.size();
     while (true) {
         if (c.Eof())
             return c.Fail(cmd.line, "$physicsmodel: missing '}'");
@@ -6031,6 +6082,10 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
         }
     }
 
+    if (c.in.physShapes.size() == shapesBefore)
+        std::fprintf(stderr, "warning: %s line %d: $physicsmodel has no $physicsshape\n",
+                     c.file.c_str(), cmd.line);
+
     // A zero or negative $mass is not rejected - the per-solid mass floor in
     // writephy clamps every body to 1 kg, which is what stock lands on too.
     return true;
@@ -6046,17 +6101,33 @@ bool CmdPhysicsOutsideModel(Ctx& c, const Token& cmd) {
 // the dispatch loop, defined under the command table - $include reenters it
 bool RunCommands(Ctx& c);
 
+// $pushd <dir> / $popd select the primary directory for source files.
+// Relative pushes nest under the current directory. Popping the root is a no-op.
+bool CmdPushD(Ctx& c, const Token& cmd) {
+    std::string dir;
+    if (!c.Want("a directory", cmd, dir))
+        return false;
+    const fs::path path(dir);
+    const fs::path next = path.is_absolute() ? path : c.sourceDirStack.back() / path;
+    c.sourceDirStack.push_back(next.lexically_normal().make_preferred());
+    return true;
+}
+
+bool CmdPopD(Ctx& c, const Token&) {
+    if (c.sourceDirStack.size() > 1)
+        c.sourceDirStack.pop_back();
+    return true;
+}
+
 // $addsearchdir <dir>  (Cmd_AddSearchDir). A fallback directory for SOURCE
 // files - the .dmx/.smd a $rendermesh or $animation names, and $proceduralbones'
-// .vrd. Registration order, searched after the script's own directory, so only
+// .vrd. Registration order, searched after the current $pushd directory, so only
 // dirs registered ABOVE a reference can serve it. A relative dir is relative to
 // the ROOT script, the same rule the source paths it serves follow (stock joins
 // cddir[0] here for exactly that reason).
 //
 // This is NOT $addincludesearchdir - source files and $include scripts keep
-// separate lists. $pushd/$popd are not coming back; a search dir covers the
-// same ground without a mode the rest of the script has to track.
-// -filesearchdir is the launch-line form, searched after this list.
+// separate lists. -filesearchdir is searched after this list.
 bool CmdAddSearchDir(Ctx& c, const Token& cmd) {
     std::string dir;
     if (!c.Want("a directory", cmd, dir))
@@ -6393,10 +6464,8 @@ bool CmdRedefineVariable(Ctx& c, const Token& cmd) {
 
 bool IsCommandName(const std::string& name); // the kCommands lookup, below
 
-// $definemacro <name> [<param> ...] <body> $endmacro  (Cmd_DefineMacro). The
-// parameter list ends at the first $command, which is where the body starts -
-// no line continuation to keep track of. The body is kept as raw tokens: both
-// $param$ and $variable$ inside it resolve at each invocation, not here.
+// $definemacro <name> [<param>[=<default>] ...] <body> $endmacro.
+// Parameters end at the first $command. Body references resolve on invocation.
 bool CmdDefineMacro(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
@@ -6415,12 +6484,22 @@ bool CmdDefineMacro(Ctx& c, const Token& cmd) {
 
     Ctx::Macro m;
     while (!c.AtCommand()) {
-        const std::string& p = c.toks[c.pos++].text;
+        const std::string declaration = c.toks[c.pos++].text;
+        const size_t equal = declaration.find('=');
+        const std::string p = declaration.substr(0, equal);
+        if (p.empty())
+            return c.Fail(cmd.line, "$definemacro \"" + name + "\": empty parameter name");
         for (const std::string& prev : m.params)
             if (_stricmp(prev.c_str(), p.c_str()) == 0)
                 return c.Fail(cmd.line, "$definemacro \"" + name +
                                         "\": duplicate parameter \"" + p + "\"");
         m.params.push_back(p);
+        if (equal != std::string::npos) {
+            std::string value = declaration.substr(equal + 1);
+            if (value.empty() && !c.Eof() && c.Cur().quoted)
+                value = c.toks[c.pos++].text;
+            m.defaults.emplace(p, std::move(value));
+        }
         if (static_cast<int>(m.params.size()) > lim::kMaxMacroParams)
             return c.Fail(cmd.line, "$definemacro \"" + name + "\": too many "
                                     "parameters (max " +
@@ -6459,6 +6538,11 @@ bool ExpandMacro(Ctx& c, const Token& cmd, const Ctx::Macro& m) {
                                 ") at \"" + cmd.text + "\" - a macro is recursive");
     std::vector<std::string> args;
     for (const std::string& p : m.params) {
+        const auto fallback = m.defaults.find(p);
+        if (c.AtCommand() && fallback != m.defaults.end()) {
+            args.push_back(fallback->second);
+            continue;
+        }
         const std::string what = "an argument for \"" + p + "\"";
         std::string a;
         if (!c.Want(what.c_str(), cmd, a))
@@ -6821,6 +6905,8 @@ constexpr Command kCommands[] = {
     {"$case", CmdCaseOutside},
     {"$default", CmdCaseOutside},
     {"$addincludesearchdir", CmdAddIncludeSearchDir},
+    {"$pushd", CmdPushD},
+    {"$popd", CmdPopD},
     {"$addsearchdir", CmdAddSearchDir},
     {"$modelname", CmdModelName},
     {"$rendermesh", CmdRenderMesh},
@@ -7015,6 +7101,7 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
     Ctx c{out};
     c.scriptDir = fs::path(path).parent_path();
     c.curDir = c.scriptDir;
+    c.sourceDirStack.push_back(c.scriptDir);
     c.file = fs::path(path).filename().string();
     c.rootFile = c.file;
     c.err = err;
