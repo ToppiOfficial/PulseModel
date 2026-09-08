@@ -2193,9 +2193,10 @@ void WriteAnimBlocks(Qc& q, const Mdl& m, const std::string& mdlPath) {
             std::string o;
             if (bones[i].flags & fm::BONE_HAS_SAVEFRAME_POS)
                 o += " position";
-            if (bones[i].flags & fm::BONE_HAS_SAVEFRAME_ROT32)
+            if ((bones[i].flags & fm::BONE_HAS_SAVEFRAME_ROT32) ||
+                (DmxModelVersion() == 1 && (bones[i].flags & fm::BONE_HAS_SAVEFRAME_ROT64)))
                 o += " rotation";
-            if (bones[i].flags & fm::BONE_HAS_SAVEFRAME_ROT64)
+            if (DmxModelVersion() != 1 && (bones[i].flags & fm::BONE_HAS_SAVEFRAME_ROT64))
                 o += " rotation64";
             if (!o.empty())
                 lines.push_back("$bonesaveframe \"" + names[i] + "\"" + o);
@@ -2447,8 +2448,7 @@ void WriteSequences(Qc& q, const Mdl& m) {
 
         const char* act = m.Str(&s, s.szactivitynameindex);
         if (*act)
-            opt("activity \"" + std::string(act) + "\"" +
-                (s.actweight > 0 ? " " + std::to_string(s.actweight) : ""));
+            opt("activity \"" + std::string(act) + "\" " + std::to_string(s.actweight));
 
         // a sequence ORs in its animations' flags, so only a bit they do not
         // carry can have come from a sequence option
@@ -2768,7 +2768,7 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
     // re-derive their weights from LOD 0 the way an authored LOD needs.
     if (g_studiomdl && lods.size() > 1) {
         q.Blank();
-        q.Line("$skinnedlods");
+        q.Line("// $skinnedlods  // Alien Swarm and newer");
     }
     for (size_t l = 1; l < lods.size(); ++l) {
         q.Blank();

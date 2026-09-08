@@ -818,9 +818,7 @@ void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
         q.Ref("animationList", idAnimList);
     q.End();
 
-    // The root bones and the mesh hang off `children`, and every bone is listed
-    // in `jointList` in .mdl order so a vertex's stored bone index is its joint
-    // index unchanged.
+    // Keep joints in .mdl order so stored vertex bone indices stay unchanged.
     std::vector<std::string> rootDags, allJoints;
     for (int i = 0; i < s.numbones; ++i) {
         allJoints.push_back(s.idJointDag[i]);
@@ -834,7 +832,10 @@ void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
     q.Str("upAxis", "Z");
     q.Ref("transform", s.idModelXform);
     q.RefArray("children", rootDags);
-    q.RefArray("jointList", allJoints);
+    if (g_formatModel == 1)
+        q.RefArray("jointTransforms", s.idJointXform);
+    else
+        q.RefArray("jointList", allJoints);
     if (!s.idBind.empty())
         q.RefArray("baseStates", {s.idBind});
     if (!s.idAxis.empty())
@@ -1581,6 +1582,8 @@ const char* SetDmxOutput(const std::string& encoding, int formatModel) {
     return nullptr;
 }
 
+int DmxModelVersion() { return g_formatModel; }
+
 bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string& clipName, int fps,
                        const std::vector<std::vector<AnimPose>>& frames) {
     if (frames.empty() || fps <= 0)
@@ -1606,12 +1609,15 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
     // rounded remainder, which is how the importer reconstructs them - a key
     // that lands anywhere else gets interpolated instead of read.
     std::vector<float> times;
+    std::vector<int> legacyTimes;
     times.reserve(frames.size());
+    legacyTimes.reserve(frames.size());
     for (int k = 0; k < static_cast<int>(frames.size()); ++k) {
         const int whole = k / fps;
         const int ticks = whole * 10000 +
                           Ticks(static_cast<float>(k - whole * fps) / static_cast<float>(fps));
         times.push_back(static_cast<float>(ticks) / 10000.0f);
+        legacyTimes.push_back(ticks);
     }
 
     WriteSkel(q, m, s, clipName, std::string(), std::string(), idList, &frames[0]);
@@ -1627,9 +1633,14 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
     q.End();
 
     q.Begin("DmeTimeFrame", idFrame, "timeFrame");
-    q.Time("start", 0.0f);
-    q.Time("duration", times.back());
-    q.Time("offset", 0.0f);
+    if (g_formatModel == 1) {
+        q.Int("durationTime", legacyTimes.back());
+        q.Float("scale", 1.0f);
+    } else {
+        q.Time("start", 0.0f);
+        q.Time("duration", times.back());
+        q.Time("offset", 0.0f);
+    }
     q.End();
 
     const std::vector<std::string> boneNames = BoneNames(m);
@@ -1665,7 +1676,7 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
             q.Ref("toElement", s.idJointXform[j]);
             q.Str("toAttribute", isPos ? "position" : "orientation");
             q.Int("toIndex", 0);
-            q.Int("mode", 3); // CM_PLAY
+            q.Int("mode", g_formatModel == 1 ? 1 : 3);
             q.Ref("log", idLog[n]);
             q.End();
 
@@ -1675,9 +1686,11 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
             q.End();
 
             q.Begin(isPos ? "DmeVector3LogLayer" : "DmeQuaternionLogLayer", idLayer[n], "log");
-            q.TimeArray("times",
-                        std::vector<float>(times.begin(),
-                                           times.begin() + (isPos ? pos.size() : rot.size())));
+            const size_t keyCount = isPos ? pos.size() : rot.size();
+            if (g_formatModel == 1)
+                q.IntArray("times", std::vector<int>(legacyTimes.begin(), legacyTimes.begin() + keyCount));
+            else
+                q.TimeArray("times", std::vector<float>(times.begin(), times.begin() + keyCount));
             if (isPos)
                 q.V3Array("values", pos);
             else

@@ -17,6 +17,7 @@ namespace mdldecompiler {
 // model 1 is binary encoding version 2, model 18 version 5, model 22 (modeldoc)
 // version 9.
 const char* SetDmxOutput(const std::string& encoding, int formatModel);
+int DmxModelVersion();
 
 // One LOD of the model, as the .vtx describes it. Index 0 is the root LOD that
 // no $lod block writes; a negative switch point is the $shadowlod.
