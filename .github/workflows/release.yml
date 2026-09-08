@@ -8,7 +8,26 @@ permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.rel.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Choose release revision tag
+        id: rel
+        shell: bash
+        run: |
+          version=$(sed -n 's/^set(TOOL_VERSION \([0-9.]*\)).*/\1/p' mdlcompiler/CMakeLists.txt)
+          test -n "$version"
+          tag=$(git tag --list "v$version-r*" --sort=-v:refname | head -n 1)
+          [ -n "$tag" ] && revision=$((${tag##*-r} + 1)) || revision=1
+          echo "tag=v$version-r$revision" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -40,7 +59,7 @@ jobs:
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE PulseModel/
           cp -r dist/subtools PulseModel/
-          7z a -tzip "pulsemodel-${{ matrix.plat }}.zip" PulseModel/
+          7z a -tzip "pulsemodel-${{ needs.prepare.outputs.tag }}-${{ matrix.plat }}.zip" PulseModel/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -48,7 +67,7 @@ jobs:
           path: pulsemodel-*.zip
 
   publish:
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -62,9 +81,7 @@ jobs:
       - name: Build notes
         shell: bash
         run: |
-          prev=$(git describe --tags --abbrev=0 --match 'release-*' 2>/dev/null || true)
-          # Fall back to the old tags for the first numbered release.
-          [ -z "$prev" ] && prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
           [ -n "$prev" ] && range="$prev..HEAD" || range="HEAD"
           git log --reverse --pretty=format:%x00%B "$range" | python3 .github/scripts/release-notes.py > notes.txt
           cat notes.txt
@@ -74,4 +91,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "release-${{ github.run_number }}" pulsemodel-*.zip --target "${{ github.sha }}" --title "release-$(date -u +%-m/%-d/%Y)" --notes-file notes.txt --draft
+          gh release create "${{ needs.prepare.outputs.tag }}" pulsemodel-*.zip --target "${{ github.sha }}" --title "${{ needs.prepare.outputs.tag }}" --notes-file notes.txt --draft
