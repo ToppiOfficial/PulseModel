@@ -1271,10 +1271,8 @@ struct CompileInput {
     // writes the single empty cdtexture entry regardless.
     std::vector<std::string> cdmaterials;
 
-    // $texturegroup - skin families. One entry per $set block, in script order:
-    // the first $set is skin family 1, family 0 being the base materials.
-    // Each replacement names both materials directly, so a family only lists
-    // what it changes.
+    // $texturegroup: one entry per $set or legacy row after row 0, in script order.
+    // Family 0 uses the base materials; each entry lists explicit replacements.
     struct SkinReplace {
         std::string from; // material to replace, as the model already knows it
         std::string to;   // its replacement in this family
@@ -1317,6 +1315,8 @@ struct CompileInput {
         std::string attachment;
         float height = 0, floor = 0, radius = 0;
         bool heightSet = false, floorSet = false, radiusSet = false;
+        int slot = 0;
+        bool slotSet = false;
         int contact = -1;
         int startframe = -1, peakframe = -1, tailframe = -1, endframe = -1;
         bool usesequence = false, usesource = false;

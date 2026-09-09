@@ -9430,7 +9430,7 @@ bool ConvertIkRule(const CompileInput& input, const CompileInput::InIkRule& ir,
         return false;
     }
     rule.chain = chainIdx;
-    rule.slot = chainIdx;
+    rule.slot = ir.slotSet ? ir.slot : chainIdx;
     const IkChain& chain = input.ikchains[chainIdx];
 
     if (_stricmp(ir.type.c_str(), "footstep") == 0) {

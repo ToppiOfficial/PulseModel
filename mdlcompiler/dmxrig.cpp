@@ -270,16 +270,21 @@ void WalkAttachments(const dmx::Element* dag, float scale, cm::CompileInput& in,
 
     const dmx::Element* shape = dag->GetElement("shape");
     if (shape && shape->className == "DmeAttachment") {
-        cm::Attachment att;
-        att.name = shape->name;
-        att.bonename = bone;
-        att.local = local;
-        att.type = cm::kAttachIsFromSource;
-        if (shape->GetBool("isRigid", false))
-            att.type |= cm::kAttachIsRigid;
-        if (shape->GetBool("isWorldAligned", false))
-            att.flags |= cm::kAttachFlagWorldAlign;
-        in.attachments.push_back(std::move(att));
+        bool dup = false; // first definition wins, like the jigglebone/procedural dedup
+        for (const cm::Attachment& prev : in.attachments)
+            if (_stricmp(prev.name.c_str(), shape->name.c_str()) == 0) { dup = true; break; }
+        if (!dup) {
+            cm::Attachment att;
+            att.name = shape->name;
+            att.bonename = bone;
+            att.local = local;
+            att.type = cm::kAttachIsFromSource;
+            if (shape->GetBool("isRigid", false))
+                att.type |= cm::kAttachIsRigid;
+            if (shape->GetBool("isWorldAligned", false))
+                att.flags |= cm::kAttachFlagWorldAlign;
+            in.attachments.push_back(std::move(att));
+        }
     }
 
     if (auto kids = dag->GetElementArray("children"))

@@ -1186,7 +1186,16 @@ void MergeFlexRig(source::FlexRig& dst, const source::FlexRig& src, bool control
     }
 
     if (correctives) {
+        const size_t oldCorrectives = dst.correctives.size();
         for (const source::FlexRig::Corrective& cor : src.correctives) {
+            bool dup = false; // a corrective a PREVIOUS merge already contributed
+            for (size_t j = 0; j < oldCorrectives; ++j)
+                if (_stricmp(dst.correctives[j].delta.c_str(), cor.delta.c_str()) == 0) {
+                    dup = true;
+                    break;
+                }
+            if (dup)
+                continue;
             source::FlexRig::Corrective out;
             out.delta = cor.delta;
             for (int k : cor.combination)
@@ -1258,6 +1267,587 @@ bool CmdDataModelFlexes(Ctx& c, const Token& cmd) {
     if (!source::LoadDmxFlexRig(*dm, rig, &err))
         return c.Fail(cmd.line, "$datamodelflexes \"" + file + "\": " + err);
     MergeFlexRig(c.manual.datamodel, rig, controllers, correctives, dominators, rules);
+    return true;
+}
+
+// Load a direct file as a private morph Source (reverse/scale applied). For a
+// DMX it auto-imports the joints, and the flex rig too unless suppressed
+// (legacy noautodmxrules) - the morph deltas stay on the Source either way.
+// `file` must already be extension-resolved. null return = failure (reported).
+source::Source* LoadStudioSource(Ctx& c, const Token& entry, const std::string& file,
+                                 bool flip, float importScale, bool importFlexRig) {
+    MeshEdit edit;
+    edit.name = file;
+    edit.flipNormals = flip;
+    const float defaultScale = c.in.scale;
+    c.in.scale = importScale;
+    source::Source* src = LoadSource(c, file, entry.line, /*morphSource=*/true, &edit);
+    c.in.scale = defaultScale;
+    if (!src)
+        return nullptr;
+    if (flip)
+        source::FlipNormals(*src);
+    if (!IsSmdPath(file) && !IsFbxPath(file)) {
+        auto dm = LoadRigDmx(c, entry, file, "studio rig");
+        if (!dm)
+            return nullptr;
+        source::FlexRig rig;
+        std::string err;
+        if (!LoadDmxJoints(*dm, c.in, true, true, true, true, &err) ||
+            (importFlexRig && !source::LoadDmxFlexRig(*dm, rig, &err))) {
+            c.Fail(entry.line, "\"" + file + "\": " + err);
+            return nullptr;
+        }
+        if (importFlexRig)
+            MergeFlexRig(c.manual.datamodel, rig, true, true, true, true);
+    }
+    return src;
+}
+
+// $body and $bodygroup load private, file-only choices with automatic DMX rig imports.
+bool CmdLegacyBody(Ctx& c, const Token& cmd) {
+    cm::CompileInput::InBodyPart part;
+    if (!c.Want("a name", cmd, part.name))
+        return false;
+    const std::string where = cmd.text + " \"" + part.name + "\"";
+    for (const auto& b : c.in.bodyparts)
+        if (b.name == part.name)
+            return c.Fail(cmd.line, where + " already exists");
+
+    auto studio = [&](const Token& entry, bool inlineBody) -> bool {
+        if (c.AtCommand() || (!c.Cur().quoted &&
+            (c.Cur().text == "{" || c.Cur().text == "}")))
+            return c.Fail(entry.line, where + ": studio expects a source filename");
+        std::string file;
+        if (!c.Want("a source filename", entry, file))
+            return false;
+        file = WithSourceExtension(c, file);
+        bool flip = false;
+        float importScale = c.in.scale;
+        while (inlineBody && !c.AtCommand() && (c.Cur().quoted || c.Cur().text != "}")) {
+            const Token option = *c.Next();
+            const std::string o = Lower(option.text);
+            if (!option.quoted && o == "reverse") {
+                flip = true;
+            } else if (!option.quoted && o == "scale") {
+                if (!c.WantFloat("an import scale", option, importScale))
+                    return false;
+                if (!std::isfinite(importScale) || importScale <= 0.0f)
+                    return c.Fail(option.line, where + ": scale must be finite and greater than 0");
+            } else {
+                return c.Fail(option.line, where + ": expected reverse or scale <value>; "
+                                                   "use $rendermesh and $modelgroup for mesh edits");
+            }
+        }
+        source::Source* src =
+            LoadStudioSource(c, entry, file, flip, importScale, /*importFlexRig=*/true);
+        if (!src)
+            return false;
+        cm::CompileInput::InModel model;
+        model.name = inlineBody ? part.name : cm::ChoiceName({file});
+        model.source = src;
+        part.models.push_back(std::move(model));
+        return true;
+    };
+
+    if (_stricmp(cmd.text.c_str(), "$body") == 0) {
+        if (!studio(cmd, true))
+            return false;
+    } else {
+        const Token* brace = c.Next();
+        if (!brace || brace->quoted || brace->text != "{")
+            return c.Fail(cmd.line, where + " expects '{'");
+        for (;;) {
+            const Token* t = c.Next();
+            if (!t)
+                return c.Fail(cmd.line, where + " is missing '}'");
+            if (!t->quoted && t->text == "}")
+                break;
+            if (!t->quoted && _stricmp(t->text.c_str(), "studio") == 0) {
+                if (!studio(*t, false))
+                    return false;
+            } else if (!t->quoted && _stricmp(t->text.c_str(), "blank") == 0) {
+                cm::CompileInput::InModel model;
+                model.name = "blank";
+                model.source = nullptr;
+                part.models.push_back(std::move(model));
+            } else {
+                return c.Fail(t->line, where + ": expected studio <file>, blank or '}'; "
+                                              "use $rendermesh and $modelgroup for mesh edits");
+            }
+        }
+    }
+    if (part.models.empty())
+        return c.Fail(cmd.line, where + " expects at least one choice");
+    c.in.bodyparts.push_back(std::move(part));
+    return true;
+}
+
+// $model <name> <sourcefile> [reverse] [scale <f>] [subd|faces a b|bias x]
+//        [ { <face / flex options> } ]
+// The legacy single-mesh body part: one direct file (never a $rendermesh), an
+// auto DMX rig import like $body, and a block of face/flex markup. noautodmxrules
+// drops only the flex-rig import (the deltas stay). Every flex/eye option is
+// GLOBAL, as in stock studiomdl - it can reach other bodies' flexes, the
+// accepted trade. VTA options (flexfile/flex/flexpair/defaultflex/vcafile and the
+// frame-addressed eyelid) are SMD-only; a DMX carries its own delta states.
+bool CmdModel(Ctx& c, const Token& cmd) {
+    cm::CompileInput::InBodyPart part;
+    if (!c.Want("a name", cmd, part.name))
+        return false;
+    const std::string where = cmd.text + " \"" + part.name + "\"";
+    for (const auto& b : c.in.bodyparts)
+        if (b.name == part.name)
+            return c.Fail(cmd.line, where + " already exists");
+
+    std::string file;
+    if (!c.Want("a source filename", cmd, file))
+        return false;
+    file = WithSourceExtension(c, file);
+
+    // inline studio flags up to the '{' or the next command
+    bool flip = false;
+    float importScale = c.in.scale;
+    while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "{")) {
+        const Token option = *c.Next();
+        const std::string o = Lower(option.text);
+        if (option.quoted) {
+            return c.Fail(option.line, where + ": expected reverse/scale/subd/faces/bias or '{'");
+        } else if (o == "reverse") {
+            flip = true;
+        } else if (o == "scale") {
+            if (!c.WantFloat("an import scale", option, importScale))
+                return false;
+            if (!std::isfinite(importScale) || importScale <= 0.0f)
+                return c.Fail(option.line, where + ": scale must be finite and greater than 0");
+        } else if (o == "subd") {
+            // no quad subdivision in this compiler (matches importqc); accepted
+        } else if (o == "faces") {
+            float a, b;
+            if (!c.WantFloat("a faces arg", option, a) || !c.WantFloat("a faces arg", option, b))
+                return false; // consumed and ignored
+        } else if (o == "bias") {
+            float x;
+            if (!c.WantFloat("a bias arg", option, x))
+                return false; // consumed and ignored
+        } else {
+            return c.Fail(option.line, where + ": expected reverse/scale/subd/faces/bias or '{', "
+                                               "got \"" + option.text + "\"");
+        }
+    }
+
+    // A '{' block? Pre-scan it for noautodmxrules before the rig import decides
+    // whether to pull the flex rig (the reference does the same lookahead).
+    const bool hasBlock = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
+    bool importFlexRig = true;
+    if (hasBlock) {
+        int depth = 0;
+        for (size_t i = c.pos; i < c.toks.size(); ++i) {
+            const Token& t = c.toks[i];
+            if (t.quoted)
+                continue;
+            if (t.text == "{") {
+                depth++;
+            } else if (t.text == "}") {
+                if (--depth == 0)
+                    break;
+            } else if (Lower(t.text) == "noautodmxrules") {
+                importFlexRig = false;
+                break;
+            }
+        }
+    }
+
+    source::Source* src = LoadStudioSource(c, cmd, file, flip, importScale, importFlexRig);
+    if (!src)
+        return false;
+    cm::CompileInput::InModel model;
+    model.name = part.name;
+    model.source = src;
+    part.models.push_back(std::move(model));
+    c.in.bodyparts.push_back(std::move(part));
+
+    if (!hasBlock)
+        return true;
+    ++c.pos; // consume '{'
+
+    static const char* kLidSlot[3] = {"lowerer", "neutral", "raiser"};
+    std::string flexfile;                                    // current flex VTA
+    std::map<std::string, std::vector<source::VtaFlexOption>> vtaByFile; // file -> shapes
+    std::string vcaFile, vcaName;
+    int vtaLine = 0, vcaLine = 0;
+
+    auto atEnd = [&] { return c.Eof() || (!c.Cur().quoted && c.Cur().text == "}"); };
+    auto sameLine = [&](int line) { return !atEnd() && c.Cur().line == line; };
+
+    auto isModelOption = [](const std::string& lo) {
+        return lo == "eyeball" || lo == "eyelid" || lo == "dmxeyelid" || lo == "flexfile" ||
+               lo == "flex" || lo == "flexpair" || lo == "defaultflex" || lo == "vcafile" ||
+               lo == "localvar" || lo == "mouth" || lo == "flexcontroller" ||
+               lo == "noautodmxrules" || lo == "attachment" || lo == "spherenormals";
+    };
+    // A `%name =` at the cursor starts a NEW rule; a bare `%name` is a fetch
+    // operand, so a rule expression reads across lines until the next statement.
+    auto startsNewRule = [&]() -> bool {
+        if (c.Eof() || c.Cur().quoted || c.Cur().text.empty() || c.Cur().text[0] != '%')
+            return false;
+        const size_t eqAt = c.Cur().text.size() > 1 ? c.pos + 1 : c.pos + 2;
+        return eqAt < c.toks.size() && !c.toks[eqAt].quoted && c.toks[eqAt].text == "=";
+    };
+
+    // `flexfile "file" { ... }` groups its flex lines in a nested brace, so track
+    // depth: the model block ends only when the outer '}' brings it back to 0.
+    int depth = 1;
+    for (;;) {
+        const Token* tp = c.Next();
+        if (!tp)
+            return c.Fail(cmd.line, where + " is missing '}'");
+        if (!tp->quoted && tp->text == "{") { depth++; continue; }
+        if (!tp->quoted && tp->text == "}") { if (--depth == 0) break; continue; }
+        const Token t = *tp;
+        const std::string o = Lower(t.text);
+
+        // %<name> = <expr>  -> a global flex rule (same as $flexrule)
+        if (!t.quoted && !t.text.empty() && t.text[0] == '%') {
+            ManualFlex::Rule rule;
+            rule.name = t.text == "%" ? "" : t.text.substr(1);
+            if (rule.name.empty() && !c.Want("a morph name after '%'", t, rule.name))
+                return false;
+            std::string eq;
+            if (!c.Want("'=' after the morph name", t, eq))
+                return false;
+            if (eq != "=")
+                return c.Fail(t.line, where + ": flex rule expects '=' after \"" + rule.name + "\"");
+            // multi-line: read until the next statement (new rule, option, '}', command)
+            while (!c.Eof()) {
+                const Token& cur = c.Cur();
+                if (!cur.quoted &&
+                    (cur.text == "}" || cur.text == "{" || cur.text[0] == '$' ||
+                     startsNewRule() || isModelOption(Lower(cur.text))))
+                    break;
+                if (!rule.expr.empty())
+                    rule.expr += ' ';
+                rule.expr += c.Next()->text;
+            }
+            if (rule.expr.empty())
+                return c.Fail(t.line, where + ": flex rule \"" + rule.name + "\" has no expression");
+            c.manual.rules.push_back(std::move(rule));
+            continue;
+        }
+
+        // eyeball <name> <bone> <x y z> <material> <diameter> <angle> <iris> <pupil>
+        if (o == "eyeball") {
+            FaceMarkup::Entry e;
+            e.kind = FaceMarkup::Kind::Eyeball;
+            std::string iris;
+            if (!c.Want("an eyeball name", t, e.eyeball.name) ||
+                !c.Want("a bone name", t, e.eyeball.bonename) ||
+                !c.WantFloat("an origin x", t, e.eyeball.origin.x) ||
+                !c.WantFloat("an origin y", t, e.eyeball.origin.y) ||
+                !c.WantFloat("an origin z", t, e.eyeball.origin.z) ||
+                !c.Want("a material name", t, e.eyeball.material) ||
+                !c.WantFloat("a diameter", t, e.eyeball.diameter) ||
+                !c.WantFloat("an angle in degrees", t, e.eyeball.angle) ||
+                !c.Want("an iris material", t, iris) || // read and discarded, like the reference
+                !c.WantFloat("a pupil scale", t, e.eyeball.pupilscale))
+                return false;
+            c.face.entries.push_back(std::move(e));
+            continue;
+        }
+
+        // flexcontroller <type> [range min max] <name>...  (same as $flexcontroller)
+        if (o == "flexcontroller") {
+            std::string group;
+            if (!c.Want("a controller group", t, group))
+                return false;
+            float rMin = 0.0f, rMax = 1.0f;
+            int names = 0;
+            while (sameLine(t.line)) {
+                const Token& n = *c.Next();
+                if (!n.quoted && _stricmp(n.text.c_str(), "range") == 0) {
+                    if (!c.WantFloat("a range min", t, rMin) ||
+                        !c.WantFloat("a range max", t, rMax))
+                        return false;
+                    continue;
+                }
+                c.manual.controllers.push_back({n.text, group, rMin, rMax});
+                names++;
+            }
+            if (names == 0)
+                return c.Fail(t.line, where + ": flexcontroller \"" + group +
+                                          "\" expects at least one controller name");
+            continue;
+        }
+
+        // localvar <name>...  (same as $flexlocalvar)
+        if (o == "localvar") {
+            int names = 0;
+            while (sameLine(t.line)) {
+                ManualFlex::Rule rule;
+                rule.name = c.Next()->text;
+                rule.localvar = true;
+                c.manual.rules.push_back(std::move(rule));
+                names++;
+            }
+            if (names == 0)
+                return c.Fail(t.line, where + ": localvar expects at least one name");
+            continue;
+        }
+
+        // mouth <index> <controller> <bone> <forward x y z>  (index is implicit
+        // in this compiler - declaration order - so it is read and ignored)
+        if (o == "mouth") {
+            int index;
+            FaceMarkup::Entry e;
+            e.kind = FaceMarkup::Kind::Mouth;
+            if (!c.WantInt("a mouth index", t, index) ||
+                !c.Want("a flex controller name", t, e.mouth.controller) ||
+                !c.Want("a bone name", t, e.mouth.bonename) ||
+                !c.WantFloat("a forward x", t, e.mouth.forward.x) ||
+                !c.WantFloat("a forward y", t, e.mouth.forward.y) ||
+                !c.WantFloat("a forward z", t, e.mouth.forward.z))
+                return false;
+            c.face.entries.push_back(std::move(e));
+            continue;
+        }
+
+        // flexfile <file> - the VTA the following flex/flexpair/defaultflex read
+        if (o == "flexfile") {
+            if (!c.Want("a .vta filename", t, flexfile))
+                return false;
+            vtaLine = t.line;
+            continue;
+        }
+
+        // flex/flexpair/defaultflex <name> [<split>] frame <N> [position f] [decay f]
+        // Each names one VTA frame; a split routes to the stereo-split machinery.
+        if (o == "flex" || o == "flexpair" || o == "defaultflex") {
+            if (flexfile.empty())
+                return c.Fail(t.line, where + ": " + o + " needs a `flexfile <file>` before it");
+            source::VtaFlexOption fo;
+            float split = 0.0f;
+            bool hasSplit = false;
+            if (o == "defaultflex") {
+                fo.name = "default";
+            } else if (!c.Want("a flex name", t, fo.name)) {
+                return false;
+            }
+            if (o == "flexpair") {
+                if (!c.WantFloat("a pair split", t, split))
+                    return false;
+                hasSplit = true;
+            }
+            bool sawFrame = false;
+            while (sameLine(t.line)) {
+                const std::string k = Lower(c.Cur().text);
+                if (k == "frame") {
+                    ++c.pos;
+                    if (!c.WantInt("a frame index", t, fo.frame))
+                        return false;
+                    sawFrame = true;
+                } else if (k == "position") {
+                    ++c.pos;
+                    if (!c.WantFloat("a position", t, fo.position))
+                        return false;
+                } else if (k == "decay") {
+                    ++c.pos;
+                    if (!c.WantFloat("a decay", t, fo.decay))
+                        return false;
+                } else if (k == "split") {
+                    ++c.pos;
+                    if (!c.WantFloat("a split", t, split))
+                        return false;
+                    hasSplit = true;
+                } else {
+                    break;
+                }
+            }
+            if (!sawFrame)
+                return c.Fail(t.line, where + ": " + o + " \"" + fo.name +
+                                          "\" needs a frame <N> - a .vta names nothing");
+            if (fo.frame == 0)
+                continue; // frame 0 is the VTA basis (the rest pose), not a delta
+            if (hasSplit && split != 0.0f)
+                c.manual.stereoSplits.push_back({fo.name, split});
+            vtaByFile[flexfile].push_back(std::move(fo));
+            continue;
+        }
+
+        // vcafile <file> [controller] - a baked VTA sequence, the mesh's only flex
+        if (o == "vcafile") {
+            if (!vcaFile.empty())
+                return c.Fail(t.line, where + ": vcafile written twice");
+            if (!c.Want("a .vca filename", t, vcaFile))
+                return false;
+            vcaLine = t.line;
+            if (sameLine(t.line))
+                vcaName = c.Next()->text;
+            if (vcaName.empty())
+                vcaName = StripExtension(pulse::FilePath(vcaFile).filename().string());
+            continue;
+        }
+
+        // dmxeyelid <upper|lower> <file> lowerer <d|-> <t> neutral <d|-> <t>
+        //           raiser <d|-> <t> [split s] (righteyeball n lefteyeball n | eyeball n)
+        // Deltas resolve by name against this model's morphs; the file is the
+        // source they came from. Maps straight to the $eyelid registration.
+        if (o == "dmxeyelid") {
+            std::string type, dmxfile;
+            if (!c.Want("\"upper\" or \"lower\"", t, type) ||
+                !c.Want("a source filename", t, dmxfile)) // where the deltas came from
+                return false;
+            FaceMarkup::Entry e;
+            e.kind = FaceMarkup::Kind::Eyelid;
+            const char dtc = type.empty() ? '?' : static_cast<char>(std::tolower(type[0]));
+            if (dtc == 'u')      e.eyelid.upper = true;
+            else if (dtc == 'l') e.eyelid.upper = false;
+            else return c.Fail(t.line, where + ": dmxeyelid type must be upper or lower");
+            bool haveSlot[3] = {false, false, false};
+            while (sameLine(t.line)) {
+                const Token& k = *c.Next();
+                const std::string ko = Lower(k.text);
+                int slot = -1;
+                for (int i = 0; i < 3; ++i)
+                    if (ko == kLidSlot[i]) { slot = i; break; }
+                if (slot >= 0) {
+                    if (!c.Want("a delta name or \"-\"", t, e.eyelid.delta[slot]) ||
+                        !c.WantFloat("a lid target", t, e.eyelid.target[slot]))
+                        return false;
+                    if (e.eyelid.delta[slot] == "-")
+                        e.eyelid.delta[slot].clear();
+                    e.eyelid.target[slot] *= c.in.scale;
+                    haveSlot[slot] = true;
+                } else if (ko == "split") {
+                    if (!c.WantFloat("a split distance", t, e.eyelid.split)) return false;
+                } else if (ko == "flexdesc") {
+                    if (!c.Want("a flexdesc name", t, e.eyelid.basedesc)) return false;
+                } else if (ko == "eyeball") {
+                    if (!c.Want("an eyeball name", t, e.eyelid.eyeball)) return false;
+                } else if (ko == "righteyeball") {
+                    if (!c.Want("an eyeball name", t, e.eyelid.righteyeball)) return false;
+                } else if (ko == "lefteyeball") {
+                    if (!c.Want("an eyeball name", t, e.eyelid.lefteyeball)) return false;
+                } else {
+                    return c.Fail(k.line, where + ": dmxeyelid unknown option \"" + k.text + "\"");
+                }
+            }
+            for (int i = 0; i < 3; ++i)
+                if (!haveSlot[i])
+                    return c.Fail(t.line, where + ": dmxeyelid " + type + " missing `" +
+                                              kLidSlot[i] + " <delta> <target>`");
+            const bool mono = !e.eyelid.eyeball.empty();
+            if (!mono && (e.eyelid.righteyeball.empty() || e.eyelid.lefteyeball.empty()))
+                return c.Fail(t.line, where +
+                                          ": dmxeyelid needs `eyeball` or both "
+                                          "`righteyeball`/`lefteyeball`");
+            c.face.entries.push_back(std::move(e));
+            continue;
+        }
+
+        // eyelid <upperN|lowerN> <vtafile> lowerer <frame|-> <t> neutral <frame|-> <t>
+        //        raiser <frame|-> <t> [split s] eyeball <name>
+        // The frame-addressed VTA form: type is decided by its first char, its full
+        // string is the lid desc base. Each present frame loads as a named delta
+        // (<type>_lid_<slot>) so it resolves by name like dmxeyelid.
+        if (o == "eyelid") {
+            std::string type, vtafile;
+            if (!c.Want("\"upper\" or \"lower\"", t, type) ||
+                !c.Want("a .vta filename", t, vtafile))
+                return false;
+            FaceMarkup::Entry e;
+            e.kind = FaceMarkup::Kind::Eyelid;
+            const char etc = type.empty() ? '?' : static_cast<char>(std::tolower(type[0]));
+            if (etc == 'u')      e.eyelid.upper = true;
+            else if (etc == 'l') e.eyelid.upper = false;
+            else return c.Fail(t.line, where + ": eyelid type must start with upper or lower");
+            int frame[3] = {-1, -1, -1};
+            bool haveSlot[3] = {false, false, false};
+            while (sameLine(t.line)) {
+                const Token& k = *c.Next();
+                const std::string ko = Lower(k.text);
+                int slot = -1;
+                for (int i = 0; i < 3; ++i)
+                    if (ko == kLidSlot[i]) { slot = i; break; }
+                if (slot >= 0) {
+                    if (c.Cur().text == "-") {
+                        ++c.pos;
+                        frame[slot] = -1;
+                    } else if (!c.WantInt("a frame index", t, frame[slot])) {
+                        return false;
+                    }
+                    if (!c.WantFloat("a lid target", t, e.eyelid.target[slot]))
+                        return false;
+                    e.eyelid.target[slot] *= c.in.scale;
+                    haveSlot[slot] = true;
+                } else if (ko == "split") {
+                    if (!c.WantFloat("a split distance", t, e.eyelid.split)) return false;
+                } else if (ko == "eyeball") {
+                    if (!c.Want("an eyeball name", t, e.eyelid.eyeball)) return false;
+                } else {
+                    return c.Fail(k.line, where + ": eyelid unknown option \"" + k.text + "\"");
+                }
+            }
+            for (int i = 0; i < 3; ++i)
+                if (!haveSlot[i])
+                    return c.Fail(t.line, where + ": eyelid " + type + " missing `" +
+                                              kLidSlot[i] + " <frame> <target>`");
+            if (e.eyelid.eyeball.empty())
+                return c.Fail(t.line, where + ": the VTA eyelid form needs `eyeball <name>`");
+            e.eyelid.basedesc = type; // e.g. "upper_right" - the reference's lid desc base
+            for (int i = 0; i < 3; ++i) {
+                if (frame[i] <= 0)
+                    continue; // "-" or frame 0 (the basis) = a pose with no vertex data
+                source::VtaFlexOption fo;
+                fo.name = e.eyelid.basedesc + "_lid_" + kLidSlot[i];
+                fo.frame = frame[i];
+                e.eyelid.delta[i] = fo.name;
+                vtaByFile[vtafile].push_back(std::move(fo));
+            }
+            c.face.entries.push_back(std::move(e));
+            continue;
+        }
+
+        if (o == "noautodmxrules")
+            continue; // handled by the pre-scan above
+        if (o == "attachment")
+            continue; // no-op inside $model, as in the reference
+        if (o == "spherenormals") {
+            std::string mat;
+            float x, y, z;
+            if (!c.Want("a material name", t, mat) || !c.WantFloat("x", t, x) ||
+                !c.WantFloat("y", t, y) || !c.WantFloat("z", t, z))
+                return false; // consumed and ignored (matches importqc)
+            continue;
+        }
+
+        return c.Fail(t.line, where + ": unknown model option \"" + t.text + "\"");
+    }
+
+    // Load the collected VTA / VCA morphs against the source (SMD-only). The
+    // import scale must match the one the mesh was loaded with.
+    if (!vcaFile.empty() && !vtaByFile.empty())
+        return c.Fail(vcaLine, where + ": vcafile must be the only flex source");
+    if ((!vtaByFile.empty() || !vcaFile.empty()) && !IsSmdPath(src->filename))
+        return c.Fail(cmd.line, where + ": flexfile/flex/eyelid/vcafile are SMD-only - a DMX "
+                                        "mesh carries its own delta states");
+    for (auto& kv : vtaByFile) {
+        std::vector<fs::path> tried;
+        const fs::path full = FindSourceFile(c, kv.first, &tried);
+        if (full.empty())
+            return c.Fail(vtaLine, "cannot find \"" + kv.first + "\" - looked in:" + LookedIn(tried));
+        std::string err;
+        if (!source::LoadVtaMorphs(full.string(), *src, importScale, kv.second, &err))
+            return c.Fail(vtaLine, "cannot load \"" + full.string() + "\": " + err);
+    }
+    if (!vcaFile.empty()) {
+        std::vector<fs::path> tried;
+        const fs::path full = FindSourceFile(c, vcaFile, &tried);
+        if (full.empty())
+            return c.Fail(vcaLine, "cannot find \"" + vcaFile + "\" - looked in:" + LookedIn(tried));
+        std::string err;
+        if (!source::LoadVcaMorphs(full.string(), *src, importScale, vcaName, &err))
+            return c.Fail(vcaLine, "cannot load \"" + full.string() + "\": " + err);
+    }
     return true;
 }
 
@@ -2078,6 +2668,10 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
             c.pos++;
             if (!c.WantFloat("a height", cmd, rule.height)) return false;
             rule.heightSet = true;
+        } else if (_stricmp(o.c_str(), "target") == 0) {
+            c.pos++;
+            if (!c.WantInt("a target slot", cmd, rule.slot)) return false;
+            rule.slotSet = true;
         } else if (_stricmp(o.c_str(), "floor") == 0) {
             c.pos++;
             if (!c.WantFloat("a floor", cmd, rule.floor)) return false;
@@ -3278,6 +3872,10 @@ bool CmdModelArchetype(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// Legacy bare flags replaced by $modelarchetype; last one wins.
+bool CmdStaticProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Static; return true; }
+bool CmdSimpleProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Simple; return true; }
+
 // $vtxformat <int> - which .vtx strip/stripgroup layout to write. 0 = legacy
 // 27/25-byte headers (TF2/L4D2/GMod/HL2), 1 = full 35/33-byte headers with the
 // topology fields (SFM/CS:GO/ASW+). The -vtxformat launch switch overrides it.
@@ -3347,6 +3945,10 @@ bool CmdRenderPass(Ctx& c, const Token& cmd) {
                                 "\" (expected none/opaque/mostlyopaque)");
     return true;
 }
+
+// Legacy bare flags replaced by $renderpass; last one wins.
+bool CmdOpaque(Ctx& c, const Token&) { c.in.renderPass = 1; return true; }
+bool CmdMostlyOpaque(Ctx& c, const Token&) { c.in.renderPass = 2; return true; }
 
 // $setbindpose <file> <frame> [meshonly] - bake the rest mesh and skeleton.
 // The pose file contributes no geometry or materials.
@@ -3508,6 +4110,41 @@ bool CmdTransformModel(Ctx& c, const Token& cmd) {
     if (!any)
         return c.Fail(cmd.line, "$transformmodel expects at least one of "
                                 "origin, angles or scale");
+    return true;
+}
+
+// $origin <x> <y> <z> [z rotation]  (legacy Cmd_Origin)
+// Old-QC alias writing the same slots as $transformmodel origin/angles; last of
+// the two in the script wins. The optional 4th value is a yaw in degrees,
+// composed with the built-in +90 like $transformmodel angles.
+bool CmdOrigin(Ctx& c, const Token& cmd) {
+    float x = 0, y = 0, z = 0;
+    if (!c.WantFloat("an X offset", cmd, x) || !c.WantFloat("a Y offset", cmd, y) ||
+        !c.WantFloat("a Z offset", cmd, z))
+        return false;
+    c.in.adjust = {x, y, z};
+    if (!c.AtCommand()) {
+        float zrot = 0;
+        if (!c.WantFloat("a Z rotation", cmd, zrot))
+            return false;
+        c.in.rotation = {0, 0, (zrot + 90.0f) * pm::kDeg2Rad};
+        c.in.rotationSet = true;
+    }
+    return true;
+}
+
+// $scale <float>  (legacy Cmd_ScaleUp)
+// Old-QC alias for $transformmodel scale. Scale is baked as each source loads,
+// so sources placed before this keep the previous scale (legacy g_currentscale
+// per-file behavior) - warn, but do not stop; last write wins for later ones.
+bool CmdScale(Ctx& c, const Token& cmd) {
+    if (!c.WantFloat("a scale", cmd, c.in.scale))
+        return false;
+    if (!c.in.sources.empty())
+        std::fprintf(stderr,
+                     "warning: %s line %d: $scale after a source - sources loaded "
+                     "before it keep the previous scale\n",
+                     c.file.c_str(), cmd.line);
     return true;
 }
 
@@ -5068,6 +5705,8 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             lod.meshWordRemovals.push_back(std::move(r));
         } else if (opt == "nomorphs" || opt == "nofacial") {
             lod.facialAnimation = false;
+        } else if (opt == "facial") {
+            lod.facialAnimation = !isShadow; // on is the plain-$lod default; a shadow forces it off
         } else if (opt == "use_shadowlod_materials") {
             // silently ignored on a plain $lod, the way the reference does it -
             // the flag is model-wide and only means anything for the shadow LOD
@@ -5082,24 +5721,57 @@ bool CmdLod(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $texturegroup { $set { material <replaced> <replacement> ... } ... }
-//
-// Skin families. Family 0 is the model's own materials; each $set becomes the
-// next family in script order, so the first $set is skin 1. Stock's
-// Cmd_TextureGroup listed a full row of materials per group and paired them up
-// with row 0 by position; here each line names both materials, so a family
-// writes only what it changes and the order within a $set does not matter.
-// More than one $texturegroup just keeps appending families.
+// $texturegroup [name] accepts positional material rows or explicit $set blocks.
+// Legacy row 0 defines columns; later rows and each $set append skin families.
+// Family 0 uses the model's own materials, shared across all groups.
 bool CmdTextureGroup(Ctx& c, const Token& cmd) {
+    if (!c.AtCommand() && (c.Cur().quoted || c.Cur().text != "{")) {
+        std::string name;
+        if (!c.Want("a group name", cmd, name))
+            return false;
+    }
     if (!WantOpenBrace(c, cmd, cmd.text))
         return false;
 
+    const bool legacy = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
+    std::vector<std::string> base;
+    bool haveBase = false;
     while (true) {
         if (c.Eof())
             return c.Fail(cmd.line, "$texturegroup: missing '}'");
         const Token t = c.toks[c.pos++];
         if (!t.quoted && t.text == "}")
             break;
+        if (legacy) {
+            if (t.quoted || t.text != "{")
+                return c.Fail(t.line, "$texturegroup: expected a material row or '}'");
+            std::vector<std::string> row;
+            while (true) {
+                if (c.Eof())
+                    return c.Fail(t.line, "$texturegroup: material row is missing '}'");
+                if (!c.Cur().quoted && c.Cur().text == "}") {
+                    ++c.pos;
+                    break;
+                }
+                if (c.AtCommand() || (!c.Cur().quoted && c.Cur().text == "{"))
+                    return c.Fail(c.Cur().line, "$texturegroup: expected a material name or '}'");
+                row.push_back(c.toks[c.pos++].text);
+            }
+            if (!haveBase) {
+                base = std::move(row);
+                haveBase = true;
+                continue;
+            }
+            if (row.size() != base.size())
+                return c.Fail(t.line, "$texturegroup: every material row must have " +
+                                      std::to_string(base.size()) + " entries");
+            std::vector<cm::CompileInput::SkinReplace> fam;
+            for (size_t i = 0; i < base.size(); ++i)
+                if (row[i] != base[i])
+                    fam.push_back({base[i], row[i]});
+            c.in.skinFamilies.push_back(std::move(fam));
+            continue;
+        }
         if (t.quoted || _stricmp(t.text.c_str(), "$set") != 0)
             return c.Fail(t.line, "$texturegroup: expected $set or '}', got \"" +
                                   t.text + "\"");
@@ -5110,9 +5782,9 @@ bool CmdTextureGroup(Ctx& c, const Token& cmd) {
         c.in.skinFamilies.push_back(std::move(fam));
     }
 
-    // +1 for family 0, which no $set writes
+    // Include the base family in the limit.
     if (c.in.skinFamilies.size() + 1 > static_cast<size_t>(pulse::limits::kMaxSkinFamilies))
-        return c.Fail(cmd.line, "too many $texturegroup $set blocks");
+        return c.Fail(cmd.line, "too many $texturegroup skin families");
     return true;
 }
 
@@ -6914,8 +7586,11 @@ constexpr Command kCommands[] = {
     {"$modelname", CmdModelName},
     {"$rendermesh", CmdRenderMesh},
     {"$modelgroup", CmdModelGroup},
-    {"$model", CmdModelGroup},
+    {"$body", CmdLegacyBody},
+    {"$bodygroup", CmdLegacyBody},
+    {"$model", CmdModel},
     {"$modelgrouppreset", CmdModelGroupPreset},
+    {"$bodygrouppreset", CmdModelGroupPreset},
     {"$datamodeljoints", CmdDataModelJoints},
     {"$datamodelflexes", CmdDataModelFlexes},
     {"$wrinklescale", CmdWrinkleScale},
@@ -6944,11 +7619,15 @@ constexpr Command kCommands[] = {
     {"$weightlist", CmdWeightList},
     {"$defaultweightlist", CmdDefaultWeightList},
     {"$modelarchetype", CmdModelArchetype},
+    {"$staticprop", CmdStaticProp},
+    {"$simpleprop", CmdSimpleProp},
     {"$vtxformat", CmdVtxFormat},
     {"$modelbudget", CmdModelBudget},
     {"$setbindpose", CmdSetBindPose},
     {"$setflex", CmdSetFlex},
     {"$renderpass", CmdRenderPass},
+    {"$opaque", CmdOpaque},
+    {"$mostlyopaque", CmdMostlyOpaque},
     {"$surfaceprop", CmdSurfaceProp},
     {"$contents", CmdContents},
     {"$jointcontents", CmdJointContents},
@@ -6969,6 +7648,8 @@ constexpr Command kCommands[] = {
     {"$skiptransition", CmdSkipTransition},
     {"$calctransitions", CmdCalcTransitions},
     {"$transformmodel", CmdTransformModel},
+    {"$origin", CmdOrigin},
+    {"$scale", CmdScale},
     {"$upaxis", CmdUpAxis},
     {"$attachment", CmdAttachment},
     {"$declareattachment", CmdDeclareAttachment},
