@@ -5280,7 +5280,7 @@ bool SubtractBaseAnimations(Ctx& ctx, const Anim& psrc, Anim& pdest, int srcfram
                             int flags, std::string* err) {
     CompiledModel& m = *ctx.out;
 
-    if (srcframe >= psrc.numframes) {
+    if (srcframe < 0 || srcframe >= psrc.numframes) {
         if (err)
             *err = "subtract frame " + std::to_string(srcframe) + " out of range for " + psrc.name;
         return false;
@@ -5777,6 +5777,19 @@ void FixupIkErrors(Ctx& ctx, Anim& panim, IkRule rule) {
                     panim.name.c_str(), chain.name.c_str(), worstMiss, worstFrame);
 }
 
+// A per-anim command that indexes a script-supplied frame must reject an
+// out-of-range one, or the sanim read runs off the end and crashes.
+static bool CheckAnimFrame(const Anim& a, int frame, const char* what,
+                           const char* cmdName, std::string* err) {
+    if (frame < 0 || frame >= a.numframes) {
+        if (err)
+            *err = std::string(cmdName) + ": " + what + " " + std::to_string(frame) +
+                   " out of range [0, " + std::to_string(a.numframes - 1) + "] for " + a.name;
+        return false;
+    }
+    return true;
+}
+
 bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std::string* err) {
     CompiledModel& m = *ctx.out;
 
@@ -5926,6 +5939,10 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                                 ? m.anims[cmd.refAnim] : panim;
                 const int refFrame =
                     (cmd.kind == AnimCmd::RefMotion) ? cmd.destframe : motionStartFrame;
+                if (cmd.kind == AnimCmd::RefMotion &&
+                    (!CheckAnimFrame(ref, refFrame, "reference frame", "walkalign", err) ||
+                     !CheckAnimFrame(panim, cmd.srcframe, "source frame", "walkalign", err)))
+                    return false;
                 if (!ExtractLinearMotion(ctx, panim, cmd.motiontype, motionStartFrame,
                                          cmd.motionEndFrame, cmd.srcframe, ref,
                                          refFrame, err))
@@ -5939,6 +5956,14 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 // then back-solve to local space. Bone lengths blend separately
                 // by posweight.
                 Anim& ref = m.anims[cmd.refAnim];
+                if (cmd.worldLoops && ref.numframes < 2) {
+                    if (err) *err = "worldspaceblendloop: reference " + ref.name +
+                                    " needs at least 2 frames";
+                    return false;
+                }
+                if (!cmd.worldLoops &&
+                    !CheckAnimFrame(ref, cmd.srcframe, "source frame", "worldspaceblend", err))
+                    return false;
                 const size_t nb = m.bones.size();
                 std::vector<Quaternion> srcQ(nb);
                 std::vector<Vector3> srcPos(nb);
@@ -6039,6 +6064,9 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 // ramp wraps around the clip, so a looping animation also gets
                 // its duplicate last frame updated.
                 Anim& ref = m.anims[cmd.refAnim];
+                if (!CheckAnimFrame(ref, cmd.srcframe, "source frame", "matchblend", err) ||
+                    !CheckAnimFrame(panim, cmd.destframe, "destination frame", "matchblend", err))
+                    return false;
                 int pre = cmd.matchPre, post = cmd.matchPost;
                 if (panim.flags & STUDIO_LOOPING) {
                     pre = std::max(pre, -panim.numframes);
@@ -9898,7 +9926,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 cmd.motiontype = ic.motiontype;
                 cmd.motionEndFrame = ic.motionEndFrame;
                 cmd.srcframe = ic.srcframe;
-                cmd.destframe = ic.frame; // RefMotion: the reference frame
                 cmd.refAnim = ref;
                 cmd.alignBone = ic.alignBone;
                 cmd.motiontype = ic.motiontype;

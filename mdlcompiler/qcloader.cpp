@@ -2122,12 +2122,15 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         a.cmds.push_back(std::move(cmd));
         return 1;
     }
-    // walkframe <frame> <controls...>              (CMD_MOTION)
-    // walkalignto <frame> <anim> <srcframe> <controls...> (CMD_REFMOTION)
+    // walkframe <frame> <controls...>
+    // walkalignto <frame> <anim> <controls...>
+    // walkalign <frame> <anim> <controls...> <refframe> <srcframe>
     // Extract the root bone's travel up to <frame> into a movement key.
     if (_stricmp(o.c_str(), "walkframe") == 0 ||
-        _stricmp(o.c_str(), "walkalignto") == 0) {
-        const bool ref = (_stricmp(o.c_str(), "walkalignto") == 0);
+        _stricmp(o.c_str(), "walkalignto") == 0 ||
+        _stricmp(o.c_str(), "walkalign") == 0) {
+        const bool ref = (_stricmp(o.c_str(), "walkframe") != 0);
+        const bool explicitFrames = (_stricmp(o.c_str(), "walkalign") == 0);
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = ref ? cm::CompileInput::InAnim::InCmd::RefMotion
                        : cm::CompileInput::InAnim::InCmd::Motion;
@@ -2135,12 +2138,11 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             return -1;
         cmd.srcframe = cmd.motionEndFrame;
         if (ref) {
-            if (!c.Want("an animation name", t, cmd.name) ||
-                !c.WantInt("a reference frame", t, cmd.frame))
+            if (!c.Want("an animation name", t, cmd.name))
                 return -1;
         }
         for (;;) {
-            if (c.AtCommand() || c.Eof() || c.Cur().quoted)
+            if (c.AtCommand() || c.Eof() || c.Cur().quoted || c.Cur().line != t.line)
                 break;
             const int ctrl = LookupControl(c.Cur().text);
             if (ctrl == -1)
@@ -2152,6 +2154,10 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             c.Fail(t.line, "\"" + o + "\": missing motion controls");
             return -1;
         }
+        if (explicitFrames &&
+            (!c.WantInt("a reference frame", t, cmd.destframe) ||
+             !c.WantInt("a source frame", t, cmd.srcframe)))
+            return -1;
         a.cmds.push_back(std::move(cmd));
         return 1;
     }
