@@ -9698,6 +9698,20 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         out.anims.push_back(std::move(a));
     }
 
+    // StudioMDL resolves animations first, then a sequence's first blend.
+    const auto lookupAnimation = [&](const std::string& name) -> int {
+        for (size_t n = 0; n < out.anims.size(); n++)
+            if (_stricmp(out.anims[n].name.c_str(), name.c_str()) == 0)
+                return static_cast<int>(n);
+        for (const auto& seq : input.sequences) {
+            if (_stricmp(seq.name.c_str(), name.c_str()) != 0)
+                continue;
+            const int ref = seq.blendAnims.empty() ? seq.animIndex : seq.blendAnims[0];
+            return ref >= 0 && ref < static_cast<int>(out.anims.size()) ? ref : -1;
+        }
+        return -1;
+    };
+
     // per-anim commands, in script order (studiomdl ParseCmdlistToken order).
     // Weightlist and subtract targets resolve by name now that all anims exist.
     using InCmd = CompileInput::InAnim::InCmd;
@@ -9721,10 +9735,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 break;
             }
             case InCmd::Subtract: {
-                int ref = -1;
-                for (size_t n = 0; n < out.anims.size(); n++)
-                    if (_stricmp(out.anims[n].name.c_str(), ic.name.c_str()) == 0)
-                        ref = static_cast<int>(n);
+                const int ref = lookupAnimation(ic.name);
                 if (ref == -1) {
                     if (err) *err = "unknown subtract animation \"" + ic.name + "\" in " + a.name;
                     return false;
@@ -9787,23 +9798,10 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 cmd.srcframe = ic.srcframe;
                 break;
             case InCmd::CopyPose: {
-                // the source may be an animation or a sequence; a sequence
-                // resolves to its blend animation 0, which for a sequence that
-                // named a file inline is its implied "@<seq>" clip. `bindpose`
-                // is not a clip at all and resolves to nothing.
+                // bindpose uses the skeleton directly, without a source clip.
                 int ref = -1;
                 if (!ic.copyBindPose) {
-                    for (size_t n = 0; n < out.anims.size(); n++)
-                        if (_stricmp(out.anims[n].name.c_str(), ic.name.c_str()) == 0)
-                            ref = static_cast<int>(n);
-                    if (ref == -1) {
-                        for (const auto& is : input.sequences) {
-                            if (_stricmp(is.name.c_str(), ic.name.c_str()) != 0)
-                                continue;
-                            ref = is.blendAnims.empty() ? is.animIndex : is.blendAnims[0];
-                            break;
-                        }
-                    }
+                    ref = lookupAnimation(ic.name);
                     if (ref < 0 || ref >= static_cast<int>(out.anims.size())) {
                         if (err) *err = "unknown copypose animation or sequence \"" +
                                         ic.name + "\" in " + a.name;
@@ -9837,10 +9835,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             case InCmd::MatchBlend:
             case InCmd::Align:
             case InCmd::Match: {
-                int ref = -1;
-                for (size_t n = 0; n < out.anims.size(); n++)
-                    if (_stricmp(out.anims[n].name.c_str(), ic.name.c_str()) == 0)
-                        ref = static_cast<int>(n);
+                const int ref = lookupAnimation(ic.name);
                 if (ref == -1) {
                     if (err) *err = "unknown reference animation \"" + ic.name +
                                     "\" in " + a.name;
@@ -10075,10 +10070,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             for (const Ref& r : refs) {
                 if (r.name.empty())
                     continue;
-                int idx = -1;
-                for (size_t n = 0; n < out.anims.size(); n++)
-                    if (_stricmp(out.anims[n].name.c_str(), r.name.c_str()) == 0)
-                        idx = static_cast<int>(n);
+                const int idx = lookupAnimation(r.name);
                 if (idx == -1) {
                     if (err) *err = std::string("unknown ") + r.what + " animation \"" +
                                     r.name + "\" in " + seq.name;

@@ -6,6 +6,7 @@
 // insertion order and the checksum-before-fixup sequencing are all load-bearing.
 
 #include "strcompat.h"
+#include "pathcompat.h"
 
 #include "writer.h"
 #include "perf.h"
@@ -3009,8 +3010,11 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     // save. Reference hardcodes a "models/" root in the disk path (not in the
     // header name), so $modelname stays prefix-free and the .mdl bytes match.
     std::filesystem::path base =
-        (outDir.empty() ? std::filesystem::path(".") : std::filesystem::path(outDir)) / "models";
-    std::filesystem::path stem = (base / m.outname).make_preferred();
+        pulse::FilePath(outDir.empty() ? "." : outDir) / "models";
+    auto outputStem = [&](std::string name) {
+        return (base / pulse::FilePath(name)).make_preferred();
+    };
+    std::filesystem::path stem = outputStem(m.outname);
 
     // reference console format: a "writing <path>:" line
     // per output file, then its stats. GUI front ends scrape these lines for
@@ -3061,7 +3065,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     if (!phyBuf.empty()) {
         // the .phy filename may be overridden independently of the .mdl
         std::filesystem::path phyStem =
-            m.physName.empty() ? stem : (base / m.physName).make_preferred();
+            m.physName.empty() ? stem : outputStem(m.physName);
         phyPath = phyStem.string() + ".phy";
         std::printf("---------------------\n");
         std::printf("writing %s:\n", phyPath.c_str());

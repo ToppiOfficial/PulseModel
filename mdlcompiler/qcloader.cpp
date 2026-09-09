@@ -1,6 +1,7 @@
 // qcloader.cpp - keyvalues1 compile-script loader. See qcloader.h.
 
 #include "strcompat.h"
+#include "pathcompat.h"
 
 #include "perf.h"
 #include "qcloader.h"
@@ -356,7 +357,7 @@ std::string LookedIn(const std::vector<fs::path>& tried) {
 // Empty return = nowhere, and `tried` then holds every candidate.
 fs::path FindSourceFile(const Ctx& c, const std::string& filename,
                         std::vector<fs::path>* tried) {
-    const fs::path rel(filename);
+    const fs::path rel = pulse::FilePath(filename);
     std::vector<fs::path> cands;
     if (rel.is_absolute()) {
         cands.push_back(rel);
@@ -800,7 +801,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 if (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "}"))
                     edit.vcaName = c.Next()->text;
                 if (edit.vcaName.empty())
-                    edit.vcaName = StripExtension(fs::path(edit.vca).filename().string());
+                    edit.vcaName = StripExtension(pulse::FilePath(edit.vca).filename().string());
                 continue;
             }
 
@@ -928,7 +929,7 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
             }
             auto it = c.rendermeshes.find(r.text);
             source::Source* src = it != c.rendermeshes.end() ? it->second : nullptr;
-            const std::string ext = Lower(fs::path(r.text).extension().string());
+            const std::string ext = Lower(pulse::FilePath(r.text).extension().string());
             if (!src && (ext == ".dmx" || ext == ".smd" || ext == ".fbx")) {
                 if (std::find(refNames.begin(), refNames.end(), r.text) != refNames.end())
                     return c.Fail(r.line, where + ": mesh \"" + r.text + "\" is listed twice");
@@ -4498,7 +4499,7 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
         return false;
     // the non-.vrd branch of Load_ProceduralBones reads axis-interp bones, a
     // different procedural type with no backend here
-    if (_stricmp(fs::path(filename).extension().string().c_str(), ".vrd") != 0)
+    if (_stricmp(pulse::FilePath(filename).extension().string().c_str(), ".vrd") != 0)
         return c.Fail(cmd.line, "$proceduralbones expects a .vrd file, got \"" +
                                 filename + "\"");
 
@@ -5785,7 +5786,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
                                source::LoadKind::Collision);
         if (!sh.source)
             return false;
-        sh.name = fs::path(file).stem().string();
+        sh.name = pulse::FilePath(file).stem().string();
     }
 
     // perjoint = keep the source's own rigging (the only mode that can produce
@@ -6107,7 +6108,7 @@ bool CmdPushD(Ctx& c, const Token& cmd) {
     std::string dir;
     if (!c.Want("a directory", cmd, dir))
         return false;
-    const fs::path path(dir);
+    const fs::path path = pulse::FilePath(dir);
     const fs::path next = path.is_absolute() ? path : c.sourceDirStack.back() / path;
     c.sourceDirStack.push_back(next.lexically_normal().make_preferred());
     return true;
@@ -6132,7 +6133,8 @@ bool CmdAddSearchDir(Ctx& c, const Token& cmd) {
     std::string dir;
     if (!c.Want("a directory", cmd, dir))
         return false;
-    const fs::path p = fs::path(dir).is_absolute() ? fs::path(dir) : c.scriptDir / dir;
+    const fs::path path = pulse::FilePath(dir);
+    const fs::path p = path.is_absolute() ? path : c.scriptDir / path;
     c.searchDirs.push_back(p.lexically_normal().make_preferred());
     return true;
 }
@@ -6147,7 +6149,8 @@ bool CmdAddIncludeSearchDir(Ctx& c, const Token& cmd) {
     std::string dir;
     if (!c.Want("a directory", cmd, dir))
         return false;
-    const fs::path p = fs::path(dir).is_absolute() ? fs::path(dir) : c.curDir / dir;
+    const fs::path path = pulse::FilePath(dir);
+    const fs::path p = path.is_absolute() ? path : c.curDir / path;
     c.includeDirs.push_back(p.lexically_normal().make_preferred());
     return true;
 }
@@ -6187,7 +6190,7 @@ bool CmdInclude(Ctx& c, const Token& cmd) {
 
     // primary location first, then the search dirs in registration order. An
     // absolute path is itself and nothing else.
-    const fs::path relPath(rel);
+    const fs::path relPath = pulse::FilePath(rel);
     std::vector<fs::path> tries;
     if (relPath.is_absolute()) {
         tries.push_back(relPath);
@@ -7081,13 +7084,15 @@ void PrintCommandNames() {
 }
 
 bool IsQcScriptPath(const char* path) {
-    const std::string ext = fs::path(path).extension().string();
+    const std::string ext = pulse::FilePath(path).extension().string();
     return _stricmp(ext.c_str(), ".pulseqc") == 0 || _stricmp(ext.c_str(), ".qc") == 0;
 }
 
-bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
+bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
                   const ScriptVars& defvars, const SearchDirs& includeDirs,
                   const SearchDirs& fileDirs) {
+    const std::string normalizedPath = pulse::FilePath(rawPath).string();
+    const char* path = normalizedPath.c_str();
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         if (err) *err = std::string("cannot open \"") + path + "\"";
@@ -7116,8 +7121,8 @@ bool LoadQcScript(const char* path, cm::CompileInput& out, std::string* err,
 
     auto seedDirs = [](const SearchDirs& in, std::vector<fs::path>& out) {
         for (const std::string& dir : in) {
-            const fs::path p = fs::path(dir).is_absolute() ? fs::path(dir)
-                                                           : fs::current_path() / dir;
+            const fs::path path = pulse::FilePath(dir);
+            const fs::path p = path.is_absolute() ? path : fs::current_path() / path;
             out.push_back(p.lexically_normal().make_preferred());
         }
     };
