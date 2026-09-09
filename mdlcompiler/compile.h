@@ -973,6 +973,7 @@ struct BoneSaveFrame {
 struct CompiledModel {
     std::string outname; // e.g. "testmodel/testcube" (no extension)
     int gflags = 0;
+    uint8_t constDirectionalLightDot = 0;
     float mass = 1.0f;
     std::string surfaceprop = "default";
     std::string keyvalues; // $keyvalues text block, "" = none
@@ -1084,6 +1085,7 @@ enum class Archetype {
 struct CompileInput {
     std::string outname;
     Archetype archetype = Archetype::General;
+    bool autoCenter = false; // $autocenter
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.
     int vtxArchetype = 0;
@@ -1102,6 +1104,11 @@ struct CompileInput {
     bool doNotCastShadows = false;
     // $forcephonemecrossfade -> STUDIOHDR_FLAGS_FORCE_PHONEME_CROSSFADE
     bool forcePhonemeCrossfade = false;
+    bool noForcedFade = false;       // $noforcedfade -> STUDIOHDR_FLAGS_NO_FORCED_FADE
+    bool castTextureShadows = false; // $casttextureshadows -> STUDIOHDR_FLAGS_CAST_TEXTURE_SHADOWS
+    // $constantdirectionallight <scale>: sets the flag and the header byte below
+    bool constDirLight = false;
+    uint8_t constDirLightDot = 0;
     bool realignBones = false; // $realignbones: realign every single-child chain
     // $lockbonelengths: pin every bone to its bind-pose local translation, then
     // re-solve each ik chain so its end bone keeps its authored world position
@@ -1274,6 +1281,7 @@ struct CompileInput {
     // bone with no entry of its own inherits the nearest parent that has one,
     // else the model word.
     std::vector<std::pair<std::string, int>> jointContents;
+    std::vector<std::pair<std::string, std::string>> jointSurfaceProps;
 
     // $includemodel, authored in animationlist. Already prefixed "models/".
     std::vector<std::string> includeModels;

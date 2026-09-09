@@ -9,12 +9,14 @@
 // Registration ORDER defines flexdesc/controller/rule indices and the string
 // table - it mirrors the QC: per body (bodygroup order): [first use of the
 // source: AddCombination] -> AddBodyFlexData -> [last morphed body only: the
-// ManualFlex block, standing in for the manual $model flexcontroller/%rule
-// block] -> AddBodyFlexRules.
+// face markup and ManualFlex block, standing in for the manual $model block]
+// -> AddBodyFlexRules.
 
 #include "strcompat.h"
 
 #include "flexreg.h"
+
+#include "facemarkup.h"
 
 #include <cctype>
 #include <cstdio>
@@ -1080,7 +1082,8 @@ bool ApplyDominations(cm::CompileInput& in, const ManualFlex& manual, std::strin
 
 } // namespace
 
-bool RegisterFlex(cm::CompileInput& in, const ManualFlex& manual, std::string* err) {
+bool RegisterFlex(cm::CompileInput& in, const ManualFlex& manual, std::string* err,
+                  const FaceMarkup* face) {
     ApplyDataModelFlex(in, manual.datamodel);
     if (!ApplyStereoSplits(in, manual, err))
         return false;
@@ -1121,6 +1124,8 @@ bool RegisterFlex(cm::CompileInput& in, const ManualFlex& manual, std::string* e
                                  imodel, src->controllerRemaps.size(), in.flexkeys.size(),
                                  in.flexdescs.size(), in.flexcontrollers.size());
                 if (imodel == lastMorphed) {
+                    if (face && !RegisterFaceMarkup(in, *face, err))
+                        return false;
                     if (!RegisterManualLists(in, manual, err))
                         return false;
                     manualDone = true;
@@ -1133,8 +1138,12 @@ bool RegisterFlex(cm::CompileInput& in, const ManualFlex& manual, std::string* e
     }
     // no morphed body at all: register the manual block after the bodies (no
     // auto rules exist, so no ordering interleave is possible)
-    if (!manualDone && !RegisterManualLists(in, manual, err))
-        return false;
+    if (!manualDone) {
+        if (face && !RegisterFaceMarkup(in, *face, err))
+            return false;
+        if (!RegisterManualLists(in, manual, err))
+            return false;
+    }
 
     return ApplyDominations(in, manual, err);
 }

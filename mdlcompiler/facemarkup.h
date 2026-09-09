@@ -11,8 +11,8 @@
 // order fixes the eyeball index an Eyelid names, and Mouth and Eyelid both
 // append to the global flexdesc table.
 //
-// Must run AFTER RegisterFlex - it appends to the flex tables the flex pass
-// built.
+// QC passes this into RegisterFlex so model-block eyelids and mouths are
+// registered before the manual rules that follow them.
 
 #ifndef PULSEMDL_FACEMARKUP_H
 #define PULSEMDL_FACEMARKUP_H

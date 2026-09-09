@@ -1552,6 +1552,10 @@ bool CmdModel(Ctx& c, const Token& cmd) {
                     (cur.text == "}" || cur.text == "{" || cur.text[0] == '$' ||
                      startsNewRule() || isModelOption(Lower(cur.text))))
                     break;
+                if (!cur.quoted && cur.text == "\\\\") {
+                    ++c.pos;
+                    continue;
+                }
                 if (!rule.expr.empty())
                     rule.expr += ' ';
                 rule.expr += c.Next()->text;
@@ -3038,6 +3042,10 @@ bool CmdFlexRule(Ctx& c, const Token& cmd) {
     ManualFlex::Rule rule;
     rule.name = name;
     while (!c.AtCommand()) {
+        if (!c.Cur().quoted && c.Cur().text == "\\\\") {
+            ++c.pos;
+            continue;
+        }
         if (!rule.expr.empty())
             rule.expr += ' ';
         rule.expr += c.Next()->text;
@@ -3940,6 +3948,7 @@ bool CmdModelArchetype(Ctx& c, const Token& cmd) {
 // Legacy bare flags replaced by $modelarchetype; last one wins.
 bool CmdStaticProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Static; return true; }
 bool CmdSimpleProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Simple; return true; }
+bool CmdAutoCenter(Ctx& c, const Token&) { c.in.autoCenter = true; return true; }
 
 // $vtxformat <int> - which .vtx strip/stripgroup layout to write. 0 = legacy
 // 27/25-byte headers (TF2/L4D2/GMod/HL2), 1 = full 35/33-byte headers with the
@@ -4130,6 +4139,25 @@ bool CmdJointContents(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $jointsurfaceprop <bone> <surfaceprop> - the property for one bone and, via
+// the parent walk in ApplyJointSurfaceProps, its descendants. Replaces any
+// existing entry for the same bone.
+bool CmdJointSurfaceProp(Ctx& c, const Token& cmd) {
+    std::string bone, prop;
+    if (!c.Want("a bone name", cmd, bone))
+        return false;
+    if (!c.Want("a surface property name", cmd, prop))
+        return false;
+    for (auto& js : c.in.jointSurfaceProps) {
+        if (_stricmp(js.first.c_str(), bone.c_str()) == 0) {
+            js.second = prop;
+            return true;
+        }
+    }
+    c.in.jointSurfaceProps.emplace_back(bone, prop);
+    return true;
+}
+
 // $transformmodel [origin x y z] [angles x y z] [scale <float>]
 //
 // The whole modelmodifierlist transform in one command: translatemodel,
@@ -4307,10 +4335,23 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
                 return false;
         } else if (!t.quoted && (_stricmp(t.text.c_str(), "angles") == 0 ||
                                  _stricmp(t.text.c_str(), "rotate") == 0)) {
-            if (!c.WantFloat("a pitch", sub, a.anglesDeg.x) ||
-                !c.WantFloat("a yaw", sub, a.anglesDeg.y) ||
-                !c.WantFloat("a roll", sub, a.anglesDeg.z))
-                return false;
+            // reference reads up to 3 values, breaking early; omitted
+            // components keep their 0 default (anglesDeg{}).
+            for (float* d : {&a.anglesDeg.x, &a.anglesDeg.y, &a.anglesDeg.z}) {
+                if (c.AtCommand())
+                    break;
+                const std::string& s = c.Cur().text;
+                try {
+                    size_t used = 0;
+                    const float v = std::stof(s, &used);
+                    if (used != s.size())
+                        break;
+                    *d = v;
+                    c.pos++;
+                } catch (const std::exception&) {
+                    break;
+                }
+            }
             a.hasAngles = true;
         } else if (!t.quoted && _stricmp(t.text.c_str(), "rigid") == 0) {
             a.type |= cm::kAttachIsRigid;
@@ -5382,6 +5423,28 @@ bool CmdForcePhonemeCrossfade(Ctx& c, const Token&) {
     return true;
 }
 
+// $noforcedfade: model never fades out from level/fallback distance settings.
+bool CmdNoForcedFade(Ctx& c, const Token&) {
+    c.in.noForcedFade = true;
+    return true;
+}
+
+// $casttextureshadows: static prop casts alpha-channel texture shadows in VRAD.
+bool CmdCastTextureShadows(Ctx& c, const Token&) {
+    c.in.castTextureShadows = true;
+    return true;
+}
+
+// $constantdirectionallight <scale>: light dot stored as a 0-255 byte.
+bool CmdConstantDirectionalLight(Ctx& c, const Token& cmd) {
+    float scale = 0.0f;
+    if (!c.WantFloat("a scale", cmd, scale))
+        return false;
+    c.in.constDirLight = true;
+    c.in.constDirLightDot = static_cast<uint8_t>(scale * 255.0f);
+    return true;
+}
+
 // $skipboneinbbox (Cmd_SkipBoneInBBox): clears
 // useBoneInBBox, so the auto-generated hitboxes (and the sequence boxes derived
 // from them) grow from the bone's vertices alone instead of always containing
@@ -6102,16 +6165,24 @@ bool CmdPoseParameter(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $ikchain <name> <endbone> [knee x y z] [height h] [pad p] [floor f]
-//          [center x y z]   (Cmd_IKChain). A duplicate name is warned + ignored.
+// $ikchain <name> <endbone> [control value] [knee x y z] [height h]
+//          [pad p] [floor f] [center x y z] (Cmd_IKChain).
 bool CmdIkChain(Ctx& c, const Token& cmd) {
-    std::string name, endbone;
-    if (!c.Want("a name", cmd, name) || !c.Want("an end bone name", cmd, endbone))
+    std::string name;
+    if (!c.Want("a name", cmd, name))
         return false;
 
-    bool dup = false;
     for (const auto& e : c.in.ikchains)
-        if (_stricmp(e.name.c_str(), name.c_str()) == 0) { dup = true; break; }
+        if (_stricmp(e.name.c_str(), name.c_str()) == 0) {
+            while (!c.AtCommand())
+                c.pos++;
+            fprintf(stderr, "WARNING: duplicate ikchain \"%s\" ignored\n", name.c_str());
+            return true;
+        }
+
+    std::string endbone;
+    if (!c.Want("an end bone name", cmd, endbone))
+        return false;
 
     cm::IkChain chain;
     chain.name = name;
@@ -6120,34 +6191,31 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
         const Token sub{cmd.text + " " + t.text, t.line, false};
-        if (!t.quoted && _stricmp(t.text.c_str(), "knee") == 0) {
+        if (LookupControl(t.text) != -1) {
+            float unused = 0.0f;
+            if (!c.WantFloat("a control value", sub, unused))
+                return false;
+        } else if (_stricmp(t.text.c_str(), "knee") == 0) {
             if (!c.WantFloat("an X", sub, chain.link[0].kneeDir.x) ||
                 !c.WantFloat("a Y", sub, chain.link[0].kneeDir.y) ||
                 !c.WantFloat("a Z", sub, chain.link[0].kneeDir.z))
                 return false;
-        } else if (!t.quoted && _stricmp(t.text.c_str(), "height") == 0) {
+        } else if (_stricmp(t.text.c_str(), "height") == 0) {
             if (!c.WantFloat("a height", sub, chain.height)) return false;
-        } else if (!t.quoted && _stricmp(t.text.c_str(), "pad") == 0) {
+        } else if (_stricmp(t.text.c_str(), "pad") == 0) {
             float pad = 0.0f;
             if (!c.WantFloat("a pad", sub, pad)) return false;
             chain.radius = pad / 2.0f;
-        } else if (!t.quoted && _stricmp(t.text.c_str(), "floor") == 0) {
+        } else if (_stricmp(t.text.c_str(), "floor") == 0) {
             if (!c.WantFloat("a floor", sub, chain.floor)) return false;
-        } else if (!t.quoted && _stricmp(t.text.c_str(), "center") == 0) {
+        } else if (_stricmp(t.text.c_str(), "center") == 0) {
             if (!c.WantFloat("an X", sub, chain.center.x) ||
                 !c.WantFloat("a Y", sub, chain.center.y) ||
                 !c.WantFloat("a Z", sub, chain.center.z))
                 return false;
-        } else {
-            return c.Fail(t.line, "$ikchain \"" + name + "\": expected knee, height, "
-                                  "pad, floor or center, got \"" + t.text + "\"");
         }
     }
 
-    if (dup) {
-        fprintf(stderr, "WARNING: duplicate ikchain \"%s\" ignored\n", name.c_str());
-        return true;
-    }
     c.in.ikchains.push_back(std::move(chain));
     if (c.in.ikchains.size() > static_cast<size_t>(pulse::limits::kMaxIkChains))
         return c.Fail(cmd.line, "too many ik chains");
@@ -7117,6 +7185,53 @@ bool CmdAssert(Ctx& c, const Token& cmd) {
     return c.Fail(cmd.line, "$assert failed");
 }
 
+// $qcassert <boneexists|importboneexists> <bone> [source] <true|false>
+bool CmdQcAssert(Ctx& c, const Token& cmd) {
+    std::string type, bone;
+    if (!c.Want("boneexists or importboneexists", cmd, type) ||
+        !c.Want("a bone name", cmd, bone))
+        return false;
+
+    bool actual = false;
+    std::string line = "QC Assert: " + type + " " + bone;
+    if (_stricmp(type.c_str(), "boneexists") == 0) {
+        std::string file;
+        if (!c.Want("a source filename", cmd, file))
+            return false;
+        line += " " + file;
+        file = WithSourceExtension(c, file);
+        source::Source* src = LoadSource(c, file, cmd.line);
+        if (!src)
+            return false;
+        actual = std::any_of(src->localBone.begin(), src->localBone.end(),
+                             [&](const source::LocalBone& b) {
+                                 return _stricmp(b.name.c_str(), bone.c_str()) == 0;
+                             });
+    } else if (_stricmp(type.c_str(), "importboneexists") == 0) {
+        actual = std::any_of(c.in.importbones.begin(), c.in.importbones.end(),
+                             [&](const cm::ImportBone& b) {
+                                 return _stricmp(b.name.c_str(), bone.c_str()) == 0;
+                             });
+    } else {
+        return c.Fail(cmd.line, "$qcassert: unknown assertion type \"" + type + "\"");
+    }
+
+    std::string expectedText;
+    if (!c.Want("true or false", cmd, expectedText))
+        return false;
+    bool expected = false;
+    if (_stricmp(expectedText.c_str(), "true") == 0)
+        expected = true;
+    else if (_stricmp(expectedText.c_str(), "false") != 0)
+        return c.Fail(cmd.line, "$qcassert expects true or false, got \"" + expectedText + "\"");
+
+    line += " " + expectedText + " RESULT: ";
+    if (actual != expected)
+        return c.Fail(cmd.line, line + "[Fail]");
+    std::printf("%s[Success]\n", line.c_str());
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Script preprocessing - $definevariable / $redefinevariable / $definemacro
 // ---------------------------------------------------------------------------
@@ -7870,6 +7985,10 @@ bool CmdCaseOutside(Ctx& c, const Token& cmd) {
     return c.Fail(cmd.line, cmd.text + " outside a $switch body");
 }
 
+// $forcecapsules: undocumented top-level flag in Valve's survivor QCs.
+// No capsule build path exists here, so it is accepted and silently ignored.
+bool CmdForceCapsules(Ctx&, const Token&) { return true; }
+
 // ---------------------------------------------------------------------------
 // Command table - the whole supported surface. Add, rename or drop a line and
 // the language changes; nothing else needs touching.
@@ -7883,6 +8002,7 @@ struct Command {
 constexpr Command kCommands[] = {
     {"$break", CmdBreak},
     {"$assert", CmdAssert},
+    {"$qcassert", CmdQcAssert},
     {"$print", CmdPrint},
     {"$definevariable", CmdDefineVariable},
     {"$redefinevariable", CmdRedefineVariable},
@@ -7938,6 +8058,7 @@ constexpr Command kCommands[] = {
     {"$modelarchetype", CmdModelArchetype},
     {"$staticprop", CmdStaticProp},
     {"$simpleprop", CmdSimpleProp},
+    {"$autocenter", CmdAutoCenter},
     {"$vtxformat", CmdVtxFormat},
     {"$modelbudget", CmdModelBudget},
     {"$setbindpose", CmdSetBindPose},
@@ -7948,6 +8069,7 @@ constexpr Command kCommands[] = {
     {"$surfaceprop", CmdSurfaceProp},
     {"$contents", CmdContents},
     {"$jointcontents", CmdJointContents},
+    {"$jointsurfaceprop", CmdJointSurfaceProp},
     {"$keyvalues", CmdKeyValues},
     {"$collisiontext", CmdCollisionText},
     {"$boneflexdriver", CmdBoneFlexDriver},
@@ -8001,8 +8123,12 @@ constexpr Command kCommands[] = {
     {"$hierarchy", CmdHierarchy},
     {"$heirarchy", CmdHierarchy}, // stock's misspelling, same command
     {"$ambientboost", CmdAmbientBoost},
+    {"$forcecapsules", CmdForceCapsules},
     {"$donotcastshadows", CmdDoNotCastShadows},
     {"$forcephonemecrossfade", CmdForcePhonemeCrossfade},
+    {"$noforcedfade", CmdNoForcedFade},
+    {"$casttextureshadows", CmdCastTextureShadows},
+    {"$constantdirectionallight", CmdConstantDirectionalLight},
     {"$skipboneinbbox", CmdSkipBoneInBBox},
     {"$bbox", CmdBBox},
     {"$cbox", CmdCBox},
@@ -8182,13 +8308,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     // bodygroup list, so it runs here rather than per command.
     {
         std::string flexErr;
-        if (!RegisterFlex(out, c.manual, &flexErr)) {
-            if (err) *err = c.file + ": " + flexErr;
-            return false;
-        }
-        // face markup appends to the tables the flex pass just built, so it
-        // runs second - the same order the .pulsemdl loader uses
-        if (!RegisterFaceMarkup(out, c.face, &flexErr)) {
+        if (!RegisterFlex(out, c.manual, &flexErr, &c.face)) {
             if (err) *err = c.file + ": " + flexErr;
             return false;
         }

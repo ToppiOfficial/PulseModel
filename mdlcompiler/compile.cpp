@@ -48,9 +48,12 @@ static constexpr int STUDIOHDR_FLAGS_TRANSLUCENT_TWOPASS = 1 << 3;
 static constexpr int STUDIOHDR_FLAGS_STATIC_PROP = 1 << 4;
 static constexpr int STUDIOHDR_FLAGS_HASSHADOWLOD = 1 << 6;
 static constexpr int STUDIOHDR_FLAGS_USE_SHADOWLOD_MATERIALS = 1 << 8;
+static constexpr int STUDIOHDR_FLAGS_NO_FORCED_FADE = 1 << 11;
 static constexpr int STUDIOHDR_FLAGS_FORCE_PHONEME_CROSSFADE = 1 << 12;
+static constexpr int STUDIOHDR_FLAGS_CONSTANT_DIRECTIONAL_LIGHT_DOT = 1 << 13;
 static constexpr int STUDIOHDR_FLAGS_AMBIENT_BOOST = 1 << 16;
 static constexpr int STUDIOHDR_FLAGS_DO_NOT_CAST_SHADOWS = 1 << 17;
+static constexpr int STUDIOHDR_FLAGS_CAST_TEXTURE_SHADOWS = 1 << 18;
 // StudioBoneFlexComponent_t (format/mdl.h)
 static constexpr int STUDIO_BONE_FLEX_TX = 0;
 static constexpr int STUDIO_BONE_FLEX_TZ = 2;
@@ -594,10 +597,9 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// MakeStaticProp: archetype "static". Bakes the
-// $origin/$upaxis transform into the vertices, collapses the skeleton to one
-// "static_prop" bone, and throws away all animations ($autocenter skipped -
-// not in the schema yet).
+// MakeStaticProp: archetype "static". Bakes the $origin/$upaxis transform
+// into the vertices, collapses the skeleton to one "static_prop" bone, and
+// throws away all animations.
 // ---------------------------------------------------------------------------
 void MakeStaticProp(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
@@ -607,6 +609,14 @@ void MakeStaticProp(Ctx& ctx) {
     Vector3 negAdjust{-ctx.in->adjust.x, -ctx.in->adjust.y, -ctx.in->adjust.z};
     Vector3 tmp = pm::VectorTransform(negAdjust, rotated);
     MatrixSetColumn(tmp, 3, rotated);
+
+    size_t placementOrigin = m.attachments.size();
+    for (size_t i = 0; i < m.attachments.size(); i++)
+        if (_stricmp(m.attachments[i].name.c_str(), "placementOrigin") == 0) {
+            placementOrigin = i;
+            break;
+        }
+    Vector3 centerOffset;
 
     // replace bone 0 with "static_prop" bone and attach everything to it
     for (auto& sp : ctx.in->sources) {
@@ -619,6 +629,8 @@ void MakeStaticProp(Ctx& ctx) {
         for (int k = 1; k < psource->numbones; k++)
             psource->localBone[k].parent = -1;
 
+        Vector3 mins{FLT_MAX, FLT_MAX, FLT_MAX};
+        Vector3 maxs{-FLT_MAX, -FLT_MAX, -FLT_MAX};
         for (src::SrcVertex& v : psource->vertex) {
             for (int k = 0; k < v.boneweight.numbones; k++)
                 v.boneweight.bone[k] = 0;
@@ -631,9 +643,32 @@ void MakeStaticProp(Ctx& ctx) {
             v.tangentS.x = ts.x;
             v.tangentS.y = ts.y;
             v.tangentS.z = ts.z;
+
+            mins = {std::min(mins.x, v.position.x), std::min(mins.y, v.position.y),
+                    std::min(mins.z, v.position.z)};
+            maxs = {std::max(maxs.x, v.position.x), std::max(maxs.y, v.position.y),
+                    std::max(maxs.z, v.position.z)};
         }
 
-        // ($autocenter / placementOrigin attachment: not supported yet)
+        if (ctx.in->autoCenter) {
+            if (placementOrigin == m.attachments.size()) {
+                centerOffset = {-0.5f * (mins.x + maxs.x), -0.5f * (mins.y + maxs.y),
+                                -0.5f * (mins.z + maxs.z)};
+
+                Attachment att;
+                att.name = "placementOrigin";
+                att.bonename = "static_prop";
+                att.bone = 0;
+                MatrixSetColumn(centerOffset, 3, att.local);
+                m.attachments.push_back(std::move(att));
+            }
+
+            for (src::SrcVertex& v : psource->vertex) {
+                v.position.x += centerOffset.x;
+                v.position.y += centerOffset.y;
+                v.position.z += centerOffset.z;
+            }
+        }
 
         // force the animation to be identity
         src::SourceAnim* pSourceAnim = src::FindSourceAnim(*psource, "BindPose");
@@ -679,7 +714,10 @@ void MakeStaticProp(Ctx& ctx) {
 
     // Recalc attachment points. Reference drops IS_FROM_SOURCE attachments only
     // on the $staticproppose path (not supported); plain $staticprop keeps all.
-    for (Attachment& att : m.attachments) {
+    for (size_t i = 0; i < m.attachments.size(); i++) {
+        Attachment& att = m.attachments[i];
+        if (ctx.in->autoCenter && i == placementOrigin)
+            continue;
         att.local = pm::ConcatTransforms(rotated, att.local);
         att.bonename = "static_prop";
         att.bone = 0;
@@ -2938,10 +2976,39 @@ void ApplyJointContents(Ctx& ctx) {
     // reference ConsistencyCheckContents
     for (const auto& jc : list)
         if (FindGlobalBone(m, jc.first) == -1)
-            std::fprintf(stderr, 
+            std::fprintf(stderr,
                          "warning: $jointcontents names bone \"%s\", which either "
                          "doesn't exist or was optimized out\n",
                          jc.first.c_str());
+}
+
+// $jointsurfaceprop: a bone and, via the parent walk, its descendants take a
+// surface property. Nearest named ancestor wins; unmatched bones stay empty so
+// the writer substitutes the model default.
+void ApplyJointSurfaceProps(Ctx& ctx) {
+    CompiledModel& m = *ctx.out;
+    const auto& list = ctx.in->jointSurfaceProps;
+
+    auto find = [&list](const std::string& name) -> const std::string* {
+        for (const auto& js : list)
+            if (_stricmp(js.first.c_str(), name.c_str()) == 0)
+                return &js.second;
+        return nullptr;
+    };
+
+    for (size_t i = 0; i < m.bones.size(); i++)
+        for (int j = static_cast<int>(i); j >= 0; j = m.bones[j].parent)
+            if (const std::string* v = find(m.bones[j].name)) {
+                m.bones[i].surfaceprop = *v;
+                break;
+            }
+
+    for (const auto& js : list)
+        if (FindGlobalBone(m, js.first) == -1)
+            std::fprintf(stderr,
+                         "warning: $jointsurfaceprop names bone \"%s\", which either "
+                         "doesn't exist or was optimized out\n",
+                         js.first.c_str());
 }
 
 // BuildBoneLODMapping: global bone -> its replacement at
@@ -9597,11 +9664,26 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         out.gflags |= STUDIOHDR_FLAGS_DO_NOT_CAST_SHADOWS;
     if (input.forcePhonemeCrossfade)
         out.gflags |= STUDIOHDR_FLAGS_FORCE_PHONEME_CROSSFADE;
+    if (input.noForcedFade)
+        out.gflags |= STUDIOHDR_FLAGS_NO_FORCED_FADE;
+    if (input.castTextureShadows)
+        out.gflags |= STUDIOHDR_FLAGS_CAST_TEXTURE_SHADOWS;
+    if (input.constDirLight) {
+        out.gflags |= STUDIOHDR_FLAGS_CONSTANT_DIRECTIONAL_LIGHT_DOT;
+        out.constDirectionalLightDot = input.constDirLightDot;
+    }
     if (input.archetype == Archetype::Static)
         out.gflags |= STUDIOHDR_FLAGS_STATIC_PROP;
 
     // attachments come from the script; the compile passes mutate them in place
-    if (input.attachments.size() > static_cast<size_t>(lim::kMaxAttachments)) {
+    const bool addPlacementOrigin =
+        input.autoCenter && input.archetype == Archetype::Static &&
+        std::none_of(input.attachments.begin(), input.attachments.end(),
+                     [](const Attachment& a) {
+                         return _stricmp(a.name.c_str(), "placementOrigin") == 0;
+                     });
+    if (input.attachments.size() + static_cast<size_t>(addPlacementOrigin) >
+        static_cast<size_t>(lim::kMaxAttachments)) {
         if (err) *err = "too many attachments";
         return false;
     }
@@ -10234,6 +10316,9 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     }
 
     // archetype passes run next (reference RemapBones head)
+    if (input.autoCenter && input.archetype != Archetype::Static)
+        std::fprintf(stderr,
+                     "warning: ignoring $autocenter; it is only supported on $staticprop models\n");
     if (input.archetype == Archetype::Static) {
         MakeStaticProp(ctx);
         // the skeleton is now a single "static_prop" bone, so anything keyed to
@@ -10325,6 +10410,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
 
     // per-bone contents, now that the bone table is final
     ApplyJointContents(ctx);
+    ApplyJointSurfaceProps(ctx);
 
     // ---- geometry ----
     // bonetreecollapse expands against the final bone table, and the resulting

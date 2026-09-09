@@ -23,6 +23,8 @@
 
 namespace pulse::loader {
 
+struct FaceMarkup;
+
 // The script-authored flex block. Both front ends fill this and hand it to
 // RegisterFlex(); nothing in here is format-specific.
 struct ManualFlex {
@@ -75,10 +77,11 @@ struct ManualFlex {
 // Walk in.bodyparts and build the global flex tables on `in`. Only sources
 // actually used by a body contribute - a render mesh that carries delta states
 // but is never referenced registers nothing. Returns false + err on failure.
-bool RegisterFlex(compile::CompileInput& in, const ManualFlex& manual, std::string* err);
+bool RegisterFlex(compile::CompileInput& in, const ManualFlex& manual, std::string* err,
+                  const FaceMarkup* face = nullptr);
 
 // reference Add_Flexdesc: find (stricmp) or append. Exposed for the face-markup
-// pass, which registers eyelid/mouth descs of its own after RegisterFlex.
+// pass, which registers eyelid/mouth descs of its own during registration.
 // Returns the index, or -1 + err past kMaxFlexDesc.
 int AddFlexdesc(compile::CompileInput& in, const std::string& name, std::string* err);
 

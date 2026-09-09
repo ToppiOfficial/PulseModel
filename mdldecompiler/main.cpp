@@ -266,6 +266,12 @@ void WriteHeader(Qc& q, const Mdl& m) {
         q.Line("$donotcastshadows");
     if (h.flags & fm::STUDIOHDR_FLAGS_FORCE_PHONEME_CROSSFADE)
         q.Line("$forcephonemecrossfade");
+    if (h.flags & fm::STUDIOHDR_FLAGS_NO_FORCED_FADE)
+        q.Line("$noforcedfade");
+    if (h.flags & fm::STUDIOHDR_FLAGS_CAST_TEXTURE_SHADOWS)
+        q.Line("$casttextureshadows");
+    if (h.flags & fm::STUDIOHDR_FLAGS_CONSTANT_DIRECTIONAL_LIGHT_DOT)
+        q.Line("$constantdirectionallight " + F(h.constdirectionallightdot / 255.0f));
 
     q.Blank();
     q.Line("$bbox " + V3(h.hull_min) + "  " + V3(h.hull_max));
