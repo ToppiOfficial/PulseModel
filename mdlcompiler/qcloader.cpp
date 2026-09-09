@@ -158,6 +158,12 @@ bool Tokenize(const std::string& s, const std::string& file,
 // Parse context
 // ---------------------------------------------------------------------------
 
+struct Ctx;
+// Resolves any $include or conditional ($if/$switch) at the read cursor in place,
+// so both are transparent at any nesting depth - a handler reading its own braced
+// body gets them resolved too. Defined under the helpers it needs.
+void ResolveDirectives(Ctx& c);
+
 struct Ctx {
     cm::CompileInput& in;
     fs::path scriptDir; // root script's directory
@@ -167,7 +173,17 @@ struct Ctx {
     size_t pos = 0;
     std::string* err = nullptr;
     fs::path curDir; // dir of the file currently being parsed ($include is relative to it)
-    std::vector<std::string> includeStack; // cycle guard
+    std::vector<std::string> includeStack; // cycle guard, LIFO with includeFrames
+    // one open $include region: pos>=endPos restores file/curDir and pops the
+    // cycle-guard entry. endPos is an absolute index, kept live by SpliceAt.
+    struct IncludeFrame { size_t endPos; std::string savedFile; fs::path savedDir; };
+    std::vector<IncludeFrame> includeFrames;
+    bool abortErr = false;        // a hard $include error; stops parsing at the next read
+    bool resolvingInclude = false; // reentrancy guard for ResolveIncludes
+    // set while a block is captured raw ($if/$switch branch, macro or cmdlist
+    // body): a $include there is stored verbatim and resolved when executed, not
+    // during capture.
+    bool rawCollect = false;
     std::vector<fs::path> includeDirs; // $addincludesearchdir
     std::vector<fs::path> sourceDirStack; // root script dir plus nested $pushd dirs
     std::vector<fs::path> searchDirs;  // $addsearchdir, for source files - never mixed with includeDirs
@@ -241,8 +257,18 @@ struct Ctx {
     // three because their relative order is load-bearing (indices, flexdescs)
     FaceMarkup face;
 
-    bool Eof() const { return pos >= toks.size(); }
-    const Token& Cur() const { return toks[pos]; }
+    // Insert tokens at `at`, keeping open include-region boundaries in sync so
+    // a macro/conditional/include splice inside an included file cannot desync
+    // the frame that restores curDir/file when its region ends.
+    void SpliceAt(size_t at, const std::vector<Token>& src) {
+        toks.insert(toks.begin() + at, src.begin(), src.end());
+        for (IncludeFrame& f : includeFrames)
+            if (f.endPos > at)
+                f.endPos += src.size();
+    }
+
+    bool Eof() { ResolveDirectives(*this); return abortErr || pos >= toks.size(); }
+    const Token& Cur() { ResolveDirectives(*this); return toks[pos]; }
 
     // True when -defvar owns this variable name (case-sensitive, like the
     // variable table itself).
@@ -254,6 +280,7 @@ struct Ctx {
     }
 
     bool Fail(int line, const std::string& msg) {
+        if (abortErr) return false; // keep the first $include error, not a cascade
         if (err) *err = file + "(" + std::to_string(line) + "): " + msg;
         return false;
     }
@@ -263,7 +290,7 @@ struct Ctx {
 
     // True when the next token starts a new command (or the file ended) - the
     // terminator for an unbraced option list.
-    bool AtCommand() const { return Eof() || (!Cur().quoted && Cur().text[0] == '$'); }
+    bool AtCommand() { return Eof() || (!Cur().quoted && Cur().text[0] == '$'); }
 
     // A required value token. Rejects a following $command so a missing
     // argument reports itself instead of eating the next line.
@@ -327,7 +354,7 @@ struct Ctx {
 
     // True when the next token parses cleanly as a base-10 integer - used for
     // studiomdl's optional trailing activity weight.
-    bool NextIsInt() const {
+    bool NextIsInt() {
         if (Eof() || Cur().quoted) return false;
         const std::string& s = Cur().text;
         try {
@@ -2469,7 +2496,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         // exactly as if written inline, so a cmdlist supports whatever the
         // option parser does and grows with it. $cmdlist rejects nesting, so
         // this cannot expand forever.
-        c.toks.insert(c.toks.begin() + c.pos, it->second.begin(), it->second.end());
+        c.SpliceAt(c.pos, it->second);
         return 1;
     }
     if (const char* why = UnsupportedAnimOption(o)) {
@@ -2490,6 +2517,8 @@ bool CmdCmdList(Ctx& c, const Token& cmd) {
         return c.Fail(cmd.line, "duplicate $cmdlist \"" + name + "\"");
 
     std::vector<Token> body;
+    const bool savedRaw = c.rawCollect;
+    c.rawCollect = true;
     bool braced = false;
     if (!c.Eof() && !c.Cur().quoted && c.Cur().text == "{") {
         braced = true;
@@ -2497,17 +2526,22 @@ bool CmdCmdList(Ctx& c, const Token& cmd) {
     }
     for (;;) {
         if (braced) {
-            if (c.Eof())
+            if (c.Eof()) {
+                c.rawCollect = savedRaw;
                 return c.Fail(cmd.line, "$cmdlist \"" + name + "\" is missing '}'");
+            }
             if (!c.Cur().quoted && c.Cur().text == "}") { c.pos++; break; }
         } else if (c.AtCommand()) {
             break;
         }
         const Token t = c.toks[c.pos++];
-        if (!t.quoted && _stricmp(t.text.c_str(), "cmdlist") == 0)
+        if (!t.quoted && _stricmp(t.text.c_str(), "cmdlist") == 0) {
+            c.rawCollect = savedRaw;
             return c.Fail(t.line, "$cmdlist \"" + name + "\" cannot nest a cmdlist");
+        }
         body.push_back(t);
     }
+    c.rawCollect = savedRaw;
     c.cmdlists[name] = std::move(body);
     return true;
 }
@@ -6492,7 +6526,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
 
 // True when the next token is a bare number - the optional trailing friction,
 // as opposed to the next axis letter or '}'.
-bool AtNumber(const Ctx& c) {
+bool AtNumber(Ctx& c) {
     if (c.Eof() || c.Cur().quoted)
         return false;
     const std::string& s = c.Cur().text;
@@ -7050,124 +7084,6 @@ bool CmdAddIncludeSearchDir(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $include "file.qci" [localdir] [optional]   (scriplib's
-// AttemptConditionalInclude; its nofallbackdir flag is `localdir` here and its
-// iffileexist flag is `optional`). The file's commands run inline, where the
-// $include stands - the prefab mechanism. Top level only: it is a $command, so
-// it cannot appear inside a braced body, whose options are bare words.
-//
-//   localdir   only look at the primary location, skip the search dirs
-//   optional   found nowhere = do nothing, instead of an error
-//
-// The path is relative to the file the $include is written in (so a nested
-// include names its sibling directly), then to the root script's directory,
-// then to each $addincludesearchdir dir.
-// Everything else in an included file - source filenames, $proceduralbones -
-// stays relative to the ROOT script's directory, matching how stock keeps
-// cddir pinned to the top-level script.
-bool CmdInclude(Ctx& c, const Token& cmd) {
-    std::string rel;
-    if (!c.Want("a script path", cmd, rel))
-        return false;
-
-    bool localDir = false, optional = false;
-    while (!c.AtCommand()) {
-        const Token& t = c.toks[c.pos];
-        if (!t.quoted && _stricmp(t.text.c_str(), "localdir") == 0)
-            localDir = true;
-        else if (!t.quoted && _stricmp(t.text.c_str(), "optional") == 0)
-            optional = true;
-        else
-            return c.Fail(t.line, "$include: unknown parameter \"" + t.text +
-                                  "\" - localdir, optional");
-        c.pos++;
-    }
-
-    // primary location first, then the search dirs in registration order. An
-    // absolute path is itself and nothing else.
-    const fs::path relPath = pulse::FilePath(rel);
-    std::vector<fs::path> tries;
-    if (relPath.is_absolute()) {
-        tries.push_back(relPath);
-    } else {
-        tries.push_back(c.curDir / relPath);
-        // stock resolves every $include against the root script's dir, so a
-        // nested one often carries the whole path down from there
-        if (c.curDir != c.scriptDir)
-            tries.push_back(c.scriptDir / relPath);
-        if (!localDir)
-            for (const auto* list : {&c.includeDirs, &c.launchIncludeDirs})
-                for (const fs::path& dir : *list) {
-                    tries.push_back(dir / relPath);
-                    // last resort: the bare filename in that dir, for a request
-                    // that carried a relative hierarchy the dir does not have
-                    if (relPath.has_parent_path())
-                        tries.push_back(dir / relPath.filename());
-                }
-    }
-
-    fs::path full;
-    for (fs::path& t : tries) {
-        t = t.lexically_normal().make_preferred();
-        std::error_code fec;
-        if (fs::is_regular_file(t, fec)) {
-            full = t;
-            break;
-        }
-    }
-    if (full.empty()) {
-        if (optional)
-            return true;
-        return c.Fail(cmd.line, "$include: cannot find \"" + rel +
-                                "\" - looked in:" + LookedIn(tries));
-    }
-
-    std::error_code ec;
-    const fs::path canon = fs::weakly_canonical(full, ec);
-    const std::string key = ec ? full.string() : canon.string();
-    for (const std::string& open : c.includeStack)
-        if (_stricmp(open.c_str(), key.c_str()) == 0)
-            return c.Fail(cmd.line, "$include: \"" + rel +
-                                    "\" is already open - circular include");
-
-    std::ifstream f(full, std::ios::binary);
-    if (!f)
-        return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
-    std::ostringstream buf;
-    buf << f.rdbuf();
-    std::string text = buf.str();
-    StripUtf8Bom(text);
-
-    std::printf("$include: Including %s...\n", full.string().c_str());
-
-    const std::string name = full.filename().string();
-    std::vector<Token> toks;
-    if (!Tokenize(text, name, toks, c.err))
-        return false;
-
-    // swap the included file in, run it, swap back. An unbraced option list
-    // ends at the file boundary - the include cannot leave a command half-read.
-    std::vector<Token> savedToks = std::move(c.toks);
-    const size_t savedPos = c.pos;
-    const std::string savedFile = c.file;
-    const fs::path savedDir = c.curDir;
-
-    c.toks = std::move(toks);
-    c.pos = 0;
-    c.file = name;
-    c.curDir = full.parent_path();
-    c.includeStack.push_back(key);
-
-    const bool ok = RunCommands(c);
-
-    c.includeStack.pop_back();
-    c.toks = std::move(savedToks);
-    c.pos = savedPos;
-    c.file = savedFile;
-    c.curDir = savedDir;
-    return ok;
-}
-
 // $break [<message>]  (Cmd_Break). Stops reading the script here: everything
 // below is ignored, in this file and in every parent that $included it, but the
 // model still compiles from what was read so far. The flag is sticky because
@@ -7238,6 +7154,175 @@ bool ExpandVars(Ctx& c, Token& t) {
     }
     t.text = std::move(out);
     return true;
+}
+
+// $include "file.qci" [localdir] [optional]   (scriplib's
+// AttemptConditionalInclude; its nofallbackdir flag is `localdir` here, its
+// iffileexist flag is `optional`). Splices the file's tokens in where the
+// $include stands, so it is transparent at any depth - top level or inside a
+// braced body - exactly like stock's streaming GetToken. Flags are read only on
+// the $include's own line; a token on a later line is content, not a flag.
+//
+//   localdir   only look at the primary location, skip the search dirs
+//   optional   found nowhere = do nothing, instead of an error
+//
+// The path is relative to the file the $include is written in, then to the root
+// script's directory, then to each $addincludesearchdir dir. Everything else in
+// an included file - source filenames, $proceduralbones - stays relative to the
+// ROOT script's directory, matching how stock keeps cddir pinned to the top.
+bool SpliceInclude(Ctx& c) {
+    const Token cmd = c.toks[c.pos]; // the $include token
+    size_t p = c.pos + 1;
+    if (p >= c.toks.size() || (!c.toks[p].quoted && c.toks[p].text[0] == '$'))
+        return c.Fail(cmd.line, "$include expects a script path");
+
+    Token pathTok = c.toks[p++];
+    if (!pathTok.expanded && !ExpandVars(c, pathTok))
+        return false;
+    const std::string rel = pathTok.text;
+
+    bool localDir = false, optional = false;
+    while (p < c.toks.size() && !c.toks[p].quoted && c.toks[p].line == cmd.line &&
+           c.toks[p].text[0] != '$' && c.toks[p].text != "{" && c.toks[p].text != "}") {
+        const std::string& o = c.toks[p].text;
+        if (_stricmp(o.c_str(), "localdir") == 0)
+            localDir = true;
+        else if (_stricmp(o.c_str(), "optional") == 0)
+            optional = true;
+        else
+            return c.Fail(c.toks[p].line, "$include: unknown parameter \"" + o +
+                                          "\" - localdir, optional");
+        p++;
+    }
+    const size_t directiveEnd = p; // [c.pos, directiveEnd) is the $include to drop
+
+    // primary location first, then the search dirs in registration order. An
+    // absolute path is itself and nothing else.
+    const fs::path relPath = pulse::FilePath(rel);
+    std::vector<fs::path> tries;
+    if (relPath.is_absolute()) {
+        tries.push_back(relPath);
+    } else {
+        tries.push_back(c.curDir / relPath);
+        // stock resolves every $include against the root script's dir, so a
+        // nested one often carries the whole path down from there
+        if (c.curDir != c.scriptDir)
+            tries.push_back(c.scriptDir / relPath);
+        if (!localDir)
+            for (const auto* list : {&c.includeDirs, &c.launchIncludeDirs})
+                for (const fs::path& dir : *list) {
+                    tries.push_back(dir / relPath);
+                    // last resort: the bare filename in that dir, for a request
+                    // that carried a relative hierarchy the dir does not have
+                    if (relPath.has_parent_path())
+                        tries.push_back(dir / relPath.filename());
+                }
+    }
+
+    fs::path full;
+    for (fs::path& t : tries) {
+        t = t.lexically_normal().make_preferred();
+        std::error_code fec;
+        if (fs::is_regular_file(t, fec)) {
+            full = t;
+            break;
+        }
+    }
+    if (full.empty()) {
+        c.toks.erase(c.toks.begin() + c.pos, c.toks.begin() + directiveEnd);
+        for (Ctx::IncludeFrame& f : c.includeFrames)
+            if (f.endPos > c.pos)
+                f.endPos -= (directiveEnd - c.pos);
+        if (optional)
+            return true;
+        return c.Fail(cmd.line, "$include: cannot find \"" + rel +
+                                "\" - looked in:" + LookedIn(tries));
+    }
+
+    std::error_code ec;
+    const fs::path canon = fs::weakly_canonical(full, ec);
+    const std::string key = ec ? full.string() : canon.string();
+    for (const std::string& open : c.includeStack)
+        if (_stricmp(open.c_str(), key.c_str()) == 0)
+            return c.Fail(cmd.line, "$include: \"" + rel +
+                                    "\" is already open - circular include");
+
+    std::ifstream f(full, std::ios::binary);
+    if (!f)
+        return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
+    std::ostringstream buf;
+    buf << f.rdbuf();
+    std::string text = buf.str();
+    StripUtf8Bom(text);
+
+    std::printf("$include: Including %s...\n", full.string().c_str());
+
+    const std::string name = full.filename().string();
+    std::vector<Token> toks;
+    if (!Tokenize(text, name, toks, c.err))
+        return false;
+
+    // drop the $include directive, splice the file in its place, and open a
+    // frame so pos crossing its end restores file/curDir and the cycle guard.
+    c.toks.erase(c.toks.begin() + c.pos, c.toks.begin() + directiveEnd);
+    for (Ctx::IncludeFrame& fr : c.includeFrames)
+        if (fr.endPos > c.pos)
+            fr.endPos -= (directiveEnd - c.pos);
+    const size_t at = c.pos;
+    c.SpliceAt(at, toks); // extends any enclosing frame over the new content
+    c.includeFrames.push_back({at + toks.size(), c.file, c.curDir});
+    c.includeStack.push_back(key);
+    c.file = name;
+    c.curDir = full.parent_path();
+    return true;
+}
+
+// Conditional handlers, defined below - the hook resolves them at read time.
+bool CmdIf(Ctx& c, const Token& cmd);
+bool CmdIfdef(Ctx& c, const Token& cmd);
+bool CmdIfndef(Ctx& c, const Token& cmd);
+bool CmdSwitch(Ctx& c, const Token& cmd);
+
+// Runs the conditional whose command token sits at the cursor, splicing the
+// winning branch in place. Returns false only when nothing matched.
+bool ResolveConditionalHere(Ctx& c) {
+    const char* t = c.toks[c.pos].text.c_str();
+    bool (*fn)(Ctx&, const Token&) =
+        _stricmp(t, "$if") == 0       ? CmdIf     :
+        _stricmp(t, "$ifdef") == 0    ? CmdIfdef  :
+        _stricmp(t, "$ifndef") == 0   ? CmdIfndef :
+        _stricmp(t, "$switch") == 0   ? CmdSwitch : nullptr;
+    if (!fn)
+        return false;
+    const Token cmd = c.toks[c.pos]; // copy; the handler consumes from c.pos
+    c.pos++;
+    if (!fn(c, cmd))
+        c.abortErr = true; // the handler's Fail already recorded the message
+    return true;
+}
+
+void ResolveDirectives(Ctx& c) {
+    if (c.resolvingInclude || c.abortErr || c.rawCollect)
+        return;
+    c.resolvingInclude = true;
+    auto popFinished = [&] {
+        while (!c.includeFrames.empty() && c.pos >= c.includeFrames.back().endPos) {
+            c.file = c.includeFrames.back().savedFile;
+            c.curDir = c.includeFrames.back().savedDir;
+            c.includeStack.pop_back();
+            c.includeFrames.pop_back();
+        }
+    };
+    popFinished();
+    while (c.pos < c.toks.size() && !c.abortErr && !c.toks[c.pos].quoted) {
+        if (_stricmp(c.toks[c.pos].text.c_str(), "$include") == 0) {
+            if (!SpliceInclude(c)) { c.abortErr = true; break; }
+        } else if (!ResolveConditionalHere(c)) {
+            break;
+        }
+        popFinished(); // an empty include/branch leaves pos at its own end
+    }
+    c.resolvingInclude = false;
 }
 
 // True when the token holds at least one closed $name$ reference.
@@ -7404,10 +7489,14 @@ bool CmdDefineMacro(Ctx& c, const Token& cmd) {
                                     std::to_string(lim::kMaxMacroParams) + ")");
     }
     // body up to the matching $endmacro - a nested $definemacro takes its own
+    const bool savedRaw = c.rawCollect;
+    c.rawCollect = true;
     for (int depth = 1;;) {
-        if (c.Eof())
+        if (c.Eof()) {
+            c.rawCollect = savedRaw;
             return c.Fail(cmd.line, "$definemacro \"" + name +
                                     "\" is missing its $endmacro");
+        }
         const Token t = c.toks[c.pos++];
         if (!t.quoted && _stricmp(t.text.c_str(), "$definemacro") == 0) {
             depth++;
@@ -7417,6 +7506,7 @@ bool CmdDefineMacro(Ctx& c, const Token& cmd) {
         }
         m.body.push_back(t);
     }
+    c.rawCollect = savedRaw;
     c.macros[key] = std::move(m);
     return true;
 }
@@ -7450,7 +7540,7 @@ bool ExpandMacro(Ctx& c, const Token& cmd, const Ctx::Macro& m) {
     std::vector<Token> body = m.body;
     for (Token& t : body)
         SubstMacroParams(t, m.params, args);
-    c.toks.insert(c.toks.begin() + c.pos, body.begin(), body.end());
+    c.SpliceAt(c.pos, body);
     return true;
 }
 
@@ -7527,9 +7617,13 @@ bool ExpectBrace(Ctx& c, const Token& cmd) {
 // The tokens between a '{' (already consumed) and its matching '}' (dropped),
 // kept raw so they expand where they are spliced rather than here.
 bool CollectBlock(Ctx& c, const Token& cmd, std::vector<Token>& body) {
+    const bool savedRaw = c.rawCollect;
+    c.rawCollect = true;
     for (int depth = 1;;) {
-        if (c.Eof())
+        if (c.Eof()) {
+            c.rawCollect = savedRaw;
             return c.Fail(cmd.line, cmd.text + " is missing its closing \"}\"");
+        }
         const Token t = c.toks[c.pos++];
         if (!t.quoted && t.text == "{") {
             depth++;
@@ -7538,6 +7632,7 @@ bool CollectBlock(Ctx& c, const Token& cmd, std::vector<Token>& body) {
         }
         body.push_back(t);
     }
+    c.rawCollect = savedRaw;
     return true;
 }
 
@@ -7699,7 +7794,7 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
         if (!taken)
             chosen = std::move(body);
     }
-    c.toks.insert(c.toks.begin() + c.pos, chosen.begin(), chosen.end());
+    c.SpliceAt(c.pos, chosen);
     return true;
 }
 
@@ -7761,7 +7856,7 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
                                 "when no $case matches, even if it is nothing");
     if (!taken)
         chosen = std::move(fallback);
-    c.toks.insert(c.toks.begin() + c.pos, chosen.begin(), chosen.end());
+    c.SpliceAt(c.pos, chosen);
     return true;
 }
 
@@ -7786,7 +7881,6 @@ struct Command {
 };
 
 constexpr Command kCommands[] = {
-    {"$include", CmdInclude},
     {"$break", CmdBreak},
     {"$assert", CmdAssert},
     {"$print", CmdPrint},
@@ -7971,7 +8065,7 @@ bool RunCommands(Ctx& c) {
         if (!found->fn(c, cmd))
             return false;
     }
-    return true;
+    return !c.abortErr; // a hard $include error surfaces as Eof
 }
 
 std::string SupportedList() {
