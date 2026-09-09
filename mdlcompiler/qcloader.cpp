@@ -4520,6 +4520,18 @@ bool CmdLockBoneLengths(Ctx& c, const Token&) {
     return true;
 }
 
+// $limitrotation <bone> [sequence names...]: the reference accepts the
+// sequence names but calculates the alignment from every eligible animation.
+bool CmdLimitRotation(Ctx& c, const Token& cmd) {
+    std::string bone;
+    if (!c.Want("a bone name", cmd, bone))
+        return false;
+    c.in.limitRotationBones.push_back(std::move(bone));
+    while (!c.Eof() && c.Cur().line == cmd.line)
+        c.pos++;
+    return true;
+}
+
 // $transformbone <bone> [options]  (Cmd_TransformBindPoseBone)
 //
 // Edits a bone's bind pose late in the pipeline, after the global bone table is
@@ -6090,6 +6102,16 @@ bool CmdHboxOutsideSet(Ctx& c, const Token& cmd) {
         c.activeHitboxSet = static_cast<int>(c.in.hitboxsets.size() - 1);
     }
     return ParseHbox(c, cmd, c.in.hitboxsets[static_cast<size_t>(c.activeHitboxSet)]);
+}
+
+bool CmdHGroup(Ctx& c, const Token& cmd) {
+    int group;
+    std::string bone;
+    if (!c.WantInt("a hit group", cmd, group) ||
+        !c.Want("a bone name", cmd, bone))
+        return false;
+    c.in.hitgroups.emplace_back(std::move(bone), group);
+    return true;
 }
 
 // $renamehboxset <target> <newname> - rename an already-declared set.
@@ -8096,6 +8118,7 @@ constexpr Command kCommands[] = {
     {"$hitboxset", CmdHitboxSet},
     {"$hboxset", CmdHitboxSet}, // stock's spelling, same command
     {"$hbox", CmdHboxOutsideSet},
+    {"$hgroup", CmdHGroup},
     {"$renamehboxset", CmdRenameHboxSet},
     {"$bonecullmethod", CmdBoneCullMethod},
     {"$physicsmodel", CmdPhysicsModel},
@@ -8113,6 +8136,7 @@ constexpr Command kCommands[] = {
     {"$proceduralbones", CmdProceduralBones},
     {"$realignbones", CmdRealignBones},
     {"$lockbonelengths", CmdLockBoneLengths},
+    {"$limitrotation", CmdLimitRotation},
     {"$transformbone", CmdTransformBone},
     {"$root", CmdRoot},
     {"$definebone", CmdDefineBone},

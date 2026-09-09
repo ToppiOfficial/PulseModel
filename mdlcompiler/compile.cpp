@@ -34,6 +34,7 @@ static constexpr int BONE_USED_BY_ATTACHMENT = 0x00000200;
 static constexpr int BONE_USED_BY_VERTEX_LOD0 = 0x00000400;
 static constexpr int BONE_USED_BY_VERTEX_MASK = 0x0003FC00;
 static constexpr int BONE_USED_BY_BONE_MERGE = 0x00040000;
+static constexpr int BONE_FIXED_ALIGNMENT = 0x00100000;
 // Marker for `boneref` ONLY - never a boneflag, so it cannot reach the .mdl.
 // Deliberately outside the BONE_* range so it can never be confused for one.
 static constexpr int kBoneRefProceduralKeep = 0x40000000;
@@ -7040,9 +7041,22 @@ void MarkHitboxBones(CompiledModel& m) {
 bool SetupHitBoxes(Ctx& ctx, std::string* err) {
     CompiledModel& m = *ctx.out;
 
-    // hitgroups: default 0, inherit parent
+    // Explicit $hgroup values win; other bones inherit from their parent.
     for (Bone& b : m.bones)
-        b.group = 0;
+        b.group = -9999;
+    for (const auto& hitgroup : ctx.in->hitgroups) {
+        const int bone = FindGlobalBone(m, hitgroup.first);
+        if (bone == -1) {
+            if (err) *err = "cannot find bone '" + hitgroup.first +
+                            "' for hitgroup " + std::to_string(hitgroup.second);
+            return false;
+        }
+        m.bones[bone].group = hitgroup.second;
+    }
+    for (Bone& b : m.bones) {
+        if (b.group == -9999)
+            b.group = b.parent == -1 ? 0 : m.bones[b.parent].group;
+    }
 
     // authored sets: take them as written, resolve the bone names, and leave
     // the bone bmin/bmax at zero - only the auto path derives those
@@ -7284,6 +7298,75 @@ bool LinkIKLocks(Ctx& ctx, std::string* err) {
     return true;
 }
 
+void FindAnimQuaternionAlignment(const Anim& anim, int bone, Quaternion& qBase,
+                                 Quaternion& qMin, Quaternion& qMax) {
+    pm::AngleQuaternion(anim.sanim[0][bone].rot, qBase);
+    qMin = qMax = qBase;
+    float dMin = 1.0f;
+    float dMax = 1.0f;
+
+    auto dot = [](const Quaternion& a, const Quaternion& b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    };
+
+    for (int frame = 1; frame < anim.numframes; frame++) {
+        Quaternion q;
+        pm::AngleQuaternion(anim.sanim[frame][bone].rot, q);
+        pm::QuaternionAlign(qBase, q, q);
+
+        const float d0 = dot(q, qBase);
+        const float d1 = dot(q, qMin);
+        const float d2 = dot(q, qMax);
+        if (d1 >= d0) {
+            if (d0 < dMin) {
+                qMin = q;
+                dMin = d0;
+                if (dMax == 1.0f) {
+                    pm::QuaternionMA(qBase, -0.01f, qMin, qMax);
+                    pm::QuaternionAlign(qBase, qMax, qMax);
+                }
+            }
+        } else if (d2 >= d0 && d0 < dMax) {
+            qMax = q;
+            dMax = d0;
+        }
+
+        pm::QuaternionSlerpNoAlign(qMin, qMax, 0.5f, qBase);
+        dMin = dot(qBase, qMin);
+        dMax = dot(qBase, qMax);
+    }
+}
+
+bool LimitBoneRotations(Ctx& ctx, std::string* err) {
+    CompiledModel& m = *ctx.out;
+    for (const std::string& name : ctx.in->limitRotationBones) {
+        const int bone = m.FindBone(name.c_str());
+        if (bone == -1) {
+            if (err) *err = "unknown bone \"" + name + "\" in $limitrotation";
+            return false;
+        }
+
+        Quaternion qBase;
+        pm::AngleQuaternion(m.bones[bone].rot, qBase);
+        for (const Anim& anim : m.anims) {
+            if ((anim.flags & STUDIO_DELTA) || anim.numframes <= 3)
+                continue;
+            Quaternion animBase, qMin, qMax;
+            FindAnimQuaternionAlignment(anim, bone, animBase, qMin, qMax);
+            Quaternion aligned;
+            pm::QuaternionAlign(qBase, animBase, aligned);
+            qBase.x += aligned.x;
+            qBase.y += aligned.y;
+            qBase.z += aligned.z;
+            qBase.w += aligned.w;
+        }
+        pm::QuaternionNormalize(qBase);
+        m.bones[bone].qAlignment = qBase;
+        m.bones[bone].flags |= BONE_FIXED_ALIGNMENT;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // limitIKChainLength: accumulate an automatic knee direction when the
 // chain has no authored knee AND some frame has a nearly straight leg.
@@ -7403,8 +7486,10 @@ void SlerpBones(Ctx& ctx, std::vector<Quaternion>& q1, std::vector<Vector3>& pos
             if (s2 > 0.0f) {
                 float s1 = 1.0f - s2;
                 Quaternion q3;
-                // (BONE_FIXED_ALIGNMENT slerp-noalign: no $limitrotation yet)
-                pm::QuaternionSlerp(q2[i], q1[i], s1, q3);
+                if (m.bones[i].flags & BONE_FIXED_ALIGNMENT)
+                    pm::QuaternionSlerpNoAlign(q2[i], q1[i], s1, q3);
+                else
+                    pm::QuaternionSlerp(q2[i], q1[i], s1, q3);
                 q1[i] = q3;
                 pos1[i].x = pos1[i].x * s1 + pos2[i].x * s2;
                 pos1[i].y = pos1[i].y * s1 + pos2[i].y * s2;
@@ -10456,7 +10541,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     { PULSE_TIME_PASS("ProcessAnimations");
       if (!ProcessAnimations(ctx, weightlists, err)) return false; }
 
-    // (limitBoneRotations: no $limitrotation -> qAlignment stays zero)
+    if (!LimitBoneRotations(ctx, err))
+        return false;
 
     // auto kneeDir for chains without an authored knee
     LimitIKChainLength(ctx);
