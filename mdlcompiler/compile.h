@@ -736,6 +736,12 @@ enum class PhysicsImportType {
     OneBoneOnly = 2, // keep only the geometry on parent_bone, discard the rest
 };
 
+enum class PhysicsBuildMode {
+    Auto,
+    Single,
+    Ragdoll,
+};
+
 // one shape in `physicsshapelist` - a source of collision geometry.
 //
 // FromFile and FromRender share enough (the offset/scale framing, the naming,
@@ -1055,6 +1061,7 @@ struct CompiledModel {
     float physAnimFrictionTimeIn = 0.0f;
     float physAnimFrictionTimeOut = 0.0f;
     float physAnimFrictionTimeHold = 0.0f;
+    std::string physCollisionText;
 
     source::MaterialTable* mats = nullptr;
     std::vector<std::string> cdtextures;
@@ -1224,6 +1231,10 @@ struct CompileInput {
     std::vector<PhysicsMarkup> physMarkups;
     // $physicscollide - emitted in declaration order
     std::vector<PhysicsCollidePair> physCollidePairs;
+    PhysicsBuildMode physBuildMode = PhysicsBuildMode::Auto;
+    bool physLegacyConcave = false;
+    bool physLegacyConcavePerJoint = false;
+    bool physConvexHullCountOverride = false;
     // physicsmarkuplist container scalars - the per-body DEFAULTS a child
     // overrides, so they share the child's spelling. Values match the
     // reference CJointedModel constructor.
@@ -1250,6 +1261,7 @@ struct CompileInput {
     float physAnimFrictionTimeIn = 0.0f;
     float physAnimFrictionTimeOut = 0.0f;
     float physAnimFrictionTimeHold = 0.0f;
+    std::string physCollisionText;
 
     // gamedatalist - model-level game data
     std::string surfaceprop;

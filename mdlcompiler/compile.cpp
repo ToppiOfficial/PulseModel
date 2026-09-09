@@ -4174,7 +4174,10 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
                           std::vector<GeneratedShape>& out, std::string* err) {
     matrix3x4 modelXform;
     pm::AngleMatrix(defaultRotation, modelXform);
-    for (const PhysicsShape& shape : in.physShapes) {
+    for (size_t shapeIndex = 0; shapeIndex < in.physShapes.size(); shapeIndex++) {
+        if (in.physBuildMode == PhysicsBuildMode::Ragdoll && shapeIndex > 0)
+            break;
+        const PhysicsShape& shape = in.physShapes[shapeIndex];
         if (shape.kind != PhysicsShapeKind::FromRender)
             continue;
 
@@ -4357,7 +4360,10 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
         dest.insert(dest.end(), convexes.begin(), convexes.end());
     }
 
-    for (const PhysicsShape& shape : in.physShapes) {
+    for (size_t shapeIndex = 0; shapeIndex < in.physShapes.size(); shapeIndex++) {
+        if (in.physBuildMode == PhysicsBuildMode::Ragdoll && shapeIndex > 0)
+            break;
+        const PhysicsShape& shape = in.physShapes[shapeIndex];
         if (shape.kind != PhysicsShapeKind::FromFile)
             continue;
         const src::Source* ps = shape.source;
@@ -4559,6 +4565,23 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
                 freeBodies();
                 return false;
             }
+            if (in.physBuildMode == PhysicsBuildMode::Ragdoll &&
+                static_cast<int>(convexes.size()) > shape.maxConvex) {
+                std::printf("WARNING: costly collision body \"%s\" (%zu convex pieces, "
+                            "%d allowed); building one hull\n",
+                            m.bones[globalBone].name.c_str(), convexes.size(), shape.maxConvex);
+                for (phys::Convex* convex : convexes)
+                    phys::ConvexFree(convex);
+                convexes.clear();
+                groups.clear();
+                BuildSingleGroupForFaces(ps, faceList, totalSourceFaces, groups);
+                if (!BuildConvexesForGroups(groups, boneVerts, shape.name.c_str(), shape.remove2d,
+                                            static_cast<unsigned int>(globalBone) + 1,
+                                            convexes, err)) {
+                    freeBodies();
+                    return false;
+                }
+            }
             if (convexes.empty())
                 continue;
 
@@ -4751,7 +4774,9 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
     AssignPhysicsBones(m);
     m.physTotalMass = in.physAutoMass ? -1.0f : in.physMass;
     m.physName = in.physName;
-    m.physConcave = anyConcave;
+    m.physConcave = in.physBuildMode == PhysicsBuildMode::Auto
+                        ? anyConcave
+                        : in.physLegacyConcave;
     m.physNoSelfCollisions = in.physNoSelfCollisions;
     m.physHasAnimatedFriction = in.physHasAnimatedFriction;
     m.physAnimFrictionMin = in.physAnimFrictionMin;
@@ -4780,6 +4805,8 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     const CompileInput& in = *ctx.in;
     if (in.physShapes.empty())
         return true; // no collision authored - no .phy
+
+    m.physCollisionText = in.physCollisionText;
 
     // Generated shapes run first: their hulls decide bones too, so the single
     // body vs ragdoll call below has to see them.
@@ -4828,9 +4855,12 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     if (physBones.empty())
         physBones.push_back(0);
 
-    // A $physicsjoint declares a ragdoll outright; the single-body path would
-    // leave its hulls in pose space, displaced. Otherwise decide on bone count.
-    if (!in.physJoints.empty() || physBones.size() > 1)
+    // Legacy commands force the build type. $physicsmodel uses its joints and
+    // resolved bone count.
+    if (in.physBuildMode == PhysicsBuildMode::Ragdoll)
+        return BuildRagdollCollision(ctx, generated, err);
+    if (in.physBuildMode == PhysicsBuildMode::Auto &&
+        (!in.physJoints.empty() || physBones.size() > 1))
         return BuildRagdollCollision(ctx, generated, err);
 
     const int physBone = physBones[0];
@@ -4928,14 +4958,16 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     }
 
     if (static_cast<int>(convexes.size()) > maxConvexPieces) {
-        std::printf("WARNING: costly collision model (%zu convex pieces, %d allowed)\n",
-                    convexes.size(), maxConvexPieces);
+        if (in.physBuildMode == PhysicsBuildMode::Single &&
+            !in.physConvexHullCountOverride) {
+            std::printf("WARNING: costly collision model (%zu convex pieces, %d allowed); "
+                        "building one hull\n", convexes.size(), maxConvexPieces);
+            freeConvexes();
+        } else {
+            std::printf("WARNING: costly collision model (%zu convex pieces, %d allowed)\n",
+                        convexes.size(), maxConvexPieces);
+        }
     }
-    if (!CheckSolidVertBudget(convexes, m.bones[physBone].name.c_str(), err)) {
-        freeConvexes();
-        return false;
-    }
-
     // Fallback (ProcessSingleBody): if nothing survived, hull everything
     // as one piece rather than emitting a model with no collision at all.
     if (convexes.empty()) {
@@ -4951,6 +4983,10 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
         }
         phys::SetConvexGameData(convex, 0);
         convexes.push_back(convex);
+    }
+    if (!CheckSolidVertBudget(convexes, m.bones[physBone].name.c_str(), err)) {
+        freeConvexes();
+        return false;
     }
 
     // ---- assemble the solid ----------------------------------------------
@@ -5014,9 +5050,17 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     // is the reference's behavior (SetAutoMass).
     m.physTotalMass = in.physAutoMass ? -1.0f : in.physMass;
     m.physName = in.physName;
-    m.physConcave = anyConcave;
+    m.physConcave = in.physBuildMode == PhysicsBuildMode::Auto
+                        ? anyConcave
+                        : in.physLegacyConcave;
     m.physNoSelfCollisions = in.physNoSelfCollisions;
     m.physRootName = in.physRootBone.empty() ? m.bones[physBone].name : in.physRootBone;
+    m.physHasAnimatedFriction = in.physHasAnimatedFriction;
+    m.physAnimFrictionMin = in.physAnimFrictionMin;
+    m.physAnimFrictionMax = in.physAnimFrictionMax;
+    m.physAnimFrictionTimeIn = in.physAnimFrictionTimeIn;
+    m.physAnimFrictionTimeOut = in.physAnimFrictionTimeOut;
+    m.physAnimFrictionTimeHold = in.physAnimFrictionTimeHold;
 
     // CollisionModel_ExpandBBox: the render hull must enclose the
     // collision hull, or the model gets culled while its physics is still in

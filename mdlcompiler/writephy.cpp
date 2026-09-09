@@ -171,6 +171,12 @@ std::vector<uint8_t> BuildPhy(cm::CompiledModel& m, int32_t checksum) {
     }
     AppendText(buf, "}\n");
 
+    if (!m.physCollisionText.empty()) {
+        Append(buf, m.physCollisionText.data(), m.physCollisionText.size());
+        if (m.physCollisionText.back() != '\n')
+            AppendText(buf, "\n");
+    }
+
     // The engine parses the text tail until this NUL.
     buf.push_back(0);
     return buf;

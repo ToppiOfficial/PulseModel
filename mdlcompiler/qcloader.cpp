@@ -2808,12 +2808,15 @@ bool CmdCalcTransitions(Ctx& c, const Token&) {
 // command and the $sequence option. The block between braces is re-emitted as
 // text and copied into the .mdl unchanged; nesting is preserved and tokens
 // inside a nested block come back out quoted, exactly like the reference.
-bool ParseKeyValues(Ctx& c, const Token& cmd, std::string& out) {
+bool ParseKeyValues(Ctx& c, const Token& cmd, std::string& out,
+                    bool normalizeModelPaths = false) {
     const Token* brace = c.Next();
     if (!brace || brace->quoted || brace->text != "{")
         return c.Fail(cmd.line, cmd.text + " expects '{'");
 
     int level = 1;
+    std::vector<bool> expectKey(2, true);
+    std::vector<bool> modelKey(2, false);
     for (;;) {
         if (out.size() > static_cast<size_t>(lim::kMaxKeyValuesBytes))
             return c.Fail(cmd.line, cmd.text + ": keyvalue block exceeds " +
@@ -2825,11 +2828,29 @@ bool ParseKeyValues(Ctx& c, const Token& cmd, std::string& out) {
             if (--level <= 0)
                 break;
             out += " }\n";
+            expectKey.resize(static_cast<size_t>(level) + 1);
+            modelKey.resize(static_cast<size_t>(level) + 1);
+            expectKey[level] = true;
+            modelKey[level] = false;
         } else if (!t->quoted && t->text == "{") {
             out += "{\n";
+            expectKey[level] = true;
+            modelKey[level] = false;
             level++;
+            expectKey.resize(static_cast<size_t>(level) + 1, true);
+            modelKey.resize(static_cast<size_t>(level) + 1, false);
         } else if (level > 1) {
-            out += "\"" + t->text + "\" ";
+            std::string value = t->text;
+            if (expectKey[level]) {
+                modelKey[level] = Lower(value) == "model";
+                expectKey[level] = false;
+            } else {
+                if (normalizeModelPaths && modelKey[level])
+                    std::replace(value.begin(), value.end(), '\\', '/');
+                expectKey[level] = true;
+                modelKey[level] = false;
+            }
+            out += "\"" + value + "\" ";
         } else {
             out += t->text + " ";
         }
@@ -2889,6 +2910,10 @@ bool CmdBoneFlexDriver(Ctx& c, const Token& cmd) {
 // $keyvalues { ... }  (Cmd_KeyValues): the model-level block.
 bool CmdKeyValues(Ctx& c, const Token& cmd) {
     return ParseKeyValues(c, cmd, c.in.keyvalues);
+}
+
+bool CmdCollisionText(Ctx& c, const Token& cmd) {
+    return ParseKeyValues(c, cmd, c.in.physCollisionText, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -6298,28 +6323,24 @@ bool CmdBoneSaveFrame(Ctx& c, const Token& cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// $physicsmodel - the whole .phy in one block.
-//
-// There is no $collisionmodel / $collisionjoints split: the compile stage
-// counts the bones the collision geometry resolves to and picks single body vs
-// ragdoll itself.
-//
-// Two levels of vocabulary. Directly inside $physicsmodel everything is a
-// $command, keeping stock studiomdl's spellings ($mass, $rootbone,
-// $noselfcollisions, ...); inside the nested $physicsshape / $physicsjoint /
-// $physicsmarkup blocks the options are bare words. So the block loops here
-// terminate on '}' rather than on Ctx::AtCommand - a '$' no longer means "a new
-// top-level command started".
-//
-// Defaults are never restated: a field is only touched when authored, so the
-// PhysicsShape / CompileInput struct defaults are the single source of them and
-// both front ends land in the same place.
+// $physicsmodel uses nested shape, joint, and markup commands. Its build type
+// remains automatic; the legacy collision commands set it explicitly.
 // ---------------------------------------------------------------------------
 
 bool WantVec3(Ctx& c, const Token& cmd, pm::Vector3& v) {
     return c.WantFloat("an X value", cmd, v.x) &&
            c.WantFloat("a Y value", cmd, v.y) &&
            c.WantFloat("a Z value", cmd, v.z);
+}
+
+bool LoadPhysicsFileShape(Ctx& c, const Token& cmd, const std::string& ref,
+                          cm::PhysicsShape& sh) {
+    const std::string file = WithSourceExtension(c, ref);
+    sh.source = LoadSource(c, file, cmd.line, false, nullptr, source::LoadKind::Collision);
+    if (!sh.source)
+        return false;
+    sh.name = pulse::FilePath(file).stem().string();
+    return true;
 }
 
 // $physicsshape fromfile <file> { }, fromrendermesh <$rendermesh> { }, or
@@ -6444,22 +6465,8 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         return true;
     }
 
-    {
-        // a collision-only source, loaded straight from disk with no
-        // $rendermesh in front of it. Same loader as everything else, so .smd
-        // and .dmx both work; morphSource stays off, so its delta shapes are
-        // skipped along with everything else a collision hull has no use for -
-        // and LoadKind::Collision keeps its MATERIALS out of the model too. The
-        // hull needs the geometry, but only its shape: the physics stage flattens
-        // the per-material mesh grouping away (compile.cpp CollectSourceFaces)
-        // and surfaceprop comes from the script, never from a mesh material.
-        const std::string file = WithSourceExtension(c, ref);
-        sh.source = LoadSource(c, file, cmd.line, /*morphSource=*/false, /*edit=*/nullptr,
-                               source::LoadKind::Collision);
-        if (!sh.source)
-            return false;
-        sh.name = pulse::FilePath(file).stem().string();
-    }
+    if (!LoadPhysicsFileShape(c, cmd, ref, sh))
+        return false;
 
     // perjoint = keep the source's own rigging (the only mode that can produce
     // a ragdoll on its own); singlejoint = pin every part onto parentbone
@@ -6762,6 +6769,216 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
     // A zero or negative $mass is not rejected - the per-solid mass floor in
     // writephy clamps every body to 1 kg, which is what stock lands on too.
     return true;
+}
+
+cm::PhysicsMarkup& LegacyMarkup(Ctx& c, const std::string& bone) {
+    for (cm::PhysicsMarkup& mk : c.in.physMarkups)
+        if (_stricmp(mk.bonename.c_str(), bone.c_str()) == 0)
+            return mk;
+    c.in.physMarkups.emplace_back();
+    cm::PhysicsMarkup& mk = c.in.physMarkups.back();
+    mk.name = mk.bonename = bone;
+    return mk;
+}
+
+cm::PhysicsJoint& LegacyJoint(Ctx& c, const std::string& bone) {
+    for (cm::PhysicsJoint& joint : c.in.physJoints)
+        if (_stricmp(joint.bonename.c_str(), bone.c_str()) == 0)
+            return joint;
+    c.in.physJoints.emplace_back();
+    c.in.physJoints.back().bonename = bone;
+    return c.in.physJoints.back();
+}
+
+void RemovePhysicsPair(Ctx& c, const std::string& a, const std::string& b) {
+    std::vector<cm::PhysicsCollidePair>& pairs = c.in.physCollidePairs;
+    pairs.erase(std::remove_if(pairs.begin(), pairs.end(),
+                               [&](const cm::PhysicsCollidePair& pair) {
+                                   return (_stricmp(pair.a.c_str(), a.c_str()) == 0 &&
+                                           _stricmp(pair.b.c_str(), b.c_str()) == 0) ||
+                                          (_stricmp(pair.a.c_str(), b.c_str()) == 0 &&
+                                           _stricmp(pair.b.c_str(), a.c_str()) == 0);
+                               }),
+                pairs.end());
+}
+
+bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
+    std::string file;
+    if (!c.Want("a collision source filename", cmd, file))
+        return false;
+    if (Lower(file) == "blank")
+        return c.Fail(cmd.line, cmd.text + " requires a source file; use $physicsmodel for generation");
+
+    cm::PhysicsShape shape;
+    shape.maxConvex = 40;
+    if (!LoadPhysicsFileShape(c, cmd, file, shape))
+        return false;
+    const size_t mainShape = c.in.physShapes.size();
+    c.in.physShapes.push_back(std::move(shape));
+    c.in.physBuildMode = mode;
+
+    const bool braced = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
+    if (!braced)
+        return true;
+    c.pos++;
+
+    int maxConvex = 40;
+    bool remove2d = false;
+    for (;;) {
+        if (c.Eof())
+            return c.Fail(cmd.line, cmd.text + ": missing '}'");
+        const Token t = c.toks[c.pos++];
+        if (!t.quoted && t.text == "}")
+            break;
+        const std::string o = t.quoted ? std::string() : Lower(t.text);
+        const Token sub{cmd.text + " " + t.text, t.line, false};
+
+        if (o == "$mass") {
+            if (!c.WantFloat("a mass in kg", sub, c.in.physMass)) return false;
+            c.in.physAutoMass = false;
+        } else if (o == "$automass") {
+            c.in.physAutoMass = true;
+        } else if (o == "$inertia") {
+            if (!c.WantFloat("an inertia", sub, c.in.physInertia)) return false;
+        } else if (o == "$damping") {
+            if (!c.WantFloat("a damping value", sub, c.in.physDamping)) return false;
+        } else if (o == "$rotdamping") {
+            if (!c.WantFloat("a rotdamping value", sub, c.in.physRotdamping)) return false;
+        } else if (o == "$drag") {
+            if (!c.WantFloat("a drag value", sub, c.in.physDrag)) return false;
+        } else if (o == "$maxconvexpieces") {
+            if (!c.WantInt("a piece count", sub, maxConvex)) return false;
+        } else if (o == "$remove2d") {
+            remove2d = true;
+        } else if (o == "$concaveperjoint") {
+            c.in.physLegacyConcavePerJoint = true;
+        } else if (o == "$weldposition") {
+            if (!c.WantFloat("a position epsilon", sub, c.in.physWeldPosition)) return false;
+        } else if (o == "$weldnormal") {
+            if (!c.WantFloat("a normal epsilon", sub, c.in.physWeldNormal)) return false;
+        } else if (o == "$concave") {
+            c.in.physLegacyConcave = true;
+        } else if (o == "$convexhullcountoverride") {
+            std::string ignored;
+            if (!c.Want("an override value", sub, ignored)) return false;
+            c.in.physConvexHullCountOverride = true;
+        } else if (o == "$masscenter") {
+            if (!WantVec3(c, sub, c.in.physMassCenter)) return false;
+            c.in.physMassCenterSet = true;
+        } else if (o == "$jointskip") {
+            std::string bone;
+            if (!c.Want("a bone name", sub, bone)) return false;
+            cm::PhysicsMarkup& mk = LegacyMarkup(c, bone);
+            mk.skip = true;
+            mk.mergeInto.clear();
+        } else if (o == "$jointmerge") {
+            std::string parent, child;
+            if (!c.Want("a parent bone name", sub, parent) ||
+                !c.Want("a child bone name", sub, child)) return false;
+            cm::PhysicsMarkup& mk = LegacyMarkup(c, child);
+            mk.skip = false;
+            mk.mergeInto = parent;
+        } else if (o == "$rootbone") {
+            if (!c.Want("a bone name", sub, c.in.physRootBone)) return false;
+        } else if (o == "$jointconstrain") {
+            std::string bone, axis, type;
+            cm::PhysicsJointAxis a;
+            if (!c.Want("a bone name", sub, bone) || !c.Want("an axis", sub, axis) ||
+                !c.Want("free, fixed or limit", sub, type) ||
+                !c.WantFloat("a minimum angle", sub, a.min) ||
+                !c.WantFloat("a maximum angle", sub, a.max)) return false;
+            axis = Lower(axis);
+            type = Lower(type);
+            if      (axis == "x") a.axis = 0;
+            else if (axis == "y") a.axis = 1;
+            else if (axis == "z") a.axis = 2;
+            else return c.Fail(t.line, sub.text + ": expected x, y or z");
+            if      (type == "free")  { a.type = 0; a.min = -360.0f; a.max = 360.0f; }
+            else if (type == "limit") { a.type = 1; }
+            else if (type == "fixed") { a.type = 2; a.min = a.max = 0.0f; }
+            else return c.Fail(t.line, sub.text + ": expected free, fixed or limit");
+            if (AtNumber(c) && !c.WantFloat("a friction value", sub, a.friction)) return false;
+            cm::PhysicsJoint& joint = LegacyJoint(c, bone);
+            auto existing = std::find_if(joint.axes.begin(), joint.axes.end(),
+                                         [&](const cm::PhysicsJointAxis& value) {
+                                             return value.axis == a.axis;
+                                         });
+            if (existing == joint.axes.end()) joint.axes.push_back(a);
+            else *existing = a;
+        } else if (o == "$jointinertia" || o == "$jointdamping" ||
+                   o == "$jointrotdamping" || o == "$jointmassbias") {
+            std::string bone;
+            float value = 0.0f;
+            if (!c.Want("a bone name", sub, bone) || !c.WantFloat("a value", sub, value))
+                return false;
+            cm::PhysicsMarkup& mk = LegacyMarkup(c, bone);
+            if (o == "$jointinertia") { mk.inertia = value; mk.inertiaSet = true; }
+            else if (o == "$jointdamping") { mk.damping = value; mk.dampingSet = true; }
+            else if (o == "$jointrotdamping") { mk.rotdamping = value; mk.rotdampingSet = true; }
+            else { mk.massBias = value; mk.massBiasSet = true; }
+        } else if (o == "$noselfcollisions") {
+            c.in.physNoSelfCollisions = true;
+        } else if (o == "$jointcollide" || o == "$jointnocollide") {
+            std::string a, b;
+            if (!c.Want("a bone name", sub, a) || !c.Want("a second bone name", sub, b))
+                return false;
+            if (o == "$jointcollide") c.in.physCollidePairs.push_back({a, b});
+            else RemovePhysicsPair(c, a, b);
+        } else if (o == "$jointcollidealltoall") {
+            const Token* open = c.Next();
+            if (!open || open->quoted || open->text != "{")
+                return c.Fail(t.line, sub.text + " expects '{'");
+            std::vector<std::string> bones;
+            for (;;) {
+                const Token* bone = c.Next();
+                if (!bone) return c.Fail(t.line, sub.text + ": missing '}'");
+                if (!bone->quoted && bone->text == "}") break;
+                if (bones.size() < 32) bones.push_back(bone->text);
+            }
+            for (size_t i = 0; i < bones.size(); i++)
+                for (size_t j = i + 1; j < bones.size(); j++)
+                    c.in.physCollidePairs.push_back({bones[i], bones[j]});
+        } else if (o == "$animatedfriction") {
+            c.in.physHasAnimatedFriction = true;
+            if (!c.WantInt("a minimum friction", sub, c.in.physAnimFrictionMin) ||
+                !c.WantInt("a maximum friction", sub, c.in.physAnimFrictionMax) ||
+                !c.WantFloat("a ramp-in time", sub, c.in.physAnimFrictionTimeIn) ||
+                !c.WantFloat("a hold time", sub, c.in.physAnimFrictionTimeHold) ||
+                !c.WantFloat("a ramp-out time", sub, c.in.physAnimFrictionTimeOut)) return false;
+        } else if (o == "$assumeworldspace") {
+            c.in.physAssumeWorldspace = true;
+        } else if (o == "$addconvexsrc") {
+            std::string extra;
+            if (!c.Want("a collision source filename", sub, extra)) return false;
+            cm::PhysicsShape extraShape;
+            extraShape.maxConvex = maxConvex;
+            extraShape.remove2d = remove2d;
+            if (!LoadPhysicsFileShape(c, sub, extra, extraShape)) return false;
+            c.in.physShapes.push_back(std::move(extraShape));
+        } else if (o == "$generate" || o == "$generatemodel" || o == "$generatejoint" ||
+                   o == "$addgeneratechild") {
+            return c.Fail(t.line, t.text + " is not supported here; use $physicsmodel for generation");
+        } else {
+            return c.Fail(t.line, cmd.text + ": invalid syntax \"" + t.text + "\"");
+        }
+    }
+
+    for (size_t i = mainShape; i < c.in.physShapes.size(); i++) {
+        c.in.physShapes[i].maxConvex = maxConvex;
+        c.in.physShapes[i].remove2d = remove2d;
+    }
+    c.in.physShapes[mainShape].concave =
+        mode == cm::PhysicsBuildMode::Single ? c.in.physLegacyConcave
+                                             : c.in.physLegacyConcavePerJoint;
+    return true;
+}
+
+bool CmdCollisionModel(Ctx& c, const Token& cmd) {
+    return CmdLegacyCollision(c, cmd, cm::PhysicsBuildMode::Single);
+}
+
+bool CmdCollisionJoints(Ctx& c, const Token& cmd) {
+    return CmdLegacyCollision(c, cmd, cm::PhysicsBuildMode::Ragdoll);
 }
 
 // The $physicsmodel body commands, written at top level. Listed in the command
@@ -7632,6 +7849,7 @@ constexpr Command kCommands[] = {
     {"$contents", CmdContents},
     {"$jointcontents", CmdJointContents},
     {"$keyvalues", CmdKeyValues},
+    {"$collisiontext", CmdCollisionText},
     {"$boneflexdriver", CmdBoneFlexDriver},
     {"$flexcontroller", CmdFlexController},
     {"$flexlocalvar", CmdFlexLocalVar},
@@ -7659,6 +7877,8 @@ constexpr Command kCommands[] = {
     {"$renamehboxset", CmdRenameHboxSet},
     {"$bonecullmethod", CmdBoneCullMethod},
     {"$physicsmodel", CmdPhysicsModel},
+    {"$collisionmodel", CmdCollisionModel},
+    {"$collisionjoints", CmdCollisionJoints},
     {"$physicsshape", CmdPhysicsOutsideModel},
     {"$physicsjoint", CmdPhysicsOutsideModel},
     {"$physicsmarkup", CmdPhysicsOutsideModel},

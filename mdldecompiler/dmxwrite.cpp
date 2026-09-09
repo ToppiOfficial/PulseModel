@@ -1461,18 +1461,14 @@ bool ReadLedge(const std::vector<char>& buf, size_t off, PhyHull& out) {
     size_t ptOff = 0;
     if (nTri <= 0 || nPts <= 0 || nPts > 0xffff ||
         !RelOff(off, l.c_point_offset, buf.size(), ptOff) ||
-        ptOff + 16 * static_cast<size_t>(nPts) > buf.size() ||
         off + 16 + 16 * static_cast<size_t>(nTri) > buf.size())
         return false;
 
-    out.verts.resize(nPts);
-    for (int i = 0; i < nPts; ++i) {
-        float k[3];
-        std::memcpy(k, &buf[ptOff + 16 * static_cast<size_t>(i)], sizeof k);
-        out.verts[i] = IvpToSrc(k);
-    }
-
-    // the ledge's three edges start at its three corners, in order
+    // Stock solids share one point array, so later ledges use cumulative indices.
+    // Locally written solids start each ledge at zero.
+    std::vector<int> indices;
+    int firstPoint = 0xffff;
+    int lastPoint = -1;
     for (int t = 0; t < nTri; ++t) {
         const size_t to = off + 16 + 16 * static_cast<size_t>(t);
         int v[3];
@@ -1480,14 +1476,25 @@ bool ReadLedge(const std::vector<char>& buf, size_t off, PhyHull& out) {
             uint32_t d = 0;
             std::memcpy(&d, &buf[to + 4 + 4 * static_cast<size_t>(e)], sizeof d);
             v[e] = static_cast<int>(d & 0xffffu);
+            firstPoint = std::min(firstPoint, v[e]);
+            lastPoint = std::max(lastPoint, v[e]);
         }
-        if (v[0] >= nPts || v[1] >= nPts || v[2] >= nPts || v[0] == v[1] || v[1] == v[2] ||
-            v[0] == v[2])
+        if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2])
             continue;
-        out.tris.insert(out.tris.end(), {v[0], v[1], v[2]});
+        indices.insert(indices.end(), {v[0], v[1], v[2]});
     }
-    if (out.tris.empty())
+    if (indices.empty() || firstPoint < 0 || lastPoint - firstPoint >= nPts ||
+        ptOff + 16 * static_cast<size_t>(firstPoint + nPts) > buf.size())
         return false;
+
+    out.verts.resize(nPts);
+    for (int i = 0; i < nPts; ++i) {
+        float k[3];
+        std::memcpy(k, &buf[ptOff + 16 * static_cast<size_t>(firstPoint + i)], sizeof k);
+        out.verts[i] = IvpToSrc(k);
+    }
+    for (int index : indices)
+        out.tris.push_back(index - firstPoint);
 
     // A hull is convex, so "outward" is just "away from the centre" - which
     // makes the export display right whatever winding the .phy was built with.

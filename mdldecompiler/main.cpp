@@ -941,6 +941,7 @@ void WriteProceduralBones(Qc& q, const Mdl& m, const std::string& dir) {
 struct PhySection {
     std::string name;
     std::vector<std::pair<std::string, std::string>> kv;
+    std::string raw;
 
     const std::string* Find(const char* key) const {
         for (const auto& p : kv)
@@ -987,8 +988,14 @@ std::vector<PhySection> ReadPhy(const std::string& mdlPath) {
         p += static_cast<size_t>(blob);
     }
 
-    std::vector<std::string> toks;
+    struct PhyToken {
+        std::string text;
+        size_t begin = 0;
+        size_t end = 0;
+    };
+    std::vector<PhyToken> toks;
     while (p < buf.size() && buf[p]) {
+        const size_t begin = p;
         const char c = buf[p];
         if (std::isspace(static_cast<unsigned char>(c))) {
             ++p;
@@ -996,49 +1003,75 @@ std::vector<PhySection> ReadPhy(const std::string& mdlPath) {
             size_t e = p + 1;
             while (e < buf.size() && buf[e] && buf[e] != '"')
                 ++e;
-            toks.emplace_back(&buf[p + 1], e - p - 1);
+            if (e >= buf.size() || !buf[e])
+                return out;
             p = e + 1;
+            toks.push_back({std::string(&buf[begin + 1], e - begin - 1), begin, p});
         } else if (c == '{' || c == '}') {
-            toks.emplace_back(1, c);
             ++p;
+            toks.push_back({std::string(1, c), begin, p});
         } else {
             size_t e = p;
             while (e < buf.size() && buf[e] && !std::isspace(static_cast<unsigned char>(buf[e])) &&
                    buf[e] != '{' && buf[e] != '}')
                 ++e;
-            toks.emplace_back(&buf[p], e - p);
             p = e;
+            toks.push_back({std::string(&buf[begin], e - begin), begin, p});
         }
     }
 
     for (size_t i = 0; i + 1 < toks.size();) {
-        if (toks[i + 1] != "{") {
+        if (toks[i + 1].text != "{") {
             ++i;
             continue;
         }
         PhySection s;
-        s.name = toks[i];
-        i += 2;
-        for (; i + 1 < toks.size() && toks[i] != "}"; i += 2)
-            s.kv.emplace_back(toks[i], toks[i + 1]);
-        if (i < toks.size())
-            ++i; // past '}'
+        s.name = toks[i].text;
+        const size_t first = i;
+        size_t cursor = i + 2;
+        int depth = 1;
+        while (cursor < toks.size() && depth > 0) {
+            if (toks[cursor].text == "{") {
+                depth++;
+                cursor++;
+            } else if (toks[cursor].text == "}") {
+                depth--;
+                cursor++;
+            } else if (depth == 1 && cursor + 1 < toks.size() &&
+                       toks[cursor + 1].text != "{" && toks[cursor + 1].text != "}") {
+                s.kv.emplace_back(toks[cursor].text, toks[cursor + 1].text);
+                cursor += 2;
+            } else {
+                cursor++;
+            }
+        }
+        if (depth != 0)
+            return out;
+        s.raw.assign(&buf[toks[first].begin], toks[cursor - 1].end - toks[first].begin);
         out.push_back(std::move(s));
+        i = cursor;
     }
     return out;
 }
+
+void EmitKeyValues(Qc& q, const std::string& text, std::string indent,
+                   bool normalizeModelPaths = false);
 
 // $physicsmodel. The hulls go out as a DMX collision mesh beside the render
 // meshes; everything else round-trips out of the .phy's text tail.
 void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::string& dir) {
     const std::vector<PhySection> secs = ReadPhy(mdlPath);
     std::vector<const PhySection*> solids;
+    std::vector<const PhySection*> collisionText;
     const PhySection* edit = nullptr;
     for (const PhySection& s : secs) {
         if (s.name == "solid")
             solids.push_back(&s);
         else if (s.name == "editparams")
             edit = &s;
+        else if (s.name != "ragdollconstraint" && s.name != "collisionrules" &&
+                 s.name != "animatedfriction")
+            collisionText.push_back(&s);
     }
     if (solids.empty())
         return;
@@ -1241,6 +1274,14 @@ void WritePhysics(Qc& q, const Mdl& m, const std::string& mdlPath, const std::st
                    F(s.Getf("animfrictiontimehold")));
 
     q.Line("}");
+
+    if (!collisionText.empty()) {
+        q.Blank();
+        q.Line("$collisiontext {");
+        for (const PhySection* section : collisionText)
+            EmitKeyValues(q, section->raw, "    ", true);
+        q.Line("}");
+    }
 }
 
 // $poseparameter <name> <min> <max> [wrap | loop <v>]. "wrap" is just a loop of
@@ -1865,7 +1906,8 @@ void WriteIncludeModels(Qc& q, const Mdl& m) {
 
 // Re-indent a keyvalues1 blob: one pair per line, `key {` opening a block.
 // Quoting is preserved as authored; a `//` comment runs to end of line.
-void EmitKeyValues(Qc& q, const std::string& text, std::string indent) {
+void EmitKeyValues(Qc& q, const std::string& text, std::string indent,
+                   bool normalizeModelPaths) {
     struct Tok { std::string s; bool quoted; };
     std::vector<Tok> t;
     for (size_t p = 0; p < text.size();) {
@@ -1902,7 +1944,15 @@ void EmitKeyValues(Qc& q, const std::string& text, std::string indent) {
             indent += "    ";
             ++i;
         } else if (i + 1 < t.size()) {
-            q.Line(indent + spell(t[i]) + " " + spell(t[i + 1]));
+            Tok value = t[i + 1];
+            const bool modelKey = t[i].s.size() == 5 &&
+                std::equal(t[i].s.begin(), t[i].s.end(), "model",
+                           [](char a, char b) {
+                               return std::tolower(static_cast<unsigned char>(a)) == b;
+                           });
+            if (normalizeModelPaths && modelKey)
+                std::replace(value.s.begin(), value.s.end(), '\\', '/');
+            q.Line(indent + spell(t[i]) + " " + spell(value));
             ++i;
         } else {
             q.Line(indent + spell(t[i]));
