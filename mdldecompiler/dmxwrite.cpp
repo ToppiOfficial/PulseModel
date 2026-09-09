@@ -797,8 +797,8 @@ Skel AllocSkel(Dmx& q, const Mdl& m) {
 // animation file has none. `pose0` overrides the bind pose the joints are
 // written at, for a clip whose frame 0 is its own reference pose.
 void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
-               const std::string& idMeshDag, const std::string& idCombo,
-               const std::string& idAnimList = std::string(),
+               const std::string& idMeshDag, const std::string& idMeshXform,
+               const std::string& idCombo, const std::string& idAnimList = std::string(),
                const std::vector<AnimPose>* pose0 = nullptr) {
     const fm::mstudiobone_t* bones =
         m.At<fm::mstudiobone_t>(m.buf.data(), m.hdr->boneindex, m.hdr->numbones);
@@ -825,16 +825,25 @@ void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
         if (bones[i].parent < 0)
             rootDags.push_back(s.idJointDag[i]);
     }
-    if (!idMeshDag.empty())
+    // Every dag under the model has to be listed, mesh included: Valve's reader
+    // resolves a dag to its index in jointList (jointTransforms before model 2)
+    // and warns about any it cannot find.
+    std::vector<std::string> allXforms = s.idJointXform;
+    if (!idMeshDag.empty()) {
         rootDags.push_back(idMeshDag);
+        allJoints.push_back(idMeshDag);
+        allXforms.push_back(idMeshXform);
+    }
 
     q.Begin("DmeModel", s.idModel, name);
     q.Str("upAxis", "Z");
     q.Ref("transform", s.idModelXform);
     q.RefArray("children", rootDags);
-    if (g_formatModel == 1)
-        q.RefArray("jointTransforms", s.idJointXform);
-    else
+    // jointTransforms up to model 20, jointList from 11 on - the overlap writes
+    // both, because a reader in that range may key off either one.
+    if (g_formatModel <= 20)
+        q.RefArray("jointTransforms", allXforms);
+    if (g_formatModel >= 11)
         q.RefArray("jointList", allJoints);
     if (!s.idBind.empty())
         q.RefArray("baseStates", {s.idBind});
@@ -860,7 +869,7 @@ void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
     // the same elements again rather than a second copy of the numbers.
     if (!s.idBind.empty()) {
         q.Begin("DmeTransformList", s.idBind, "bind");
-        q.RefArray("transforms", s.idJointXform);
+        q.RefArray("transforms", allXforms);
         q.End();
     }
 
@@ -1221,7 +1230,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         idDom.push_back(q.NewId());
     const std::string idCombo = deltaOrder.empty() ? std::string() : q.NewId();
 
-    WriteSkel(q, m, skel, meshName, idMeshDag, idCombo);
+    WriteSkel(q, m, skel, meshName, idMeshDag, idMeshXform, idCombo);
 
     // ---- the mesh ----
     q.Begin("DmeDag", idMeshDag, MeshDagName(m, meshName));
@@ -1620,7 +1629,7 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         legacyTimes.push_back(ticks);
     }
 
-    WriteSkel(q, m, s, clipName, std::string(), std::string(), idList, &frames[0]);
+    WriteSkel(q, m, s, clipName, std::string(), std::string(), std::string(), idList, &frames[0]);
 
     q.Begin("DmeAnimationList", idList, clipName);
     q.RefArray("animations", {idClip});
@@ -1774,7 +1783,7 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
     const std::string idMeshDag = q.NewId(), idMeshXform = q.NewId(), idMesh = q.NewId(),
                       idData = q.NewId(), idFaceSet = q.NewId(), idMaterial = q.NewId();
 
-    WriteSkel(q, m, skel, name, idMeshDag, std::string());
+    WriteSkel(q, m, skel, name, idMeshDag, idMeshXform, std::string());
 
     q.Begin("DmeDag", idMeshDag, MeshDagName(m, name));
     q.Ref("transform", idMeshXform);
