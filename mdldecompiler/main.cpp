@@ -2322,23 +2322,15 @@ std::vector<std::string> IkRules(const Mdl& m, const fm::mstudioanimdesc_t& a) {
                 std::to_string(std::lround(r.peak * lastframe)) + " " +
                 std::to_string(std::lround(r.tail * lastframe)) + " " +
                 std::to_string(std::lround(r.end * lastframe));
-        if (r.type == fm::IK_SELF && a.numframes == 1) {
-            const auto* error =
-                m.At<fm::mstudiocompressedikerror_t>(&r, r.compressedikerrorindex);
-            if (error) {
-                float value[6] = {};
-                for (int axis = 0; axis < 6; ++axis) {
-                    const auto* stream = m.At<fm::mstudioanimvalue_t>(error, error->offset[axis]);
-                    const auto* sample = stream && stream->num.valid
-                                             ? m.At<fm::mstudioanimvalue_t>(stream, sizeof(*stream))
-                                             : nullptr;
-                    if (sample)
-                        value[axis] = sample->value * error->scale[axis];
-                }
-                line += " fakeorigin " + V3({value[0], value[1], value[2]});
-                line += " fakerotate " + QAngleDeg({value[3], value[4], value[5]});
-            }
-        }
+        // KNOWN LIMITATION: a 1-frame delta clip's baked IK touch error is not
+        // round-tripped. It was measured at original compile from the animation's
+        // grip pose (its true subtract base), neither of which the .mdl keeps, so
+        // no stock re-bake can reproduce it. Every carrier tried failed: fakeorigin
+        // becomes a header anchor (wrong pose), a source re-pose corrupts the
+        // clip's delta (breaks layer blending in-game), and a custom command is
+        // not portable to stock studiomdl. So the rule goes out as a plain touch:
+        // faithful geometry/blending, but the hand offset is lost. Do not add a
+        // solver or a private command here.  NOTHING I DID EVER WORKED! WHY?
         out.push_back(std::move(line));
     }
     return out;
