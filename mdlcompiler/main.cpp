@@ -10,6 +10,7 @@
 #include <cstring>
 #include <exception>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -48,12 +49,18 @@ static int Usage() {
     std::printf("  -filesearchdir <dir>\n");
     std::printf("                extra fallback dir for source files, searched after\n");
     std::printf("                any $addsearchdir; repeatable\n");
+    std::printf("  -tempcontent <dir>   synonym for -filesearchdir\n");
     std::printf("  -modelname <path>   overrides $modelname\n");
     std::printf("  -vtxformat <0|1>\n");
     std::printf("                .vtx layout, overriding the script's $vtxformat.\n");
     std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
+    std::printf("  -striplods    ignore all $lod and $shadowlod commands\n");
+    std::printf("  -minlod <lod> discard higher-detail LODs and promote this LOD to root;\n");
+    std::printf("                overrides $minlod in the script\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and\n");
     std::printf("                stop - no .mdl/.vvd/.vtx/.phy is written\n");
+    std::printf("  -verify       compile the model without writing output files\n");
+    std::printf("  -dumpmaterials print the names of materials used by the model\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms for each stage of the compile\n");
     std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
@@ -90,7 +97,11 @@ static int RunCompile(int argc, char** argv) {
     std::string outdir;
     std::string modelname; // -modelname: overrides the script's $modelname
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
+    int launchMinLod = -1;
+    bool stripLods = false;
     bool definebones = false;
+    bool verify = false;
+    bool dumpMaterials = false;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
@@ -114,17 +125,37 @@ static int RunCompile(int argc, char** argv) {
             if (i + 1 >= argc)
                 return Fail("bad option", "-includesearchdir needs a directory");
             includeDirs.emplace_back(argv[++i]);
-        } else if (std::strcmp(argv[i], "-filesearchdir") == 0) {
+        } else if (std::strcmp(argv[i], "-filesearchdir") == 0 ||
+                   std::strcmp(argv[i], "-tempcontent") == 0) {
             if (i + 1 >= argc)
-                return Fail("bad option", "-filesearchdir needs a directory");
+                return Fail("bad option", std::string(argv[i]) + " needs a directory");
             fileDirs.emplace_back(argv[++i]);
         } else if (std::strcmp(argv[i], "-vtxformat") == 0 && i + 1 < argc) {
             vtxFormat = std::atoi(argv[++i]);
             if (vtxFormat != 0 && vtxFormat != 1)
                 return Fail("bad option", std::string("-vtxformat must be 0 or 1, got \"") +
                                               argv[i] + "\"");
+        } else if (std::strcmp(argv[i], "-minlod") == 0) {
+            if (i + 1 >= argc)
+                return Fail("bad option", "-minlod needs a non-negative LOD index");
+            const std::string value = argv[++i];
+            try {
+                size_t used = 0;
+                launchMinLod = std::stoi(value, &used);
+                if (used != value.size() || launchMinLod < 0)
+                    throw std::invalid_argument("invalid LOD index");
+            } catch (const std::exception&) {
+                return Fail("bad option", "-minlod needs a non-negative LOD index, got \"" +
+                                              value + "\"");
+            }
+        } else if (std::strcmp(argv[i], "-striplods") == 0) {
+            stripLods = true;
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
             definebones = true;
+        } else if (std::strcmp(argv[i], "-verify") == 0) {
+            verify = true;
+        } else if (std::strcmp(argv[i], "-dumpmaterials") == 0) {
+            dumpMaterials = true;
         } else if (std::strcmp(argv[i], "-perfmetrics") == 0) {
             pulse::perf::g_enabled = true;
         } else if (std::strcmp(argv[i], "-pause") == 0) {
@@ -161,10 +192,15 @@ static int RunCompile(int argc, char** argv) {
     pulse::compile::CompileInput input;
     // pre-seeded so a script without $modelname still loads under -modelname
     input.outname = modelname;
+    input.stripLods = stripLods;
     g_stage = "script load";
     if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs))
         return Fail("script error", err);
     auto tLoad = Clock::now();
+    if (stripLods)
+        input.minLod = 0;
+    else if (launchMinLod >= 0)
+        input.minLod = launchMinLod;
     if (!modelname.empty()) {
         // -modelname wins over $modelname; extension stripped the same way
         const size_t dot = modelname.find_last_of('.');
@@ -182,16 +218,24 @@ static int RunCompile(int argc, char** argv) {
         return Fail("compile error", err);
     auto tCompile = Clock::now();
 
+    if (dumpMaterials) {
+        std::printf("Used materials:\n");
+        for (int texture : model.mats->materialToTexture)
+            std::printf("  %s\n", model.mats->textures[texture].name.c_str());
+    }
+
     if (definebones) {
         g_stage = "definebones";
         DumpDefineBones(model);
         return 0;
     }
 
-    g_stage = "write";
-    if (!pulse::writer::WriteModelFiles(model, outdir,
-                                        /*legacyVtx=*/input.vtxArchetype == 0, &err))
-        return Fail("write error", err);
+    if (!verify) {
+        g_stage = "write";
+        if (!pulse::writer::WriteModelFiles(model, outdir,
+                                            /*legacyVtx=*/input.vtxArchetype == 0, &err))
+            return Fail("write error", err);
+    }
     auto tWrite = Clock::now();
     g_stage = "done";
 

@@ -49,8 +49,11 @@ spellings alongside the `.pulseqc` ones, so no conversion step is needed.
 
 ```
 mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
-            [-includesearchdir <dir>] [-filesearchdir <dir>] [-vtxformat <0|1>]
-            [-definebones] [-perfmetrics] [-dumpcommands] [-pause]
+            [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
+            [-vtxformat <0|1>]
+            [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
+            [-perfmetrics]
+            [-dumpcommands] [-pause]
 ```
 
 | Option | Meaning |
@@ -60,11 +63,19 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
 | `-defvar <name> <value>` | Define a script variable (`$name$`) before the script runs. Repeatable; the script cannot override it. |
 | `-includesearchdir <dir>` | Extra fallback directory for `$include`, searched after any `$addincludesearchdir`. Repeatable. |
 | `-filesearchdir <dir>` | Extra fallback directory for source files, searched after any `$addsearchdir`. Repeatable. |
+| `-tempcontent <dir>` | Synonym for `-filesearchdir`. |
 | `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. 0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW). |
+| `-striplods` | Ignore all `$lod` and `$shadowlod` commands and compile only the original root LOD. |
+| `-minlod <lod>` | Discard higher-detail LODs and promote the zero-based LOD index to root, overriding `$minlod` in the script. |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
+| `-verify` | Compile the model without writing output files. |
+| `-dumpmaterials` | Print the names of materials used by the compiled model. |
 | `-perfmetrics` | Print wall time in ms for each stage of the compile. |
 | `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
+
+The QC command `$minlod <lod>` sets the same zero-based minimum LOD. A
+command-line `-minlod` value takes precedence.
 
 ## mdldecompiler
 

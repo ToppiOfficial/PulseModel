@@ -5879,6 +5879,14 @@ bool ParseDecimateModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
 //
 // A shadow LOD reserves switch value -1, which is what identifies it to the
 // engine, and has facial animation off by default.
+bool CmdMinLod(Ctx& c, const Token& cmd) {
+    if (!c.WantInt("a non-negative LOD index", cmd, c.in.minLod))
+        return false;
+    if (c.in.minLod < 0)
+        return c.Fail(cmd.line, "$minlod must be non-negative");
+    return true;
+}
+
 bool CmdLod(Ctx& c, const Token& cmd) {
     const bool isShadow = _stricmp(cmd.text.c_str(), "$shadowlod") == 0;
 
@@ -8276,6 +8284,7 @@ constexpr Command kCommands[] = {
     {"$overridematerial", CmdOverrideMaterial},
     {"$texturegroup", CmdTextureGroup},
     {"$meshsortorder", CmdMeshSortOrder},
+    {"$minlod", CmdMinLod},
     {"$lod", CmdLod},
     {"$shadowlod", CmdLod},
 };
@@ -8293,6 +8302,12 @@ bool RunCommands(Ctx& c) {
     while (!c.Eof()) {
         if (c.scriptBreak) // $break, here or in a file this one $included
             return true;
+        if (c.in.stripLods && !c.toks[c.pos].quoted &&
+            (_stricmp(c.toks[c.pos].text.c_str(), "$lod") == 0 ||
+             _stricmp(c.toks[c.pos].text.c_str(), "$shadowlod") == 0)) {
+            c.pos = CommandExtent(c);
+            continue;
+        }
         if (!ExpandCommandVars(c))
             return false;
 

@@ -10759,13 +10759,26 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     { PULSE_TIME_PASS("CullAnimations"); CullAnimations(ctx); }
 
     // ---- LODs ----
-    // Index 0 is the root LOD no script block writes; $lod/$shadowlod fill the
-    // rest. This has to happen before the bone pipeline so that a replacemodel
-    // or decimated source is bone-remapped along with everything else
-    // (reference: LoadLODSources before RemapBones).
-    out.scriptLods.assign(1, ScriptLod{});
-    out.scriptLods.insert(out.scriptLods.end(), input.scriptLods.begin(),
-                          input.scriptLods.end());
+    // This has to happen before the bone pipeline so that a replacemodel or
+    // decimated source is bone-remapped along with everything else.
+    size_t regularLods = input.scriptLods.size();
+    if (regularLods && input.scriptLods.back().IsShadow())
+        regularLods--;
+    if (input.minLod > static_cast<int>(regularLods)) {
+        if (err) *err = "$minlod selects LOD " + std::to_string(input.minLod) +
+                        ", but only LODs 0 through " + std::to_string(regularLods) +
+                        " are available";
+        return false;
+    }
+    if (input.minLod == 0) {
+        out.scriptLods.assign(1, ScriptLod{});
+        out.scriptLods.insert(out.scriptLods.end(), input.scriptLods.begin(),
+                              input.scriptLods.end());
+    } else {
+        out.scriptLods.assign(input.scriptLods.begin() + input.minLod - 1,
+                              input.scriptLods.end());
+        out.scriptLods.front().switchValue = 0.0f;
+    }
     if (out.scriptLods.size() > static_cast<size_t>(lim::kMaxNumLods)) {
         if (err) *err = "too many LODs";
         return false;

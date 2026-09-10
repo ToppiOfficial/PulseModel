@@ -1342,9 +1342,11 @@ struct CompileInput {
     };
     std::vector<InBodyGroupPreset> bodygrouppresets;
 
-    // $lod / $shadowlod. Compile() prepends the implicit root LOD, so what the
-    // front end stores here is LOD 1 and up, in script order.
+    // $lod / $shadowlod. Compile() prepends the implicit root LOD unless
+    // $minlod promotes an authored LOD to the root.
     std::vector<ScriptLod> scriptLods;
+    int minLod = 0;
+    bool stripLods = false;
 
     struct InIkRule {
         std::string chain;
