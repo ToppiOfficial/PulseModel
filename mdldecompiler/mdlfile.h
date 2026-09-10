@@ -20,9 +20,9 @@ namespace pm = pulse::math;
 
 namespace mdldecompiler {
 
-// -studiomdl: emit the stock studiomdl spellings instead of the .pulseqc
-// ones. Set once from the command line; the mesh writer reads it too.
-inline bool g_studiomdl = false;
+// Emit the stock studiomdl spellings; the default. -pulseqc clears it to emit
+// the .pulseqc form. Set once from the command line; the mesh writer reads it too.
+inline bool g_studiomdl = true;
 
 // A loaded file plus bounds-checked access. Every offset in a .mdl is
 // attacker-controlled once the file is not ours, so nothing dereferences

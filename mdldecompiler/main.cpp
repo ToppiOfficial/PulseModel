@@ -32,6 +32,7 @@
 #include "goldsrc.h"
 #include "format/phy.h"
 #include "mdlfile.h"
+#include "perf.h"
 
 using namespace mdldecompiler;
 using pulse::fatal::Fail;
@@ -55,7 +56,7 @@ void PrintHeader() {
 int Usage() {
     std::printf("usage: mdldecompiler <file.mdl|folder> ... [-o <file.pulseqc>] [-outdir <dir>]\n");
     std::printf("                     [-forceversion <n>] [-dmxencoding <enc>] [-dmxmodel <n>]\n");
-    std::printf("                     [-smdanimation] [-studiomdl]\n");
+    std::printf("                     [-smdanimation] [-pulseqc]\n");
     std::printf("\n");
     std::printf("  several inputs may be given (drag-and-drop); a folder decompiles every\n");
     std::printf("  .mdl under it, recursively\n");
@@ -74,8 +75,9 @@ int Usage() {
     std::printf("  -dmxmodel <n> the `format model` version they declare: 15 (default),\n");
     std::printf("                1, 18, or 22 for Source 2 modeldoc\n");
     std::printf("  -smdanimation write the animation clips as .smd instead of .dmx\n");
-    std::printf("  -studiomdl    write a stock-studiomdl .qc instead of a .pulseqc\n");
+    std::printf("  -pulseqc      write a .pulseqc instead of the default stock .qc\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
+    std::printf("  -perfmetrics  print wall time in ms per process once the run ends\n");
     return 1;
 }
 
@@ -2320,6 +2322,23 @@ std::vector<std::string> IkRules(const Mdl& m, const fm::mstudioanimdesc_t& a) {
                 std::to_string(std::lround(r.peak * lastframe)) + " " +
                 std::to_string(std::lround(r.tail * lastframe)) + " " +
                 std::to_string(std::lround(r.end * lastframe));
+        if (r.type == fm::IK_SELF && a.numframes == 1) {
+            const auto* error =
+                m.At<fm::mstudiocompressedikerror_t>(&r, r.compressedikerrorindex);
+            if (error) {
+                float value[6] = {};
+                for (int axis = 0; axis < 6; ++axis) {
+                    const auto* stream = m.At<fm::mstudioanimvalue_t>(error, error->offset[axis]);
+                    const auto* sample = stream && stream->num.valid
+                                             ? m.At<fm::mstudioanimvalue_t>(stream, sizeof(*stream))
+                                             : nullptr;
+                    if (sample)
+                        value[axis] = sample->value * error->scale[axis];
+                }
+                line += " fakeorigin " + V3({value[0], value[1], value[2]});
+                line += " fakerotate " + QAngleDeg({value[3], value[4], value[5]});
+            }
+        }
         out.push_back(std::move(line));
     }
     return out;
@@ -2764,11 +2783,18 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
         return DecompileGoldSrc(in, dir, OutScript(dir, out));
     }
 
+    using Clock = std::chrono::steady_clock;
+    auto ms = [](Clock::time_point a, Clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    const auto t0 = Clock::now();
+
     pulse::fatal::g_stage = "read";
     Mdl m;
     std::string err;
     if (!ReadFile(in.c_str(), m, forceVersion, err))
         return Fail("read error", err);
+    const auto tRead = Clock::now();
 
     const fm::studiohdr_t& h = *m.hdr;
     std::printf("model:       \"%s\"\n", h.name);
@@ -2819,7 +2845,9 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
     // loader makes on its own and has no block; a negative switch is the shadow LOD.
     std::printf("\nmeshes:\n");
     pulse::fatal::g_stage = "WriteRenderMeshes";
+    const auto tMesh0 = Clock::now();
     const std::vector<LodInfo> lods = WriteRenderMeshes(m, in, dir, meshNames, rig);
+    const auto tMesh1 = Clock::now();
     // The LOD meshes come out of the .vvd already rigged, so stock must not
     // re-derive their weights from LOD 0 the way an authored LOD needs.
     if (g_studiomdl && lods.size() > 1) {
@@ -2871,16 +2899,28 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
     STAGE(WriteAnimations, q, m);
     STAGE(WriteSequences, q, m);
     STAGE(WriteIncludeModels, q, m);
+    const auto tPhys0 = Clock::now();
     STAGE(WritePhysics, q, m, in, dir);
+    const auto tPhys1 = Clock::now();
     STAGE(WriteKeyValues, q, m);
     std::fclose(f);
 
     if (h.numlocalanim > 0)
         std::printf("\nanimations:\n");
+    const auto tAnim0 = Clock::now();
     STAGE(WriteAnimationFiles, m, in, dir);
+    const auto tAnim1 = Clock::now();
 
     pulse::fatal::g_stage = "done";
     std::printf("\nwrote %s\n", outPath.c_str());
+
+    if (pulse::perf::g_enabled) {
+        pulse::perf::Record("total", "read", ms(t0, tRead));
+        pulse::perf::Record("total", "mesh dmx write", ms(tMesh0, tMesh1));
+        pulse::perf::Record("total", "physics write", ms(tPhys0, tPhys1));
+        pulse::perf::Record("total", "animation write", ms(tAnim0, tAnim1));
+        pulse::perf::Record("total", "whole decompile", ms(t0, Clock::now()));
+    }
     return 0;
 }
 
@@ -2907,10 +2947,14 @@ int RunDecompile(int argc, char** argv) {
             dmxModel = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "-smdanimation") == 0)
             SetAnimFormat(true);
+        else if (std::strcmp(argv[i], "-pulseqc") == 0)
+            g_studiomdl = false;
         else if (std::strcmp(argv[i], "-studiomdl") == 0)
-            g_studiomdl = true;
+            g_studiomdl = true; // now the default; still accepted so old runs work
         else if (std::strcmp(argv[i], "-pause") == 0)
             pulse::fatal::g_pause = true;
+        else if (std::strcmp(argv[i], "-perfmetrics") == 0)
+            pulse::perf::g_enabled = true;
         else
             inputs.push_back(argv[i]);
     }
@@ -2931,10 +2975,15 @@ int RunDecompile(int argc, char** argv) {
     }
     if (files.empty())
         return Fail("command line", "no .mdl files found");
-    if (files.size() > 1 && out) {
-        std::printf("-o names one script - ignored, %zu models are being decompiled\n",
-                    files.size());
-        out = nullptr;
+    if (files.size() > 1) {
+        // batch runs are usually drag-and-drop; hold the window so the summary
+        // stays readable even if -pause was not passed
+        pulse::fatal::g_pause = true;
+        if (out) {
+            std::printf("-o names one script - ignored, %zu models are being decompiled\n",
+                        files.size());
+            out = nullptr;
+        }
     }
 
     // one bad model must not end a batch, so each is guarded on its own
@@ -2953,6 +3002,7 @@ int RunDecompile(int argc, char** argv) {
     if (files.size() > 1)
         std::printf("\n%zu of %zu decompiled, %d failed\n", files.size() - failed, files.size(),
                     failed);
+    pulse::perf::Report();
     return failed ? 1 : 0;
 }
 

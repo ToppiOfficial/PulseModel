@@ -333,13 +333,13 @@ struct Ctx {
         return true;
     }
 
-    // Like WantInt but accepts studiomdl's "." placeholder as -1 (the ikrule
-    // `range` frame markers).
+    // Like WantInt but any token starting with "." (".", "..", ...) is the
+    // unset placeholder -> -1 (the ikrule `range` frame markers).
     bool WantFrame(const char* what, const Token& cmd, int& value) {
         std::string s;
         if (!Want(what, cmd, s))
             return false;
-        if (s == ".") { value = -1; return true; }
+        if (!s.empty() && s[0] == '.') { value = -1; return true; }
         try {
             size_t used = 0;
             const int v = std::stoi(s, &used);
@@ -1954,9 +1954,10 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         std::vector<cm::CompileInput::InIkRule> one;
         if (!ParseIkRule(c, t, one))
             return -1;
-        if (_stricmp(one[0].type.c_str(), "footstep") != 0) {
-            c.Fail(t.line, "ikfixup: only the footstep type bakes a correction "
-                           "(got \"" + one[0].type + "\") - use ikrule instead");
+        // autosteps fans one rule into N; the single-rule bake path cannot
+        // express that. Use ikrule autosteps for the runtime rule instead.
+        if (one[0].autosteps) {
+            c.Fail(t.line, "ikfixup: autosteps is not supported here - use ikrule autosteps");
             return -1;
         }
         cm::CompileInput::InAnim::InCmd cmd;
@@ -1982,6 +1983,101 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 !c.WantFrame("a tail frame", t, cmd.driverTail) ||
                 !c.WantFrame("an end frame", t, cmd.driverEnd))
                 return -1;
+        }
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
+    // derivative <scale>: replace each frame with its scaled delta from the
+    // previous one.
+    if (_stricmp(o.c_str(), "derivative") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::Derivative;
+        if (!c.WantFloat("a derivative scale", t, cmd.derivativeScale))
+            return -1;
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
+    // noanimation collapses to one zeroed delta frame; noanim_keepduration sets
+    // the same delta flags but keeps the frame count and bone data.
+    if (_stricmp(o.c_str(), "noanimation") == 0 ||
+        _stricmp(o.c_str(), "noanim_keepduration") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::NoAnim;
+        cmd.keepDuration = _stricmp(o.c_str(), "noanim_keepduration") == 0;
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
+    // lineardelta subtracts a straight frame0->last baseline; splinedelta eases
+    // that baseline with 3s^2-2s^3.
+    if (_stricmp(o.c_str(), "lineardelta") == 0 ||
+        _stricmp(o.c_str(), "splinedelta") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::LinearDelta;
+        cmd.splineDelta = _stricmp(o.c_str(), "splinedelta") == 0;
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
+    // compress <frames>: downsample, keeping frame 0 then every Nth frame.
+    if (_stricmp(o.c_str(), "compress") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::Compress;
+        if (!c.WantInt("a frame skip", t, cmd.compressFrames))
+            return -1;
+        if (cmd.compressFrames < 1) {
+            c.Fail(t.line, "compress frames must be >= 1");
+            return -1;
+        }
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
+    // counterrotate <bone>: strip the bone's world rotation (target from the
+    // default pose). counterrotateto <p> <y> <r> <bone>: explicit target.
+    if (_stricmp(o.c_str(), "counterrotate") == 0 ||
+        _stricmp(o.c_str(), "counterrotateto") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::CounterRotate;
+        if (_stricmp(o.c_str(), "counterrotateto") == 0) {
+            cmd.counterHasTarget = true;
+            if (!c.WantFloat("a pitch", t, cmd.counterAngles.x) ||
+                !c.WantFloat("a yaw", t, cmd.counterAngles.y) ||
+                !c.WantFloat("a roll", t, cmd.counterAngles.z))
+                return -1;
+        }
+        if (!c.Want("a bone name", t, cmd.alignBone))
+            return -1;
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
+    // forceboneposrot <bone> [pos x y z] [rot x y z [local]]: overwrite a bone's
+    // local pos and/or rotation every frame. rot is world-space unless `local`
+    // is given or the bone is rootless.
+    if (_stricmp(o.c_str(), "forceboneposrot") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::ForceBonePosRot;
+        if (!c.Want("a bone name", t, cmd.alignBone))
+            return -1;
+        if (!c.AtCommand() && !c.Cur().quoted &&
+            _stricmp(c.Cur().text.c_str(), "pos") == 0) {
+            c.Next();
+            cmd.forceDoPos = true;
+            if (!c.WantFloat("pos x", t, cmd.forcePos.x) ||
+                !c.WantFloat("pos y", t, cmd.forcePos.y) ||
+                !c.WantFloat("pos z", t, cmd.forcePos.z))
+                return -1;
+        }
+        if (!c.AtCommand() && !c.Cur().quoted &&
+            _stricmp(c.Cur().text.c_str(), "rot") == 0) {
+            c.Next();
+            cmd.forceDoRot = true;
+            if (!c.WantFloat("rot x", t, cmd.forceRot.x) ||
+                !c.WantFloat("rot y", t, cmd.forceRot.y) ||
+                !c.WantFloat("rot z", t, cmd.forceRot.z))
+                return -1;
+            if (!c.AtCommand() && !c.Cur().quoted &&
+                _stricmp(c.Cur().text.c_str(), "local") == 0) {
+                c.Next();
+                cmd.forceRotLocal = true;
+            }
         }
         a.cmds.push_back(std::move(cmd));
         return 1;
@@ -2693,9 +2789,17 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
             return false;
     } else if (_stricmp(type.c_str(), "release") == 0) {
         rule.type = "release";
+    } else if (_stricmp(type.c_str(), "unlatch") == 0) {
+        rule.type = "unlatch";
+    } else if (_stricmp(type.c_str(), "autosteps") == 0) {
+        rule.type = "footstep";
+        rule.autosteps = true;
+        if (!c.WantInt("a step count", cmd, rule.autostepsCount) ||
+            !c.Want("a foot bone name", cmd, rule.autostepsBone))
+            return false;
     } else {
         return c.Fail(cmd.line, "ikrule type \"" + type + "\": not yet supported "
-                                "(expected touch/footstep/attachment/release)");
+                                "(expected touch/footstep/attachment/release/unlatch/autosteps)");
     }
 
     // trailing options, in any order (Option_IKRule stops at the first token it
@@ -3763,6 +3867,12 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                 return c.Fail(t.line, "\"" + o + "\": " + why);
         }
 
+        // a sequence-body `ignorescale` fans out to the whole blend grid plus
+        // blendref/blendcomp/blendcenter at compile; flag it here (it still
+        // lands on blend anim 0 below like any option).
+        if (!t.quoted && _stricmp(t.text.c_str(), "ignorescale") == 0)
+            seq.ignorescale = true;
+
         // --- animation options apply to blend anim 0, once one exists (stock
         //     routes ParseAnimationToken to animations[0]) ---
         if (!blends.empty()) {
@@ -3854,6 +3964,7 @@ bool CmdSequenceCommon(Ctx& c, const Token& cmd, bool bindpose) {
         dst.scale = src0.scale;
         dst.rotation = src0.rotation;
         dst.rotationSet = src0.rotationSet;
+        dst.motiontype = src0.motiontype;
         dst.cmds.insert(dst.cmds.end(), src0.cmds.begin(), src0.cmds.end());
         dst.ikrules.insert(dst.ikrules.end(), src0.ikrules.begin(), src0.ikrules.end());
     }

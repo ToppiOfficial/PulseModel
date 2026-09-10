@@ -419,6 +419,11 @@ struct IkRule {
     int contact = 0;
     bool usesequence = false;
     bool usesource = false;
+    bool fakeTransform = false;
+    // autosteps: expand into autostepsCount footstep rules by detecting foot
+    // contacts on `bonename`, before the frame-range cascade in ProcessIKRules.
+    bool autosteps = false;
+    int autostepsCount = 0;
     int flags = 0;
     AnimStream errorData;
 };
@@ -458,7 +463,8 @@ struct AnimCmd {
     enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
-                IkFixup, LocalHierarchy } kind = Weights;
+                IkFixup, LocalHierarchy, Derivative, NoAnim, LinearDelta,
+                Compress, CounterRotate, ForceBonePosRot } kind = Weights;
     int weightlistIndex = 0; // Weights: index into CompileInput::weightlists+1 space
     int numframes = 0;       // NumFrames: the length to clip or pad to
     int subtractAnim = -1;   // Subtract: index into CompiledModel::anims
@@ -501,6 +507,16 @@ struct AnimCmd {
     // LocalHierarchy: alignBone is the bone, parentBone its new parent
     // ("" = worldspace), driverStart/Peak/Tail/End the frame range (-1 = unset)
     std::string parentBone;
+    float derivativeScale = 1.0f; // Derivative
+    bool keepDuration = false;    // NoAnim: keep frames, don't zero
+    bool splineDelta = false;     // LinearDelta: ease the baseline
+    int compressFrames = 0;       // Compress: frameskip
+    // CounterRotate/ForceBonePosRot: bone in `alignBone`. Angle triples are
+    // authored degrees (pitch, yaw, roll), converted at apply.
+    bool counterHasTarget = false;
+    Vector3 counterAngles;
+    bool forceDoPos = false, forceDoRot = false, forceRotLocal = false;
+    Vector3 forcePos, forceRot;
 };
 
 // one extracted motion segment (reference s_linearmove_t) - written as
@@ -1332,7 +1348,7 @@ struct CompileInput {
 
     struct InIkRule {
         std::string chain;
-        std::string type;      // footstep|touch|attachment|release
+        std::string type;      // footstep|touch|attachment|release|unlatch
         std::string touchBone; // IK_SELF target ("" = worldspace)
         std::string attachment;
         float height = 0, floor = 0, radius = 0;
@@ -1345,6 +1361,11 @@ struct CompileInput {
         Vector3 fakeorigin;
         Vector3 fakerotate; // degrees
         bool fakeoriginSet = false, fakerotateSet = false;
+        // autosteps <count> <bone>: detect foot contacts and fan out into count
+        // footstep rules. type is forced to footstep; the tracked bone is here.
+        bool autosteps = false;
+        int autostepsCount = 0;
+        std::string autostepsBone;
     };
     struct InAnim {
         std::string name; // "@<seq>" when implied
@@ -1361,7 +1382,8 @@ struct CompileInput {
             enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
-                IkFixup, LocalHierarchy } kind = Weights;
+                IkFixup, LocalHierarchy, Derivative, NoAnim, LinearDelta,
+                Compress, CounterRotate, ForceBonePosRot } kind = Weights;
             std::string name;   // Weights: weightlist; Subtract/Align/Match: animation
                                 // CopyPose: an animation OR a sequence
             int frame = 0;      // Subtract: reference frame
@@ -1390,6 +1412,16 @@ struct CompileInput {
             InIkRule ikfixup;        // IkFixup
             // LocalHierarchy: bone in `alignBone`, new parent in `name`
             // ("" = worldspace), range in driverStart/Peak/Tail/End (-1 unset)
+            float derivativeScale = 1.0f; // Derivative
+            bool keepDuration = false;    // NoAnim: keep frames, don't zero
+            bool splineDelta = false;     // LinearDelta: ease the baseline
+            int compressFrames = 0;       // Compress: frameskip
+            // CounterRotate/ForceBonePosRot: bone in `alignBone`. Angle triples
+            // are authored degrees (pitch, yaw, roll), converted at apply.
+            bool counterHasTarget = false;
+            Vector3 counterAngles;
+            bool forceDoPos = false, forceDoRot = false, forceRotLocal = false;
+            Vector3 forcePos, forceRot;
         };
         std::vector<InCmd> cmds;
         // clip trim (`frame <a> <b>` / `framestart <a>`). endframe -1 = run to
@@ -1472,6 +1504,9 @@ struct CompileInput {
         std::string paramanim;      // blendref: what "zero" looks like
         std::string paramcompanim;  // blendcomp: base for delta grid anims
         std::string paramcenter;    // blendcenter: the grid's neutral cell
+        // `ignorescale` in the sequence body: fans out to every blend anim plus
+        // blendref/blendcomp/blendcenter, unlike a named anim's own ignorescale.
+        bool ignorescale = false;
         std::vector<IkLock> iklocks;   // chain by name, resolved in LinkIKLocks
     };
     // $sectionframes: animation sectioning thresholds. An animation of at least

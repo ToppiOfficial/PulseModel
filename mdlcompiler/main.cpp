@@ -221,60 +221,6 @@ static int RunCompile(int argc, char** argv) {
     return 0;
 }
 
-namespace pulse::perf {
-
-bool g_enabled = false;
-
-namespace {
-struct Entry {
-    const char* tag;
-    const char* name;
-    double ms = 0;
-    int calls = 0;
-};
-std::vector<Entry> g_entries;
-} // namespace
-
-void Record(const char* tag, const char* name, double ms) {
-    for (Entry& e : g_entries) {
-        if (std::strcmp(e.tag, tag) == 0 && std::strcmp(e.name, name) == 0) {
-            e.ms += ms;
-            e.calls++;
-            return;
-        }
-    }
-    g_entries.push_back({tag, name, ms, 1});
-}
-
-// One table at the end, grouped by tag in the order the tags first appeared.
-// A stage under 1 ms is dropped - it is noise next to the ones that matter.
-void Report() {
-    if (!g_enabled)
-        return;
-    std::printf("---------------------\n-perfmetrics\n");
-    std::vector<const char*> tags;
-    for (const Entry& e : g_entries) {
-        bool seen = false;
-        for (const char* t : tags)
-            seen = seen || std::strcmp(t, e.tag) == 0;
-        if (!seen)
-            tags.push_back(e.tag);
-    }
-    for (const char* tag : tags) {
-        std::printf("  [%s]\n", tag);
-        for (const Entry& e : g_entries) {
-            if (std::strcmp(e.tag, tag) != 0 || e.ms < 1.0)
-                continue;
-            if (e.calls > 1)
-                std::printf("    %-30s %9.1f ms  (%d calls)\n", e.name, e.ms, e.calls);
-            else
-                std::printf("    %-30s %9.1f ms\n", e.name, e.ms);
-        }
-    }
-}
-
-} // namespace pulse::perf
-
 int main(int argc, char** argv) {
     // progress lines are useless if they sit in the CRT buffer until exit -
     // MSVC has no line buffering (_IOLBF == _IOFBF), so go unbuffered

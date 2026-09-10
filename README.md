@@ -42,7 +42,8 @@ that compiles is not guaranteed to load - the engine you ship to decides that.
 The script is `.pulseqc` (a `.qc` extension is read as the same format). It looks
 like QC and shares much of its vocabulary, but **it is not stock QC** - commands
 have been removed, renamed and reshaped, and an unrecognized `$command` is an
-error. A stock `.qc` input is converted in-process before the loader runs.
+error. A stock `.qc` input is read directly - the loader accepts the stock
+spellings alongside the `.pulseqc` ones, so no conversion step is needed.
 
 ### Usage
 
@@ -78,11 +79,16 @@ the job; it writes what it can parse and tells you what it skipped.
 
 ```
 mdldecompiler <file.mdl|folder> ... [-o <file>] [-outdir <dir>] [-forceversion <n>]
-              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-studiomdl] [-pause]
+              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-pulseqc] [-pause]
+              [-perfmetrics]
 ```
 
 Several inputs may be given at once (drag-and-drop works); a folder decompiles
-every `.mdl` under it, recursively.
+every `.mdl` under it, recursively. A batch of more than one model always pauses
+before exiting so the summary stays on screen.
+
+By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the `.pulseqc`
+form. Either compiles back through `mdlcompiler`.
 
 | Option | Meaning |
 | --- | --- |
@@ -92,8 +98,9 @@ every `.mdl` under it, recursively.
 | `-dmxencoding <enc>` | How the `.dmx` meshes are encoded: `binary` (default) or `keyvalues2` text. |
 | `-dmxmodel <n>` | The `format model` version they declare: 15 (default), 1, 18, or 22 (Source 2 ModelDoc). |
 | `-smdanimation` | Write animation clips as `.smd` instead of `.dmx`. |
-| `-studiomdl` | Write a stock-studiomdl `.qc` instead of a `.pulseqc`. |
+| `-pulseqc` | Write a `.pulseqc` instead of the default stock-studiomdl `.qc`. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
+| `-perfmetrics` | Print wall time in ms per process once the run ends; a batch sums each process across all models. |
 
 ## Building
 
