@@ -419,7 +419,6 @@ struct IkRule {
     int contact = 0;
     bool usesequence = false;
     bool usesource = false;
-    bool fakeTransform = false;
     // autosteps: expand into autostepsCount footstep rules by detecting foot
     // contacts on `bonename`, before the frame-range cascade in ProcessIKRules.
     bool autosteps = false;

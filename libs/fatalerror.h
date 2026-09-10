@@ -12,7 +12,10 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <conio.h>
+#include <io.h>
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace pulse {
@@ -28,6 +31,15 @@ inline bool g_pause = false;
 inline void PauseIfAsked() {
     if (!g_pause)
         return;
+    // no window to hold open when stdout is redirected or piped, and reading a key
+    // would block on input nothing can reach - only pause on an interactive terminal
+#ifdef _WIN32
+    if (!_isatty(_fileno(stdout)))
+        return;
+#else
+    if (!isatty(fileno(stdout)))
+        return;
+#endif
     g_pause = false; // a crash after the normal footer must not ask twice
     std::printf("Press any key to exit...");
     std::fflush(stdout);

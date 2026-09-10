@@ -8150,11 +8150,6 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
                 }
 
                 for (int k = 0; k < numerror; k++) {
-                    if (pRule->fakeTransform) {
-                        pRule->errorData.error[k].q = pRule->q;
-                        pRule->errorData.error[k].pos = pRule->pos;
-                        continue;
-                    }
                     sample(k + pRule->start);
 
                     matrix3x4 local;
@@ -10033,7 +10028,6 @@ bool ConvertIkRule(const CompileInput& input, const CompileInput::InIkRule& ir,
     if (ir.fakeoriginSet) {
         rule.pos = ir.fakeorigin;
         rule.bone = -1;
-        rule.fakeTransform = true;
     }
     if (ir.fakerotateSet) {
         // QAngle degrees (pitch,yaw,roll) -> RadianEuler(roll,pitch,yaw)
@@ -10041,7 +10035,6 @@ bool ConvertIkRule(const CompileInput& input, const CompileInput::InIkRule& ir,
                         ir.fakerotate.y * pm::kDeg2Rad};
         pm::AngleQuaternion(rad, rule.q);
         rule.bone = -1;
-        rule.fakeTransform = true;
     }
     return true;
 }
