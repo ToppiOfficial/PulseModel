@@ -622,6 +622,28 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
     }
 }
 
+// BuildSWSkinnedStrips - one software-skinned tri-list strip: no hardware bone
+// palette, no bone-state changes, every group vert copied. dx80 flexed groups
+// (clamped to 1 bone) land here. Reference tri-list path only; SubD is unused.
+void BuildSWSkinnedStrips(std::vector<Face>& faceList,
+                          std::vector<fmt::vtx::Vertex_t>& vertices, StripGroup* pStripGroup) {
+    pStripGroup->strips.emplace_back();
+    Strip& strip = pStripGroup->strips.back();
+    strip.flags = fmt::vtx::STRIP_IS_TRILIST;
+
+    std::vector<uint16_t> indices;
+    indices.reserve(faceList.size() * 3);
+    for (Face& f : faceList) {
+        f.touched = true;
+        indices.push_back(static_cast<uint16_t>(f.vertID[0]));
+        indices.push_back(static_cast<uint16_t>(f.vertID[1]));
+        indices.push_back(static_cast<uint16_t>(f.vertID[2]));
+    }
+    Stripify(indices, strip);
+    strip.verts = vertices;
+    strip.numBoneStateChanges = 0;
+}
+
 // Does any vertex of this mesh carry a morph delta? If not, the flexed strip
 // group is guaranteed empty and its whole pass can be skipped.
 bool MeshHasFlexedVerts(fmt::mstudiomesh_t* pStudioMesh) {
@@ -637,10 +659,19 @@ bool MeshHasFlexedVerts(fmt::mstudiomesh_t* pStudioMesh) {
 
 // ProcessStripGroup
 void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, bool bIsFlexed,
-                       fmt::mstudiomodel_t* pStudioModel, fmt::mstudiomesh_t* pStudioMesh,
+                       bool bHWFlex, fmt::mstudiomodel_t* pStudioModel,
+                       fmt::mstudiomesh_t* pStudioMesh,
                        const std::vector<source::SrcFace>& srcFaces,
                        std::vector<bool>& facesProcessed, int maxBonesPerVert,
                        int maxBonesPerFace, int maxBonesPerStrip, bool bForceNoFlex) {
+    // Software flex (dx80): a flexed group collapses to single-bone limits so it
+    // is skinned in software. Hardware flex (dx90) keeps the full maxima.
+    if (bIsFlexed && !bHWFlex) {
+        maxBonesPerVert = 1;
+        maxBonesPerFace = 1;
+        maxBonesPerStrip = 1;
+    }
+
     // ComputeStripGroupFlags: a flexed group sets BOTH the
     // software-flex and hardware-delta-flex bits
     pStripGroup->flags = 0;
@@ -661,7 +692,7 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
             continue;
 
         const source::SrcFace& face = srcFaces[n];
-        int preferredBones = bIsHWSkinned ? maxBonesPerVert : 0;
+        int preferredBones = (bIsHWSkinned && (bHWFlex || !bIsFlexed)) ? maxBonesPerVert : 0;
 
         fmt::vtx::Vertex_t stripGroupVert[3];
         bool bFaceIsFlexed = GenerateStripGroupVerticesFromFace(
@@ -720,7 +751,8 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
     if (bIsHWSkinned)
         BuildHWSkinnedStrips(b, stripGroupSourceFaces, stripGroupVertices, pStripGroup,
                              maxBonesPerStrip, pStudioModel, pStudioMesh);
-    // (software path: all faces already consumed by the HW pass)
+    else
+        BuildSWSkinnedStrips(stripGroupSourceFaces, stripGroupVertices, pStripGroup);
 }
 
 // how many verts this strip will contribute to its group (each strip gets its
@@ -797,10 +829,13 @@ void PostProcessStripGroup(StripGroup* src, std::vector<StripGroup>& out) {
 } // namespace
 
 std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
-                              std::vector<uint8_t>& vvdBuf, bool legacyVtx) {
+                              std::vector<uint8_t>& vvdBuf, bool legacyVtx, bool dx80) {
     Builder b;
     b.m = &m;
     b.mdlBuf = &mdlBuf;
+    // dx80: tighter hardware limit (more, smaller strips) and no hardware flex.
+    b.maxBonesPerStrip = dx80 ? 16 : 53;
+    const bool hwFlex = !dx80;
     // work on a COPY of the vvd: the reference mutates its cached vvd (bone
     // weight merge / renormalize) but the on-disk vvd keeps the original bytes
     std::vector<uint8_t> vvdCopy = vvdBuf;
@@ -876,9 +911,9 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
 
                     // 4 passes: hw+flexed, hw+nonflexed, sw+flexed, sw+nonflexed.
                     // Empty groups are dropped below, so a model with no flexes
-                    // still emits only hw+nonflexed.
-                    // We write .dx90.vtx = hardware flex, so the bone maxima are
-                    // NOT clamped to 1 (reference bHWFlex path).
+                    // still emits only hw+nonflexed. dx90 (hwFlex) keeps flexed
+                    // groups hardware-skinned; dx80 clamps them to 1 bone, which
+                    // routes them into the software-skinned pass.
                     const bool anyFlexed =
                         scriptLod.facialAnimation && MeshHasFlexedVerts(pStudioMesh);
                     for (int isHWSkinned = 1; isHWSkinned >= 0; --isHWSkinned) {
@@ -886,8 +921,8 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
                             if (isFlexed && !anyFlexed)
                                 continue;
                             StripGroup sg;
-                            ProcessStripGroup(b, &sg, isHWSkinned != 0, isFlexed != 0, pStudioModel,
-                                              pStudioMesh, meshFaces, facesProcessed,
+                            ProcessStripGroup(b, &sg, isHWSkinned != 0, isFlexed != 0, hwFlex,
+                                              pStudioModel, pStudioMesh, meshFaces, facesProcessed,
                                               b.maxBonesPerVert, b.maxBonesPerFace,
                                               b.maxBonesPerStrip, !scriptLod.facialAnimation);
                             PostProcessStripGroup(&sg, newMesh.stripGroups);
@@ -1240,7 +1275,7 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
         fh.vertCacheSize = 24;
         fh.maxBonesPerFace = 9;
         fh.maxBonesPerVert = 3;
-        fh.maxBonesPerStrip = 53;
+        fh.maxBonesPerStrip = static_cast<uint16_t>(b.maxBonesPerStrip);
         fh.numBodyParts = totalBodyParts;
         fh.bodyPartOffset = sizeof(fmt::vtx::FileHeader_t);
         fh.checkSum = phdr->checksum;

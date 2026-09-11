@@ -4076,6 +4076,11 @@ bool CmdVtxFormat(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $nodx80 - skip the DirectX 8 .dx80.vtx output. Only relevant when $vtxformat
+// is 0; archetype 1 (Alien Swarm+) never emits dx80. The -nodx80 launch switch
+// forces this on too.
+bool CmdNoDx80(Ctx& c, const Token&) { c.in.noDx80 = true; return true; }
+
 // $modelbudget { bones <n> materials <n> } - set the compile ceilings for this
 // model. Braces are optional for a single field. The pulselimits.h value is the
 // cap; bones default to 255 and must be raised here to go past it.
@@ -8226,6 +8231,7 @@ constexpr Command kCommands[] = {
     {"$simpleprop", CmdSimpleProp},
     {"$autocenter", CmdAutoCenter},
     {"$vtxformat", CmdVtxFormat},
+    {"$nodx80", CmdNoDx80},
     {"$modelbudget", CmdModelBudget},
     {"$setbindpose", CmdSetBindPose},
     {"$setflex", CmdSetFlex},

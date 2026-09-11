@@ -2376,7 +2376,7 @@ struct SGCommon {
 
 bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
                   std::vector<uint8_t>& vvdBuf, std::vector<uint8_t>& vtxBuf, bool legacyVtx,
-                  std::string* err) {
+                  std::string* err, std::vector<uint8_t>* vtxBuf2 = nullptr) {
     fmt::studiohdr_t* pStudioHdr = reinterpret_cast<fmt::studiohdr_t*>(mdlBuf.data());
     VtxNav vtx{vtxBuf.data(), legacyVtx};
     int numLODs = vtx.hdr()->numLODs;
@@ -2681,24 +2681,26 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
     }
 
     // ---- FixupVTXFile: remap origMeshVertIDs ----
-    {
+    // Buffer-local: reads the vvd sort (pools/vertexList) computed above and
+    // touches only the vtx buffer, so dx90 and dx80 both remap off one sort.
+    auto remapVtx = [&](VtxNav& nav) {
         int poolStart = 0;
         auto* bodyparts = reinterpret_cast<fmt::mstudiobodyparts_t*>(
             mdlBuf.data() + pStudioHdr->bodypartindex);
-        for (int i = 0; i < vtx.hdr()->numBodyParts; i++) {
-            fmt::vtx::BodyPartHeader_t* vbp = vtx.bodyPart(i);
+        for (int i = 0; i < nav.hdr()->numBodyParts; i++) {
+            fmt::vtx::BodyPartHeader_t* vbp = nav.bodyPart(i);
             fmt::mstudiobodyparts_t* bp = &bodyparts[i];
             auto* models = reinterpret_cast<fmt::mstudiomodel_t*>(
                 reinterpret_cast<uint8_t*>(bp) + bp->modelindex);
             for (int j = 0; j < vbp->numModels; j++) {
-                fmt::vtx::ModelHeader_t* vmh = vtx.model(vbp, j);
+                fmt::vtx::ModelHeader_t* vmh = nav.model(vbp, j);
                 fmt::mstudiomodel_t* sm = &models[j];
                 for (int currLod = 0; currLod < numLODs; currLod++) {
-                    fmt::vtx::ModelLODHeader_t* vlh = vtx.lod(vmh, currLod);
+                    fmt::vtx::ModelLODHeader_t* vlh = nav.lod(vmh, currLod);
                     for (int k = 0; k < vlh->numMeshes; k++) {
-                        fmt::vtx::MeshHeader_t* vmesh = vtx.mesh(vlh, k);
+                        fmt::vtx::MeshHeader_t* vmesh = nav.mesh(vlh, k);
                         for (int mm = 0; mm < vmesh->numStripGroups; mm++) {
-                            uint8_t* sgRaw = vtx.stripGroupRaw(vmesh, mm);
+                            uint8_t* sgRaw = nav.stripGroupRaw(vmesh, mm);
                             SGCommon* sg = reinterpret_cast<SGCommon*>(sgRaw);
                             for (int n = 0; n < sg->numVerts; n++) {
                                 auto* v = reinterpret_cast<fmt::vtx::Vertex_t*>(
@@ -2713,6 +2715,11 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
                 poolStart += sm->nummeshes;
             }
         }
+    };
+    remapVtx(vtx);
+    if (vtxBuf2) {
+        VtxNav vtx2{vtxBuf2->data(), legacyVtx};
+        remapVtx(vtx2);
     }
 
     // ---- FixupMDLFile: numLODVertexes + null material ptrs ----
@@ -2793,7 +2800,7 @@ bool SaveFile(const std::filesystem::path& path, const void* data, size_t len, s
 } // namespace
 
 bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legacyVtx,
-                     std::string* err) {
+                     bool writeDx80, std::string* err) {
     Buf buf(kFileBuffer);
 
     fmt::studiohdr_t* phdr = buf.Reserve<fmt::studiohdr_t>();
@@ -2990,15 +2997,26 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     auto wtVvd = WClock::now();
     wlog("BuildVvd", wt0, wtVvd);
 
-    // .vtx
+    // .vtx - dx90 always; dx80 too when asked (built from the same pre-fixup
+    // mdl/vvd, so both remap against one vvd sort in FixupBuffers)
+    // BuildVtx fills the shared g_vtxReport; snapshot each build's lines so the
+    // dx80 pass does not clobber the dx90 report before it is flushed.
     if (hasGeometry) stage("strip data (.vtx)");
     std::vector<uint8_t> vtxBuf = BuildVtx(m, mdlBuf, vvdBuf, legacyVtx);
+    std::vector<std::string> vtxReport, vtxReport80;
+    vtxReport.swap(g_vtxReport);
+    std::vector<uint8_t> vtxBuf80;
+    if (writeDx80 && hasGeometry) {
+        vtxBuf80 = BuildVtx(m, mdlBuf, vvdBuf, legacyVtx, /*dx80=*/true);
+        vtxReport80.swap(g_vtxReport);
+    }
     auto wtVtx = WClock::now();
     wlog("BuildVtx", wtVvd, wtVtx);
 
-    // fixup pass (mutates all three buffers)
+    // fixup pass (mutates all three buffers, and the dx80 vtx when present)
     if (hasGeometry) stage("vertex fixups");
-    if (!FixupBuffers(m, mdlBuf, vvdBuf, vtxBuf, legacyVtx, err))
+    if (!FixupBuffers(m, mdlBuf, vvdBuf, vtxBuf, legacyVtx, err,
+                      vtxBuf80.empty() ? nullptr : &vtxBuf80))
         return false;
     wlog("FixupBuffers", wtVtx, WClock::now());
 
@@ -3033,7 +3051,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     std::printf("total      %7zu\n", mdlBuf.size());
     if (!SaveFile(mdlPath, mdlBuf.data(), mdlBuf.size(), err)) return false;
 
-    std::string vvdPath, vtxPath;
+    std::string vvdPath, vtxPath, vtxPath80;
     if (hasGeometry) {
         vvdPath = announce(".vvd");
         FlushReport(g_vvdReport);
@@ -3044,9 +3062,17 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         std::printf("VTX format: %s\n", legacyVtx ? "0 - TF2/L4D2/GMod/HL2 (legacy 27-byte strips)"
                                                   : "1 - Alien Swarm/CS:GO/SFM (35-byte strips)");
         vtxPath = announce(".dx90.vtx");
-        FlushReport(g_vtxReport);
+        FlushReport(vtxReport);
         std::printf("everything (%zu bytes)\n", vtxBuf.size());
         if (!SaveFile(vtxPath, vtxBuf.data(), vtxBuf.size(), err)) return false;
+
+        // .dx80.vtx: DirectX 8 variant, same layout as the dx90 file
+        if (!vtxBuf80.empty()) {
+            vtxPath80 = announce(".dx80.vtx");
+            FlushReport(vtxReport80);
+            std::printf("everything (%zu bytes)\n", vtxBuf80.size());
+            if (!SaveFile(vtxPath80, vtxBuf80.data(), vtxBuf80.size(), err)) return false;
+        }
     }
 
     std::string aniPath, phyPath;
@@ -3103,6 +3129,9 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
                     vvdBuf.size());
         std::printf("  %-20s 0x%08X  %10zu bytes\n", name(vtxPath).c_str(), checksum,
                     vtxBuf.size());
+        if (!vtxPath80.empty())
+            std::printf("  %-20s 0x%08X  %10zu bytes\n", name(vtxPath80).c_str(), checksum,
+                        vtxBuf80.size());
     }
     if (!aniPath.empty())
         std::printf("  %-20s %-10s  %10zu bytes\n", name(aniPath).c_str(), "unchecksummed",

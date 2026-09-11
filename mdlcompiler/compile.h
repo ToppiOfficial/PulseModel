@@ -1104,6 +1104,9 @@ struct CompileInput {
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.
     int vtxArchetype = 0;
+    // $nodx80 / -nodx80: skip the DirectX 8 .dx80.vtx. dx80 is only emitted at
+    // all when vtxArchetype == 0 (archetype 1 is Alien Swarm+, which dropped it).
+    bool noDx80 = false;
     float scale = 1.0f;      // $scale
     Vector3 adjust;          // $origin translation (translatemodel)
     // rotatemodel, pre-converted to the reference's g_defaultrotation radians:

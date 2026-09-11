@@ -30,7 +30,8 @@ script preprocessor (`$include`, variables, macros, `$if`/`$ifdef`/`$switch`).
 DMX is the main source format; SMD and FBX also work. DMX files are read up to
 model format 22 / binary encoding 9 (Source 2 ModelDoc), and lower versions still
 work. Both `.vtx` layouts ship: legacy (`-vtxformat 0`, TF2/L4D2/GMod/HL2) and
-full (`-vtxformat 1`, SFM/CS:GO/ASW).
+full (`-vtxformat 1`, SFM/CS:GO/ASW). At the legacy layout a DirectX 8 `.dx80.vtx`
+is written next to the `.dx90.vtx` by default; skip it with `-nodx80` or `$nodx80`.
 
 **Limits are not Valve's.** The compiler rejects only counts the file format
 cannot express; several limits are uncapped (bones, meshes, attachments,
@@ -50,7 +51,7 @@ spellings alongside the `.pulseqc` ones, so no conversion step is needed.
 ```
 mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
             [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
-            [-vtxformat <0|1>]
+            [-vtxformat <0|1>] [-nodx80]
             [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
             [-perfmetrics]
             [-dumpcommands] [-pause]
@@ -65,6 +66,7 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
 | `-filesearchdir <dir>` | Extra fallback directory for source files, searched after any `$addsearchdir`. Repeatable. |
 | `-tempcontent <dir>` | Synonym for `-filesearchdir`. |
 | `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. 0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW). |
+| `-nodx80` | Skip the DirectX 8 `.dx80.vtx` output (also `$nodx80`). Only written at vtx format 0. |
 | `-striplods` | Ignore all `$lod` and `$shadowlod` commands and compile only the original root LOD. |
 | `-minlod <lod>` | Discard higher-detail LODs and promote the zero-based LOD index to root, overriding `$minlod` in the script. |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
