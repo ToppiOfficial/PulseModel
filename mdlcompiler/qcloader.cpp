@@ -212,6 +212,7 @@ struct Ctx {
     bool scriptBreak = false; // $break, sticky through every $include parent
 
     float defaultFps = 30.0f;
+    float defaultMotionRollback = 0.3f; // seed for a new anim's motionrollback
     float defaultFadeIn = 0.2f;
     float defaultFadeOut = 0.2f;
     bool lcaseSequences = false;
@@ -2691,6 +2692,7 @@ bool CmdAnimationCommon(Ctx& c, const Token& cmd, bool bindpose) {
     cm::CompileInput::InAnim a;
     a.name = name;
     a.fps = c.defaultFps;
+    a.motionrollback = c.defaultMotionRollback;
     if (bindpose) {
         a.bindpose = true;
         a.endframe = 0; // one frame unless `numframes` says otherwise
@@ -3901,6 +3903,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
             // implied blend identically; the string table dedups them
             a.name = "@" + seq.name;
             a.fps = c.defaultFps;
+            a.motionrollback = c.defaultMotionRollback;
             a.source = LoadSource(c, WithSourceExtension(c, o), t.line, /*morphSource=*/false,
                                   /*edit=*/nullptr, source::LoadKind::Animation);
             if (!a.source)
@@ -3938,6 +3941,7 @@ bool CmdSequenceCommon(Ctx& c, const Token& cmd, bool bindpose) {
         cm::CompileInput::InAnim a;
         a.name = "@" + seq.name;
         a.fps = c.defaultFps;
+        a.motionrollback = c.defaultMotionRollback;
         a.bindpose = true;
         a.endframe = 0;
         blends.push_back(static_cast<int>(c.in.anims.size()));
@@ -6464,6 +6468,23 @@ bool CmdDefaultFps(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $motionrollback <sec>  (Cmd_MotionExtractionRollBack): the motionrollback a
+// new animation starts with. Per-anim `motionrollback` still overrides it.
+bool CmdMotionRollback(Ctx& c, const Token& cmd) {
+    float sec = 0.0f;
+    if (!c.WantFloat("a rollback in seconds", cmd, sec))
+        return false;
+    if (sec <= 0.0f)
+        return c.Fail(cmd.line, "$motionrollback must be > 0");
+    c.defaultMotionRollback = sec;
+    return true;
+} // Not sure what does this do.
+
+// $nosequence  (Cmd_NoSequence): accepted for stock-QC compatibility. A
+// sequence-less model already compiles by default (auto reference bind pose),
+// so this is a no-op.
+bool CmdNoSequence(Ctx&, const Token&) { return true; }
+
 // $defaultfadein / $defaultfadeout <seconds>  (Cmd_SetDefaultFadeIn/OutTime).
 bool CmdDefaultFadeIn(Ctx& c, const Token& cmd) {
     return c.WantFloat("a time", cmd, c.defaultFadeIn);
@@ -7085,7 +7106,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
         if (o == "$mass") {
             if (!c.WantFloat("a mass in kg", sub, c.in.physMass)) return false;
             c.in.physAutoMass = false;
-        } else if (o == "$automass") {
+        } else if (o == "$automass" || o == "$calculatemass") {
             c.in.physAutoMass = true;
         } else if (o == "$inertia") {
             if (!c.WantFloat("an inertia", sub, c.in.physInertia)) return false;
@@ -7184,9 +7205,11 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
                 if (!bone->quoted && bone->text == "}") break;
                 if (bones.size() < 32) bones.push_back(bone->text);
             }
+            
             for (size_t i = 0; i < bones.size(); i++)
-                for (size_t j = i + 1; j < bones.size(); j++)
-                    c.in.physCollidePairs.push_back({bones[i], bones[j]});
+                for (size_t j = 0; j < bones.size(); j++)
+                    if (i != j)
+                        c.in.physCollidePairs.push_back({bones[i], bones[j]});
         } else if (o == "$animatedfriction") {
             c.in.physHasAnimatedFriction = true;
             if (!c.WantInt("a minimum friction", sub, c.in.physAnimFrictionMin) ||
@@ -8184,6 +8207,8 @@ constexpr Command kCommands[] = {
     {"$includemodel", CmdIncludeModel},
     {"$cmdlist", CmdCmdList},
     {"$defaultfps", CmdDefaultFps},
+    {"$motionrollback", CmdMotionRollback},
+    {"$nosequence", CmdNoSequence},
     {"$defaultfadein", CmdDefaultFadeIn},
     {"$defaultfadeout", CmdDefaultFadeOut},
     {"$lcaseallsequences", CmdLCaseAllSequences},
