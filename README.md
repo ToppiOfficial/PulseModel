@@ -89,22 +89,22 @@ the job; it writes what it can parse and tells you what it skipped.
 ### Usage
 
 ```
-mdldecompiler <file.mdl|folder> ... [-o <file>] [-outdir <dir>] [-forceversion <n>]
+mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
               [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-pulseqc] [-pause]
               [-perfmetrics]
 ```
 
 Several inputs may be given at once (drag-and-drop works); a folder decompiles
-every `.mdl` under it, recursively. A batch of more than one model always pauses
-before exiting so the summary stays on screen.
+every `.mdl` under it, recursively. Pass `-pause` to hold the window open before
+exiting so the summary stays on screen.
 
-By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the `.pulseqc`
-form. Either compiles back through `mdlcompiler`.
+Each model lands in its own folder under a `decompiled <version>` wrapper beside
+the input. By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the
+`.pulseqc` form. Either compiles back through `mdlcompiler`.
 
 | Option | Meaning |
 | --- | --- |
-| `-o <file>` | Script to write. Defaults to a folder named after the `.mdl`, next to it, holding the script and its meshes. Ignored with more than one model. |
-| `-outdir <dir>` | Put those per-model folders under `<dir>` instead of beside the `.mdl`; absolute, or relative to the current directory. |
+| `-outdir <dir>` | Put the `decompiled <version>` wrapper under `<dir>` instead of beside the input; absolute, or relative to the current directory. |
 | `-forceversion <n>` | Read the file as version `<n>`, ignoring the header. Some models carry a wrong version to break decompilers; point this at the real one. |
 | `-dmxencoding <enc>` | How the `.dmx` meshes are encoded: `binary` (default) or `keyvalues2` text. |
 | `-dmxmodel <n>` | The `format model` version they declare: 15 (default), 1, 18, or 22 (Source 2 ModelDoc). |

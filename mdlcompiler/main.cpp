@@ -36,13 +36,14 @@ static void PrintHeader() {
 }
 
 static int Usage() {
-    std::printf("usage: mdlcompiler <file.pulseqc> [-game <dir>]   (.qc is the same format)\n");
+    std::printf("usage: mdlcompiler <file.qc|file.pulseqc> [-game <dir>]\n");
     std::printf("\n");
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
-    std::printf("  -defvar <name> <value>\n");
-    std::printf("                define a .pulseqc script variable ($name$) before the\n");
-    std::printf("                script runs; repeatable. The script cannot override it\n");
+    std::printf("  -modelname <path>   overrides $modelname\n");
+    std::printf("  -vtxformat <0|1>\n");
+    std::printf("                .vtx layout, overriding the script's $vtxformat.\n");
+    std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
     std::printf("  -includesearchdir <dir>\n");
     std::printf("                extra fallback dir for $include, searched after any\n");
     std::printf("                $addincludesearchdir; repeatable\n");
@@ -50,20 +51,18 @@ static int Usage() {
     std::printf("                extra fallback dir for source files, searched after\n");
     std::printf("                any $addsearchdir; repeatable\n");
     std::printf("  -tempcontent <dir>   synonym for -filesearchdir\n");
-    std::printf("  -modelname <path>   overrides $modelname\n");
-    std::printf("  -vtxformat <0|1>\n");
-    std::printf("                .vtx layout, overriding the script's $vtxformat.\n");
-    std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
+    std::printf("  -defvar <name> <value>\n");
+    std::printf("                define a .pulseqc script variable ($name$) before the\n");
+    std::printf("                script runs; repeatable. The script cannot override it\n");
     std::printf("  -striplods    ignore all $lod and $shadowlod commands\n");
     std::printf("  -minlod <lod> discard higher-detail LODs and promote this LOD to root;\n");
     std::printf("                overrides $minlod in the script\n");
-    std::printf("  -definebones  print the compiled skeleton as $definebone lines and\n");
-    std::printf("                stop - no .mdl/.vvd/.vtx/.phy is written\n");
+    std::printf("  -definebones  print the compiled skeleton as $definebone lines and stop\n");
     std::printf("  -verify       compile the model without writing output files\n");
     std::printf("  -dumpmaterials print the names of materials used by the model\n");
+    std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms for each stage of the compile\n");
-    std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
     return 1;
 }
 

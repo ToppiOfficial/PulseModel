@@ -1,13 +1,16 @@
 // mdldecompiler - reads a compiled .mdl and writes back a .pulseqc describing it.
 //
 // Usage:
-//   mdldecompiler <file.mdl|folder> ... [-o <file.pulseqc>] [-forceversion <n>]
+//   mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
 //                            [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]
 //                            [-pause]
 //
 // The script-level markup - names, materials, bodygroups, skeleton, attachments,
 // hitboxes, skins - plus one .dmx render mesh per model (dmxwrite.cpp) and one
 // clip per animation (animwrite.cpp).
+//
+// Output lands in a per-model folder under a "decompiled <version>" wrapper -
+// beside the input (its parent), or under -outdir, mirroring a folder's subtree.
 
 #include <algorithm>
 #include <cctype>
@@ -54,28 +57,26 @@ void PrintHeader() {
 }
 
 int Usage() {
-    std::printf("usage: mdldecompiler <file.mdl|folder> ... [-o <file.pulseqc>] [-outdir <dir>]\n");
+    std::printf("usage: mdldecompiler <file.mdl|folder> ... [-outdir <dir>]\n");
     std::printf("                     [-forceversion <n>] [-dmxencoding <enc>] [-dmxmodel <n>]\n");
     std::printf("                     [-smdanimation] [-pulseqc]\n");
     std::printf("\n");
     std::printf("  several inputs may be given (drag-and-drop); a folder decompiles every\n");
-    std::printf("  .mdl under it, recursively\n");
+    std::printf("  .mdl under it, recursively. each model lands in a per-model folder under\n");
+    std::printf("  a \"decompiled <version>\" wrapper beside the input\n");
     std::printf("\n");
-    std::printf("  -o <file>     script to write; defaults to a folder named after the\n");
-    std::printf("                .mdl, next to it, holding the script and its meshes\n");
-    std::printf("                (ignored when more than one model is decompiled)\n");
-    std::printf("  -outdir <dir> put those per-model folders under <dir> instead of beside\n");
-    std::printf("                the .mdl; absolute, or relative to the current directory\n");
+    std::printf("  -outdir <dir> put the \"decompiled <version>\" wrapper under <dir> instead of\n");
+    std::printf("                beside the input; absolute, or relative to the cwd\n");
     std::printf("  -forceversion <n>\n");
     std::printf("                read the file as version <n>, ignoring the header field\n");
     std::printf("                (some compilers write a bogus one to block decompiling)\n");
+    std::printf("  -pulseqc      write a .pulseqc instead of the default stock .qc\n");
+    std::printf("  -smdanimation write the animation clips as .smd instead of .dmx\n");
     std::printf("  -dmxencoding <enc>\n");
     std::printf("                how the .dmx meshes are encoded: binary (default) or\n");
     std::printf("                keyvalues2 text\n");
     std::printf("  -dmxmodel <n> the `format model` version they declare: 15 (default),\n");
     std::printf("                1, 18, or 22 for Source 2 modeldoc\n");
-    std::printf("  -smdanimation write the animation clips as .smd instead of .dmx\n");
-    std::printf("  -pulseqc      write a .pulseqc instead of the default stock .qc\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms per process once the run ends\n");
     return 1;
@@ -2749,30 +2750,39 @@ int FailCaught() {
     }
 }
 
-// Everything a decompile produces goes in its own folder named after the model,
-// next to the .mdl or under -outdir (relative paths are off the cwd). -o is an
-// explicit override for the script path and is used verbatim.
-std::string OutFolder(const std::string& in, const char* outDir) {
-    return outDir ? (std::filesystem::path(outDir) / BaseName(StripExt(in))).string()
-                  : StripExt(in);
+// Output goes under a "decompiled <toolversion>" wrapper beside the input (its
+// parent folder, or -outdir), mirroring the input folder's subtree - its own
+// name included - then the per-model folder. A direct .mdl wraps in its own dir.
+std::string OutFolder(const std::string& in, const std::string& root, const char* outDir) {
+    const std::string ver = std::string("decompiled ") + (*kAppVersion ? kAppVersion : "0.0.0");
+    const std::filesystem::path parent =
+        std::filesystem::path(root.empty() ? in : root).parent_path();
+    const std::filesystem::path base = outDir ? std::filesystem::path(outDir) : parent;
+    std::filesystem::path rel;
+    if (!root.empty()) {
+        rel = std::filesystem::path(in).parent_path().lexically_relative(parent);
+        if (rel == ".")
+            rel.clear();
+    }
+    return (base / ver / rel / BaseName(StripExt(in))).string();
 }
 
-std::string OutScript(const std::string& dir, const char* out) {
-    return out ? out
-               : (std::filesystem::path(dir) / (BaseName(dir) + (g_studiomdl ? ".qc" : ".pulseqc")))
-                     .string();
+std::string OutScript(const std::string& dir) {
+    return (std::filesystem::path(dir) / (BaseName(dir) + (g_studiomdl ? ".qc" : ".pulseqc")))
+        .string();
 }
 
-int DecompileOne(const std::string& in, const char* out, const char* outDir, int forceVersion) {
+int DecompileOne(const std::string& in, const std::string& root, const char* outDir,
+                 int forceVersion) {
     std::printf("Decompiling: %s\n", in.c_str());
 
     // GoldSrc shares only the "IDST" magic with v44+; it has its own reader.
     if (IsGoldSrcMdl(in)) {
         pulse::fatal::g_stage = "goldsrc";
-        const std::string dir = OutFolder(in, outDir);
+        const std::string dir = OutFolder(in, root, outDir);
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        return DecompileGoldSrc(in, dir, OutScript(dir, out));
+        return DecompileGoldSrc(in, dir, OutScript(dir));
     }
 
     using Clock = std::chrono::steady_clock;
@@ -2797,10 +2807,10 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
     STAGE(PrintMaterials, m);
 
     pulse::fatal::g_stage = "output folder";
-    const std::string dir = OutFolder(in, outDir);
+    const std::string dir = OutFolder(in, root, outDir);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    const std::string outPath = OutScript(dir, out);
+    const std::string outPath = OutScript(dir);
     std::FILE* f = std::fopen(outPath.c_str(), "wb");
     if (!f)
         return Fail("write error",
@@ -2921,15 +2931,12 @@ int DecompileOne(const std::string& in, const char* out, const char* outDir, int
 int RunDecompile(int argc, char** argv) {
     pulse::fatal::g_stage = "command line";
     std::vector<std::string> inputs;
-    const char* out = nullptr;
     const char* outDir = nullptr;
     int forceVersion = 0;
     std::string dmxEncoding = "binary";
     int dmxModel = 15;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
-            out = argv[++i];
-        else if (std::strcmp(argv[i], "-outdir") == 0 && i + 1 < argc)
+        if (std::strcmp(argv[i], "-outdir") == 0 && i + 1 < argc)
             outDir = argv[++i];
         else if (std::strcmp(argv[i], "-forceversion") == 0 && i + 1 < argc)
             forceVersion = std::atoi(argv[++i]);
@@ -2957,26 +2964,20 @@ int RunDecompile(int argc, char** argv) {
 
     // a folder input expands to the models under it; everything is collected
     // before the first decompile, so the output folders it makes are not rescanned
-    std::vector<std::string> files;
+    std::vector<std::pair<std::string, std::string>> files; // {mdl path, input root; "" = direct file}
     for (const std::string& in : inputs) {
         std::error_code ec;
-        if (std::filesystem::is_directory(in, ec))
-            CollectMdl(in, files);
-        else
-            files.push_back(in);
+        if (std::filesystem::is_directory(in, ec)) {
+            std::vector<std::string> found;
+            CollectMdl(in, found);
+            for (const std::string& f : found)
+                files.emplace_back(f, in);
+        } else {
+            files.emplace_back(in, std::string());
+        }
     }
     if (files.empty())
         return Fail("command line", "no .mdl files found");
-    if (files.size() > 1) {
-        // batch runs are usually drag-and-drop; hold the window so the summary
-        // stays readable even if -pause was not passed
-        pulse::fatal::g_pause = true;
-        if (out) {
-            std::printf("-o names one script - ignored, %zu models are being decompiled\n",
-                        files.size());
-            out = nullptr;
-        }
-    }
 
     // one bad model must not end a batch, so each is guarded on its own
     int failed = 0;
@@ -2985,7 +2986,7 @@ int RunDecompile(int argc, char** argv) {
             std::printf("\n===== [%zu/%zu] =====\n", i + 1, files.size());
         int rc;
         try {
-            rc = DecompileOne(files[i], out, outDir, forceVersion);
+            rc = DecompileOne(files[i].first, files[i].second, outDir, forceVersion);
         } catch (...) {
             rc = FailCaught();
         }
