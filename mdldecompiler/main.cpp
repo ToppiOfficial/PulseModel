@@ -1376,10 +1376,8 @@ void WriteIk(Qc& q, const Mdl& m) {
         std::string line = "$ikchain \"" + chainNames[i] + "\" \"" +
                            (links && chains[i].numlinks >= 3 ? pick(links[2].bone) : std::string()) +
                            "\"";
-        // an unauthored knee is derived from the animations, so writing the
-        // stored value keeps the result reproducible without them
-        if (links && chains[i].numlinks >= 1 &&
-            (links[0].kneeDir.x || links[0].kneeDir.y || links[0].kneeDir.z))
+        // always emit knee, including 0 0 0
+        if (links && chains[i].numlinks >= 1)
             line += " knee " + V3(links[0].kneeDir);
         q.Line(line);
     }
