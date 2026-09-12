@@ -164,6 +164,10 @@ Referenced, not vendored:
 - [VPhysics-Jolt](https://github.com/misyltoad/VPhysics-Jolt) - read alongside
   V-HACD to work out the `.phy` / IVP collision format. `libs/minicollision` is
   our own code written from that understanding.
+- [Crowbar](https://github.com/ZeqMacaw/Crowbar) (ZeqMacaw, CC BY-SA 3.0) -
+  cross-checked our own expansion of combination flex ops (2-way, n-way, eyelid)
+  into stock `.qc` min/max expressions. The math is the engine's (SDK `studio.cpp`
+  flex eval); no Crowbar code was used.
 - Valve's Source SDK 2013 - read as documentation of the file format.
 
 ## License

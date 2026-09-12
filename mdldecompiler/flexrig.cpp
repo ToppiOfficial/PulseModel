@@ -256,11 +256,8 @@ FlexRig BuildFlexRig(const Mdl& m) {
             lidRoles.count(rules[i].flex))
             continue;
         Rule r{rules[i].flex, targetName(rules[i].flex), DecodeRule(ops, rules[i].numops)};
-        if (!r.d.ok) {
-            if (deltaOf.count(r.desc))
-                ++rig.dropped;
+        if (!r.d.ok)
             continue;
-        }
         const std::vector<std::string> parts = Split(r.delta);
         if (parts.size() == r.d.combo.size()) {
             for (size_t j = 0; j < parts.size(); ++j) {
@@ -383,10 +380,8 @@ FlexRig BuildFlexRig(const Mdl& m) {
 
         RigCorrective cor;
         cor.delta = r.delta;
-        if (!names(r.d.combo, cor.combo)) {
-            ++rig.dropped;
+        if (!names(r.d.combo, cor.combo))
             continue;
-        }
         // the compiler splits the delta name on every '_' and matches each part
         // against the control names (case-insensitively), so a raw control whose
         // own name has one cannot round trip
@@ -394,10 +389,8 @@ FlexRig BuildFlexRig(const Mdl& m) {
         bool spelled = parts.size() == cor.combo.size();
         for (size_t j = 0; spelled && j < parts.size(); ++j)
             spelled = _stricmp(parts[j].c_str(), cor.combo[j].c_str()) == 0;
-        if (!spelled) {
-            ++rig.dropped;
+        if (!spelled)
             continue;
-        }
         bool ok = true;
         for (const std::vector<Fetch>& group : r.d.dominators) {
             std::vector<std::string> dom;
@@ -407,10 +400,8 @@ FlexRig BuildFlexRig(const Mdl& m) {
             }
             cor.dominators.push_back(std::move(dom));
         }
-        if (!ok) {
-            ++rig.dropped;
+        if (!ok)
             continue;
-        }
         rig.descs.insert(r.desc);
         if (seen.insert(cor.delta).second)
             rig.correctives.push_back(std::move(cor));

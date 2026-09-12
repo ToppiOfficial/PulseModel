@@ -1636,14 +1636,23 @@ struct Expr {
     int prec; // 1 = +-, 2 = */, 3 = atom
 };
 
-// RPN op stream -> the infix text $flexrule takes. Fails on the ops that have
-// no spelling in an expression - combo/dominate/nway/2way/eyelid come from the
-// DMX rig ($datamodelflexes) or $flexcorrective, never from rule text.
+// RPN op stream -> the infix text a flex rule takes. For stock QC (allowCombo) the
+// combination ops are expanded to the min/max arithmetic the engine evaluates them
+// to: COMBO as a product, DOMINATE as * (1 - product), 2-way/n-way/eyelid to their
+// remap. Off for .pulseqc, where they import via the DMX rig ($datamodelflexes).
 bool RebuildExpr(const fm::mstudioflexop_t* ops, int n, const std::vector<std::string>& ctrls,
-                 const std::vector<std::string>& descs, std::string& out) {
+                 const std::vector<std::string>& descs, std::string& out, bool allowCombo,
+                 const fm::mstudioflexcontroller_t* fc, int nfc) {
     std::vector<Expr> st;
     auto name = [](const std::vector<std::string>& v, int32_t i) {
         return (i >= 0 && static_cast<size_t>(i) < v.size()) ? v[i] : std::string("?");
+    };
+    // RemapValClamped(ctrl, min, max, 0, 1) - the engine's per-controller normalize.
+    auto remap01 = [&](int32_t idx) {
+        const std::string nm = name(ctrls, idx);
+        const float lo = (fc && idx >= 0 && idx < nfc) ? fc[idx].min : 0.0f;
+        const float hi = (fc && idx >= 0 && idx < nfc) ? fc[idx].max : 1.0f;
+        return "min(max((" + nm + " - " + F(lo) + ") / (" + F(hi) + " - " + F(lo) + "), 0), 1)";
     };
     auto bin = [&](const char* sym, int prec) {
         if (st.size() < 2)
@@ -1692,7 +1701,88 @@ bool RebuildExpr(const fm::mstudioflexop_t* ops, int n, const std::vector<std::s
                 // always wrapped: the lexer only reads '-' as unary after "(+-*/,"
                 st.back() = {"(-" + st.back().s + ")", 3};
                 break;
-            default: return false; // combo / dominate / nway / 2way / eyelid
+            // Pure fetch/const combos only: a 2way/nway/eyelid operand returned false above.
+            case fm::STUDIO_COMBO: {
+                const int cnt = ops[i].d.index;
+                if (!allowCombo || cnt < 1 || static_cast<int>(st.size()) < cnt)
+                    return false;
+                std::string p;
+                for (size_t t = st.size() - cnt; t < st.size(); ++t)
+                    p += (p.empty() ? "" : " * ") + (st[t].prec < 2 ? "(" + st[t].s + ")" : st[t].s);
+                st.erase(st.end() - cnt, st.end());
+                st.push_back({p, 2});
+                break;
+            }
+            case fm::STUDIO_DOMINATE: {
+                const int cnt = ops[i].d.index;
+                if (!allowCombo || cnt < 1 || static_cast<int>(st.size()) < cnt + 1)
+                    return false;
+                std::string p;
+                for (size_t t = st.size() - cnt; t < st.size(); ++t)
+                    p += (p.empty() ? "" : " * ") + (st[t].prec < 2 ? "(" + st[t].s + ")" : st[t].s);
+                st.erase(st.end() - cnt, st.end());
+                const Expr acc = st.back();
+                st.pop_back();
+                st.push_back({(acc.prec < 2 ? "(" + acc.s + ")" : acc.s) + " * (1 - " + p + ")", 2});
+                break;
+            }
+            // 2-way slider halves: RemapValClamped(ctrl, -/+, 0/1) = min(max(+-ctrl,0),1)
+            case fm::STUDIO_2WAY_0:
+            case fm::STUDIO_2WAY_1: {
+                if (!allowCombo)
+                    return false;
+                const std::string c = name(ctrls, ops[i].d.index);
+                const std::string s = ops[i].op == fm::STUDIO_2WAY_0 ? "-" + c : c;
+                st.push_back({"min(max(" + s + ", 0), 1)", 3});
+                break;
+            }
+            // eyelid: 3 preceding CONSTs are [i-3] EyesUpDown, [i-2] Blink (unused),
+            // [i-1] CloseLid controller indices; d.index is the CloseLidV multi. The
+            // min(1, 1 -/+ up) reproduces the engine's EyeUpDown sign branch exactly.
+            case fm::STUDIO_DME_LOWER_EYELID:
+            case fm::STUDIO_DME_UPPER_EYELID: {
+                if (!allowCombo || i < 3 || st.size() < 3 || ops[i - 1].op != fm::STUDIO_CONST ||
+                    ops[i - 3].op != fm::STUDIO_CONST)
+                    return false;
+                const bool upper = ops[i].op == fm::STUDIO_DME_UPPER_EYELID;
+                const std::string closeLidV = remap01(ops[i].d.index);
+                const std::string closeLid = remap01(static_cast<int32_t>(ops[i - 1].d.value));
+                const std::string lidV = upper ? closeLidV : "(1 - " + closeLidV + ")";
+                const int32_t upIdx = static_cast<int32_t>(ops[i - 3].d.value);
+                std::string s = lidV + " * " + closeLid;
+                if (upIdx >= 0) {
+                    const std::string up = "(-1 + 2 * " + remap01(upIdx) + ")";
+                    s = "min(1, (1 " + std::string(upper ? "+ " : "- ") + up + ")) * " + s;
+                }
+                st.erase(st.end() - 3, st.end());
+                st.push_back({s, 2});
+                break;
+            }
+            // n-way envelope: 4 preceding CONSTs are the ramp x/y/z/w, [i-1] the
+            // selector controller index, d.index the driven one. Expands to the
+            // engine's piecewise remap of the selector, scaled by the driven value.
+            case fm::STUDIO_NWAY: {
+                if (!allowCombo || i < 5 || st.size() < 5)
+                    return false;
+                for (int t = 1; t <= 5; ++t)
+                    if (ops[i - t].op != fm::STUDIO_CONST)
+                        return false;
+                const std::string x = F(ops[i - 5].d.value), y = F(ops[i - 4].d.value);
+                const std::string z = F(ops[i - 3].d.value), w = F(ops[i - 2].d.value);
+                const std::string v = name(ctrls, static_cast<int32_t>(ops[i - 1].d.value));
+                const std::string drv = name(ctrls, ops[i].d.index);
+                const std::string env =
+                    "((min(1, (-min(0, (" + x + " - " + v + ")))) * min(1, (-min(0, (" + v +
+                    " - " + y + "))))) * min(max((" + v + " - " + x + ") / (" + y + " - " + x +
+                    "), 0), 1)) + (-(min(1, (-min(0, (" + v + " - " + y + ")))) - 1) * -(min(1, "
+                    "(-min(0, (" + z + " - " + v + ")))) - 1)) + ((min(1, (-min(0, (" + z + " - " +
+                    v + ")))) * min(1, (-min(0, (" + v + " - " + w + "))))) * (1 - (min(max((" + v +
+                    " - " + z + ") / (" + w + " - " + z + "), 0), 1))))";
+                st.erase(st.end() - 5, st.end());
+                st.push_back({"((" + env + ") * (" + drv + "))", 3});
+                break;
+            }
+            default: return false; // unknown op
         }
         if (!ok)
             return false;
@@ -1743,9 +1833,11 @@ void WriteFlexes(Qc& q, const Mdl& m, const FlexRig& rig, const std::string& fac
         m.At<fm::mstudioflexcontroller_t>(m.buf.data(), h.flexcontrollerindex, h.numflexcontrollers);
 
     // The combination rig went back into the mesh .dmx, so the controllers and
-    // rules it rebuilds are imported rather than written out again here. Only
-    // the .pulseqc can import one; stock reads the operator off the mesh itself.
-    const bool importRig = !g_studiomdl && !rig.empty() && !faceMesh.empty();
+    // rules it rebuilds are imported rather than written out again here.
+    // Stock QC never imports the DMX combination operator: it writes noautodmxrules
+    // plus explicit controllers/rules (eyelid and 2-way spelled as min/max). Only
+    // .pulseqc imports via $datamodelflexes.
+    const bool importRig = !rig.empty() && !faceMesh.empty() && !g_studiomdl;
     if (importRig) {
         q.Blank();
         q.Line("$datamodelflexes \"" + faceMesh +
@@ -1753,9 +1845,6 @@ void WriteFlexes(Qc& q, const Mdl& m, const FlexRig& rig, const std::string& fac
         q.Line("// " + std::to_string(rig.correctives.size()) + " correctives and " +
                std::to_string(rig.dominations.size()) +
                " domination rules, rebuilt from the flex rules into that file");
-        if (rig.dropped)
-            q.Line("// " + std::to_string(rig.dropped) +
-                   " rules did not decode as a combination and are commented out below");
         if (rig.domMismatch)
             q.Line("// " + std::to_string(rig.domMismatch) +
                    " correctives get a different dominator set than the model had - the rules "
@@ -1766,11 +1855,6 @@ void WriteFlexes(Qc& q, const Mdl& m, const FlexRig& rig, const std::string& fac
     std::vector<std::string> ctrls;
     if (fc && h.numflexcontrollers > 0) {
         q.Blank();
-        // stock auto-creates a controller per combination control on top of the
-        // real ones below, which double-registers them. This keeps the deltas
-        // and the rig in the .dmx and drops only that.
-        if (g_studiomdl)
-            q.Line("noautodmxrules");
         for (int i = 0; i < h.numflexcontrollers; ++i) {
             ctrls.push_back(m.Str(&fc[i], fc[i].sznameindex));
             if (importRig && rig.controllers.count(i))
@@ -1793,6 +1877,36 @@ void WriteFlexes(Qc& q, const Mdl& m, const FlexRig& rig, const std::string& fac
         q.Blank();
         q.Line("// " + std::to_string(renamed) + " of " + std::to_string(h.numflexdesc) +
                " flex names were junk or duplicated - renamed flex<index>, real names are lost");
+    }
+
+    // A stereo flexpair is written as one merged delta; the compiler recreates
+    // <base>L/<base>R only if it knows the delta is stereo. The rig re-marks
+    // operator-driven ones, so flag only the pairs it does not - a hand-authored
+    // pair whose L/R halves the flex rules drive directly (alyx's FACS AUs).
+    if (!g_studiomdl) {
+        std::set<std::string> rigSplits;
+        for (const RigControl& c : rig.controls)
+            if (c.stereo) rigSplits.insert(c.name);
+        for (const RigCorrective& cor : rig.correctives)
+            rigSplits.insert(cor.delta);
+        std::vector<std::string> splits;
+        std::set<std::string> seen;
+        ForEachFlex(m, [&](const fm::mstudioflex_t& fx) {
+            if (fx.flexpair <= 0)
+                return;
+            const size_t d = fx.flexdesc, p = fx.flexpair;
+            std::string base;
+            bool one = false;
+            if (d < descs.size() && p < descs.size() &&
+                StereoBase(descs[d], descs[p], base, one) && !rigSplits.count(base) &&
+                seen.insert(base).second)
+                splits.push_back(base);
+        });
+        if (!splits.empty()) {
+            q.Blank();
+            for (const std::string& s : splits)
+                q.Line("$morphsplitstereo \"" + s + "\"");
+        }
     }
 
     const fm::mstudiomouth_t* mouths =
@@ -1868,7 +1982,8 @@ void WriteFlexes(Qc& q, const Mdl& m, const FlexRig& rig, const std::string& fac
                 ? descs[rules[i].flex]
                 : std::string();
         std::string expr;
-        if (!ops || !RebuildExpr(ops, rules[i].numops, ctrls, descs, expr)) {
+        if (!ops || !RebuildExpr(ops, rules[i].numops, ctrls, descs, expr, g_studiomdl, fc,
+                                 h.numflexcontrollers)) {
             ++skipped;
             continue;
         }
@@ -1887,9 +2002,9 @@ void WriteFlexes(Qc& q, const Mdl& m, const FlexRig& rig, const std::string& fac
                "\n// compile. The expression is intact if you can work out what it drove.");
     if (skipped) {
         q.Line("// " + std::to_string(skipped) + " of " + std::to_string(h.numflexrules) +
-               " flex rules use combo/dominate/nway/2way ops, which have no $flexrule");
-        q.Line(importRig ? "// spelling and did not rebuild as a combination - they are lost."
-                         : "// spelling - they come back from the DMX rig via $datamodelflexes.");
+               " flex rules use ops with no expression spelling");
+        q.Line(importRig ? "// - they come back from the DMX rig via $datamodelflexes."
+                         : "// - they did not rebuild and are lost.");
     }
 }
 
@@ -2836,6 +2951,12 @@ int DecompileOne(const std::string& in, const std::string& root, const char* out
     std::string faceBody;
     if (g_studiomdl) {
         q.sink = &faceBody;
+        // Suppress stock's auto DMX rules so the explicit controllers/rules below are
+        // not double-registered. Must lead the block, before any eyelid command.
+        const fm::mstudioflexcontroller_t* fc = m.At<fm::mstudioflexcontroller_t>(
+            m.buf.data(), m.hdr->flexcontrollerindex, m.hdr->numflexcontrollers);
+        if (fc && m.hdr->numflexcontrollers > 0)
+            q.Line("noautodmxrules");
         STAGE(WriteEyes, q, m, faceMesh);
         STAGE(WriteFlexes, q, m, rig, faceMesh);
         q.sink = nullptr;

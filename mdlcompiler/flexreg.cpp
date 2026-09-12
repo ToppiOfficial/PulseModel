@@ -146,9 +146,28 @@ struct ExprLexer {
     }
 };
 
-// reference Option_Flexrule: infix -> RPN via
-// shunting-yard. One rule per flexdesc - a later rule for the same desc is
-// skipped (mirrors the LOD/multi-body dedup).
+// A rule already registered with this desc AND op stream - the LOD/multi-body
+// reprocess duplicate to drop. d is a 4-byte union, so comparing d.index also
+// covers a CONST's value bits.
+bool RuleExists(const cm::CompileInput& in, const cm::FlexRule& rule) {
+    for (const cm::FlexRule& r : in.flexrules) {
+        if (r.flex != rule.flex || r.ops.size() != rule.ops.size())
+            continue;
+        bool same = true;
+        for (size_t i = 0; i < r.ops.size(); ++i)
+            if (r.ops[i].op != rule.ops[i].op || r.ops[i].d.index != rule.ops[i].d.index) {
+                same = false;
+                break;
+            }
+        if (same)
+            return true;
+    }
+    return false;
+}
+
+// reference Option_Flexrule: infix -> RPN via shunting-yard. One rule per
+// (flexdesc, ops) - an identical later rule is skipped (LOD/multi-body dedup),
+// a different formula for the same desc stacks as a staged rule.
 bool ParseMorphRuleExpr(cm::CompileInput& in, const std::string& flexName,
                         const std::string& expr, std::string* err) {
     static const int precedence[32] = {
@@ -163,15 +182,6 @@ bool ParseMorphRuleExpr(cm::CompileInput& in, const std::string& flexName,
         if (err) *err = "morph rule for unknown morph \"" + flexName + "\"";
         return false;
     }
-
-    // dedup per desc (the reference drains the expression tokens; a string
-    // input can simply be skipped)
-    for (const cm::FlexRule& r : in.flexrules)
-        if (r.flex == flexdesc) {
-            std::fprintf(stderr, "warning: morph \"%s\" already has a rule, ignoring\n",
-                         flexName.c_str());
-            return true;
-        }
 
     if (in.flexrules.size() >= static_cast<size_t>(lim::kMaxFlexRules)) {
         if (err) *err = "too many flex rules (max " + std::to_string(lim::kMaxFlexRules) + ")";
@@ -348,6 +358,14 @@ bool ParseMorphRuleExpr(cm::CompileInput& in, const std::string& flexName,
         return false;
     }
 
+    // Dedup on target AND ops: a byte-identical rule is the LOD/multi-body
+    // reprocess duplicate the reference drops; a different formula for the same
+    // desc is a staged rule (alyx's FACS AUs) and stacks, evaluated in order.
+    if (RuleExists(in, rule)) {
+        PrintFlexRule("rule", flexName, "= " + expr + " (duplicate, skipped)");
+        return true;
+    }
+
     in.flexrules.push_back(std::move(rule));
     PrintFlexRule("rule", flexName, "= " + expr);
     return true;
@@ -393,12 +411,6 @@ bool RegisterCorrective(cm::CompileInput& in, const ManualFlex::Rule& r, std::st
         if (err) *err = where + ": no such morph";
         return false;
     }
-    for (const cm::FlexRule& existing : in.flexrules) {
-        if (existing.flex == flexdesc) {
-            std::fprintf(stderr, "warning: %s already has a rule, ignoring\n", where.c_str());
-            return true;
-        }
-    }
     if (in.flexrules.size() >= static_cast<size_t>(lim::kMaxFlexRules)) {
         if (err) *err = "too many flex rules, max " + std::to_string(lim::kMaxFlexRules);
         return false;
@@ -420,6 +432,10 @@ bool RegisterCorrective(cm::CompileInput& in, const ManualFlex::Rule& r, std::st
     if (rule.ops.size() > static_cast<size_t>(lim::kMaxFlexOps)) {
         if (err) *err = where + ": too many controls";
         return false;
+    }
+    if (RuleExists(in, rule)) {
+        PrintFlexRule("corrective", r.name, "= " + JoinNames(r.combo, " + ") + " (duplicate, skipped)");
+        return true;
     }
     in.flexrules.push_back(std::move(rule));
     PrintFlexRule("corrective", r.name, "= " + JoinNames(r.combo, " + "));

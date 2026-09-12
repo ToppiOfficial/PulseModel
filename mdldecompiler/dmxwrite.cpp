@@ -1219,8 +1219,11 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
         idFaceSet.push_back(q.NewId());
         idMaterial.push_back(q.NewId());
     }
-    // With a rebuilt rig the controls are the real ones, not one per delta.
-    const size_t numControl = rig.empty() ? deltaOrder.size() : rig.controls.size();
+    // Stock QC never embeds the rig: the DMX carries only the per-delta controls
+    // that trigger the stereo split, and every controller/rule is written in the
+    // script. Only .pulseqc embeds the full rig for the combination operator.
+    const bool embedRig = !rig.empty() && !g_studiomdl;
+    const size_t numControl = embedRig ? rig.controls.size() : deltaOrder.size();
     std::vector<std::string> idDelta, idControl, idDom;
     for (size_t i = 0; i < deltaOrder.size(); ++i)
         idDelta.push_back(q.NewId());
@@ -1251,7 +1254,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     // parallel to deltaStates - the weight each delta is dialed to, which is
     // nothing at rest. The combination operator reads the pair as a set, so the
     // array has to be there for the deltas to count as targets at all.
-    if (!rig.empty())
+    if (embedRig)
         q.V2Array("deltaStateWeights", std::vector<pm::Vector2>(idDelta.size(), {0.0f, 0.0f}));
     q.End();
 
@@ -1330,13 +1333,13 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
     if (!idCombo.empty()) {
         q.Begin("DmeCombinationOperator", idCombo, meshName);
         q.RefArray("controls", idControl);
-        q.RefArray("targets", rig.empty() ? std::vector<std::string>{}
-                                          : std::vector<std::string>{idMesh});
-        if (!rig.dominations.empty())
+        q.RefArray("targets", embedRig ? std::vector<std::string>{idMesh}
+                                       : std::vector<std::string>{});
+        if (embedRig && !rig.dominations.empty())
             q.RefArray("dominators", idDom);
         q.End();
 
-        if (rig.empty()) {
+        if (!embedRig) {
             for (size_t i = 0; i < deltaOrder.size(); ++i) {
                 q.Begin("DmeCombinationInputControl", idControl[i], deltaOrder[i]);
                 q.StrArray("rawControlNames", {deltaOrder[i]});

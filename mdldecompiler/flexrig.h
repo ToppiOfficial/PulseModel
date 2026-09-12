@@ -45,7 +45,6 @@ struct FlexRig {
     std::vector<RigDomination> dominations;
     std::set<int> controllers; // flex controllers the rig recreates on compile
     std::set<int> descs;       // flexdescs whose rule the rig rebuilds
-    int dropped = 0;           // rules the rebuild could not express
     int domMismatch = 0;       // correctives whose dominators did not round trip
 
     bool empty() const { return correctives.empty(); }

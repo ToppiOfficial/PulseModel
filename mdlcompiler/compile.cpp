@@ -9138,15 +9138,23 @@ void CullDuplicateFlex(Ctx& ctx) {
         }
     }
 
-    // rules: one per flexdesc. Registration already dedups per desc, so this
-    // only fires on a table assembled some other way - but a second rule for a
-    // desc is unreachable either way (RunFlexRules keeps the last write).
+    // rules: drop a byte-identical duplicate (a reprocess artifact). A different
+    // op stream for the same desc is a staged rule - the later one reads the
+    // earlier's result via %desc, so both are reachable and evaluated in order.
     size_t before = m.flexrules.size();
     std::vector<FlexRule> keptRules;
     for (FlexRule& rule : m.flexrules) {
         bool dup = false;
         for (const FlexRule& k : keptRules) {
-            if (k.flex == rule.flex) { dup = true; break; }
+            if (k.flex != rule.flex || k.ops.size() != rule.ops.size())
+                continue;
+            bool same = true;
+            for (size_t i = 0; i < k.ops.size(); ++i)
+                if (k.ops[i].op != rule.ops[i].op || k.ops[i].d.index != rule.ops[i].d.index) {
+                    same = false;
+                    break;
+                }
+            if (same) { dup = true; break; }
         }
         if (dup) {
             const char* facs = (rule.flex >= 0 && rule.flex < static_cast<int>(m.flexdescs.size()))
