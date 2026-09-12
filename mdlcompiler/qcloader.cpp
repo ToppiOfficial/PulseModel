@@ -6154,6 +6154,23 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
         !c.WantFloat("a max Z", cmd, hb.bmax.z))
         return false;
 
+    auto numeric = [](const Token& t) {
+        if (t.quoted || t.text.empty()) return false;
+        const char ch = t.text[0];
+        return (ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == '.';
+    };
+    if (!c.AtCommand() && numeric(c.Cur())) {
+        if (!c.WantFloat("a pitch", cmd, hb.angOffset.x) ||
+            !c.WantFloat("a yaw", cmd, hb.angOffset.y) ||
+            !c.WantFloat("a roll", cmd, hb.angOffset.z))
+            return false;
+        if (!c.AtCommand() && numeric(c.Cur()) &&
+            !c.WantFloat("a capsule radius", cmd, hb.capsuleRadius))
+            return false;
+        if (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "}"))
+            hb.name = c.toks[c.pos++].text;
+    }
+
     // a clause list ends at '}' or the next $hbox
     while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "}")) {
         const Token t = c.toks[c.pos++];

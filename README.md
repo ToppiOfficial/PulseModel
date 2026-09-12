@@ -92,8 +92,8 @@ the job; it writes what it can parse and tells you what it skipped.
 
 ```
 mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
-              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-pulseqc] [-pause]
-              [-perfmetrics]
+              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-pulseqc]
+              [-nomesh] [-noanimation] [-declaresequence] [-pause] [-perfmetrics]
 ```
 
 Several inputs may be given at once (drag-and-drop works); a folder decompiles
@@ -112,6 +112,9 @@ the input. By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the
 | `-dmxmodel <n>` | The `format model` version they declare: 15 (default), 1, 18, or 22 (Source 2 ModelDoc). |
 | `-smdanimation` | Write animation clips as `.smd` instead of `.dmx`. |
 | `-pulseqc` | Write a `.pulseqc` instead of the default stock-studiomdl `.qc`. |
+| `-nomesh` | Skip the mesh `.dmx` files, the `.phy` hull and the `.vrd`; the script still lists their commands. |
+| `-noanimation` | Skip the animation clip files; the script still lists the sequences and animations. |
+| `-declaresequence` | Also write a `<name>.qci` listing every sequence, in order, as `$declaresequence` - paste into a model that `$includemodel`'s this one. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 | `-perfmetrics` | Print wall time in ms per process once the run ends; a batch sums each process across all models. |
 

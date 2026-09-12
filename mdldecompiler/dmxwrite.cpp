@@ -1736,6 +1736,13 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
     for (const PhyHull& hull : hulls)
         info.concave = info.concave || ++perBone[hull.bone] > 1;
 
+    // -nomesh: concave is known, skip the hull file. Report written so WritePhysics
+    // emits a clean $collisionmodel without the "supply this file" note.
+    if (g_nomesh) {
+        info.written = true;
+        return info;
+    }
+
     const std::string meshDir = dir + "/meshes";
     std::error_code ec;
     std::filesystem::create_directories(meshDir, ec);
@@ -1889,10 +1896,12 @@ std::vector<LodInfo> WriteRenderMeshes(const Mdl& m, const std::string& mdlPath,
         }
     }
 
-    // meshes/ next to the script, the way animations go in anims/
+    // meshes/ next to the script, the way animations go in anims/. -nomesh keeps
+    // the LOD detection above (the $lod blocks need it) but writes no files.
     const std::string meshDir = dir + "/meshes";
     std::error_code ec;
-    std::filesystem::create_directories(meshDir, ec);
+    if (!g_nomesh)
+        std::filesystem::create_directories(meshDir, ec);
 
     static const ModelTris empty;
     std::vector<fm::mstudiovertex_t> vvd;
@@ -1921,8 +1930,9 @@ std::vector<LodInfo> WriteRenderMeshes(const Mdl& m, const std::string& mdlPath,
                                        static_cast<size_t>(j) < tris[i].size())
                                           ? tris[i][j]
                                           : empty;
-                WriteOne(m, meshDir + "/" + names[i][j] + suffix + ".dmx", names[i][j] + suffix,
-                         models[j], layout[i][j], mt, vvd, rig);
+                if (!g_nomesh)
+                    WriteOne(m, meshDir + "/" + names[i][j] + suffix + ".dmx",
+                             names[i][j] + suffix, models[j], layout[i][j], mt, vvd, rig);
             }
         }
     }

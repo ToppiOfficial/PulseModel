@@ -24,6 +24,12 @@ namespace mdldecompiler {
 // the .pulseqc form. Set once from the command line; the mesh writer reads it too.
 inline bool g_studiomdl = true;
 
+// Launch-option gates. -nomesh/-noanimation suppress side-file writing only; the
+// script keeps every command. -declaresequence writes a standalone .qci beside it.
+inline bool g_nomesh = false;
+inline bool g_noanim = false;
+inline bool g_declareseq = false;
+
 // A loaded file plus bounds-checked access. Every offset in a .mdl is
 // attacker-controlled once the file is not ours, so nothing dereferences
 // without a range check.

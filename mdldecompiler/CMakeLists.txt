@@ -3,7 +3,7 @@
 add_executable(mdldecompiler main.cpp dmxwrite.cpp animwrite.cpp flexrig.cpp goldsrc.cpp)
 target_include_directories(mdldecompiler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 0.13.0)
+set(TOOL_VERSION 0.14.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(mdldecompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 

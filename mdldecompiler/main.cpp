@@ -60,6 +60,7 @@ int Usage() {
     std::printf("usage: mdldecompiler <file.mdl|folder> ... [-outdir <dir>]\n");
     std::printf("                     [-forceversion <n>] [-dmxencoding <enc>] [-dmxmodel <n>]\n");
     std::printf("                     [-smdanimation] [-pulseqc]\n");
+    std::printf("                     [-nomesh] [-noanimation] [-declaresequence]\n");
     std::printf("\n");
     std::printf("  several inputs may be given (drag-and-drop); a folder decompiles every\n");
     std::printf("  .mdl under it, recursively. each model lands in a per-model folder under\n");
@@ -77,6 +78,12 @@ int Usage() {
     std::printf("                keyvalues2 text\n");
     std::printf("  -dmxmodel <n> the `format model` version they declare: 15 (default),\n");
     std::printf("                1, 18, or 22 for Source 2 modeldoc\n");
+    std::printf("  -nomesh       skip the mesh .dmx, the .phy hull and the .vrd; the script\n");
+    std::printf("                still lists their commands\n");
+    std::printf("  -noanimation  skip the animation clip files; the script still lists them\n");
+    std::printf("  -declaresequence\n");
+    std::printf("                also write a <name>.qci listing every sequence, in order, as\n");
+    std::printf("                $declaresequence - paste into a model that $includemodel's this\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms per process once the run ends\n");
     return 1;
@@ -919,20 +926,23 @@ void WriteProceduralBones(Qc& q, const Mdl& m, const std::string& dir) {
     }
 
     const std::string name = BaseName(dir) + ".vrd";
-    std::FILE* f = std::fopen((std::filesystem::path(dir) / name).string().c_str(), "wb");
-    if (!f) {
-        q.Blank();
-        q.Line("// could not write " + name + " - the procedural bones are lost");
-        return;
+    if (!g_nomesh) {
+        std::FILE* f = std::fopen((std::filesystem::path(dir) / name).string().c_str(), "wb");
+        if (!f) {
+            q.Blank();
+            q.Line("// could not write " + name + " - the procedural bones are lost");
+            return;
+        }
+        // a .vrd has no way to quote, so a name with a space in it splits into two
+        // tokens and the line it is on will not parse
+        for (const std::string& s : spaced)
+            std::fprintf(f, "// \"%s\" has a space - the lines naming it will not parse\n",
+                         s.c_str());
+        for (const std::string& l : lines)
+            std::fprintf(f, "%s\n", l.c_str());
+        std::fclose(f);
+        std::printf("\nprocedural bones:\n  wrote %s\n", name.c_str());
     }
-    // a .vrd has no way to quote, so a name with a space in it splits into two
-    // tokens and the line it is on will not parse
-    for (const std::string& s : spaced)
-        std::fprintf(f, "// \"%s\" has a space - the lines naming it will not parse\n", s.c_str());
-    for (const std::string& l : lines)
-        std::fprintf(f, "%s\n", l.c_str());
-    std::fclose(f);
-    std::printf("\nprocedural bones:\n  wrote %s\n", name.c_str());
 
     q.Blank();
     if (!spaced.empty())
@@ -2545,6 +2555,45 @@ void WriteAnimations(Qc& q, const Mdl& m) {
         q.Line(l);
 }
 
+// Sequence names in header order, deduped: the engine allows duplicates, the
+// compiler does not, so repeats get an _N suffix to recompile.
+std::vector<std::string> SequenceLabels(const Mdl& m) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudioseqdesc_t* seqs =
+        m.At<fm::mstudioseqdesc_t>(m.buf.data(), h.localseqindex, h.numlocalseq);
+    std::vector<std::string> labels;
+    if (!seqs || h.numlocalseq <= 0)
+        return labels;
+    std::map<std::string, int> labelSeen;
+    for (int i = 0; i < h.numlocalseq; ++i) {
+        std::string name = m.Str(&seqs[i], seqs[i].szlabelindex);
+        std::string key = name;
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        int& n = labelSeen[key];
+        if (n++ > 0) name += "_" + std::to_string(n);
+        labels.push_back(name);
+    }
+    return labels;
+}
+
+// -declaresequence: the whole sequence order as a standalone .qci to paste into a
+// model that $includemodel's this one. Not $include'd into this model's own qc.
+void WriteDeclareSequenceFile(const Mdl& m, const std::string& dir) {
+    const std::vector<std::string> labels = SequenceLabels(m);
+    if (labels.empty())
+        return;
+    const std::string name = BaseName(dir) + "_declaresequence.qci";
+    std::FILE* f = std::fopen((std::filesystem::path(dir) / name).string().c_str(), "wb");
+    if (!f) {
+        std::printf("\ncould not write %s\n", name.c_str());
+        return;
+    }
+    for (const std::string& l : labels)
+        std::fprintf(f, "$declaresequence \"%s\"\n", l.c_str());
+    std::fclose(f);
+    std::printf("\nwrote %s (%zu sequences)\n", name.c_str(), labels.size());
+}
+
 // $sequence / $declaresequence, in file order: the two interleave, and that
 // order is the sequence index every activity lookup and $includemodel override
 // resolves against.
@@ -2563,18 +2612,7 @@ void WriteSequences(Qc& q, const Mdl& m) {
     const std::vector<std::string> nodes = NodeNames(m);
     const std::vector<std::string> chains = IkChainNames(m);
     const WeightLists weights = GatherWeightLists(m);
-    std::vector<std::string> labels;
-    // the engine allows duplicate sequence names, the compiler does not - suffix
-    // repeats so the emitted script recompiles
-    std::map<std::string, int> labelSeen;
-    for (int i = 0; i < h.numlocalseq; ++i) {
-        std::string name = m.Str(&seqs[i], seqs[i].szlabelindex);
-        std::string key = name;
-        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        int& n = labelSeen[key];
-        if (n++ > 0) name += "_" + std::to_string(n);
-        labels.push_back(name);
-    }
+    const std::vector<std::string> labels = SequenceLabels(m);
     auto pick = [](const std::vector<std::string>& v, int i) {
         return (i >= 0 && static_cast<size_t>(i) < v.size()) ? v[i] : std::string();
     };
@@ -2809,22 +2847,33 @@ void WriteHitboxes(Qc& q, const Mdl& m) {
                                                                             : std::string();
             std::string line = (g_studiomdl ? "$hbox " : "    $hbox ") + std::to_string(b.group) +
                                " \"" + bone + "\" " + V3(b.bbmin) + "  " + V3(b.bbmax);
-            // a box is only a capsule when the radius is positive, and the
-            // orientation is read only for a capsule - on a box it is dead data
-            if (b.flCapsuleRadius > 0.0f) {
-                if (b.angOffsetOrientation.x || b.angOffsetOrientation.y ||
-                    b.angOffsetOrientation.z)
-                    line += " angles " + V3(b.angOffsetOrientation);
-                line += " radius " + F(b.flCapsuleRadius);
-            }
             // whitespace or junk is not a name worth restating
             std::string hbname = m.Str(&b, b.szhitboxnameindex);
             const size_t first = hbname.find_first_not_of(" \t");
             hbname = first == std::string::npos
                          ? std::string()
                          : hbname.substr(first, hbname.find_last_not_of(" \t") - first + 1);
-            if (CleanName(hbname))
-                line += " name \"" + hbname + "\"";
+            const bool hasName = CleanName(hbname);
+            const bool capsule = b.flCapsuleRadius > 0.0f;
+            const bool hasAngles = b.angOffsetOrientation.x || b.angOffsetOrientation.y ||
+                                   b.angOffsetOrientation.z;
+            if (g_studiomdl) {
+                // stock $hbox trailing fields are positional (angles, radius, name),
+                // so pad the earlier ones whenever a later one is present.
+                if (capsule || hasName || hasAngles)
+                    line += " " + V3(b.angOffsetOrientation);
+                if (capsule || hasName)
+                    line += " " + (capsule ? F(b.flCapsuleRadius) : std::string("0"));
+                if (hasName)
+                    line += " \"" + hbname + "\"";
+            } else {
+                if (capsule || hasAngles)
+                    line += " angles " + V3(b.angOffsetOrientation);
+                if (capsule)
+                    line += " radius " + F(b.flCapsuleRadius);
+                if (hasName)
+                    line += " name \"" + hbname + "\"";
+            }
             q.Line(line);
         }
         if (!g_studiomdl)
@@ -3033,8 +3082,12 @@ int DecompileOne(const std::string& in, const std::string& root, const char* out
     if (h.numlocalanim > 0)
         std::printf("\nanimations:\n");
     const auto tAnim0 = Clock::now();
-    STAGE(WriteAnimationFiles, m, in, dir);
+    if (!g_noanim)
+        STAGE(WriteAnimationFiles, m, in, dir);
     const auto tAnim1 = Clock::now();
+
+    if (g_declareseq)
+        STAGE(WriteDeclareSequenceFile, m, dir);
 
     pulse::fatal::g_stage = "done";
     std::printf("\nwrote %s\n", outPath.c_str());
@@ -3073,6 +3126,12 @@ int RunDecompile(int argc, char** argv) {
             g_studiomdl = false;
         else if (std::strcmp(argv[i], "-studiomdl") == 0)
             g_studiomdl = true; // now the default; still accepted so old runs work
+        else if (std::strcmp(argv[i], "-nomesh") == 0)
+            g_nomesh = true;
+        else if (std::strcmp(argv[i], "-noanimation") == 0)
+            g_noanim = true;
+        else if (std::strcmp(argv[i], "-declaresequence") == 0)
+            g_declareseq = true;
         else if (std::strcmp(argv[i], "-pause") == 0)
             pulse::fatal::g_pause = true;
         else if (std::strcmp(argv[i], "-perfmetrics") == 0)
