@@ -29,11 +29,37 @@ inline bool g_studiomdl = true;
 // without a range check.
 struct Mdl {
     std::vector<char> buf;
+    std::vector<char> ani; // sibling .ani, loaded only when the block table is real
     const fm::studiohdr_t* hdr = nullptr;
+
+    // A delta clip's IK touch error is re-baked by studiomdl against anims[0].
+    // When that base does not reproduce the stored error, recovery finds the base
+    // pose that does and routes every delta's `subtract` through a synthesized
+    // a_bindpose holding it, so it lands at anims[0]. Set once before output.
+    bool ikRecovered = false;
+    std::vector<pm::Vector3> ikBasePos;
+    std::vector<pm::RadianEuler> ikBaseRot;
 
     bool InRange(const void* base, size_t bytes) const {
         const char* p = static_cast<const char*>(base);
         return p >= buf.data() && p + bytes <= buf.data() + buf.size();
+    }
+
+    // A demand-loaded clip keeps its IK rules in the .ani at animblockikruleindex
+    // (relative to the clip's own block), not in the .mdl. Returns null unless the
+    // .ani is loaded and the span is in range.
+    const fm::mstudioikrule_t* BlockIkRules(const fm::mstudioanimdesc_t& a) const {
+        if (a.numikrules <= 0 || a.animblock <= 0 || ani.empty())
+            return nullptr;
+        const fm::mstudioanimblock_t* blocks =
+            At<fm::mstudioanimblock_t>(buf.data(), hdr->animblockindex, hdr->numanimblocks);
+        if (!blocks || a.animblock >= hdr->numanimblocks)
+            return nullptr;
+        const char* base = ani.data() + blocks[a.animblock].datastart + a.animblockikruleindex;
+        const size_t need = sizeof(fm::mstudioikrule_t) * static_cast<size_t>(a.numikrules);
+        if (base < ani.data() || base + need > ani.data() + ani.size())
+            return nullptr;
+        return reinterpret_cast<const fm::mstudioikrule_t*>(base);
     }
 
     // `base` is what the offset is relative to: the file start for studiohdr_t
@@ -228,6 +254,8 @@ inline std::vector<AnimRef> AnimRefs(const Mdl& m) {
 // bind pose would shift animation 0 and misplace ik `touch` targets. The writer
 // must subtract the same pose named here in `subtract`.
 inline int SubtractBase(const Mdl& m, const std::vector<AnimRef>& refs) {
+    if (m.ikRecovered)
+        return -1; // route every delta through the recovered a_bindpose base
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudioanimdesc_t* a =
         m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
@@ -250,6 +278,8 @@ inline std::string SubtractNameFor(const std::vector<AnimRef>& refs, int base, i
 
 // True when some delta clip has to fall back on that synthesized bind-pose clip.
 inline bool NeedsBindPoseAnim(const Mdl& m, int base) {
+    if (m.ikRecovered)
+        return true; // the recovered base ships as the a_bindpose clip
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudioanimdesc_t* a =
         m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);

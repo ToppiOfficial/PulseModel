@@ -15,6 +15,10 @@ void SetAnimFormat(bool smd);
 // ".dmx" or ".smd" - what the .pulseqc has to name.
 const char* AnimExt();
 
+// Detect and store the IK base-pose recovery (see Mdl::ikRecovered). Call once
+// after the .mdl and its .ani are loaded, before any animation/sequence output.
+void ComputeIkBaseRecovery(Mdl& m, const std::string& mdlPath);
+
 // One anims/<name>.<ext> per local animation that carries data, named by the
 // AnimRefs() alias the .pulseqc writes. `mdlPath` locates a sibling .ani for
 // demand-loaded clips. Reports what it wrote and never fails the decompile.

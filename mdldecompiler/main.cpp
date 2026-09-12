@@ -2286,10 +2286,12 @@ const struct { int32_t bit; const char* name; } kMotionControls[] = {
 // The ramp and contact are cycle fractions of this animation. One line each,
 // for the { } body of whatever declared the animation.
 std::vector<std::string> IkRules(const Mdl& m, const fm::mstudioanimdesc_t& a) {
-    // animblockikruleindex is relative to the .ani block, not the .mdl - a
-    // demand-loaded clip's rules are simply out of reach here.
+    // In-mdl rules for a resident clip; a demand-loaded clip's rules live in the
+    // .ani and come back through BlockIkRules instead.
     const fm::mstudioikrule_t* rules =
         m.At<fm::mstudioikrule_t>(&a, a.ikruleindex, a.numikrules);
+    if (!rules)
+        rules = m.BlockIkRules(a);
     if (!rules)
         return {};
     const std::vector<std::string> chains = IkChainNames(m);
@@ -2307,7 +2309,9 @@ std::vector<std::string> IkRules(const Mdl& m, const fm::mstudioanimdesc_t& a) {
             case fm::IK_GROUND: line += " footstep"; break;
             case fm::IK_RELEASE: line += " release"; break;
             case fm::IK_ATTACHMENT:
-                // a raw string after the error streams, not the string table
+                // raw string after the error streams, not the string table. A
+                // block clip's rule sits in the .ani, out of m.Str's range, so its
+                // attachment name comes back empty - unseen so far on real models.
                 line += " attachment \"" + std::string(m.Str(&r, r.szattachmentindex)) + "\"";
                 break;
             default:
@@ -2323,15 +2327,10 @@ std::vector<std::string> IkRules(const Mdl& m, const fm::mstudioanimdesc_t& a) {
                 std::to_string(std::lround(r.peak * lastframe)) + " " +
                 std::to_string(std::lround(r.tail * lastframe)) + " " +
                 std::to_string(std::lround(r.end * lastframe));
-        // KNOWN LIMITATION: a 1-frame delta clip's baked IK touch error is not
-        // round-tripped. It was measured at original compile from the animation's
-        // grip pose (its true subtract base), neither of which the .mdl keeps, so
-        // no stock re-bake can reproduce it. Every carrier tried failed: fakeorigin
-        // becomes a header anchor (wrong pose), a source re-pose corrupts the
-        // clip's delta (breaks layer blending in-game), and a custom command is
-        // not portable to stock studiomdl. So the rule goes out as a plain touch:
-        // faithful geometry/blending, but the hand offset is lost. Do not add a
-        // solver or a private command here.  NOTHING I DID EVER WORKED! WHY?
+        // A delta clip's touch error re-bakes against anims[0], so it round-trips
+        // only when that base holds the grip pose. RecoverIkBase finds it and
+        // ships it as a_bindpose (see Mdl::ikRecovered); the rule itself stays a
+        // plain touch.
         out.push_back(std::move(line));
     }
     return out;
@@ -2799,6 +2798,9 @@ int DecompileOne(const std::string& in, const std::string& root, const char* out
     const auto tRead = Clock::now();
 
     const fm::studiohdr_t& h = *m.hdr;
+    if (h.numanimblocks > 1)
+        ReadWhole(StripExt(in) + ".ani", m.ani);
+    ComputeIkBaseRecovery(m, in);
     std::printf("model:       \"%s\"\n", h.name);
     std::printf("contents:    %d bones, %d bodyparts, %d materials, %d animations, %d sequences,\n"
                 "             %d flex controllers, %d attachments, %d hitbox sets\n",

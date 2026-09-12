@@ -17,9 +17,12 @@
 
 #include "animwrite.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <system_error>
 #include <vector>
 
@@ -319,7 +322,178 @@ void RestoreMotion(const Mdl& m, const fm::mstudioanimdesc_t& a, const fm::mstud
     }
 }
 
+// studiomdl re-bakes a delta clip's IK touch error against anims[0], not the
+// clip's own subtract base. This finds the non-delta clip whose frame-0 pose,
+// used as that base, reproduces the stored error, so shipping it as anims[0]
+// makes the re-bake match. Returns false when no delta clip carries a touch rule
+// or no candidate reproduces the error - then the ordinary base is kept.
+bool RecoverIkBase(const Mdl& m, const std::string& mdlPath, std::vector<pm::Vector3>& outPos,
+                   std::vector<pm::RadianEuler>& outRot) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const auto* descs = m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
+    const auto* bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+    const auto* chains = m.At<fm::mstudioikchain_t>(m.buf.data(), h.ikchainindex, h.numikchains);
+    if (!descs || !bones || h.numlocalanim <= 0 || h.numbones <= 0)
+        return false;
+
+    std::vector<char> ani;
+    const auto* blocks =
+        m.At<fm::mstudioanimblock_t>(m.buf.data(), h.animblockindex, h.numanimblocks);
+    if (blocks && h.numanimblocks > 1)
+        ReadWhole(StripExt(mdlPath) + ".ani", ani);
+    const Block local{m.buf.data(), m.buf.data() + m.buf.size()};
+    const Block ext{ani.empty() ? nullptr : ani.data(),
+                    ani.empty() ? nullptr : ani.data() + ani.size()};
+
+    auto chainEnd = [&](int c) -> int {
+        if (!chains || c < 0 || c >= h.numikchains)
+            return -1;
+        const auto* links =
+            m.At<fm::mstudioiklink_t>(&chains[c], chains[c].linkindex, chains[c].numlinks);
+        return (links && chains[c].numlinks >= 3) ? links[2].bone : -1;
+    };
+
+    struct Target {
+        int clip, touch, hand, start, end;
+        const fm::mstudioikrule_t* rule;
+        Block blk;
+    };
+    std::vector<Target> targets;
+    for (int i = 0; i < h.numlocalanim; ++i) {
+        const auto& a = descs[i];
+        if ((a.flags & fm::STUDIO_OVERRIDE) || !(a.flags & fm::STUDIO_DELTA))
+            continue;
+        const fm::mstudioikrule_t* rules =
+            m.At<fm::mstudioikrule_t>(&a, a.ikruleindex, a.numikrules);
+        Block rblk = local;
+        if (!rules) {
+            rules = m.BlockIkRules(a);
+            rblk = ext;
+        }
+        if (!rules)
+            continue;
+        const float lf = a.numframes > 1 ? static_cast<float>(a.numframes - 1) : 1.0f;
+        for (int r = 0; r < a.numikrules; ++r) {
+            const int hand = chainEnd(rules[r].chain);
+            if (rules[r].type != fm::IK_SELF || rules[r].compressedikerrorindex == 0 || hand < 0 ||
+                rules[r].bone < 0 || rules[r].bone >= h.numbones)
+                continue;
+            targets.push_back({i, rules[r].bone, hand, static_cast<int>(std::lround(rules[r].start * lf)),
+                               static_cast<int>(std::lround(rules[r].end * lf)), &rules[r], rblk});
+        }
+    }
+    if (targets.empty())
+        return false;
+
+    std::map<int, std::vector<std::vector<Pose>>> clipFrames;
+    for (const auto& t : targets)
+        if (!clipFrames.count(t.clip))
+            DecodeAnim(m, descs[t.clip], bones, h.numbones, local, ext, blocks, h.numanimblocks,
+                       clipFrames[t.clip]);
+
+    auto storedError = [&](const Target& t, int frame, pm::Vector3& ep, pm::RadianEuler& er) -> bool {
+        const auto* cie =
+            t.blk.At<fm::mstudiocompressedikerror_t>(t.rule, t.rule->compressedikerrorindex);
+        if (!cie)
+            return false;
+        float v[6] = {0, 0, 0, 0, 0, 0};
+        for (int c = 0; c < 6; ++c) {
+            if (!cie->offset[c])
+                continue;
+            const auto* s = t.blk.At<fm::mstudioanimvalue_t>(cie, cie->offset[c]);
+            if (s)
+                v[c] = ExtractAnimValue(t.blk, s, frame - t.start) * cie->scale[c];
+        }
+        ep = {v[0], v[1], v[2]};
+        er = {v[3], v[4], v[5]};
+        return true;
+    };
+
+    double best = 1e30;
+    int bestCmp = 0;
+    for (int cand = 0; cand < h.numlocalanim; ++cand) {
+        if (descs[cand].flags & (fm::STUDIO_OVERRIDE | fm::STUDIO_DELTA))
+            continue;
+        std::vector<std::vector<Pose>> cf;
+        if (!DecodeAnim(m, descs[cand], bones, h.numbones, local, ext, blocks, h.numanimblocks,
+                        cf) ||
+            cf.empty())
+            continue;
+        const std::vector<Pose>& base = cf[0];
+        double score = 0;
+        int cmp = 0;
+        for (const auto& t : targets) {
+            auto it = clipFrames.find(t.clip);
+            if (it == clipFrames.end() || it->second.empty())
+                continue;
+            const auto& df = it->second;
+            for (int fr : {t.start, (t.start + t.end) / 2, t.end}) {
+                if (fr < 0 || fr >= static_cast<int>(df.size()))
+                    continue;
+                std::vector<pm::matrix3x4> world(static_cast<size_t>(h.numbones));
+                for (int b = 0; b < h.numbones; ++b) {
+                    pm::Quaternion qb, qd, q3;
+                    pm::AngleQuaternion(base[b].rot, qb);
+                    pm::AngleQuaternion(df[fr][b].rot, qd);
+                    pm::QuaternionMA(qb, 1.0f, qd, q3);
+                    pm::RadianEuler e3;
+                    pm::QuaternionAngles(q3, e3);
+                    const pm::Vector3 p3{base[b].pos.x + df[fr][b].pos.x,
+                                         base[b].pos.y + df[fr][b].pos.y,
+                                         base[b].pos.z + df[fr][b].pos.z};
+                    pm::matrix3x4 mm;
+                    pm::AngleMatrix(e3, p3, mm);
+                    world[b] = bones[b].parent < 0
+                                   ? mm
+                                   : pm::ConcatTransforms(world[bones[b].parent], mm);
+                }
+                const pm::matrix3x4 loc =
+                    pm::ConcatTransforms(pm::MatrixInvert(world[t.touch]), world[t.hand]);
+                pm::RadianEuler cr;
+                pm::Vector3 cp;
+                pm::MatrixAngles(loc, cr, cp);
+                pm::Vector3 ep;
+                pm::RadianEuler er;
+                if (!storedError(t, fr, ep, er))
+                    continue;
+                pm::Quaternion qc, qe;
+                pm::AngleQuaternion(cr, qc);
+                pm::AngleQuaternion(er, qe);
+                const double dq =
+                    1.0 - std::fabs(qc.x * qe.x + qc.y * qe.y + qc.z * qe.z + qc.w * qe.w);
+                const double dp = (cp.x - ep.x) * (cp.x - ep.x) + (cp.y - ep.y) * (cp.y - ep.y) +
+                                  (cp.z - ep.z) * (cp.z - ep.z);
+                score += dp + dq * 100.0;
+                ++cmp;
+            }
+        }
+        if (cmp && score < best) {
+            best = score;
+            bestCmp = cmp;
+            outPos.assign(static_cast<size_t>(h.numbones), pm::Vector3{});
+            outRot.assign(static_cast<size_t>(h.numbones), pm::RadianEuler{});
+            for (int b = 0; b < h.numbones; ++b) {
+                outPos[b] = base[b].pos;
+                outRot[b] = base[b].rot;
+            }
+        }
+    }
+    // only take the recovered base when it actually reproduces the error; a poor
+    // best means the true base was never in the file, so leave the default.
+    return bestCmp > 0 && best / bestCmp < 2.0;
+}
+
 } // namespace
+
+void ComputeIkBaseRecovery(Mdl& m, const std::string& mdlPath) {
+    std::vector<pm::Vector3> pos;
+    std::vector<pm::RadianEuler> rot;
+    if (RecoverIkBase(m, mdlPath, pos, rot)) {
+        m.ikRecovered = true;
+        m.ikBasePos = std::move(pos);
+        m.ikBaseRot = std::move(rot);
+    }
+}
 
 void SetAnimFormat(bool smd) { g_smd = smd; }
 
@@ -361,6 +535,11 @@ void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::st
     std::vector<Pose> realBase, bindPose(static_cast<size_t>(h.numbones));
     for (int j = 0; j < h.numbones; ++j)
         bindPose[j] = Pose{bones[j].pos, bones[j].rot};
+    // the recovered IK base ships as a_bindpose, so its pose replaces the skeleton
+    // bind pose the synthesized clip would otherwise carry
+    if (m.ikRecovered && static_cast<int>(m.ikBasePos.size()) == h.numbones)
+        for (int j = 0; j < h.numbones; ++j)
+            bindPose[j] = Pose{m.ikBasePos[j], m.ikBaseRot[j]};
     if (baseIndex >= 0) {
         std::vector<std::vector<Pose>> f;
         if (DecodeAnim(m, descs[baseIndex], bones, h.numbones, local, ext, blocks,
