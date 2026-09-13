@@ -243,6 +243,8 @@ int IllumAttachment(const Mdl& m) {
 void WriteHeader(Qc& q, const Mdl& m) {
     const fm::studiohdr_t& h = *m.hdr;
     q.Line("$modelname \"" + std::string(h.name) + "\"");
+    if (ModelUsesUpAxisY(m))
+        q.Line("$upaxis Y");
 
     // sources go in meshes/ and anims/ beside the script - registered here so
     // every reference below can name a bare filename
@@ -324,9 +326,10 @@ void WriteMaterials(Qc& q, const Mdl& m) {
         return;
     bool any = false;
     for (int i = 0; i < h.numcdtextures; ++i) {
-        const std::string cd = m.Str(m.buf.data(), cds[i]);
+        std::string cd = m.Str(m.buf.data(), cds[i]);
         if (cd.empty())
             continue;
+        std::replace(cd.begin(), cd.end(), '/', '\\'); // Source path convention
         if (!any) {
             q.Blank();
             any = true;
@@ -3044,6 +3047,19 @@ int DecompileOne(const std::string& in, const std::string& root, const char* out
                            MeshFile(name + "_lod" + std::to_string(l)) + "\"");
         for (const auto& r : lods[l].materialReplacements)
             q.Line("    replacematerial \"" + r.first + "\" \"" + r.second + "\"");
+
+        // A bone whose LOD-use flag is clear at this LOD was collapsed into its
+        // parent (bonetreecollapse/replacebone); reconstruct it as replacebone.
+        const fm::mstudiobone_t* bones =
+            m.At<fm::mstudiobone_t>(m.buf.data(), m.hdr->boneindex, m.hdr->numbones);
+        const std::vector<std::string> boneNames = BoneNames(m);
+        const int32_t lodBit = fm::BONE_USED_BY_VERTEX_LOD0 << l;
+        for (int b = 0; bones && b < m.hdr->numbones; ++b)
+            if (bones[b].parent >= 0 && !(bones[b].flags & lodBit))
+                q.Line("    replacebone \"" + boneNames[b] + "\" \"" +
+                       boneNames[bones[b].parent] + "\"");
+
+        q.Line(lods[l].usesFacial ? "    facial" : "    nofacial");
         q.Line("}");
     }
 

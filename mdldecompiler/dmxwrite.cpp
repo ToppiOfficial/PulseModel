@@ -311,6 +311,60 @@ float LodSwitchPoint(const std::vector<char>& buf, const Mdl& m, int lod) {
     return 0.0f;
 }
 
+// $lod facial/nofacial. The compiler flags a strip group STRIPGROUP_IS_FLEXED
+// when facial animation is on for that LOD; the flags byte sits at the same
+// offset in both strip-group layouts, so `stride` is the only version split.
+bool LodUsesFacial(const std::vector<char>& buf, const Mdl& m, size_t stride, int lod) {
+    const auto* fh = reinterpret_cast<const vtx::FileHeader_t*>(buf.data());
+    const char* end = buf.data() + buf.size();
+    auto at = [&](const void* owner, int32_t off, size_t bytes) -> const char* {
+        const char* c = static_cast<const char*>(owner) + off;
+        return (c >= buf.data() && c <= end && bytes <= static_cast<size_t>(end - c)) ? c
+                                                                                     : nullptr;
+    };
+    const char* bpRaw = at(fh, fh->bodyPartOffset,
+                           sizeof(vtx::BodyPartHeader_t) * static_cast<size_t>(fh->numBodyParts));
+    if (!bpRaw)
+        return false;
+    const auto* bps = reinterpret_cast<const vtx::BodyPartHeader_t*>(bpRaw);
+    for (int i = 0; i < fh->numBodyParts; ++i) {
+        const char* mRaw = at(&bps[i], bps[i].modelOffset,
+                              sizeof(vtx::ModelHeader_t) * static_cast<size_t>(bps[i].numModels));
+        if (!mRaw)
+            continue;
+        const auto* models = reinterpret_cast<const vtx::ModelHeader_t*>(mRaw);
+        for (int j = 0; j < bps[i].numModels; ++j) {
+            if (models[j].numLODs <= lod)
+                continue;
+            const char* lodRaw =
+                at(&models[j], models[j].lodOffset,
+                   sizeof(vtx::ModelLODHeader_t) * static_cast<size_t>(models[j].numLODs));
+            if (!lodRaw)
+                continue;
+            const auto& lodHdr = reinterpret_cast<const vtx::ModelLODHeader_t*>(lodRaw)[lod];
+            const char* meshRaw =
+                at(&lodHdr, lodHdr.meshOffset,
+                   sizeof(vtx::MeshHeader_t) * static_cast<size_t>(lodHdr.numMeshes));
+            if (!meshRaw)
+                continue;
+            const auto* meshes = reinterpret_cast<const vtx::MeshHeader_t*>(meshRaw);
+            for (int k = 0; k < lodHdr.numMeshes; ++k) {
+                const char* sgRaw = at(&meshes[k], meshes[k].stripGroupHeaderOffset,
+                                       stride * static_cast<size_t>(meshes[k].numStripGroups));
+                if (!sgRaw)
+                    continue;
+                for (int g = 0; g < meshes[k].numStripGroups; ++g) {
+                    const auto& sg = *reinterpret_cast<const vtx::LegacyStripGroupHeader_t*>(
+                        sgRaw + stride * static_cast<size_t>(g));
+                    if (sg.flags & vtx::STRIPGROUP_IS_FLEXED)
+                        return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // $lod replacematerial. One list per LOD; an entry names the texture it swaps
 // out by id and the replacement by a raw string, so the replacement never joins
 // the model's material table.
@@ -1915,6 +1969,7 @@ std::vector<LodInfo> WriteRenderMeshes(const Mdl& m, const std::string& mdlPath,
         lods.push_back(LodInfo{});
         LodInfo& info = lods.back();
         info.switchPoint = LodSwitchPoint(vtxBuf, m, lod);
+        info.usesFacial = LodUsesFacial(vtxBuf, m, stride, lod);
         info.materialReplacements = LodMaterialReplacements(vtxBuf, m, lod);
 
         // LOD 0 keeps the plain alias; the rest hang a _lod<n> off it, which is

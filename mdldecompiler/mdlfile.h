@@ -413,6 +413,34 @@ inline std::set<int> LidDescs(const Mdl& m) {
     return lids;
 }
 
+// $upaxis Y detection: the compiler bakes eyeball->up through g_defaultrotation
+// and poseToBone. Pull it back; y~=1 means the model was compiled $upaxis Y.
+// No eyeballs -> Z (no $upaxis emitted).
+inline bool ModelUsesUpAxisY(const Mdl& m) {
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudiobone_t* bones =
+        m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+    if (!bones)
+        return false;
+    const fm::mstudiobodyparts_t* parts =
+        m.At<fm::mstudiobodyparts_t>(m.buf.data(), h.bodypartindex, h.numbodyparts);
+    for (int i = 0; parts && i < h.numbodyparts; ++i) {
+        const fm::mstudiomodel_t* models =
+            m.At<fm::mstudiomodel_t>(&parts[i], parts[i].modelindex, parts[i].nummodels);
+        for (int j = 0; models && j < parts[i].nummodels; ++j) {
+            const fm::mstudioeyeball_t* eb = m.At<fm::mstudioeyeball_t>(
+                &models[j], models[j].eyeballindex, models[j].numeyeballs);
+            for (int k = 0; eb && k < models[j].numeyeballs; ++k) {
+                if (eb[k].bone < 0 || eb[k].bone >= h.numbones)
+                    continue;
+                pm::Vector3 tmp = pm::VectorIRotate(eb[k].up, bones[eb[k].bone].poseToBone);
+                return tmp.y > 0.99f; // first valid eyeball decides
+            }
+        }
+    }
+    return false;
+}
+
 // A lid pose's delta name. NOT "<desc>_<slot>" - that is the slot flexdesc
 // $eyelid creates, and a delta of the same name would apply the morph twice.
 inline std::string LidDeltaName(const std::string& desc, int slot) {

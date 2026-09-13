@@ -551,8 +551,15 @@ void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::st
     // BuildRawTransforms yaws a source clip's ROOT bones by g_defaultrotation
     // (+90 about Z) on the way in, so the clip goes back out with that removed.
     // Child bones are parent-relative and never see it.
+    // Y-up bakes {pi/2,0,pi/2}, whose inverse is not a single negated euler.
     pm::matrix3x4 unrotate;
-    pm::AngleMatrix(pm::RadianEuler{0.0f, 0.0f, -pm::kPiF / 2.0f}, unrotate);
+    if (ModelUsesUpAxisY(m)) {
+        pm::matrix3x4 fwd;
+        pm::AngleMatrix(pm::RadianEuler{pm::kPiF / 2.0f, 0.0f, pm::kPiF / 2.0f}, fwd);
+        unrotate = pm::MatrixInvert(fwd);
+    } else {
+        pm::AngleMatrix(pm::RadianEuler{0.0f, 0.0f, -pm::kPiF / 2.0f}, unrotate);
+    }
     auto unyawRoots = [&](std::vector<Pose>& fr) {
         for (int j = 0; j < h.numbones; ++j) {
             if (bones[j].parent >= 0)

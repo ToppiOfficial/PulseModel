@@ -4388,9 +4388,12 @@ bool CmdUpAxis(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $attachment <name> [bone <name>] [origin x y z] [angles x y z]
+// $attachment <name> [inherit <name>] [bone <name>] [origin x y z] [angles x y z]
 //                    [rigid] [absolute] [world_align]
 //                    [flexgroup <n>]... [flexmorph <n>]... [material <n>]...
+//
+// `inherit <name>` seeds every setting from an earlier attachment; any clause
+// after it overrides. Put it first.
 //
 // Also accepts the legacy studiomdl positional form (Cmd_Attachment):
 //   $attachment <name> <bone> [<x> <y> <z>] [absolute] [rigid] [rotate p y r]
@@ -4414,7 +4417,7 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
         return false;
 
     static const char* kClauses[] = {
-        "bone",   "origin",   "position",  "angles",    "rotate",  "rigid",
+        "inherit", "bone",   "origin",   "position",  "angles",    "rotate",  "rigid",
         "absolute", "world_align", "flexgroup", "flexmorph", "material"};
     auto isClause = [](const Token& t) {
         if (t.quoted)
@@ -4444,7 +4447,24 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
         const Token& t = c.toks[c.pos++];
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
-        if (!t.quoted && _stricmp(t.text.c_str(), "bone") == 0) {
+        if (!t.quoted && _stricmp(t.text.c_str(), "inherit") == 0) {
+            // copy an already-defined attachment as the base; later clauses
+            // override. Place `inherit` before any clause you want to change.
+            std::string src;
+            if (!c.Want("an attachment name", sub, src))
+                return false;
+            auto it = std::find_if(c.attachments.begin(), c.attachments.end(),
+                                   [&](const Ctx::PendingAttachment& p) {
+                                       return p.filled &&
+                                              _stricmp(p.name.c_str(), src.c_str()) == 0;
+                                   });
+            if (it == c.attachments.end())
+                return c.Fail(t.line, "$attachment \"" + a.name +
+                                      "\": inherit source \"" + src + "\" not defined above");
+            std::string keep = std::move(a.name);
+            a = *it;
+            a.name = std::move(keep);
+        } else if (!t.quoted && _stricmp(t.text.c_str(), "bone") == 0) {
             if (!c.Want("a bone name", sub, a.bone))
                 return false;
         } else if (!t.quoted && (_stricmp(t.text.c_str(), "origin") == 0 ||
@@ -4493,7 +4513,7 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
                 return false;
         } else {
             return c.Fail(t.line, "$attachment \"" + a.name +
-                                  "\": expected bone, origin/position, "
+                                  "\": expected inherit, bone, origin/position, "
                                   "angles/rotate, rigid, absolute, world_align, "
                                   "flexgroup, flexmorph or material, got \"" +
                                   t.text + "\"");

@@ -23,6 +23,8 @@ int DmxModelVersion();
 // no $lod block writes; a negative switch point is the $shadowlod.
 struct LodInfo {
     float switchPoint = 0.0f;
+    // any strip group in the LOD is flexed -> $lod facial, else nofacial
+    bool usesFacial = false;
     // old material -> replacement, both bare names ($lod replacematerial)
     std::vector<std::pair<std::string, std::string>> materialReplacements;
 };
