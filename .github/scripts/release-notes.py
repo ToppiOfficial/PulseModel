@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Merge the section blocks out of every commit since the last release.
 
-Commit bodies use "<section>:" headers followed by "- " bullets; bullets are
-grouped under the section name (case-insensitive) in first-seen order.
-"Bump version" bullets collapse to the newest one.
+Commit bodies use "<section>:" headers followed by "- " bullets; only the
+mdlcompiler and mdldecompiler sections are kept. Bullets under any other header
+(Misc, stray body lines) are dropped. "Bump version" bullets collapse to the
+newest one.
 """
 
 # Toppi: I am lazy writer.
@@ -13,6 +14,9 @@ import sys
 
 BULLET = re.compile(r"^\s*[-*]\s+(.*\S)\s*$")
 BUMP = re.compile(r"bump\s+version", re.I)
+
+# lowercase header -> display name; bullets under any other header are dropped.
+SECTIONS = {"mdlcompiler": "mdlcompiler", "mdldecompiler": "mdldecompiler"}
 
 sections = {}   # lowercase key -> [display name, [bullets]]
 bumps = {}      # lowercase section key -> newest bump-version bullet
@@ -30,22 +34,21 @@ for commit in sys.stdin.read().split("\0") if len(sys.argv) < 2 else \
     lines = commit.strip("\n").split("\n")
     if not any(l.strip() for l in lines):
         continue
-    section = "Misc"
-    found = False
+    section = None  # bullets before a known header are dropped
     for line in lines[1:]:  # line 0 is the subject
         if not line.strip():
             continue
         m = BULLET.match(line)
         if m:
-            found = True
+            if section is None:
+                continue
             if BUMP.search(m.group(1)):
                 bumps[section.lower()] = (section, m.group(1))
             else:
                 add(section, m.group(1))
         else:
-            section = line.strip().rstrip(":")
-    if not found:  # no bullets - fall back to the subject line
-        add("Misc", lines[0].strip())
+            header = line.strip().rstrip(":").lower()
+            section = SECTIONS.get(header)
 
 for section, text in bumps.values():  # each tool versions independently
     add(section, text)
