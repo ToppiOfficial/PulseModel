@@ -138,7 +138,8 @@ inline constexpr int kMaxKeyValuesBytes  = 1 << 20;
 
 // --- Names ----------------------------------------------------------------
 // [tool] String-table names are unbounded, but mstudiomodel_t::name and
-// mstudioevent_t::options are inline char[64] - those two truncate at 63.
+// mstudioevent_t::options are inline char[64] - a 64-char string fills one with
+// no trailing null, so the cap is 64.
 inline constexpr int kMaxName            = 128;
 inline constexpr int kMaxHitboxSetName   = 64;
 

@@ -1305,8 +1305,10 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
                                   ev.name.c_str());
                     pevent[j].type = fmt::NEW_EVENT_STYLE;
                 }
-                // options is a fixed char[64]; the loader capped the length
-                memcpy(pevent[j].options, ev.options.c_str(), ev.options.size() + 1);
+                // options is a fixed char[64]; strncpy zero-fills when shorter,
+                // a 64-char string fills it with no trailing null
+                strncpy(pevent[j].options, ev.options.c_str(),
+                        sizeof(pevent[j].options));
             }
         }
         buf.Align4();

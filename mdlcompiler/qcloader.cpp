@@ -2893,10 +2893,10 @@ bool ParseEvent(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq) {
     if (!c.Eof() && c.Cur().line == cmd.line &&
         !(!c.Cur().quoted && c.Cur().text == "}"))
         ev.options = c.toks[c.pos++].text;
-    // options is a char[64] on disk, null included
-    if (ev.options.size() > 63)
+    // options is a char[64] on disk; a 64-char string fills it with no null
+    if (ev.options.size() > 64)
         return c.Fail(cmd.line, "event \"" + ev.name + "\" options are longer "
-                                "than 63 characters");
+                                "than 64 characters");
 
     seq.events.push_back(std::move(ev));
     if (seq.events.size() > static_cast<size_t>(pulse::limits::kMaxEvents))

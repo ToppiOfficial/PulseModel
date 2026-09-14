@@ -42,6 +42,17 @@ std::string Lower(std::string s) {
     return s;
 }
 
+// L4D2 campaign intro sequence: cXmY_intro... (e.g. c4m1_intro_coach).
+bool IsCampaignIntro(const std::string& name) {
+    const std::string s = Lower(name);
+    size_t i = 0;
+    if (i >= s.size() || s[i++] != 'c') return false;
+    size_t d = i; while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
+    if (i == d || i >= s.size() || s[i++] != 'm') return false;
+    d = i; while (i < s.size() && std::isdigit((unsigned char)s[i])) ++i;
+    return i != d && s.compare(i, 6, "_intro") == 0;
+}
+
 const Survivor* FindSurvivor(const std::string& name) {
     const std::string want = Lower(name);
     for (const Survivor& h : kSurvivors)
@@ -213,7 +224,7 @@ struct Result {
 // A donor name may fill only one slot: a repeated $declaresequence compiles to
 // an empty sequence, so a second claimant drops to the next donor instead.
 Result Build(const std::vector<std::string>& order, const std::vector<Index>& idx,
-             const std::set<std::string>& codes) {
+             const std::set<std::string>& codes, bool keepintro) {
     Result r;
     std::set<std::string> taken;
     std::string sw, st;
@@ -221,6 +232,12 @@ Result Build(const std::vector<std::string>& order, const std::vector<Index>& id
         Keys(v, codes, sw, st);
         std::string pick;
         int from = -1;
+        // -keepintro: a campaign intro is never swapped - keep the target's own.
+        if (keepintro && IsCampaignIntro(v)) {
+            r.names.push_back(v);
+            r.from.push_back(-1);
+            continue;
+        }
         for (size_t d = 0; d < idx.size() && pick.empty(); ++d) {
             const std::map<std::string, std::string>* tabs[2] = {&idx[d].swapped, &idx[d].stripped};
             const std::string* keys[2] = {&sw, &st};
@@ -245,7 +262,8 @@ Result Build(const std::vector<std::string>& order, const std::vector<Index>& id
 
 bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
            const std::vector<const Survivor*>& chain, const Result& res, int skip, const Slots& order,
-           Resolver& mdls, const std::string& ref) {
+           Resolver& mdls, const std::string& ref, bool noanim, bool nofallback, bool self,
+           bool keepintro) {
     std::vector<int> won(chain.size(), 0);
     int kept = 0;
     for (size_t i = static_cast<size_t>(skip); i < res.from.size(); ++i) {
@@ -304,7 +322,7 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
         for (size_t i = static_cast<size_t>(skip); i < res.from.size(); ++i)
             if (res.from[i] < 0) std::fprintf(f, "//   %s\n", res.names[i].c_str());
     if (local)
-        std::fprintf(f, ref.empty()
+        std::fprintf(f, (ref.empty() && !noanim)
                             ? "// %d further slot(s) below are marked REPLACE ME - vanilla keeps\n"
                               "// those local, so no $includemodel can fill them.\n"
                             : "// %d further slot(s) below are emitted as local $sequence - no\n"
@@ -321,19 +339,65 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
     }
     if (skip) std::fputc('\n', f);
 
-    bool prevLocal = false;
+    // Inert placeholder: bind pose held, noanimation zeroes it to a do-nothing
+    // delta so a slot with no donor swap compiles non-empty without a source.
+    const auto emitNoanim = [&](size_t i, const char* note) {
+        std::fprintf(f, "$bindposesequence \"%s\" { noanimation", res.names[i].c_str());
+        if (!order.acts[i].empty()) std::fprintf(f, " activity %s", order.acts[i].c_str());
+        std::fprintf(f, " }   // slot %d - %s\n", static_cast<int>(i), note);
+    };
+
+    // Blank-line separate runs of unlike lines: donor declares, inert
+    // bindposesequence slots, and local REPLACE ME/$sequence blocks.
+    int prevKind = -1;
+    const auto spacer = [&](int kind) {
+        if (prevKind != -1 && kind != prevKind) std::fputc('\n', f);
+        prevKind = kind;
+    };
+    // A donor pick can collide with a name already emitted (survivor lists hold
+    // other survivors' prefixed entries). Dropping the slot would shift every
+    // later index and desync multiplayer, so re-emit it as a duplicate
+    // $declaresequence - the compiler allows repeats and the index is held.
+    std::set<std::string> emitted;
     for (size_t i = static_cast<size_t>(skip); i < res.names.size(); ++i) {
+        if (!emitted.insert(Lower(res.names[i])).second) {
+            spacer(0);
+            std::fprintf(f, "$declaresequence \"%s\"   // dup name, index held\n",
+                         res.names[i].c_str());
+            continue;
+        }
         if (reachable.count(Lower(res.names[i]))) {
-            if (prevLocal) std::fputc('\n', f); // keep the local runs easy to spot
-            std::fprintf(f, "$declaresequence \"%s\"\n", res.names[i].c_str());
-            prevLocal = false;
+            // -usenoanimation: a kept slot (no donor equivalent) goes inert too;
+            // a real donor swap (from >= 0) stays a plain declare. Not on the
+            // self file (a no-donor slot is the rig's own) or a kept intro.
+            const bool keptIntro = keepintro && IsCampaignIntro(order.names[i]);
+            if (noanim && res.from[i] < 0 && !self && !keptIntro) {
+                spacer(1);
+                emitNoanim(i, "no donor swap");
+            } else {
+                spacer(0);
+                std::fprintf(f, "$declaresequence \"%s\"\n", res.names[i].c_str());
+            }
             continue;
         }
         // Vanilla keeps this slot local, so a declare here compiles empty. With
         // a reference sequence to point at we can emit the local outright.
         const std::string& act = order.acts[i];
-        if (!prevLocal) std::fputc('\n', f);
-        prevLocal = true;
+        spacer(2);
+        // The T-pose slot (index 0) and the ragdoll both need a real pose, not an
+        // inert clip. Point them at an $animation the modder names "a_reference",
+        // so one authored clip fills both without a REPLACE ME.
+        if (i == 0 || act.compare(0, 14, "ACT_DIERAGDOLL") == 0) {
+            std::fprintf(f, "$sequence \"%s\" { a_reference", res.names[i].c_str());
+            if (!act.empty()) std::fprintf(f, " activity %s", act.c_str());
+            std::fprintf(f, " }   // slot %d - provide an $animation named a_reference\n",
+                         static_cast<int>(i));
+            continue;
+        }
+        if (noanim) {
+            emitNoanim(i, "no $includemodel provides this");
+            continue;
+        }
         if (ref.empty()) {
             std::fprintf(f, "// REPLACE ME - slot %d. No $includemodel provides \"%s\";\n"
                             "// vanilla defines it locally%s%s. Put your own $sequence here\n"
@@ -346,6 +410,37 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
         std::fprintf(f, "$sequence %s \"%s\" FPS 30", res.names[i].c_str(), ref.c_str());
         if (!act.empty()) std::fprintf(f, " activity %s", act.c_str());
         std::fprintf(f, "   // slot %d - no $includemodel provides this\n", static_cast<int>(i));
+    }
+
+    // -nofallbackanimation: a replaced slot declares the donor's name, but the
+    // fallback $includemodel re-adds the original vanilla-named sequence as a
+    // stray the engine can still play by name. Zero each such re-added name with
+    // a local inert bindpose (a local sequence shadows the included one).
+    if (nofallback) {
+        bool any = false;
+        for (size_t i = static_cast<size_t>(skip); i < res.names.size(); ++i) {
+            if (res.from[i] < 0) continue;
+            // Only names an include actually re-adds. A base-model local (a root
+            // reference like "mechanic") is in no include, so nothing re-adds it.
+            if (!reachable.count(Lower(order.names[i]))) continue;
+            // -keepintro: leave campaign intros (cXmY_intro) for the include.
+            if (keepintro && IsCampaignIntro(order.names[i])) continue;
+            // Gestures (ACT_GEST_*) are called by name, so shadowing the name
+            // would freeze them - leave those to the include. Every other
+            // re-added name is selected by activity: zeroing it (below, with no
+            // activity) drops it from the pool so only the donor swap competes.
+            if (order.acts[i].compare(0, 8, "ACT_GEST") == 0) continue;
+            // `emitted` holds every name the main loop wrote; a shared-name swap
+            // declares the vanilla spelling itself, so skip any already present.
+            if (!emitted.insert(Lower(order.names[i])).second) continue;
+            if (!any) {
+                std::fprintf(f, "\n// -nofallbackanimation: zero the original names the fallback\n"
+                                "// $includemodel re-adds under a replaced slot, so a stray call\n"
+                                "// lands on a do-nothing clip instead of the target's animation.\n");
+                any = true;
+            }
+            std::fprintf(f, "$bindposesequence \"%s\" { noanimation }\n", order.names[i].c_str());
+        }
     }
 
     std::fputc('\n', f);
@@ -385,6 +480,13 @@ void Usage() {
         "  -skip <n>       leading slots the model defines itself (default 2)\n"
         "  -ref <name>     source clip for slots no include can fill; emits a real\n"
         "                  $sequence there instead of a declare that compiles empty\n"
+        "  -usenoanimation slots no include can fill are emitted as an inert\n"
+        "                  $bindposesequence { noanimation } instead of REPLACE ME\n"
+        "  -nofallbackanimation\n"
+        "                  also re-declare each replaced vanilla name as an inert\n"
+        "                  $bindposesequence, blocking a local server's activity fallback\n"
+        "  -keepintro      do not zero L4D2 campaign intros (cXmY_intro); keep the\n"
+        "                  target's own intro rather than a do-nothing clip\n"
         "  -o <file>       output path (default Anims_RigTo<Rig>_Replace<Target>.qci)\n"
         "  -all            every rig x replace pair, written into -outdir\n"
         "  -selftest       run the name-matching checks and exit\n\n"
@@ -440,7 +542,7 @@ int SelfTest() {
     std::vector<Index> chain(2);
     chain[0].Build({"biker_Idle_Rifle"}, "biker", codes);
     chain[1].Build({"coach_Idle_Rifle", "Idle_Rifle"}, "coach", codes);
-    const Result r = Build({"coach_Idle_Rifle", "Idle_Rifle"}, chain, codes);
+    const Result r = Build({"coach_Idle_Rifle", "Idle_Rifle"}, chain, codes, false);
     if (r.names[0] != "biker_Idle_Rifle" || r.names[1] == r.names[0]) {
         std::fprintf(stderr, "claim-once failed: %s / %s\n", r.names[0].c_str(),
                      r.names[1].c_str());
@@ -458,7 +560,7 @@ int main(int argc, char** argv) {
     const Survivor* rig = nullptr;
     const Survivor* tgt = nullptr;
     int skip = 2;
-    bool all = false, haveVia = false;
+    bool all = false, haveVia = false, noanim = false, nofallback = false, keepintro = false;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -471,6 +573,9 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(a, "-o")) out = next();
         else if (!std::strcmp(a, "-outdir")) outdir = next();
         else if (!std::strcmp(a, "-ref")) ref = next();
+        else if (!std::strcmp(a, "-usenoanimation")) noanim = true;
+        else if (!std::strcmp(a, "-nofallbackanimation")) nofallback = true;
+        else if (!std::strcmp(a, "-keepintro")) keepintro = true;
         else if (!std::strcmp(a, "-all")) all = true;
         else if (!std::strcmp(a, "-selftest")) return SelfTest();
         else { Usage(); return 1; }
@@ -527,7 +632,7 @@ int main(int argc, char** argv) {
             idx[d].Build(orders[chain[d]->survivor].names, chain[d]->code, codes);
 
         const Slots& order = orders[job.second->survivor];
-        const Result built = Build(order.names, idx, codes);
+        const Result built = Build(order.names, idx, codes, keepintro);
 
         std::string path = out;
         if (path.empty() || all) {
@@ -537,7 +642,13 @@ int main(int argc, char** argv) {
             path = (all ? outdir + "/" : std::string()) + "Anims_RigTo" + r + "_Replace" + t +
                    ".qci";
         }
-        if (!Write(path, *job.first, *job.second, chain, built, skip, order, res, ref)) return 1;
+        // Self swap (rig == target): every slot is "no donor", but a reachable
+        // one is the rig's own animation, so Write keeps those as plain declares
+        // rather than zeroing them. Unfillable locals still go inert.
+        const bool self = job.first == job.second;
+        if (!Write(path, *job.first, *job.second, chain, built, skip, order, res, ref, noanim,
+                   nofallback, self, keepintro))
+            return 1;
     }
     return 0;
 }
