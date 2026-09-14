@@ -1,17 +1,14 @@
 name: Dev build
 
-# Manual only. Overwrites the single rolling "dev" release with the current
-# commit's build; the release body is that commit's message.
+# Manual only. Builds the current commit; artifacts are served publicly via
+# nightly.link (see README), so no GitHub release/tag is created.
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build:
     strategy:
-      # a Linux failure must not cancel win64 or block the dev release
+      # a Linux failure must not cancel win64
       fail-fast: false
       matrix:
         include:
@@ -22,7 +19,7 @@ jobs:
             plat: linux64
             ext: ""
     runs-on: ${{ matrix.os }}
-    # linux64 is best-effort: a failure still zips/publishes what built
+    # linux64 is best-effort
     continue-on-error: ${{ matrix.plat == 'linux64' }}
     steps:
       - uses: actions/checkout@v7
@@ -34,44 +31,16 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Package
+      - name: Stage
         shell: bash
         run: |
-          sha=$(echo "${{ github.sha }}" | cut -c1-7)
-          # both tools ship in one PulseModel/ folder inside the archive, with
-          # the subtools in their own folder under it
+          # both tools ship in one PulseModel/ folder, subtools under it
           mkdir -p PulseModel
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE PulseModel/
           cp -r dist/subtools PulseModel/
-          7z a -tzip "pulsemodel-${{ matrix.plat }}-$sha.zip" PulseModel/
 
       - uses: actions/upload-artifact@v7
         with:
-          name: dev-${{ matrix.plat }}
-          path: pulsemodel-*.zip
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: dev-*
-          merge-multiple: true
-
-      - name: Publish dev release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git log -1 --pretty=%B > notes.txt
-          # replace the old dev release and its tag, so "dev" is always latest
-          gh release delete dev --yes --cleanup-tag || true
-          gh release create dev pulsemodel-*.zip \
-            --target "${{ github.sha }}" \
-            --title "Dev build (${GITHUB_SHA:0:7})" \
-            --notes-file notes.txt \
-            --prerelease \
-            --latest=false
+          name: pulsemodel-${{ matrix.plat }}
+          path: PulseModel/

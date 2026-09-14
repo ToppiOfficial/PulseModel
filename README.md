@@ -18,6 +18,19 @@ GMod, CS:S, SFM). One build produces two executables:
 > **Beta, Windows and Linux.** It compiles models that load and render in-engine, but
 > expect rough edges and script-command changes between versions.
 
+## Download
+
+**Stable releases are on the [Releases](https://github.com/ToppiOfficial/PulseModel/releases) tab.**
+
+**dev builds**, straight from the latest CI run (no login needed) -
+expect rough edges:
+
+- **[Windows x64 (dev)](https://nightly.link/ToppiOfficial/PulseModel/workflows/dev/main/pulsemodel-win64.zip)**
+- **[Linux x64 (dev)](https://nightly.link/ToppiOfficial/PulseModel/workflows/dev/main/pulsemodel-linux64.zip)**
+
+Unzip anywhere; both `mdlcompiler` and `mdldecompiler` are inside the
+`PulseModel/` folder.
+
 ## mdlcompiler
 
 Supports meshes, LODs, bodygroups, materials and skins; skeletons, bone markup,
