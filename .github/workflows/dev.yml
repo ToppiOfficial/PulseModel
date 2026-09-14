@@ -1,8 +1,9 @@
 name: Dev build
 
-# Manual only. Builds the current commit; artifacts are served publicly via
-# nightly.link (see README), so no GitHub release/tag is created.
 on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
   workflow_dispatch:
 
 jobs:
