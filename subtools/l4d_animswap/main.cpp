@@ -53,6 +53,10 @@ bool IsCampaignIntro(const std::string& name) {
     return i != d && s.compare(i, 6, "_intro") == 0;
 }
 
+bool IsGestureName(const std::string& name) {
+    return Lower(name).find("_gesture_") != std::string::npos;
+}
+
 const Survivor* FindSurvivor(const std::string& name) {
     const std::string want = Lower(name);
     for (const Survivor& h : kSurvivors)
@@ -77,6 +81,7 @@ struct Mdl {
     std::vector<char> bytes;
     std::vector<std::string> seqs;
     std::vector<std::string> acts; // "ACT_X <weight>", empty when the slot has none
+    std::vector<bool> overrides;
     std::vector<std::string> includes;
 };
 
@@ -108,6 +113,7 @@ bool LoadMdl(const std::string& path, Mdl& out) {
                               : std::string();
         if (!act.empty()) act += " " + std::to_string(sd->actweight);
         out.acts.push_back(act);
+        out.overrides.push_back((sd->flags & fm::STUDIO_OVERRIDE) != 0);
     }
     for (int i = 0; i < hdr->numincludemodels; ++i) {
         const size_t at =
@@ -124,6 +130,7 @@ bool LoadMdl(const std::string& path, Mdl& out) {
 struct Slots {
     std::vector<std::string> names;
     std::vector<std::string> acts;
+    std::vector<bool> overrides;
 };
 
 // The engine indexes sequences as: the model's own locals, then each
@@ -149,11 +156,20 @@ struct Resolver {
         return &(cache[key] = std::move(m));
     }
 
-    void Walk(const Mdl& m, Slots& order, std::set<std::string>& seen) {
+    void Walk(const Mdl& m, Slots& order, std::map<std::string, size_t>& seen) {
         for (size_t i = 0; i < m.seqs.size(); ++i) {
-            if (!seen.insert(Lower(m.seqs[i])).second) continue;
+            const std::string key = Lower(m.seqs[i]);
+            const std::string act = i < m.acts.size() ? m.acts[i] : std::string();
+            const auto found = seen.find(key);
+            if (found != seen.end()) {
+                if (order.overrides[found->second] && order.acts[found->second].empty())
+                    order.acts[found->second] = act;
+                continue;
+            }
+            seen[key] = order.names.size();
             order.names.push_back(m.seqs[i]);
-            order.acts.push_back(i < m.acts.size() ? m.acts[i] : std::string());
+            order.acts.push_back(act);
+            order.overrides.push_back(i < m.overrides.size() && m.overrides[i]);
         }
         for (const std::string& inc : m.includes)
             if (const Mdl* sub = Get(inc)) Walk(*sub, order, seen);
@@ -161,7 +177,7 @@ struct Resolver {
 
     Slots Order(const Survivor& h) {
         Slots order;
-        std::set<std::string> seen;
+        std::map<std::string, size_t> seen;
         if (const Mdl* m = Get("survivor_" + std::string(h.code) + ".mdl")) Walk(*m, order, seen);
         return order;
     }
@@ -262,7 +278,7 @@ Result Build(const std::vector<std::string>& order, const std::vector<Index>& id
 
 bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
            const std::vector<const Survivor*>& chain, const Result& res, int skip, const Slots& order,
-           Resolver& mdls, const std::string& ref, bool noanim, bool nofallback, bool self,
+           Resolver& mdls, const std::string& ref, bool noanim, bool nofallback,
            bool keepintro) {
     std::vector<int> won(chain.size(), 0);
     int kept = 0;
@@ -339,8 +355,7 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
     }
     if (skip) std::fputc('\n', f);
 
-    // Inert placeholder: bind pose held, noanimation zeroes it to a do-nothing
-    // delta so a slot with no donor swap compiles non-empty without a source.
+    // Inert placeholder for a slot no included model can fill.
     const auto emitNoanim = [&](size_t i, const char* note) {
         std::fprintf(f, "$bindposesequence \"%s\" { noanimation", res.names[i].c_str());
         if (!order.acts[i].empty()) std::fprintf(f, " activity %s", order.acts[i].c_str());
@@ -367,17 +382,8 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
             continue;
         }
         if (reachable.count(Lower(res.names[i]))) {
-            // -usenoanimation: a kept slot (no donor equivalent) goes inert too;
-            // a real donor swap (from >= 0) stays a plain declare. Not on the
-            // self file (a no-donor slot is the rig's own) or a kept intro.
-            const bool keptIntro = keepintro && IsCampaignIntro(order.names[i]);
-            if (noanim && res.from[i] < 0 && !self && !keptIntro) {
-                spacer(1);
-                emitNoanim(i, "no donor swap");
-            } else {
-                spacer(0);
-                std::fprintf(f, "$declaresequence \"%s\"\n", res.names[i].c_str());
-            }
+            spacer(0);
+            std::fprintf(f, "$declaresequence \"%s\"\n", res.names[i].c_str());
             continue;
         }
         // Vanilla keeps this slot local, so a declare here compiles empty. With
@@ -429,7 +435,8 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
             // would freeze them - leave those to the include. Every other
             // re-added name is selected by activity: zeroing it (below, with no
             // activity) drops it from the pool so only the donor swap competes.
-            if (order.acts[i].compare(0, 8, "ACT_GEST") == 0) continue;
+            if (IsGestureName(order.names[i]) ||
+                order.acts[i].compare(0, 8, "ACT_GEST") == 0) continue;
             // `emitted` holds every name the main loop wrote; a shared-name swap
             // declares the vanilla spelling itself, so skip any already present.
             if (!emitted.insert(Lower(order.names[i])).second) continue;
@@ -548,6 +555,22 @@ int SelfTest() {
                      r.names[1].c_str());
         ++bad;
     }
+    Mdl local, included;
+    local.seqs = {"namvet_gesture_head_nod"};
+    local.acts = {""};
+    local.overrides = {true};
+    included.seqs = local.seqs;
+    included.acts = {"ACT_GEST_HEAD_NOD 1"};
+    Resolver resolver;
+    Slots slots;
+    std::map<std::string, size_t> seen;
+    resolver.Walk(local, slots, seen);
+    resolver.Walk(included, slots, seen);
+    if (slots.names.size() != 1 || slots.acts[0] != "ACT_GEST_HEAD_NOD 1" ||
+        !IsGestureName("namvet_gesture_head_noddefault")) {
+        std::fprintf(stderr, "included gesture activity failed\n");
+        ++bad;
+    }
     std::printf(bad ? "selftest: %d FAILED\n" : "selftest: ok\n", bad);
     return bad ? 1 : 0;
 }
@@ -642,12 +665,8 @@ int main(int argc, char** argv) {
             path = (all ? outdir + "/" : std::string()) + "Anims_RigTo" + r + "_Replace" + t +
                    ".qci";
         }
-        // Self swap (rig == target): every slot is "no donor", but a reachable
-        // one is the rig's own animation, so Write keeps those as plain declares
-        // rather than zeroing them. Unfillable locals still go inert.
-        const bool self = job.first == job.second;
         if (!Write(path, *job.first, *job.second, chain, built, skip, order, res, ref, noanim,
-                   nofallback, self, keepintro))
+                   nofallback, keepintro))
             return 1;
     }
     return 0;

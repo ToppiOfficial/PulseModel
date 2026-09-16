@@ -5971,6 +5971,10 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             if (!c.Want("a bone name", t, r.src))
                 return false;
             lod.boneTreeCollapses.push_back(std::move(r));
+        } else if (opt == "collapsejigglebones") {
+            lod.collapseJiggleBones = true;
+        } else if (opt == "collapseproceduralbones") {
+            lod.collapseProceduralBones = true;
         } else if (opt == "replacematerial") {
             cm::LodReplacement r;
             if (!c.Want("a material name", t, r.src) ||
@@ -5981,6 +5985,14 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             // reference registers it here and then culls it right back out in
             // CullUnusedMaterials - same result, one less step.
             lod.materialReplacements.push_back(std::move(r));
+        } else if (opt == "replacematerialword") {
+            cm::LodReplacement r;
+            if (!c.Want("a word to match", t, r.src) ||
+                !c.Want("a replacement material", t, r.dst))
+                return false;
+            if (r.src.empty())
+                return c.Fail(t.line, "replacematerialword: matching word must not be empty");
+            lod.materialWordReplacements.push_back(std::move(r));
         } else if (opt == "removemesh") {
             cm::LodReplacement r;
             if (!c.Want("a material name", t, r.src))

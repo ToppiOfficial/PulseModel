@@ -2911,8 +2911,8 @@ void ReplaceBonesRecursive(const CompiledModel& m, int globalBoneID, bool replac
                                   replacementName);
 }
 
-// ConvertBoneTreeCollapsesToReplaceBones
-void ConvertBoneTreeCollapses(Ctx& ctx) {
+// Expand the LOD bone-collapse shorthands into ordinary replacements.
+void ExpandLodBoneCollapses(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
     for (ScriptLod& lod : m.scriptLods) {
         for (const LodReplacement& collapse : lod.boneTreeCollapses) {
@@ -2920,6 +2920,26 @@ void ConvertBoneTreeCollapses(Ctx& ctx) {
             if (i == -1)
                 continue; // the bone did not survive the collapse; nothing to do
             ReplaceBonesRecursive(m, i, false, lod.boneReplacements, m.bones[i].name);
+        }
+
+        auto collapseToParent = [&](int bone) {
+            if (bone < 0 || m.bones[bone].parent < 0)
+                return;
+            for (const LodReplacement& r : lod.boneReplacements)
+                if (_stricmp(r.src.c_str(), m.bones[bone].name.c_str()) == 0)
+                    return;
+            lod.boneReplacements.push_back(
+                {m.bones[bone].name, m.bones[m.bones[bone].parent].name});
+        };
+
+        if (lod.collapseJiggleBones)
+            for (const JiggleBone& jb : m.jigglebones)
+                collapseToParent(jb.bone);
+        if (lod.collapseProceduralBones) {
+            for (const ProceduralBone& pb : m.proceduralbones)
+                collapseToParent(pb.helper);
+            for (const AimAtBone& ab : m.aimatbones)
+                collapseToParent(ab.bone);
         }
     }
 }
@@ -10899,10 +10919,10 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     ApplyJointSurfaceProps(ctx);
 
     // ---- geometry ----
-    // bonetreecollapse expands against the final bone table, and the resulting
-    // replacebone chains are flattened, before any vertex is remapped
+    // LOD collapse options expand against the final bone table, and the
+    // resulting replacebone chains are flattened before any vertex is remapped
     // (reference: after RealignBones)
-    ConvertBoneTreeCollapses(ctx);
+    ExpandLodBoneCollapses(ctx);
     FixupReplacedBones(ctx);
 
     { PULSE_TIME_PASS("RemapVertices"); RemapVertices(ctx); }
@@ -11184,6 +11204,49 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             pairs.emplace_back(from, input.mats.UseTextureAsMaterial(tex));
         }
         families.push_back(std::move(pairs));
+    }
+
+    auto findReplacementMaterial = [&](const std::string& name)
+        -> const src::MaterialTable::Texture* {
+        for (const auto& tex : input.mats.textures)
+            if (tex.material >= 0 && _stricmp(tex.name.c_str(), name.c_str()) == 0)
+                return &tex;
+        for (const auto& tex : input.mats.textures)
+            if (tex.material >= 0 && MaterialNameMatches(tex.name, name))
+                return &tex;
+        return nullptr;
+    };
+    for (ScriptLod& lod : out.scriptLods) {
+        std::vector<std::string> claimedMaterials;
+        for (LodReplacement& r : lod.materialReplacements) {
+            if (const auto* tex = findReplacementMaterial(r.src))
+                r.src = tex->name;
+            if (const auto* tex = findReplacementMaterial(r.dst))
+                r.dst = tex->name;
+            claimedMaterials.push_back(r.src);
+        }
+        for (const LodReplacement& rule : lod.materialWordReplacements) {
+            const auto* destination = findReplacementMaterial(rule.dst);
+            if (!destination) {
+                if (err)
+                    *err = "replacematerialword: unknown destination material \"" + rule.dst + "\"";
+                return false;
+            }
+            for (const auto& tex : input.mats.textures) {
+                if (tex.material < 0 || !ContainsNoCase(FileBaseName(tex.name), rule.src))
+                    continue;
+                const bool alreadyReplaced = std::any_of(
+                    claimedMaterials.begin(), claimedMaterials.end(),
+                    [&](const std::string& name) {
+                        return _stricmp(name.c_str(), tex.name.c_str()) == 0;
+                    });
+                if (alreadyReplaced)
+                    continue;
+                claimedMaterials.push_back(tex.name);
+                if (_stricmp(tex.name.c_str(), destination->name.c_str()) != 0)
+                    lod.materialReplacements.push_back({tex.name, destination->name});
+            }
+        }
     }
 
     // CullUnusedMaterials: a material no writable mesh names -

@@ -918,10 +918,13 @@ struct ScriptLod {
     std::vector<LodReplacement> boneReplacements;  // replacebone
     std::vector<LodReplacement> boneTreeCollapses; // bonetreecollapse
     std::vector<LodReplacement> materialReplacements;
+    std::vector<LodReplacement> materialWordReplacements;
     std::vector<LodReplacement> meshRemovals;
     // removemeshword: drop any mesh whose material base name CONTAINS the
     // stored word, case-insensitively
     std::vector<LodReplacement> meshWordRemovals;
+    bool collapseJiggleBones = false;
+    bool collapseProceduralBones = false;
     bool facialAnimation = true;     // cleared by nomorphs/nofacial
     // use_shadowlod_materials, only ever set on a $shadowlod block
     bool useShadowLodMaterials = false;
