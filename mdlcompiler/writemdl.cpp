@@ -2273,7 +2273,7 @@ std::vector<uint8_t> BuildVvd(cm::CompiledModel& m, int32_t checksum) {
                static_cast<int>(model.vertices.size()));
         vcur = buf.pos;
     }
-    Report(g_vvdReport, "total      %7zu bytes", buf.pos);
+    Report(g_vvdReport, "total      %7zu bytes", buf.cur);
 
     return std::vector<uint8_t>(buf.start(), buf.start() + buf.cur);
 }

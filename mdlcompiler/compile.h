@@ -928,6 +928,7 @@ struct ScriptLod {
     bool facialAnimation = true;     // cleared by nomorphs/nofacial
     // use_shadowlod_materials, only ever set on a $shadowlod block
     bool useShadowLodMaterials = false;
+    bool skeletalAwareDecimation = false; // use_skeletalaware_decimation
     float decimateAllFactor = -1.0f; // decimateallmodel, <= 0 = unset
     bool IsShadow() const { return switchValue < 0.0f; }
     bool HasDecimateAll() const { return decimateAllFactor > 0.0f; }
@@ -1235,7 +1236,8 @@ struct CompileInput {
     int bindPoseFrame = 0;
     bool bindPoseMeshOnly = false;
     // $setflex <morph> <strength>: fixed morph amounts baked into the rest mesh,
-    // in script order, on top of any $setbindpose. Strength clamps to [0,1].
+    // in script order, on top of any $setbindpose. Strength clamps to [0,1];
+    // the morph's remaining delta scales by (1 - strength).
     struct FixedFlex {
         std::string name;
         float value = 1.0f;

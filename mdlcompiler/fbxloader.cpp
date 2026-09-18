@@ -8,6 +8,7 @@
 
 #include "fbxloader.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -66,6 +67,32 @@ void AddNodes(const ufbx_node* node, int parentIndex, bool inSkeleton, Source& o
         AddNodes(node->children.data[i], index, inSkeleton, out, nodeToBone);
 }
 
+// Parent-relative transform for a bone node, container-folded for a root (its
+// FBX parent is a dropped container, so take world instead of losing it), with
+// translation scaled. Same rule for the bind pose and every animated frame.
+pm::matrix3x4 BoneLocal(const ufbx_node* node, bool isRoot, float scale) {
+    pm::matrix3x4 local = ToMatrix3x4(isRoot ? node->node_to_world : node->node_to_parent);
+    for (int r = 0; r < 3; ++r)
+        local.m[r][3] *= scale;
+    return local;
+}
+
+// Fill one frame's pose for every bone from an (evaluated) scene. A bone is a
+// root when its FBX parent is not itself a mapped bone.
+void SampleFrame(const ufbx_scene* scene, const std::unordered_map<uint32_t, int>& nodeToBone,
+                 float scale, std::vector<SrcBonePose>& frame) {
+    for (size_t i = 0; i < scene->nodes.count; ++i) {
+        const ufbx_node* node = scene->nodes.data[i];
+        auto it = nodeToBone.find(node->typed_id);
+        if (it == nodeToBone.end())
+            continue;
+        const bool isRoot = !node->parent ||
+                            nodeToBone.find(node->parent->typed_id) == nodeToBone.end();
+        const pm::matrix3x4 local = BoneLocal(node, isRoot, scale);
+        pm::MatrixAngles(local, frame[it->second].rot, frame[it->second].pos);
+    }
+}
+
 // Rest transforms become the bind pose: an FBX exported in a pose
 // other than its bind pose will bind wrong - the fix is ufbx_scene.poses
 // (is_bind_pose) per skin cluster, added when a sample actually needs it.
@@ -78,8 +105,11 @@ void BuildSkeleton(const ufbx_scene* scene, float scale, Source& out,
     anim.name = "BindPose";
     anim.numframes = 1;
     anim.frames.assign(1, std::vector<SrcBonePose>(out.numbones));
-    out.boneToPose.resize(out.numbones);
+    SampleFrame(scene, nodeToBone, scale, anim.frames[0]);
 
+    // boneToPose is the bind-pose world fold, parents-before-children (ufbx
+    // orders scene->nodes that way, which AddNodes also relies on).
+    out.boneToPose.resize(out.numbones);
     for (size_t i = 0; i < scene->nodes.count; ++i) {
         const ufbx_node* node = scene->nodes.data[i];
         auto it = nodeToBone.find(node->typed_id);
@@ -87,21 +117,61 @@ void BuildSkeleton(const ufbx_scene* scene, float scale, Source& out,
             continue;
         const int b = it->second;
         const int parent = out.localBone[b].parent;
-
-        // a top bone's FBX parent is a dropped container, so take its world
-        // transform - that folds the container's transform in instead of
-        // losing it.
-        pm::matrix3x4 local =
-            ToMatrix3x4(parent == -1 ? node->node_to_world : node->node_to_parent);
-        for (int r = 0; r < 3; ++r)
-            local.m[r][3] *= scale;
-        pm::MatrixAngles(local, anim.frames[0][b].rot, anim.frames[0][b].pos);
-
+        const pm::matrix3x4 local = BoneLocal(node, parent == -1, scale);
         out.boneToPose[b] =
             parent == -1 ? local : pm::ConcatTransforms(out.boneToPose[parent], local);
     }
 
     out.anims.push_back(std::move(anim));
+}
+
+// Each FBX take (ufbx_anim_stack) becomes one named SourceAnim, sampled at the
+// scene's own frame rate. $animation/$sequence pick one with blockname; the
+// default is the first non-BindPose clip.
+bool LoadAnimStacks(const ufbx_scene* scene, float scale, Source& out, std::string* err,
+                    const std::unordered_map<uint32_t, int>& nodeToBone) {
+    double fps = scene->settings.frames_per_second;
+    if (fps <= 0.0)
+        fps = 30.0;
+
+    for (size_t s = 0; s < scene->anim_stacks.count; ++s) {
+        const ufbx_anim_stack* stack = scene->anim_stacks.data[s];
+        int numframes = 1 + static_cast<int>(std::lround((stack->time_end - stack->time_begin) * fps));
+        if (numframes < 1)
+            numframes = 1;
+        const std::string name(stack->name.data, stack->name.length);
+        if (numframes > lim::kMaxAnimFrames) {
+            if (err)
+                *err = "animation \"" + name + "\" has " + std::to_string(numframes) +
+                       " frames (max " + std::to_string(lim::kMaxAnimFrames) + ")";
+            return false;
+        }
+
+        SourceAnim anim;
+        anim.name = name;
+        anim.startframe = 0;
+        anim.endframe = numframes - 1;
+        anim.numframes = numframes;
+        anim.frames.assign(numframes, std::vector<SrcBonePose>(out.numbones));
+        for (int f = 0; f < numframes; ++f) {
+            const double time = stack->time_begin + static_cast<double>(f) / fps;
+            ufbx_evaluate_opts eopts = {};
+            ufbx_error everr;
+            ufbx_scene* frameScene = ufbx_evaluate_scene(scene, stack->anim, time, &eopts, &everr);
+            if (!frameScene) {
+                if (err) {
+                    char buf[1024];
+                    ufbx_format_error(buf, sizeof(buf), &everr);
+                    *err = buf;
+                }
+                return false;
+            }
+            SampleFrame(frameScene, nodeToBone, scale, anim.frames[f]);
+            ufbx_free_scene(frameScene);
+        }
+        out.anims.push_back(std::move(anim));
+    }
+    return true;
 }
 
 // Per-corner skin weights. An unskinned mesh rides its own node bone.
@@ -247,7 +317,6 @@ bool LoadFbxSource(const std::string& path, Source& out, MaterialTable& mats, fl
     // PRESERVE also never injects the helper nodes AddNodes would see as bones.
     opts.geometry_transform_handling = UFBX_GEOMETRY_TRANSFORM_HANDLING_PRESERVE;
     opts.generate_missing_normals = true;
-    opts.ignore_animation = true;
     opts.ignore_embedded = true;
 
     ufbx_error error;
@@ -265,6 +334,13 @@ bool LoadFbxSource(const std::string& path, Source& out, MaterialTable& mats, fl
     BuildSkeleton(scene, scale, out, nodeToBone);
     if (out.numbones <= 0) {
         if (err) *err = "the scene has no nodes";
+        ufbx_free_scene(scene);
+        return false;
+    }
+
+    // Load takes for every kind, not just animOnly: the source cache treats a
+    // higher LoadKind as a superset, so a mesh load must carry the anims too.
+    if (!LoadAnimStacks(scene, scale, out, err, nodeToBone)) {
         ufbx_free_scene(scene);
         return false;
     }
@@ -291,6 +367,10 @@ bool LoadFbxSource(const std::string& path, Source& out, MaterialTable& mats, fl
         if (filter && !filter->Keep(std::string(mesh->name.data, mesh->name.length),
                                     std::string(node->name.data, node->name.length)))
             continue;
+        const int meshTag =
+            filter ? filter->Tag(std::string(mesh->name.data, mesh->name.length),
+                                 std::string(node->name.data, node->name.length))
+                   : 0;
         const int meshBone = nodeToBone[node->typed_id];
         const int vertexBase = srcVertexCount;
         srcVertexCount += static_cast<int>(mesh->num_vertices);
@@ -352,6 +432,7 @@ bool LoadFbxSource(const std::string& path, Source& out, MaterialTable& mats, fl
             for (uint32_t t = 0; t < numTris; ++t) {
                 TriInput tri;
                 tri.material = material;
+                tri.tag = meshTag;
                 for (int j = 0; j < 3; ++j) {
                     const uint32_t index = triIndices[t * 3 + j];
                     TriCorner& corner = tri.v[j];

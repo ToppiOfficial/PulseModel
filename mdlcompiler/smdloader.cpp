@@ -8,6 +8,7 @@
 
 #include "smdloader.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -271,6 +272,7 @@ struct UVert {
 
 struct TriFace {
     int material = 0;
+    int tag = 0;
     uint32_t a = 0, b = 0, c = 0; // unique-vert indices (model relative)
 };
 
@@ -547,7 +549,7 @@ void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
         }
         if (idx[0] == idx[1] || idx[1] == idx[2] || idx[0] == idx[2])
             continue; // degenerate - dropped only after the lookups, which set lastref
-        st.faces.push_back(TriFace{t.material, idx[0], idx[2], idx[1]}); // winding: a, c, b
+        st.faces.push_back(TriFace{t.material, t.tag, idx[0], idx[2], idx[1]}); // winding: a, c, b
     }
 
     // ---- sort + build (reference BuildIndividualMeshes) --------------------
@@ -597,6 +599,9 @@ void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
 
     // BuildFaceList
     out.face.resize(numfaces);
+    const bool hasTags = std::any_of(st.faces.begin(), st.faces.end(),
+                                     [](const TriFace& f) { return f.tag != 0; });
+    out.faceTag.assign(hasTags ? numfaces : 0, 0);
     out.nummeshes = 0;
     for (int m = 0; m < lim::kMaxSkins; ++m) {
         if (!out.mesh[m].numfaces)
@@ -605,6 +610,8 @@ void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
         for (int i = out.mesh[m].faceoffset; i < out.mesh[m].numfaces + out.mesh[m].faceoffset;
              ++i) {
             const TriFace& sf = st.faces[facesort[i]];
+            if (hasTags)
+                out.faceTag[i] = static_cast<uint8_t>(sf.tag);
             out.face[i].a = static_cast<uint32_t>(v_ilistsort[sf.a] - out.mesh[m].vertexoffset);
             out.face[i].b = static_cast<uint32_t>(v_ilistsort[sf.b] - out.mesh[m].vertexoffset);
             out.face[i].c = static_cast<uint32_t>(v_ilistsort[sf.c] - out.mesh[m].vertexoffset);

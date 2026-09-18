@@ -213,6 +213,7 @@ struct Source {
     std::vector<const Source*> mergedParts;
     std::vector<int> vertexPart; // parallel to vertex; index into mergedParts
     std::vector<SrcFace> face;
+    std::vector<uint8_t> faceTag; // parallel to face, $decimatemesh groups; empty = none
     // Indexed by material id, so sized to kMaxSkins by whichever loader fills
     // it. Left empty on a geometry-less Source - at kMaxSkins that is ~655 KB.
     std::vector<SrcMesh> mesh;
@@ -269,6 +270,7 @@ struct TriCorner {
 
 struct TriInput {
     int material = 0; // GLOBAL material index
+    int tag = 0;      // $decimatemesh group
     TriCorner v[3];   // authored winding; the builder emits a, c, b
 };
 

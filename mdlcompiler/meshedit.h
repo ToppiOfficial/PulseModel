@@ -32,6 +32,13 @@ struct MeshFilter {
     // $removemeshword: drop every face whose material name contains one of these
     // (case-insensitive substring). Repeatable and independent of $exceptionlist.
     std::vector<std::string> removeWords;
+    // $removemesh: drop every face whose material name equals one of these
+    // (case-insensitive, path and extension ignored). Unmatched is a hard error.
+    struct RemoveEntry {
+        std::string name;
+        mutable bool matched = false;
+    };
+    std::vector<RemoveEntry> removeNames;
 
     bool empty() const { return names.empty(); } // $exceptionlist only
 
@@ -41,8 +48,17 @@ struct MeshFilter {
     // First entry that never matched a mesh, or null.
     const std::string* Unmatched() const;
 
-    // True if the material name contains any $removemeshword keyword.
+    // True if the material is named by $removemesh or contains a $removemeshword keyword.
     bool MaterialRemoved(const std::string& materialName) const;
+
+    // $decimatemesh: mesh names -> face tag (1-based per command, 0 = untagged).
+    struct TagEntry {
+        std::string name;
+        int tag = 0;
+        bool matched = false;
+    };
+    std::vector<TagEntry> tags;
+    int Tag(const std::string& meshName, const std::string& dagName);
 };
 
 // $wrinklescale <morph> <scale> - what dmxedit's SetWrinkleScale would have
@@ -87,8 +103,11 @@ void FlipNormals(Source& src);
 // dst may alias src - faces are rebuilt only after every mesh is simplified.
 // The vertex pool is untouched, so the result stays rigged. `skipMaterial`, if
 // given, is indexed by material ID and keeps those meshes at full detail.
+// Faces simplify per Source::faceTag group; `onlyTag` >= 0 limits it to that group.
+// `rigAware` adds skin centroids as an attribute so bone boundaries resist collapse.
 void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder,
-                   const std::vector<bool>* skipMaterial = nullptr);
+                   const std::vector<bool>* skipMaterial = nullptr, int onlyTag = -1,
+                   bool rigAware = false);
 
 // Fuse several loaded render meshes into ONE drawable Source - what exporting
 // them together out of a single scene would have produced. Bones unify by name

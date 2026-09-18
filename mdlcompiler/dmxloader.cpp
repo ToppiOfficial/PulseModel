@@ -5,6 +5,7 @@
 #include "perf.h"
 #include "dmxloader.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
@@ -441,6 +442,7 @@ void LoadAnimations(const dmx::Element* animationList, float flScale,
 // ---------------------------------------------------------------------------
 struct TmpFace {
     int material;
+    int tag;
     uint32_t a, na, ta;
     uint32_t b, nb, tb;
     uint32_t c, nc, tc;
@@ -1132,6 +1134,7 @@ void LoadDeltaState(FlexTemp& flex, const std::string& deltaName,
 bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Element* mesh,
               const dmx::Element* bindState, const pm::matrix3x4& mat, int nBoneAssign) {
     MeshTemp& tmp = *info.tmp;
+    const int meshTag = info.filter ? info.filter->Tag(mesh->name, dag->name) : 0;
 
     int nStartingVertex = static_cast<int>(tmp.vertex.size());
     int nStartingNormal = static_cast<int>(tmp.normal.size());
@@ -1334,6 +1337,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                     int corners[3] = {triangulated[ii], triangulated[ii + 2], triangulated[ii + 1]};
                     TmpFace f{};
                     f.material = material;
+                    f.tag = meshTag;
                     uint32_t* fv[3] = {&f.a, &f.b, &f.c};
                     uint32_t* fn[3] = {&f.na, &f.nb, &f.nc};
                     uint32_t* ft[3] = {&f.ta, &f.tb, &f.tc};
@@ -1744,6 +1748,9 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
 
     // BuildFaceList
     out.face.resize(numfaces);
+    const bool hasTags = std::any_of(tmp.face.begin(), tmp.face.end(),
+                                     [](const TmpFace& f) { return f.tag != 0; });
+    out.faceTag.assign(hasTags ? numfaces : 0, 0);
     out.nummeshes = 0;
     for (int m = 0; m < lim::kMaxSkins; m++) {
         if (!out.mesh[m].numfaces)
@@ -1752,6 +1759,8 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         for (int i = out.mesh[m].faceoffset; i < out.mesh[m].numfaces + out.mesh[m].faceoffset;
              i++) {
             int j = facesort[i];
+            if (hasTags)
+                out.faceTag[i] = static_cast<uint8_t>(tmp.face[j].tag);
             out.face[i].a = static_cast<uint32_t>(v_ilistsort[ufaces[j].a] - out.mesh[m].vertexoffset);
             out.face[i].b = static_cast<uint32_t>(v_ilistsort[ufaces[j].b] - out.mesh[m].vertexoffset);
             out.face[i].c = static_cast<uint32_t>(v_ilistsort[ufaces[j].c] - out.mesh[m].vertexoffset);

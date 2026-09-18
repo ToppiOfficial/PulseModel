@@ -5,7 +5,9 @@
 #include "meshedit.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 
@@ -30,6 +32,16 @@ bool MeshFilter::Keep(const std::string& meshName, const std::string& dagName) {
         }
     }
     return exclusive ? !hit : hit;
+}
+
+int MeshFilter::Tag(const std::string& meshName, const std::string& dagName) {
+    for (TagEntry& e : tags)
+        if (_stricmp(e.name.c_str(), meshName.c_str()) == 0 ||
+            _stricmp(e.name.c_str(), dagName.c_str()) == 0) {
+            e.matched = true;
+            return e.tag;
+        }
+    return 0;
 }
 
 void ApplyWrinkleScales(Source& src, std::vector<WrinkleScaleOption>& opts) {
@@ -69,10 +81,20 @@ const std::string* MeshFilter::Unmatched() const {
 }
 
 bool MeshFilter::MaterialRemoved(const std::string& materialName) const {
-    if (removeWords.empty())
+    if (removeWords.empty() && removeNames.empty())
         return false;
     std::string hay = materialName;
     std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
+    std::string base = std::filesystem::path(hay).stem().string();
+    bool hit = false;
+    for (const RemoveEntry& e : removeNames) {
+        std::string n = e.name;
+        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+        if (n == hay || n == base)
+            hit = e.matched = true;
+    }
+    if (hit)
+        return true;
     for (const std::string& w : removeWords) {
         std::string needle = w;
         std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
@@ -368,7 +390,7 @@ void CullUnskinnedBones(Source& src, SkinnedBoneCull mode) {
 // ---------------------------------------------------------------------------
 
 void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder,
-                   const std::vector<bool>* skipMaterial) {
+                   const std::vector<bool>* skipMaterial, int onlyTag, bool rigAware) {
     // globalVertices is empty until RemapVerticesToGlobalBones, so the
     // simplifier normally sees bind-space positions - the same input the
     // reference LOD path feeds it.
@@ -379,9 +401,13 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
         haveGlobal ? src.globalVertices.size() : src.vertex.size();
 
     const unsigned int options = lockBorder ? meshopt_SimplifyLockBorder : 0u;
+    rigAware = rigAware && src.numbones > 1 &&
+               src.boneToPose.size() >= static_cast<size_t>(src.numbones);
 
     // heap, not stack - kMaxSkins vectors is far past a thread's stack
     std::vector<std::vector<SrcFace>> meshFaces(lim::kMaxSkins);
+    std::vector<std::vector<uint8_t>> meshTags(lim::kMaxSkins);
+    const bool tagged = !src.faceTag.empty();
     float resultError = 0.0f;
 
     for (int mi = 0; mi < src.nummeshes; mi++) {
@@ -393,48 +419,95 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
             (*skipMaterial)[matID])
             continue;
 
+        // each tag group simplifies on its own so the tags stay exact
+        std::vector<std::vector<unsigned int>> groups(tagged ? 256 : 1);
+        for (int fi = 0; fi < srcMesh.numfaces; fi++) {
+            const int f = srcMesh.faceoffset + fi;
+            const SrcFace& face = src.face[f];
+            std::vector<unsigned int>& grp = groups[tagged ? src.faceTag[f] : 0];
+            grp.insert(grp.end(), {face.a, face.b, face.c});
+        }
+
         // face indices are mesh-local, so hand over the mesh's own vertex slice.
         // SrcVertex leads with position, so &position + sizeof(SrcVertex) stride
         // walks the array correctly.
         const float* pPositions =
             reinterpret_cast<const float*>(&pVertBase[srcMesh.vertexoffset].position);
 
-        const size_t nSrcIndices = static_cast<size_t>(srcMesh.numfaces) * 3;
-        std::vector<unsigned int> srcIdx(nSrcIndices), dstIdx(nSrcIndices);
-        for (int fi = 0; fi < srcMesh.numfaces; fi++) {
-            const SrcFace& f = src.face[srcMesh.faceoffset + fi];
-            srcIdx[fi * 3 + 0] = f.a;
-            srcIdx[fi * 3 + 1] = f.b;
-            srcIdx[fi * 3 + 2] = f.c;
+        // skin centroid (weighted bind-pose bone origins) as a quadric attribute,
+        // so collapses across bones cost more and small limbs like fingers survive
+        std::vector<float> skinAttr;
+        if (rigAware) {
+            const SrcVertex* mv = &pVertBase[srcMesh.vertexoffset];
+            float lo[3] = {FLT_MAX, FLT_MAX, FLT_MAX}, hi[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+            for (int vi = 0; vi < srcMesh.numvertices; vi++) {
+                const float p[3] = {mv[vi].position.x, mv[vi].position.y, mv[vi].position.z};
+                for (int k = 0; k < 3; k++) {
+                    lo[k] = std::min(lo[k], p[k]);
+                    hi[k] = std::max(hi[k], p[k]);
+                }
+            }
+            const float extent = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
+            const float inv = extent > 0.0f ? 1.0f / extent : 0.0f;
+            skinAttr.assign(static_cast<size_t>(srcMesh.numvertices) * 3, 0.0f);
+            for (int vi = 0; vi < srcMesh.numvertices; vi++) {
+                const auto& bw = mv[vi].boneweight;
+                float* a = &skinAttr[static_cast<size_t>(vi) * 3];
+                for (int i = 0; i < bw.numbones; i++) {
+                    const int b = bw.bone[i];
+                    if (b < 0 || b >= src.numbones)
+                        continue;
+                    const auto& m = src.boneToPose[b].m;
+                    for (int k = 0; k < 3; k++)
+                        a[k] += bw.weight[i] * m[k][3] * inv;
+                }
+            }
         }
+        static const float kSkinWeights[3] = {1.0f, 1.0f, 1.0f};
 
-        size_t targetIdx = static_cast<size_t>(static_cast<float>(nSrcIndices) * factor);
-        targetIdx = (targetIdx / 3) * 3;
-        if (targetIdx < 3)
-            targetIdx = 3;
-
-        const size_t newIdxCount = meshopt_simplify(
-            dstIdx.data(), srcIdx.data(), nSrcIndices,
-            pPositions, static_cast<size_t>(srcMesh.numvertices), sizeof(SrcVertex),
-            targetIdx, 1.0f, options, &resultError);
-
-        for (size_t fi = 0; fi < newIdxCount / 3; fi++) {
-            SrcFace face;
-            face.a = dstIdx[fi * 3 + 0];
-            face.b = dstIdx[fi * 3 + 1];
-            face.c = dstIdx[fi * 3 + 2];
-            meshFaces[matID].push_back(face);
+        for (size_t g = 0; g < groups.size(); g++) {
+            std::vector<unsigned int>& srcIdx = groups[g];
+            if (srcIdx.empty())
+                continue;
+            std::vector<unsigned int> dstIdx(srcIdx.size());
+            size_t newIdxCount = srcIdx.size();
+            if (onlyTag >= 0 && static_cast<int>(g) != onlyTag) {
+                dstIdx = srcIdx;
+            } else {
+                size_t targetIdx = static_cast<size_t>(static_cast<float>(srcIdx.size()) * factor);
+                targetIdx = (targetIdx / 3) * 3;
+                if (targetIdx < 3)
+                    targetIdx = 3;
+                if (rigAware)
+                    newIdxCount = meshopt_simplifyWithAttributes(
+                        dstIdx.data(), srcIdx.data(), srcIdx.size(), pPositions,
+                        static_cast<size_t>(srcMesh.numvertices), sizeof(SrcVertex),
+                        skinAttr.data(), 3 * sizeof(float), kSkinWeights, 3, nullptr, targetIdx,
+                        1.0f, options | meshopt_SimplifyRegularize, &resultError);
+                else
+                    newIdxCount = meshopt_simplify(
+                        dstIdx.data(), srcIdx.data(), srcIdx.size(), pPositions,
+                        static_cast<size_t>(srcMesh.numvertices), sizeof(SrcVertex), targetIdx,
+                        1.0f, options, &resultError);
+            }
+            for (size_t fi = 0; fi < newIdxCount / 3; fi++) {
+                meshFaces[matID].push_back({dstIdx[fi * 3 + 0], dstIdx[fi * 3 + 1], dstIdx[fi * 3 + 2]});
+                meshTags[matID].push_back(static_cast<uint8_t>(g));
+            }
         }
     }
 
     // flatten back into one face array, meshes in the source's own order
     dst.face.clear();
+    dst.faceTag.clear();
     for (int mi = 0; mi < src.nummeshes; mi++) {
         const int matID = src.meshindex[mi];
         SrcMesh& dstMesh = dst.mesh[matID];
         dstMesh.faceoffset = static_cast<int>(dst.face.size());
         dstMesh.numfaces = static_cast<int>(meshFaces[matID].size());
         dst.face.insert(dst.face.end(), meshFaces[matID].begin(), meshFaces[matID].end());
+        if (tagged)
+            dst.faceTag.insert(dst.faceTag.end(), meshTags[matID].begin(), meshTags[matID].end());
     }
 }
 

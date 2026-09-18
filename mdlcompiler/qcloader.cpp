@@ -479,7 +479,9 @@ struct MeshEdit {
     bool noMorph = false;
     float inflate = 0.0f;
     bool flipNormals = false;
-    float decimate = 1.0f; // $decimate: face-count fraction, 1 = untouched
+    bool skeletalAwareDecimation = false; // $use_skeletalaware_decimation
+    // $decimate / $decimatemesh in script order: (factor, face tag or -1 = all)
+    std::vector<std::pair<float, int>> decimates;
     std::string vta; // $vta: a legacy morph file for an SMD mesh
     int vtaLine = 0;
     std::vector<source::VtaFlexOption> vtaFlexes;
@@ -561,6 +563,10 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "$exceptionlist needs a DMX source - an SMD has no named meshes");
             return nullptr;
         }
+        if (edit && !edit->filter.tags.empty()) {
+            c.Fail(line, "$decimatemesh needs a DMX or FBX source - an SMD has no named meshes");
+            return nullptr;
+        }
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
                                    morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -580,7 +586,12 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 c.Fail(line, "$exceptionlist names \"" + *miss + "\", which is not a mesh in \"" +
                                  filename + "\"");
                 return nullptr;
-            }
+            }            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
+                if (!e.matched) {
+                    c.Fail(line, "$decimatemesh names \"" + e.name +
+                                     "\", which is not a kept mesh in \"" + filename + "\"");
+                    return nullptr;
+                }
         }
     } else {
         auto dm = LoadDmxCached(c, full, &loadErr);
@@ -603,9 +614,22 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 c.Fail(line, "$exceptionlist names \"" + *miss + "\", which is not a mesh in \"" +
                                  filename + "\"");
                 return nullptr;
-            }
+            }            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
+                if (!e.matched) {
+                    c.Fail(line, "$decimatemesh names \"" + e.name +
+                                     "\", which is not a kept mesh in \"" + filename + "\"");
+                    return nullptr;
+                }
         }
     }
+
+    if (edit)
+        for (const source::MeshFilter::RemoveEntry& e : edit->filter.removeNames)
+            if (!e.matched) {
+                c.Fail(line, "$removemesh names \"" + e.name + "\", which is not a material in \"" +
+                                 filename + "\"");
+                return nullptr;
+            }
 
     if (edit) {
         source::WeldVertices(*src, edit->weld);
@@ -719,6 +743,14 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
 
             // $removemeshword <keyword> - drop every mesh whose material name
             // contains the keyword (case-insensitive substring). Repeatable.
+            if (o == "$removemesh") {
+                std::string name;
+                if (!c.Want("a material name", *t, name))
+                    return false;
+                edit.filter.removeNames.push_back({name});
+                continue;
+            }
+
             if (o == "$removemeshword") {
                 std::string word;
                 if (!c.Want("a material keyword", *t, word))
@@ -732,6 +764,11 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                     return false;
                 if (!std::isfinite(edit.inflate))
                     return c.Fail(t->line, where + ": $inflate amount must be finite");
+                continue;
+            }
+
+            if (o == "$use_skeletalaware_decimation") {
+                edit.skeletalAwareDecimation = true;
                 continue;
             }
 
@@ -751,11 +788,35 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
 
             // $decimate <factor> - simplify this render mesh to `factor` of its
             // face count as it loads, the way $lod decimatemodel does per LOD.
-            if (o == "$decimate") {
-                if (!c.WantFloat("a factor", *t, edit.decimate))
+            // $decimatemesh <factor> <mesh> [mesh...] - the same, limited to the
+            // named DMX/FBX meshes. Both run in script order.
+            if (o == "$decimate" || o == "$decimatemesh") {
+                float factor = 1.0f;
+                if (!c.WantFloat("a factor", *t, factor))
                     return false;
-                if (edit.decimate <= 0.0f || edit.decimate > 1.0f)
-                    return c.Fail(t->line, where + ": $decimate factor must be in (0, 1.0]");
+                if (factor <= 0.0f || factor > 1.0f)
+                    return c.Fail(t->line, where + ": " + o + " factor must be in (0, 1.0]");
+                int tag = -1;
+                if (o == "$decimatemesh") {
+                    tag = 1;
+                    for (const auto& d : edit.decimates)
+                        if (d.second >= tag) tag = d.second + 1;
+                    if (tag > 255)
+                        return c.Fail(t->line, where + ": too many $decimatemesh lines");
+                    while (!c.AtCommand() && c.Cur().line == t->line &&
+                           !(!c.Cur().quoted && c.Cur().text == "}")) {
+                        const Token* m = c.Next();
+                        for (const auto& e : edit.filter.tags)
+                            if (_stricmp(e.name.c_str(), m->text.c_str()) == 0)
+                                return c.Fail(m->line, where + ": mesh \"" + m->text +
+                                                           "\" is in more than one $decimatemesh");
+                        edit.filter.tags.push_back({m->text, tag});
+                    }
+                    if (edit.filter.tags.empty() || edit.filter.tags.back().tag != tag)
+                        return c.Fail(t->line, where + ": $decimatemesh expects mesh names");
+                }
+                if (factor < 1.0f)
+                    edit.decimates.emplace_back(factor, tag);
                 continue;
             }
 
@@ -833,8 +894,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            return c.Fail(t->line, where + ": expected $exceptionlist, $removemeshword, "
-                                           "$skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $nomorph, $vta, "
+            return c.Fail(t->line, where + ": expected $exceptionlist, $removemesh, $removemeshword, "
+                                           "$skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
+                                           "$nomorph, $vta, "
                                            "$vca or '}', got \"" + t->text + "\"");
         }
     }
@@ -881,9 +943,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
     if (edit.flipNormals)
         source::FlipNormals(*src);
 
-    if (edit.decimate < 1.0f)
-        source::SimplifyFaces(*src, *src, edit.decimate,
-                              c.in.archetype == cm::Archetype::Static);
+    for (const auto& [factor, tag] : edit.decimates)
+        source::SimplifyFaces(*src, *src, factor, c.in.archetype == cm::Archetype::Static,
+                              nullptr, tag, edit.skeletalAwareDecimation);
 
     c.rendermeshes[name] = src;
     return true;
@@ -6007,6 +6069,8 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             lod.facialAnimation = false;
         } else if (opt == "facial") {
             lod.facialAnimation = !isShadow; // on is the plain-$lod default; a shadow forces it off
+        } else if (opt == "use_skeletalaware_decimation") {
+            lod.skeletalAwareDecimation = true;
         } else if (opt == "use_shadowlod_materials") {
             // silently ignored on a plain $lod, the way the reference does it -
             // the flag is model-wide and only means anything for the shadow LOD

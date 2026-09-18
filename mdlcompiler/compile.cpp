@@ -563,7 +563,9 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
                 continue;
             flexFound[f] = 1;
 
-            for (const src::SrcVertAnim& va : pMorph->vanims) {
+            // the morph keeps (1 - value) of its delta, so full strength still lands on the target
+            const float remain = 1.0f - value;
+            for (src::SrcVertAnim& va : pMorph->vanims) {
                 if (va.vertex < 0 || va.vertex >= static_cast<int>(psource->vertex.size()))
                     continue;
                 src::SrcVertex& v = psource->vertex[va.vertex];
@@ -587,6 +589,8 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
                     pm::VectorNormalize(newNormal);
                     v.normal = newNormal;
                 }
+                va.pos = {va.pos.x * remain, va.pos.y * remain, va.pos.z * remain};
+                va.normal = {va.normal.x * remain, va.normal.y * remain, va.normal.z * remain};
             }
         }
         if (poseClip && !in.bindPoseMeshOnly)
@@ -2838,7 +2842,8 @@ src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float fa
 
     // static props have no skeleton to hold a seam together, so pin the border
     src::SimplifyFaces(*pDst, *pSrc, factor,
-                       ctx.in->archetype == Archetype::Static, &skip);
+                       ctx.in->archetype == Archetype::Static, &skip, -1,
+                       lod.skeletalAwareDecimation);
     return pDst;
 }
 
