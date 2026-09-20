@@ -381,6 +381,17 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
                          res.names[i].c_str());
             continue;
         }
+        // A fidget is a cosmetic idle flourish and no donor set carries the
+        // full list, so an unmatched one keeps the target's name and plays the
+        // target's clip on a foreign rig. Zero it: the slot stays, the pool
+        // drops it, and the fidgets a donor did fill still play.
+        if (nofallback && res.from[i] < 0 && order.acts[i].compare(0, 17, "ACT_TERROR_FIDGET") == 0) {
+            spacer(2);
+            std::fprintf(f, "$bindposesequence \"%s\" { noanimation }   // slot %d - unmatched "
+                            "fidget, would play the target's own clip\n",
+                         res.names[i].c_str(), static_cast<int>(i));
+            continue;
+        }
         if (reachable.count(Lower(res.names[i]))) {
             spacer(0);
             std::fprintf(f, "$declaresequence \"%s\"\n", res.names[i].c_str());
@@ -447,6 +458,32 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
                 any = true;
             }
             std::fprintf(f, "$bindposesequence \"%s\" { noanimation }\n", order.names[i].c_str());
+        }
+        // Included sequences no slot claimed still sit in their activity's weight
+        // pool. Activity-less ones may be name-called layers, so they are kept.
+        std::vector<std::string> weighted;
+        const auto collectUnclaimed = [&](const Survivor& h) {
+            for (const std::string& inc : includesOf(h)) {
+                const Mdl* m = mdls.Get(inc);
+                if (!m) continue;
+                for (size_t k = 0; k < m->seqs.size(); ++k) {
+                    const std::string& n = m->seqs[k];
+                    const std::string act = k < m->acts.size() ? m->acts[k] : std::string();
+                    if (act.empty() || act.compare(0, 8, "ACT_GEST") == 0 || IsGestureName(n)) continue;
+                    if (keepintro && IsCampaignIntro(n)) continue;
+                    if (!emitted.insert(Lower(n)).second) continue;
+                    weighted.push_back(n);
+                }
+            }
+        };
+        for (size_t d = 0; d < chain.size(); ++d)
+            if (won[d]) collectUnclaimed(*chain[d]);
+        collectUnclaimed(tgt);
+        if (!weighted.empty()) {
+            std::fprintf(f, "\n// -nofallbackanimation: unclaimed included sequences that would\n"
+                            "// otherwise compete in an activity's weight pool.\n");
+            for (const std::string& n : weighted)
+                std::fprintf(f, "$bindposesequence \"%s\" { noanimation }\n", n.c_str());
         }
     }
 

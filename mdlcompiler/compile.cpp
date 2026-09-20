@@ -10130,6 +10130,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         out.gflags |= STUDIOHDR_FLAGS_CONSTANT_DIRECTIONAL_LIGHT_DOT;
         out.constDirectionalLightDot = input.constDirLightDot;
     }
+    out.numAllowedRootLods = static_cast<uint8_t>(input.allowRootLods);
     if (input.archetype == Archetype::Static)
         out.gflags |= STUDIOHDR_FLAGS_STATIC_PROP;
 

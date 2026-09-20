@@ -35,13 +35,16 @@ bool MeshFilter::Keep(const std::string& meshName, const std::string& dagName) {
 }
 
 int MeshFilter::Tag(const std::string& meshName, const std::string& dagName) {
-    for (TagEntry& e : tags)
-        if (_stricmp(e.name.c_str(), meshName.c_str()) == 0 ||
-            _stricmp(e.name.c_str(), dagName.c_str()) == 0) {
-            e.matched = true;
-            return e.tag;
-        }
-    return 0;
+    auto find = [&](std::vector<TagEntry>& list) {
+        for (TagEntry& e : list)
+            if (_stricmp(e.name.c_str(), meshName.c_str()) == 0 ||
+                _stricmp(e.name.c_str(), dagName.c_str()) == 0) {
+                e.matched = true;
+                return e.tag;
+            }
+        return 0;
+    };
+    return find(tags) | (find(inflateTags) << 8);
 }
 
 void ApplyWrinkleScales(Source& src, std::vector<WrinkleScaleOption>& opts) {
@@ -131,7 +134,7 @@ int WeldCompare(const SrcVertex& a, const SrcVertex& b, WeldMode mode) {
 
 } // namespace
 
-void WeldVertices(Source& src, WeldMode mode) {
+void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle) {
     const int n = static_cast<int>(src.vertex.size());
     if (mode == WeldMode::None || n == 0)
         return;
@@ -146,16 +149,38 @@ void WeldVertices(Source& src, WeldMode mode) {
         return c ? c < 0 : a < b;
     });
 
+    // no sharp pass: one cluster per position, every normal averages together
+    const float sharpCos =
+        !sharp ? -2.0f
+               : (sharpAngle > 0.0f ? std::cos(sharpAngle * pm::kPiF / 180.0f) : 1.0f - 1e-6f);
+
     std::vector<int> rep(n);
+    std::vector<int> run, clusterHead;
     for (int i = 0; i < n;) {
         int j = i + 1;
         while (j < n && WeldCompare(src.vertex[order[i]], src.vertex[order[j]], mode) == 0)
             ++j;
-        int survivor = order[i];
-        for (int k = i; k < j; ++k)
-            survivor = std::min(survivor, order[k]);
-        for (int k = i; k < j; ++k)
-            rep[order[k]] = survivor;
+        run.assign(order.begin() + i, order.begin() + j);
+        std::sort(run.begin(), run.end());
+        // one cluster per normal direction: a vertex joins the first cluster it
+        // is smooth with, so a sharp corner keeps its own split normal
+        clusterHead.clear();
+        for (int v : run) {
+            int head = -1;
+            for (int h : clusterHead) {
+                const Vector3& a = src.vertex[h].normal;
+                const Vector3& b = src.vertex[v].normal;
+                if (a.x * b.x + a.y * b.y + a.z * b.z >= sharpCos) {
+                    head = h;
+                    break;
+                }
+            }
+            if (head < 0) {
+                clusterHead.push_back(v);
+                head = v;
+            }
+            rep[v] = head;
+        }
         i = j;
     }
 
@@ -245,12 +270,48 @@ void WeldVertices(Source& src, WeldMode mode) {
     CalcModelTangentSpaces(src);
 }
 
-void InflateVertices(Source& src, float amount) {
+bool InflateVertices(Source& src, float amount, int meshTag,
+                     const std::vector<std::string>& materials, const MaterialTable* mats) {
+    std::vector<char> pick(src.vertex.size(), 1);
+    if (meshTag > 0) {
+        std::fill(pick.begin(), pick.end(), 0);
+        for (int m = 0; m < src.nummeshes; ++m) {
+            const SrcMesh& mesh = src.mesh[src.meshindex[m]];
+            for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+                if (f >= static_cast<int>(src.faceTag.size()) || (src.faceTag[f] >> 8) != meshTag)
+                    continue;
+                const SrcFace& face = src.face[f];
+                pick[mesh.vertexoffset + face.a] = pick[mesh.vertexoffset + face.b] =
+                    pick[mesh.vertexoffset + face.c] = 1;
+            }
+        }
+    }
+    if (!materials.empty() && mats) {
+        for (size_t i = 0; i < src.vertex.size(); ++i) {
+            const int mat = src.vertex[i].material;
+            if (mat < 0 || mat >= static_cast<int>(mats->materialToTexture.size())) {
+                pick[i] = 0;
+                continue;
+            }
+            std::string hay = mats->textures[mats->materialToTexture[mat]].name;
+            std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
+            const std::string base = std::filesystem::path(hay).stem().string();
+            bool hit = false;
+            for (std::string n : materials) {
+                std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+                hit = hit || n == hay || n == base;
+            }
+            pick[i] = pick[i] && hit;
+        }
+    }
+    if (std::find(pick.begin(), pick.end(), 1) == pick.end())
+        return src.vertex.empty();
     if (amount == 0.0f)
-        return;
+        return true;
     for (SrcMorphAnim& morph : src.morphs) {
         for (SrcVertAnim& va : morph.vanims) {
-            if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= src.vertex.size())
+            if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= src.vertex.size() ||
+                !pick[va.vertex])
                 continue;
             Vector3 base = src.vertex[va.vertex].normal;
             Vector3 target{base.x + va.normal.x, base.y + va.normal.y, base.z + va.normal.z};
@@ -261,7 +322,10 @@ void InflateVertices(Source& src, float amount) {
             va.pos.z += amount * (target.z - base.z);
         }
     }
-    for (SrcVertex& v : src.vertex) {
+    for (size_t i = 0; i < src.vertex.size(); ++i) {
+        if (!pick[i])
+            continue;
+        SrcVertex& v = src.vertex[i];
         Vector3 normal = v.normal;
         pm::VectorNormalize(normal);
         v.position.x += amount * normal.x;
@@ -269,6 +333,7 @@ void InflateVertices(Source& src, float amount) {
         v.position.z += amount * normal.z;
     }
     CalcModelTangentSpaces(src);
+    return true;
 }
 
 void FlipNormals(Source& src) {
@@ -406,7 +471,7 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
 
     // heap, not stack - kMaxSkins vectors is far past a thread's stack
     std::vector<std::vector<SrcFace>> meshFaces(lim::kMaxSkins);
-    std::vector<std::vector<uint8_t>> meshTags(lim::kMaxSkins);
+    std::vector<std::vector<uint16_t>> meshTags(lim::kMaxSkins);
     const bool tagged = !src.faceTag.empty();
     float resultError = 0.0f;
 
@@ -424,7 +489,7 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
         for (int fi = 0; fi < srcMesh.numfaces; fi++) {
             const int f = srcMesh.faceoffset + fi;
             const SrcFace& face = src.face[f];
-            std::vector<unsigned int>& grp = groups[tagged ? src.faceTag[f] : 0];
+            std::vector<unsigned int>& grp = groups[tagged ? (src.faceTag[f] & 0xFF) : 0];
             grp.insert(grp.end(), {face.a, face.b, face.c});
         }
 
@@ -492,7 +557,7 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
             }
             for (size_t fi = 0; fi < newIdxCount / 3; fi++) {
                 meshFaces[matID].push_back({dstIdx[fi * 3 + 0], dstIdx[fi * 3 + 1], dstIdx[fi * 3 + 2]});
-                meshTags[matID].push_back(static_cast<uint8_t>(g));
+                meshTags[matID].push_back(static_cast<uint16_t>(g));
             }
         }
     }

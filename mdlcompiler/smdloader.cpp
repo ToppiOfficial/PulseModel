@@ -611,7 +611,7 @@ void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
              ++i) {
             const TriFace& sf = st.faces[facesort[i]];
             if (hasTags)
-                out.faceTag[i] = static_cast<uint8_t>(sf.tag);
+                out.faceTag[i] = static_cast<uint16_t>(sf.tag);
             out.face[i].a = static_cast<uint32_t>(v_ilistsort[sf.a] - out.mesh[m].vertexoffset);
             out.face[i].b = static_cast<uint32_t>(v_ilistsort[sf.b] - out.mesh[m].vertexoffset);
             out.face[i].c = static_cast<uint32_t>(v_ilistsort[sf.c] - out.mesh[m].vertexoffset);

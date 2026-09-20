@@ -284,6 +284,8 @@ void WriteHeader(Qc& q, const Mdl& m) {
         q.Line("$casttextureshadows");
     if (h.flags & fm::STUDIOHDR_FLAGS_CONSTANT_DIRECTIONAL_LIGHT_DOT)
         q.Line("$constantdirectionallight " + F(h.constdirectionallightdot / 255.0f));
+    if (h.numAllowedRootLODs)
+        q.Line("$allowrootlods " + std::to_string(h.numAllowedRootLODs));
 
     q.Blank();
     q.Line("$bbox " + V3(h.hull_min) + "  " + V3(h.hull_max));

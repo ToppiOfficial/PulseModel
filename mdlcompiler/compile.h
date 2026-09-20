@@ -993,6 +993,7 @@ struct CompiledModel {
     std::string outname; // e.g. "testmodel/testcube" (no extension)
     int gflags = 0;
     uint8_t constDirectionalLightDot = 0;
+    uint8_t numAllowedRootLods = 0;
     float mass = 1.0f;
     std::string surfaceprop = "default";
     std::string keyvalues; // $keyvalues text block, "" = none
@@ -1131,6 +1132,7 @@ struct CompileInput {
     // $constantdirectionallight <scale>: sets the flag and the header byte below
     bool constDirLight = false;
     uint8_t constDirLightDot = 0;
+    int allowRootLods = 0; // $allowrootlods <count> -> numAllowedRootLODs, 0 = engine default
     bool realignBones = false; // $realignbones: realign every single-child chain
     // $lockbonelengths: pin every bone to its bind-pose local translation, then
     // re-solve each ik chain so its end bone keeps its authored world position

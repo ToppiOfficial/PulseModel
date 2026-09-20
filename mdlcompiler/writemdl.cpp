@@ -2858,6 +2858,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     phdr->flags = m.gflags;
     phdr->mass = 1;
     phdr->constdirectionallightdot = m.constDirectionalLightDot;
+    phdr->numAllowedRootLODs = m.numAllowedRootLods;
 
     // studiohdr2 immediately follows, always
     phdr->studiohdr2index = static_cast<int32_t>(buf.pos);

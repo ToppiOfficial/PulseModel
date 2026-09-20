@@ -476,8 +476,17 @@ struct MeshEdit {
     source::MeshFilter filter;
     source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
     source::WeldMode weld = source::WeldMode::None;
+    bool weldSharp = false;      // $weld sharp - keep authored split normals
+    float weldSharpAngle = 0.0f; // optional tolerance in degrees; 0 = exact normal match
     bool noMorph = false;
-    float inflate = 0.0f;
+    // $inflate <amount> [material|mesh <name>...] in script order; tag 0 = no mesh scope
+    struct Inflate {
+        float amount = 0.0f;
+        int tag = 0;
+        std::vector<std::string> materials;
+        int line = 0;
+    };
+    std::vector<Inflate> inflates;
     bool flipNormals = false;
     bool skeletalAwareDecimation = false; // $use_skeletalaware_decimation
     // $decimate / $decimatemesh in script order: (factor, face tag or -1 = all)
@@ -567,6 +576,10 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "$decimatemesh needs a DMX or FBX source - an SMD has no named meshes");
             return nullptr;
         }
+        if (edit && !edit->filter.inflateTags.empty()) {
+            c.Fail(line, "$inflate mesh needs a DMX or FBX source - an SMD has no named meshes");
+            return nullptr;
+        }
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
                                    morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -589,6 +602,12 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             }            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
                 if (!e.matched) {
                     c.Fail(line, "$decimatemesh names \"" + e.name +
+                                     "\", which is not a kept mesh in \"" + filename + "\"");
+                    return nullptr;
+                }
+            for (const source::MeshFilter::TagEntry& e : edit->filter.inflateTags)
+                if (!e.matched) {
+                    c.Fail(line, "$inflate mesh names \"" + e.name +
                                      "\", which is not a kept mesh in \"" + filename + "\"");
                     return nullptr;
                 }
@@ -620,6 +639,12 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                                      "\", which is not a kept mesh in \"" + filename + "\"");
                     return nullptr;
                 }
+            for (const source::MeshFilter::TagEntry& e : edit->filter.inflateTags)
+                if (!e.matched) {
+                    c.Fail(line, "$inflate mesh names \"" + e.name +
+                                     "\", which is not a kept mesh in \"" + filename + "\"");
+                    return nullptr;
+                }
         }
     }
 
@@ -632,7 +657,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             }
 
     if (edit) {
-        source::WeldVertices(*src, edit->weld);
+        source::WeldVertices(*src, edit->weld, edit->weldSharp, edit->weldSharpAngle);
         source::CullUnskinnedBones(*src, edit->boneCull);
     }
 
@@ -741,8 +766,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            // $removemeshword <keyword> - drop every mesh whose material name
-            // contains the keyword (case-insensitive substring). Repeatable.
             if (o == "$removemesh") {
                 std::string name;
                 if (!c.Want("a material name", *t, name))
@@ -751,6 +774,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            // $removemeshword <keyword> - drop every mesh whose material name
+            // contains the keyword (case-insensitive substring). Repeatable.
             if (o == "$removemeshword") {
                 std::string word;
                 if (!c.Want("a material keyword", *t, word))
@@ -759,11 +784,49 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            // $inflate <amount> [material <name>... | mesh <name>...] - repeatable;
+            // no scope inflates everything. Names run to the end of the line.
             if (o == "$inflate") {
-                if (!c.WantFloat("an inflation amount", *t, edit.inflate))
+                MeshEdit::Inflate inf;
+                inf.line = t->line;
+                if (!c.WantFloat("an inflation amount", *t, inf.amount))
                     return false;
-                if (!std::isfinite(edit.inflate))
+                if (!std::isfinite(inf.amount))
                     return c.Fail(t->line, where + ": $inflate amount must be finite");
+                auto onLine = [&] {
+                    return !c.AtCommand() && c.Cur().line == t->line &&
+                           !(!c.Cur().quoted && c.Cur().text == "}");
+                };
+                if (onLine()) {
+                    const Token* k = c.Next();
+                    const std::string kind = Lower(k->text);
+                    if (kind == "mesh") {
+                        inf.tag = 1;
+                        for (const auto& e : edit.filter.inflateTags)
+                            if (e.tag >= inf.tag) inf.tag = e.tag + 1;
+                        if (inf.tag > 255)
+                            return c.Fail(t->line, where + ": too many $inflate mesh lines");
+                    } else if (kind != "material") {
+                        return c.Fail(k->line, where + ": $inflate expects material or mesh, got \"" +
+                                                   k->text + "\"");
+                    }
+                    while (onLine()) {
+                        const Token* m = c.Next();
+                        if (inf.tag == 0) {
+                            inf.materials.push_back(m->text);
+                            continue;
+                        }
+                        for (const auto& e : edit.filter.inflateTags)
+                            if (_stricmp(e.name.c_str(), m->text.c_str()) == 0)
+                                return c.Fail(m->line, where + ": mesh \"" + m->text +
+                                                           "\" is in more than one $inflate mesh");
+                        edit.filter.inflateTags.push_back({m->text, inf.tag});
+                    }
+                    if (inf.materials.empty() &&
+                        (edit.filter.inflateTags.empty() || edit.filter.inflateTags.back().tag != inf.tag))
+                        return c.Fail(t->line, where + ": $inflate " + kind + " expects names");
+                }
+                edit.inflates.push_back(std::move(inf));
                 continue;
             }
 
@@ -777,11 +840,25 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            // $weld [seams] [sharp <degrees>]
             if (o == "$weld") {
                 edit.weld = source::WeldMode::KeepSeams;
                 if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "seams") {
                     ++c.pos;
                     edit.weld = source::WeldMode::All;
+                }
+                if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "sharp") {
+                    ++c.pos;
+                    edit.weldSharpAngle = 0.0f;
+                    if (!c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
+                        !(!c.Cur().quoted && c.Cur().text == "}")) {
+                        if (!c.WantFloat("a sharp angle in degrees", *t, edit.weldSharpAngle))
+                            return false;
+                        if (edit.weldSharpAngle < 0.0f || edit.weldSharpAngle > 180.0f)
+                            return c.Fail(t->line,
+                                          where + ": $weld sharp angle must be in [0, 180]");
+                    }
+                    edit.weldSharp = true;
                 }
                 continue;
             }
@@ -896,7 +973,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
 
             return c.Fail(t->line, where + ": expected $exceptionlist, $removemesh, $removemeshword, "
                                            "$skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
-                                           "$nomorph, $vta, "
+                                           "$use_skeletalaware_decimation, $nomorph, $nofacial, $vta, "
                                            "$vca or '}', got \"" + t->text + "\"");
         }
     }
@@ -939,7 +1016,10 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             return c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
     }
 
-    source::InflateVertices(*src, edit.inflate);
+    for (const MeshEdit::Inflate& inf : edit.inflates)
+        if (!source::InflateVertices(*src, inf.amount, inf.tag, inf.materials, &c.in.mats))
+            return c.Fail(inf.line, "$rendermesh \"" + name + "\": $inflate material matches no material in \"" +
+                                        file + "\"");
     if (edit.flipNormals)
         source::FlipNormals(*src);
 
@@ -5966,6 +6046,14 @@ bool ParseDecimateModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
     return true;
 }
 
+bool CmdAllowRootLods(Ctx& c, const Token& cmd) {
+    if (!c.WantInt("a root LOD count", cmd, c.in.allowRootLods))
+        return false;
+    if (c.in.allowRootLods < 0 || c.in.allowRootLods > 255)
+        return c.Fail(cmd.line, "$allowrootlods must be 0-255");
+    return true;
+}
+
 // $lod <switchvalue> { ... } / $shadowlod { ... }
 //
 // A shadow LOD reserves switch value -1, which is what identifies it to the
@@ -8429,6 +8517,7 @@ constexpr Command kCommands[] = {
     {"$texturegroup", CmdTextureGroup},
     {"$meshsortorder", CmdMeshSortOrder},
     {"$minlod", CmdMinLod},
+    {"$allowrootlods", CmdAllowRootLods},
     {"$lod", CmdLod},
     {"$shadowlod", CmdLod},
 };

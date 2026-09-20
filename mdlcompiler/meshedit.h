@@ -58,6 +58,7 @@ struct MeshFilter {
         bool matched = false;
     };
     std::vector<TagEntry> tags;
+    std::vector<TagEntry> inflateTags; // $inflate mesh: same shape, packed into the high byte
     int Tag(const std::string& meshName, const std::string& dagName);
 };
 
@@ -85,16 +86,27 @@ enum class SkinnedBoneCull { None, Tree, Aggressive };
 
 void CullUnskinnedBones(Source& src, SkinnedBoneCull mode);
 
-// $weld [seams] - merge vertices that share an exact position, within one
-// material and with identical bone weights. Normals are averaged, so hard-edge
-// splits collapse. `seams` also merges across differing UVs, which fuses
-// texture seams - without it a UV split still keeps its own vertex.
+// $weld [seams] [sharp [deg]] - merge vertices that share an exact position,
+// within one material and with identical bone weights. Normals are averaged,
+// so hard-edge splits collapse.
+
+// `seams` also merges across differing UVs, which fuses texture seams -
+// without it a UV split still keeps its own vertex.
 enum class WeldMode { None, KeepSeams, All };
 
-void WeldVertices(Source& src, WeldMode mode);
+// sharp keeps hard edges: vertices at one position whose normals differ stay
+// separate instead of averaging into one smooth normal. sharpAngle > 0 is a
+// tolerance in degrees, so near-equal normals still merge.
+void WeldVertices(Source& src, WeldMode mode, bool sharp = false,
+                  float sharpAngle = 0.0f);
 
 // Offset vertices and morph targets along their unit normals, in model units.
-void InflateVertices(Source& src, float amount);
+// `meshTag` > 0 limits it to faces with that $inflate mesh group, `materials` to
+// vertices of those materials (path and extension ignored); neither = all.
+// False if the selection matched no vertex.
+bool InflateVertices(Source& src, float amount, int meshTag = 0,
+                     const std::vector<std::string>& materials = {},
+                     const MaterialTable* mats = nullptr);
 
 // Reverse normals, morph normal deltas and triangle winding.
 void FlipNormals(Source& src);

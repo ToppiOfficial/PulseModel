@@ -1760,7 +1760,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
              i++) {
             int j = facesort[i];
             if (hasTags)
-                out.faceTag[i] = static_cast<uint8_t>(tmp.face[j].tag);
+                out.faceTag[i] = static_cast<uint16_t>(tmp.face[j].tag);
             out.face[i].a = static_cast<uint32_t>(v_ilistsort[ufaces[j].a] - out.mesh[m].vertexoffset);
             out.face[i].b = static_cast<uint32_t>(v_ilistsort[ufaces[j].b] - out.mesh[m].vertexoffset);
             out.face[i].c = static_cast<uint32_t>(v_ilistsort[ufaces[j].c] - out.mesh[m].vertexoffset);

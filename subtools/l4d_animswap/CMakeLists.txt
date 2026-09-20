@@ -11,7 +11,7 @@ set_target_properties(l4d_animswap PROPERTIES
                       RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${SUBTOOLS_DIR}"
                       RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${SUBTOOLS_DIR}")
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 0.1.0)
+set(TOOL_VERSION 0.2.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(l4d_animswap PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 
