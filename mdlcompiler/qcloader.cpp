@@ -491,6 +491,12 @@ struct MeshEdit {
     bool skeletalAwareDecimation = false; // $use_skeletalaware_decimation
     // $decimate / $decimatemesh in script order: (factor, face tag or -1 = all)
     std::vector<std::pair<float, int>> decimates;
+    struct BoneScale {
+        std::string bone;
+        pulse::math::Vector3 scale;
+        int line = 0;
+    };
+    std::vector<BoneScale> boneScales; // $scalebone, script order
     std::string vta; // $vta: a legacy morph file for an SMD mesh
     int vtaLine = 0;
     std::vector<source::VtaFlexOption> vtaFlexes;
@@ -897,6 +903,30 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            // $scalebone <bone> <factor> [x] [y] [z] - no axes scales all three
+            if (o == "$scalebone") {
+                MeshEdit::BoneScale bs;
+                bs.line = t->line;
+                float f = 1.0f;
+                if (!c.Want("a bone name", *t, bs.bone) || !c.WantFloat("a scale factor", *t, f))
+                    return false;
+                if (!(f > 0.0f) || !std::isfinite(f))
+                    return c.Fail(t->line, where + ": $scalebone factor must be > 0");
+                bool ax[3] = {}, any = false;
+                while (!c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
+                       !(!c.Cur().quoted && c.Cur().text == "}")) {
+                    const Token* a = c.Next();
+                    const std::string k = Lower(a->text);
+                    if (k != "x" && k != "y" && k != "z")
+                        return c.Fail(a->line, where + ": $scalebone axis must be x, y or z, got \"" +
+                                                   a->text + "\"");
+                    ax[k[0] - 'x'] = any = true;
+                }
+                bs.scale = {!any || ax[0] ? f : 1.0f, !any || ax[1] ? f : 1.0f, !any || ax[2] ? f : 1.0f};
+                edit.boneScales.push_back(std::move(bs));
+                continue;
+            }
+
             if (o == "$nomorph" || o == "$nofacial") {
                 edit.noMorph = true;
                 continue;
@@ -973,7 +1003,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
 
             return c.Fail(t->line, where + ": expected $exceptionlist, $removemesh, $removemeshword, "
                                            "$skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
-                                           "$use_skeletalaware_decimation, $nomorph, $nofacial, $vta, "
+                                           "$use_skeletalaware_decimation, $scalebone, $nomorph, $nofacial, $vta, "
                                            "$vca or '}', got \"" + t->text + "\"");
         }
     }
@@ -1022,6 +1052,19 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                                         file + "\"");
     if (edit.flipNormals)
         source::FlipNormals(*src);
+    // Deepest bone first, so a parent's scale carries an already-scaled child
+    // (the child's factor stays relative to its parent, whatever the script order).
+    auto boneIndex = [&](const std::string& n) {
+        for (int i = 0; i < src->numbones; ++i)
+            if (_stricmp(src->localBone[i].name.c_str(), n.c_str()) == 0) return i;
+        return -1;
+    };
+    std::stable_sort(edit.boneScales.begin(), edit.boneScales.end(),
+                     [&](const auto& a, const auto& b) { return boneIndex(a.bone) > boneIndex(b.bone); });
+    for (const MeshEdit::BoneScale& bs : edit.boneScales)
+        if (!source::ScaleBone(*src, bs.bone, bs.scale))
+            return c.Fail(bs.line, "$rendermesh \"" + name + "\": $scalebone: no bone \"" + bs.bone +
+                                       "\" in \"" + file + "\"");
 
     for (const auto& [factor, tag] : edit.decimates)
         source::SimplifyFaces(*src, *src, factor, c.in.archetype == cm::Archetype::Static,
@@ -6111,6 +6154,21 @@ bool CmdLod(Ctx& c, const Token& cmd) {
                 return false;
             if (lod.decimateAllFactor <= 0.0f || lod.decimateAllFactor > 1.0f)
                 return c.Fail(t.line, "decimateallmodel: factor must be in (0, 1.0]");
+        } else if (opt == "removesmallmeshes") {
+            if (!c.WantFloat("a minimum unit size", t, lod.smallMeshLimit))
+                return false;
+            if (lod.smallMeshLimit <= 0.0f)
+                return c.Fail(t.line, "removesmallmeshes: size must be positive");
+            while (!c.Eof() && c.Cur().line == t.line &&
+                   (c.Cur().quoted || c.Cur().text != "}")) {
+                std::string name;
+                if (!c.Want("a mesh name", t, name))
+                    return false;
+                source::Source* source = FindModelSource(c, name);
+                if (!source)
+                    return c.Fail(t.line, "removesmallmeshes: unknown mesh \"" + name + "\"");
+                lod.smallMeshSources.push_back(source);
+            }
         } else if (opt == "replacebone") {
             cm::LodReplacement r;
             if (!c.Want("a bone name", t, r.src) || !c.Want("a replacement bone", t, r.dst))

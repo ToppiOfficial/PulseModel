@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
+#include <tuple>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
@@ -576,6 +578,65 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
     }
 }
 
+void RemoveSmallMeshes(Source& src, float limit) {
+    std::vector<SrcFace> faces;
+    std::vector<uint16_t> tags;
+    const bool tagged = !src.faceTag.empty();
+
+    for (int mi = 0; mi < src.nummeshes; ++mi) {
+        SrcMesh& mesh = src.mesh[src.meshindex[mi]];
+        const int firstFace = mesh.faceoffset;
+        std::map<std::tuple<float, float, float>, std::vector<int>> positionFaces;
+        for (int fi = 0; fi < mesh.numfaces; ++fi) {
+            const SrcFace& face = src.face[firstFace + fi];
+            for (uint32_t vi : {face.a, face.b, face.c}) {
+                const Vector3& p = src.vertex[mesh.vertexoffset + vi].position;
+                positionFaces[{p.x, p.y, p.z}].push_back(fi);
+            }
+        }
+
+        std::vector<char> seen(mesh.numfaces);
+        mesh.faceoffset = static_cast<int>(faces.size());
+        mesh.numfaces = 0;
+        for (int start = 0; start < static_cast<int>(seen.size()); ++start) {
+            if (seen[start])
+                continue;
+            std::vector<int> component{start};
+            seen[start] = 1;
+            Vector3 lo = src.vertex[mesh.vertexoffset + src.face[firstFace + start].a].position;
+            Vector3 hi = lo;
+            for (size_t i = 0; i < component.size(); ++i) {
+                const SrcFace& face = src.face[firstFace + component[i]];
+                for (uint32_t vi : {face.a, face.b, face.c}) {
+                    const Vector3& p = src.vertex[mesh.vertexoffset + vi].position;
+                    lo.x = std::min(lo.x, p.x);
+                    lo.y = std::min(lo.y, p.y);
+                    lo.z = std::min(lo.z, p.z);
+                    hi.x = std::max(hi.x, p.x);
+                    hi.y = std::max(hi.y, p.y);
+                    hi.z = std::max(hi.z, p.z);
+                    for (int next : positionFaces[{p.x, p.y, p.z}])
+                        if (!seen[next]) {
+                            seen[next] = 1;
+                            component.push_back(next);
+                        }
+                }
+            }
+            if (std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z}) < limit)
+                continue;
+            for (int fi : component) {
+                faces.push_back(src.face[firstFace + fi]);
+                if (tagged)
+                    tags.push_back(src.faceTag[firstFace + fi]);
+                ++mesh.numfaces;
+            }
+        }
+    }
+    src.face.swap(faces);
+    if (tagged)
+        src.faceTag.swap(tags);
+}
+
 bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* err) {
     auto fail = [&](const std::string& m) {
         if (err) *err = m;
@@ -785,6 +846,79 @@ bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* e
     }
 
     out.kind = LoadKind::Model;
+    return true;
+}
+
+
+bool ScaleBone(Source& src, const std::string& bone, const Vector3& scale) {
+    int b = -1;
+    for (int i = 0; i < src.numbones && b < 0; ++i)
+        if (_stricmp(src.localBone[i].name.c_str(), bone.c_str()) == 0)
+            b = i;
+    if (b < 0 || src.boneToPose.size() != static_cast<size_t>(src.numbones))
+        return false;
+
+    // localBone is a DFS, so a parent is marked before its children
+    std::vector<char> sub(src.numbones, 0);
+    sub[b] = 1;
+    for (int i = b + 1; i < src.numbones; ++i)
+        sub[i] = src.localBone[i].parent >= 0 && sub[src.localBone[i].parent];
+
+    // Scale about the bone's origin along its own axes; normals take the inverse scale.
+    const pm::matrix3x4& B = src.boneToPose[b];
+    auto mul = [](const Vector3& v, const Vector3& s) { return Vector3{v.x * s.x, v.y * s.y, v.z * s.z}; };
+    const Vector3 inv{1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z};
+    auto point = [&](const Vector3& v) { return pm::VectorTransform(mul(pm::VectorITransform(v, B), scale), B); };
+    auto dir = [&](const Vector3& v, const Vector3& s) { return pm::VectorRotate(mul(pm::VectorIRotate(v, B), s), B); };
+    auto lerp = [](const Vector3& a, const Vector3& b, float t) {
+        return Vector3{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t};
+    };
+    auto unit = [](Vector3 v) {
+        const float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        return l > 0.0f ? Vector3{v.x / l, v.y / l, v.z / l} : v;
+    };
+
+    std::vector<float> w(src.vertex.size(), 0.0f); // weight share inside the scaled subtree
+    for (size_t i = 0; i < src.vertex.size(); ++i) {
+        const SrcBoneWeight& bw = src.vertex[i].boneweight;
+        for (int k = 0; k < bw.numbones; ++k)
+            if (bw.bone[k] >= 0 && bw.bone[k] < src.numbones && sub[bw.bone[k]])
+                w[i] += bw.weight[k];
+        if (w[i] <= 0.0f)
+            continue;
+        SrcVertex& v = src.vertex[i];
+        v.position = lerp(v.position, point(v.position), w[i]);
+        v.normal = unit(lerp(v.normal, unit(dir(v.normal, inv)), w[i]));
+        const Vector3 t = unit(lerp({v.tangentS.x, v.tangentS.y, v.tangentS.z},
+                                    unit(dir({v.tangentS.x, v.tangentS.y, v.tangentS.z}, scale)), w[i]));
+        v.tangentS = {t.x, t.y, t.z, v.tangentS.w};
+    }
+    for (SrcMorphAnim& morph : src.morphs)
+        for (SrcVertAnim& va : morph.vanims) {
+            if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= w.size() || w[va.vertex] <= 0.0f)
+                continue;
+            va.pos = lerp(va.pos, dir(va.pos, scale), w[va.vertex]);
+            va.normal = lerp(va.normal, dir(va.normal, inv), w[va.vertex]);
+        }
+
+    // Descendant bones ride the scale: move their bind origins, then re-localize positions.
+    for (int i = b + 1; i < src.numbones; ++i) {
+        if (!sub[i])
+            continue;
+        pm::matrix3x4& m = src.boneToPose[i];
+        const Vector3 o = point({m.m[0][3], m.m[1][3], m.m[2][3]});
+        m.m[0][3] = o.x; m.m[1][3] = o.y; m.m[2][3] = o.z;
+    }
+    for (SourceAnim& anim : src.anims)
+        for (std::vector<SrcBonePose>& frame : anim.frames)
+            for (int i = b + 1; i < src.numbones && i < static_cast<int>(frame.size()); ++i) {
+                const int p = src.localBone[i].parent;
+                if (!sub[i] || p < 0)
+                    continue;
+                const pm::matrix3x4& P = src.boneToPose[p];
+                const Vector3 d = pm::VectorRotate(frame[i].pos, P); // world offset in bind orientation
+                frame[i].pos = pm::VectorIRotate(dir(d, scale), P);
+            }
     return true;
 }
 

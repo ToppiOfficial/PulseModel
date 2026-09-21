@@ -237,6 +237,13 @@ struct Result {
     std::vector<int> from; // chain index, or -1 for "kept the vanilla name"
 };
 
+// Rig == target is the no-swap case, and every slot then reports from == -1
+// ("kept the vanilla name"). That is the right answer there, not a gap, so no
+// fallback blocking applies - the target's own include is the correct source.
+bool BlockFallback(bool flag, const Survivor& rig, const Survivor& tgt) {
+    return flag && &rig != &tgt;
+}
+
 // A donor name may fill only one slot: a repeated $declaresequence compiles to
 // an empty sequence, so a second claimant drops to the next donor instead.
 Result Build(const std::vector<std::string>& order, const std::vector<Index>& idx,
@@ -280,6 +287,7 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
            const std::vector<const Survivor*>& chain, const Result& res, int skip, const Slots& order,
            Resolver& mdls, const std::string& ref, bool noanim, bool nofallback,
            bool keepintro) {
+    nofallback = BlockFallback(nofallback, rig, tgt);
     std::vector<int> won(chain.size(), 0);
     int kept = 0;
     for (size_t i = static_cast<size_t>(skip); i < res.from.size(); ++i) {
@@ -385,7 +393,8 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
         // full list, so an unmatched one keeps the target's name and plays the
         // target's clip on a foreign rig. Zero it: the slot stays, the pool
         // drops it, and the fidgets a donor did fill still play.
-        if (nofallback && res.from[i] < 0 && order.acts[i].compare(0, 17, "ACT_TERROR_FIDGET") == 0) {
+        if (nofallback && res.from[i] < 0 &&
+            order.acts[i].compare(0, 17, "ACT_TERROR_FIDGET") == 0) {
             spacer(2);
             std::fprintf(f, "$bindposesequence \"%s\" { noanimation }   // slot %d - unmatched "
                             "fidget, would play the target's own clip\n",

@@ -108,6 +108,10 @@ bool InflateVertices(Source& src, float amount, int meshTag = 0,
                      const std::vector<std::string>& materials = {},
                      const MaterialTable* mats = nullptr);
 
+// $scalebone: scale a bone's subtree in its bind-space axes, deforming skinned
+// vertices by their subtree weight and moving descendant bone origins. False if no such bone.
+bool ScaleBone(Source& src, const std::string& bone, const Vector3& scale);
+
 // Reverse normals, morph normal deltas and triangle winding.
 void FlipNormals(Source& src);
 
@@ -120,6 +124,9 @@ void FlipNormals(Source& src);
 void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder,
                    const std::vector<bool>* skipMaterial = nullptr, int onlyTag = -1,
                    bool rigAware = false);
+
+// Drop disconnected face islands smaller than limit on every axis.
+void RemoveSmallMeshes(Source& src, float limit);
 
 // Fuse several loaded render meshes into ONE drawable Source - what exporting
 // them together out of a single scene would have produced. Bones unify by name

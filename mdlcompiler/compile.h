@@ -923,6 +923,8 @@ struct ScriptLod {
     // removemeshword: drop any mesh whose material base name CONTAINS the
     // stored word, case-insensitively
     std::vector<LodReplacement> meshWordRemovals;
+    float smallMeshLimit = 0.0f;
+    std::vector<source::Source*> smallMeshSources;
     bool collapseJiggleBones = false;
     bool collapseProceduralBones = false;
     bool facialAnimation = true;     // cleared by nomorphs/nofacial

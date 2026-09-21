@@ -2829,11 +2829,14 @@ bool IsMeshRemoved(const Ctx& ctx, const ScriptLod& lod, int nMaterialID) {
 // so the LOD is already rigged - there is no weight transfer step. Registering
 // it as a source is what gets it bone-remapped along with everything else.
 src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float factor,
-                                     const ScriptLod& lod) {
+                                     const ScriptLod& lod, float smallMeshLimit) {
     auto owned = std::make_unique<src::Source>(*pSrc);
     src::Source* pDst = owned.get();
     pDst->isActiveModel = false; // LOD geometry, never a bodygroup choice itself
     ctx.in->sources.push_back(std::move(owned));
+
+    if (smallMeshLimit > 0.0f)
+        src::RemoveSmallMeshes(*pDst, smallMeshLimit);
 
     // no point simplifying geometry this LOD is about to drop
     std::vector<bool> skip(lim::kMaxSkins, false);
@@ -2841,7 +2844,7 @@ src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float fa
         skip[matID] = IsMeshRemoved(ctx, lod, matID);
 
     // static props have no skeleton to hold a seam together, so pin the border
-    src::SimplifyFaces(*pDst, *pSrc, factor,
+    src::SimplifyFaces(*pDst, *pDst, factor,
                        ctx.in->archetype == Archetype::Static, &skip, -1,
                        lod.skeletalAwareDecimation);
     return pDst;
@@ -2859,6 +2862,11 @@ void GetLodSources(Ctx& ctx, Model& model) {
         const ScriptLod& lod = m.scriptLods[lodID];
         src::Source* pSource = nullptr;
         bool bFound = false;
+        const bool removeSmall = lod.smallMeshLimit > 0.0f &&
+            (lod.smallMeshSources.empty() ||
+             std::find(lod.smallMeshSources.begin(), lod.smallMeshSources.end(), model.source) !=
+                 lod.smallMeshSources.end());
+        bool smallRemoved = false;
 
         for (const LodReplacement& r : lod.modelReplacements) {
             if (r.srcSource != model.source)
@@ -2874,18 +2882,35 @@ void GetLodSources(Ctx& ctx, Model& model) {
                     continue;
                 // always decimate the full-detail source, never the previous
                 // LOD's - the factor means "share of the original triangles"
-                pSource = GenerateDecimatedSource(ctx, model.source, r.decimation, lod);
+                pSource = GenerateDecimatedSource(
+                    ctx, model.source, r.decimation, lod,
+                    removeSmall ? lod.smallMeshLimit : 0.0f);
                 bFound = true;
+                smallRemoved = removeSmall;
                 break;
             }
         }
 
         if (!bFound && lod.HasDecimateAll()) {
-            pSource = GenerateDecimatedSource(ctx, model.source, lod.decimateAllFactor, lod);
+            pSource = GenerateDecimatedSource(
+                ctx, model.source, lod.decimateAllFactor, lod,
+                removeSmall ? lod.smallMeshLimit : 0.0f);
             bFound = true;
+            smallRemoved = removeSmall;
         }
 
-        model.lodSources[lodID] = bFound ? pSource : model.source;
+        if (!bFound)
+            pSource = model.source;
+
+        if (removeSmall && !smallRemoved && pSource) {
+            auto owned = std::make_unique<src::Source>(*pSource);
+            pSource = owned.get();
+            pSource->isActiveModel = false;
+            src::RemoveSmallMeshes(*pSource, lod.smallMeshLimit);
+            ctx.in->sources.push_back(std::move(owned));
+        }
+
+        model.lodSources[lodID] = pSource;
     }
 }
 
