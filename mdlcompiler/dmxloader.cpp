@@ -451,6 +451,7 @@ struct TmpFace {
 struct MeshTemp {
     std::vector<pm::Vector3> vertex;   // transformed positions
     std::vector<SrcBoneWeight> bone;   // per position
+    std::vector<float> outline;        // per position, toonoutline_weight$0
     std::vector<pm::Vector3> normal;   // rotated normals
     std::vector<pm::Vector2> texcoord;
     std::vector<TmpFace> face;
@@ -1199,6 +1200,54 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     { PULSE_PERF("mesh", "LoadVertices");
       LoadVertices(info, dag, bindState, mat, nBoneAssign, normals); }
 
+    // $toonoutline's per-corner float stream (a Blender vertex group), -1 when absent
+    tmp.outline.resize(tmp.vertex.size(), -1.0f);
+    const std::vector<float>* ow = nullptr;
+    const std::vector<int32_t>* owi = nullptr;
+    if (info.filter && !info.filter->outlineStream.empty()) {
+        const std::string idxName = info.filter->outlineStream + "Indices";
+        for (const dmx::Attribute& a : bindState->attributes) {
+            if (_stricmp(a.name.c_str(), info.filter->outlineStream.c_str()) == 0)
+                ow = std::get_if<std::vector<float>>(&a.value);
+            else if (_stricmp(a.name.c_str(), idxName.c_str()) == 0)
+                owi = std::get_if<std::vector<int32_t>>(&a.value);
+        }
+        if (ow && owi)
+            info.filter->outlineStreamFound = true;
+    }
+    if (ow && owi && positionIndices)
+        for (size_t i = 0; i < owi->size() && i < positionIndices->size(); ++i) {
+            const size_t p = nStartingVertex + static_cast<size_t>((*positionIndices)[i]);
+            const int32_t w = (*owi)[i];
+            if (p < tmp.outline.size() && w >= 0 && w < static_cast<int32_t>(ow->size()))
+                tmp.outline[p] = (*ow)[w];
+        }
+
+    // $cullvertex: flag corners over threshold in the named weight stream
+    std::vector<char> cullCorner;
+    if (info.filter && !info.filter->cullGroups.empty() && positionIndices) {
+        cullCorner.assign(positionIndices->size(), 0);
+        for (MeshFilter::CullEntry& e : info.filter->cullGroups) {
+            const std::vector<float>* cw = nullptr;
+            const std::vector<int32_t>* cwi = nullptr;
+            const std::string idxName = e.group + "Indices";
+            for (const dmx::Attribute& a : bindState->attributes) {
+                if (_stricmp(a.name.c_str(), e.group.c_str()) == 0)
+                    cw = std::get_if<std::vector<float>>(&a.value);
+                else if (_stricmp(a.name.c_str(), idxName.c_str()) == 0)
+                    cwi = std::get_if<std::vector<int32_t>>(&a.value);
+            }
+            if (cw && cwi) {
+                e.matched = true;
+                for (size_t i = 0; i < cwi->size() && i < cullCorner.size(); ++i) {
+                    const int32_t w = (*cwi)[i];
+                    if (w >= 0 && w < static_cast<int32_t>(cw->size()) && (*cw)[w] > e.threshold)
+                        cullCorner[i] = 1;
+                }
+            }
+        }
+    }
+
     // balance/speed data follows the mesh's vertices (reference LoadVertices
     // tail: whole array, or a single 1.0f so the 0-index default hits it)
     if (flex) {
@@ -1328,7 +1377,15 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                    (*faces)[nFirstIndex + nVertexCount] != -1)
                 ++nVertexCount;
 
-            if (nVertexCount >= 3) {
+            bool culled = false;
+            if (!cullCorner.empty())
+                for (int k = 0; k < nVertexCount && !culled; ++k) {
+                    const int32_t corner = (*faces)[nFirstIndex + k];
+                    culled = corner >= 0 && corner < static_cast<int32_t>(cullCorner.size()) &&
+                             cullCorner[corner];
+                }
+
+            if (nVertexCount >= 3 && !culled) {
                 ComputeTriangulatedIndices(*positions, *positionIndices, *faces, nFirstIndex,
                                            nVertexCount, triangulated);
                 for (size_t ii = 0; ii + 2 < triangulated.size() + 1 && ii < triangulated.size();
@@ -1722,6 +1779,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         vertex.normal = (u.n >= 0 && u.n < static_cast<int>(tmp.normal.size()))
                             ? tmp.normal[u.n] : pm::Vector3{};
         vertex.boneweight = tmp.bone[u.v];
+        vertex.outline = static_cast<size_t>(u.v) < tmp.outline.size() ? tmp.outline[u.v] : -1.0f;
         vertex.texcoord = (u.t < tmp.texcoord.size()) ? tmp.texcoord[u.t] : pm::Vector2{};
         vertex.material = u.m;
     }

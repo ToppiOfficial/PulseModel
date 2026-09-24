@@ -17,6 +17,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -502,6 +503,8 @@ struct MeshEdit {
     std::vector<source::VtaFlexOption> vtaFlexes;
     std::string vca, vcaName; // $vca: the same file played back as one NWAY run
     int vcaLine = 0;
+    bool toonOutline = false; // $toonoutline, applied after every other edit
+    source::ToonOutlineOption outline;
 };
 
 // Load-or-reuse a source file, keyed by filename. `edit` marks the load as a
@@ -586,6 +589,10 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "$inflate mesh needs a DMX or FBX source - an SMD has no named meshes");
             return nullptr;
         }
+        if (edit && !edit->filter.cullGroups.empty()) {
+            c.Fail(line, "$cullvertex needs a DMX source - an SMD has no vertex groups");
+            return nullptr;
+        }
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
                                    morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -593,6 +600,10 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
         }
     } else if (IsFbxPath(filename)) {
         std::printf("%s\n", head.c_str());
+        if (edit && !edit->filter.cullGroups.empty()) {
+            c.Fail(line, "$cullvertex needs a DMX source");
+            return nullptr;
+        }
         if (!source::LoadFbxSource(full.string(), *src, mats, c.in.scale, &loadErr, morphSource,
                                    edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -661,6 +672,12 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                                  filename + "\"");
                 return nullptr;
             }
+    if (edit)
+        for (const source::MeshFilter::CullEntry& e : edit->filter.cullGroups)
+            if (!e.matched)
+                std::fprintf(stderr,
+                             "warning: %s line %d: $cullvertex \"%s\" is not a vertex group in \"%s\"\n",
+                             c.file.c_str(), line, e.group.c_str(), filename.c_str());
 
     if (edit) {
         source::WeldVertices(*src, edit->weld, edit->weldSharp, edit->weldSharpAngle);
@@ -790,6 +807,19 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
+            // $cullvertex <stream> <threshold> - drop every face touching a vertex
+            // weighted above threshold in <stream> (e.g. cullvertex$0). Repeatable, DMX only.
+            if (o == "$cullvertex") {
+                source::MeshFilter::CullEntry e;
+                if (!c.Want("a vertex group name", *t, e.group) ||
+                    !c.WantFloat("a weight threshold", *t, e.threshold))
+                    return false;
+                if (!std::isfinite(e.threshold))
+                    return c.Fail(t->line, where + ": $cullvertex threshold must be finite");
+                edit.filter.cullGroups.push_back(std::move(e));
+                continue;
+            }
+
             // $inflate <amount> [material <name>... | mesh <name>...] - repeatable;
             // no scope inflates everything. Names run to the end of the line.
             if (o == "$inflate") {
@@ -833,6 +863,65 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                         return c.Fail(t->line, where + ": $inflate " + kind + " expects names");
                 }
                 edit.inflates.push_back(std::move(inf));
+                continue;
+            }
+
+            // $toonoutline <stream> <thickness> [<min> <max>] [noweld] [permaterial]
+            //              [forceuseoutline] [materialname <name>] [cdmaterial <dir>]
+            if (o == "$toonoutline") {
+                if (edit.toonOutline)
+                    return c.Fail(t->line, where + ": $toonoutline written twice");
+                edit.toonOutline = true;
+                source::ToonOutlineOption& ol = edit.outline;
+                ol.line = t->line;
+                if (!c.Want("a vertex stream name", *t, edit.filter.outlineStream) ||
+                    !c.WantFloat("an outline thickness", *t, ol.thickness))
+                    return false;
+                if (!std::isfinite(ol.thickness))
+                    return c.Fail(t->line, where + ": $toonoutline thickness must be finite");
+                auto onLine = [&] {
+                    return !c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
+                           !(!c.Cur().quoted && c.Cur().text == "}");
+                };
+                auto numberNext = [&] {
+                    if (!onLine())
+                        return false;
+                    char* end = nullptr;
+                    std::strtof(c.Cur().text.c_str(), &end);
+                    return end != c.Cur().text.c_str() && *end == '\0';
+                };
+                if (numberNext()) {
+                    if (!c.WantFloat("a min weight", *t, ol.minWeight) ||
+                        !c.WantFloat("a max weight", *t, ol.maxWeight))
+                        return false;
+                    if (ol.minWeight > ol.maxWeight)
+                        return c.Fail(t->line, where + ": $toonoutline min weight is above max weight");
+                }
+                bool named = false;
+                while (onLine()) {
+                    const Token* k = c.Next();
+                    const std::string kw = Lower(k->text);
+                    if (kw == "noweld") {
+                        ol.weld = false;
+                    } else if (kw == "permaterial") {
+                        ol.perMaterial = true;
+                    } else if (kw == "forceuseoutline") {
+                        ol.forceUse = true;
+                    } else if (kw == "materialname") {
+                        if (!c.Want("a material name", *t, ol.material))
+                            return false;
+                        named = true;
+                    } else if (kw == "cdmaterial") {
+                        if (!c.Want("a material directory", *t, ol.cdmaterial))
+                            return false;
+                    } else {
+                        return c.Fail(k->line, where + ": $toonoutline expects noweld, permaterial, "
+                                                       "forceuseoutline, materialname or cdmaterial, got \"" +
+                                                       k->text + "\"");
+                    }
+                }
+                if (named && ol.perMaterial)
+                    return c.Fail(t->line, where + ": $toonoutline materialname and permaterial contradict each other");
                 continue;
             }
 
@@ -1002,9 +1091,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $exceptionlist, $removemesh, $removemeshword, "
-                                           "$skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
-                                           "$use_skeletalaware_decimation, $scalebone, $nomorph, $nofacial, $vta, "
-                                           "$vca or '}', got \"" + t->text + "\"");
+                                           "$cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
+                                           "$use_skeletalaware_decimation, $scalebone, $toonoutline, $nomorph, "
+                                           "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
         }
     }
 
@@ -1069,6 +1158,16 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
     for (const auto& [factor, tag] : edit.decimates)
         source::SimplifyFaces(*src, *src, factor, c.in.archetype == cm::Archetype::Static,
                               nullptr, tag, edit.skeletalAwareDecimation);
+
+    if (edit.toonOutline) {
+        if (!edit.filter.outlineStreamFound && !edit.outline.forceUse)
+            return c.Fail(edit.outline.line, "$rendermesh \"" + name + "\": $toonoutline: no mesh in \"" + file +
+                                                 "\" has a \"" + edit.filter.outlineStream +
+                                                 "\" vertex stream (use forceuseoutline to outline it anyway)");
+        std::string outlineErr;
+        if (!source::AddToonOutline(*src, c.in.mats, edit.outline, &outlineErr))
+            return c.Fail(edit.outline.line, "$rendermesh \"" + name + "\": $toonoutline: " + outlineErr);
+    }
 
     c.rendermeshes[name] = src;
     return true;
@@ -1321,15 +1420,104 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadRigDmx(Ctx& c, const Token& cmd,
     return dm;
 }
 
+float DegToRad(float deg);
+
+// One settriggeraoi line (triggers [first, last] of `bone` get tolerance `aoiDeg`)
+// or removetrigger line (those triggers are dropped).
+struct TriggerAoiEdit {
+    int line = 0;
+    bool remove = false;
+    std::string bone;
+    float aoiDeg = 0.0f;
+    int first = 0, last = 0;
+};
+
+// Body of $datamodeljoints: `$proceduralbones { settriggeraoi <bone> <deg> <sel> |
+// removetrigger <bone> <sel> }`, sel = `frame <n> | framerange <min> <max>`, 0-based.
+bool ParseDataModelJointsBody(Ctx& c, const Token& cmd, std::vector<TriggerAoiEdit>& edits) {
+    ++c.pos; // '{'
+    for (;;) {
+        const Token* t = c.Next();
+        if (!t)
+            return c.Fail(cmd.line, "$datamodeljoints is missing '}'");
+        if (t->text == "}")
+            return true;
+        if (Lower(t->text) != "$proceduralbones")
+            return c.Fail(t->line, "$datamodeljoints: expected $proceduralbones, got \"" +
+                                       t->text + "\"");
+        const Token* brace = c.Next();
+        if (!brace || brace->quoted || brace->text != "{")
+            return c.Fail(t->line, "$proceduralbones expects '{'");
+        for (;;) {
+            const Token* s = c.Next();
+            if (!s)
+                return c.Fail(t->line, "$proceduralbones is missing '}'");
+            if (s->text == "}")
+                break;
+            const std::string kw = Lower(s->text);
+            if (kw != "settriggeraoi" && kw != "removetrigger")
+                return c.Fail(s->line, "$proceduralbones: expected settriggeraoi or "
+                                       "removetrigger, got \"" + s->text + "\"");
+            TriggerAoiEdit e;
+            e.line = s->line;
+            e.remove = kw == "removetrigger";
+            if (!c.Want("a procedural bone name", *s, e.bone))
+                return false;
+            if (!e.remove) {
+                if (!c.WantFloat("an angle of influence", *s, e.aoiDeg))
+                    return false;
+                if (e.aoiDeg <= 0.0f)
+                    return c.Fail(s->line, kw + " \"" + e.bone + "\": angle must be > 0");
+            }
+            // The first frame/framerange wins; any later one is parsed, warned and dropped.
+            for (bool have = false;;) {
+                const std::string mode = c.Eof() ? "" : Lower(c.Cur().text);
+                if (have && mode != "frame" && mode != "framerange")
+                    break;
+                std::string m;
+                if (!c.Want("frame or framerange", *s, m))
+                    return false;
+                int first = 0, last = 0;
+                if (mode == "frame") {
+                    if (!c.WantInt("a frame", *s, first))
+                        return false;
+                    last = first;
+                } else if (mode == "framerange") {
+                    if (!c.WantInt("a first frame", *s, first) ||
+                        !c.WantInt("a last frame", *s, last))
+                        return false;
+                } else {
+                    return c.Fail(s->line, kw + " expects frame or framerange, got \"" + m + "\"");
+                }
+                if (have) {
+                    std::fprintf(stderr, "warning: %s line %d: %s \"%s\": extra %s "
+                                         "ignored, using the first frame selection\n",
+                                 c.file.c_str(), s->line, kw.c_str(), e.bone.c_str(),
+                                 mode.c_str());
+                    continue;
+                }
+                e.first = first;
+                e.last = last;
+                have = true;
+            }
+            if (e.first < 0 || e.last < e.first)
+                return c.Fail(s->line, kw + " \"" + e.bone + "\": invalid frame range " +
+                                           std::to_string(e.first) + ".." +
+                                           std::to_string(e.last));
+            edits.push_back(std::move(e));
+        }
+    }
+}
+
 // $datamodeljoints <file> [jigglebones] [proceduralbones] [hitboxes]
-//                        [attachments]
+//                        [attachments] [{ $proceduralbones { settriggeraoi|removetrigger ... } }]
 bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     std::string file;
     if (!c.Want("a source filename", cmd, file))
         return false;
 
     bool jiggle = false, procedural = false, hitboxes = false, attachments = false;
-    while (!c.AtCommand()) {
+    while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "{")) {
         const Token t = c.toks[c.pos++];
         const std::string o = Lower(t.text);
         if (o == "jigglebones")
@@ -1347,6 +1535,11 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     if (!jiggle && !procedural && !hitboxes && !attachments)
         jiggle = procedural = hitboxes = attachments = true; // no list = the whole rig
 
+    std::vector<TriggerAoiEdit> edits;
+    if (!c.Eof() && !c.Cur().quoted && c.Cur().text == "{" &&
+        !ParseDataModelJointsBody(c, cmd, edits))
+        return false;
+
     const std::string resolved = WithDmxExtension(file);
     const std::string what = "joints (" + RigImportList({{jiggle, "jigglebones"},
                                                          {procedural, "proceduralbones"},
@@ -1356,8 +1549,49 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     auto dm = LoadRigDmx(c, cmd, resolved, what);
     if (!dm)
         return false;
+    const size_t firstBone = c.in.proceduralbones.size();
     if (!LoadDmxJoints(*dm, c.in, jiggle, procedural, hitboxes, attachments, &err))
         return c.Fail(cmd.line, "$datamodeljoints \"" + file + "\": " + err);
+
+    // Only bones this file contributed; an earlier $driverbone of the same name wins.
+    // A trigger already set by an earlier settriggeraoi keeps that value. Frames index
+    // the file's trigger order; removals apply after every settriggeraoi.
+    std::set<std::pair<cm::ProceduralBone*, int>> taken, removed;
+    for (const TriggerAoiEdit& e : edits) {
+        const std::string kw = e.remove ? "removetrigger" : "settriggeraoi";
+        cm::ProceduralBone* pb = nullptr;
+        for (size_t i = firstBone; i < c.in.proceduralbones.size() && !pb; ++i)
+            if (_stricmp(c.in.proceduralbones[i].helpername.c_str(), e.bone.c_str()) == 0)
+                pb = &c.in.proceduralbones[i];
+        if (!pb)
+            return c.Fail(e.line, kw + ": \"" + e.bone + "\" is not a procedural bone "
+                                       "imported by this $datamodeljoints");
+        if (static_cast<size_t>(e.last) >= pb->triggers.size())
+            return c.Fail(e.line, kw + " \"" + e.bone + "\": frame " +
+                                      std::to_string(e.last) + " out of range (" +
+                                      std::to_string(pb->triggers.size()) + " triggers)");
+        for (int f = e.first; f <= e.last; ++f) {
+            if (e.remove) {
+                removed.insert({pb, f});
+                continue;
+            }
+            if (!taken.insert({pb, f}).second) {
+                std::fprintf(stderr, "warning: %s line %d: settriggeraoi \"%s\": frame %d "
+                                     "already set by an earlier line, skipped\n",
+                             c.file.c_str(), e.line, e.bone.c_str(), f);
+                continue;
+            }
+            pb->triggers[f].tolerance = DegToRad(e.aoiDeg);
+        }
+    }
+    // Reverse order keeps the remaining indices valid while erasing.
+    for (auto it = removed.rbegin(); it != removed.rend(); ++it) {
+        auto& trig = it->first->triggers;
+        trig.erase(trig.begin() + it->second);
+        if (trig.empty())
+            return c.Fail(cmd.line, "removetrigger: \"" + it->first->helpername +
+                                        "\" has no triggers left");
+    }
     return true;
 }
 

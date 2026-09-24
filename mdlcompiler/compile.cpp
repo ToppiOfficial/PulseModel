@@ -1048,6 +1048,8 @@ bool MapProceduralBones(Ctx& ctx, std::string* err) {
     return true;
 }
 
+bool GetAccumulatedBoneEditDelta(const Ctx& ctx, int globalBone, matrix3x4& outD);
+
 // ---------------------------------------------------------------------------
 // RemapProceduralBones
 //
@@ -1091,6 +1093,10 @@ bool RemapProceduralBones(Ctx& ctx, std::string* err) {
             return false;
         }
 
+        // a $transformbone on the helper moves every pose with it
+        matrix3x4 helperEdit;
+        const bool hasHelperEdit = GetAccumulatedBoneEditDelta(ctx, pb.helper, helperEdit);
+
         for (ProceduralBoneTrigger& tr : pb.triggers) {
             // ---- trigger: the driver, relative to the driver's parent ----
             int parent = m.bones[pb.driver].parent;
@@ -1119,6 +1125,13 @@ bool RemapProceduralBones(Ctx& ctx, std::string* err) {
             // only its parent's. That asymmetry with the trigger block above is
             // the reference's, not an oversight.
             parent = m.bones[pb.helper].parent;
+            if (hasHelperEdit) {
+                Vector3 pos;
+                pm::MatrixAngles(pm::ConcatTransforms(pm::QuaternionMatrix(tr.quat, tr.pos),
+                                                      helperEdit),
+                                 tr.quat, pos);
+                tr.pos = pos;
+            }
             if (parent != -1) {
                 matrix3x4 srcParentRelative = pm::QuaternionMatrix(tr.quat, tr.pos);
 
@@ -1293,9 +1306,13 @@ void TagUsedBones(Ctx& ctx) {
         for (const AimAtBone& ab : ctx.out->aimatbones) {
             keepProceduralBone(ab.bonename);
             keepProceduralBone(ab.parentname);
-            // aimname is an attachment OR a bone; a non-bone simply matches
-            // nothing here
-            keepProceduralBone(ab.aimname);
+            // an attachment target wins, like MapProceduralBones - its DMX
+            // locator dag must not be kept as a bone
+            bool isAttachment = false;
+            for (const Attachment& att : ctx.out->attachments)
+                isAttachment |= att.name == ab.aimname;
+            if (!isAttachment)
+                keepProceduralBone(ab.aimname);
         }
     }
 }
@@ -1852,6 +1869,16 @@ bool ApplyBoneTransformEdits(Ctx& ctx, std::string* err) {
     st.hasOrigSrcRealign.assign(m.bones.size(), 0);
     st.ignoreHitbox.assign(m.bones.size(), 0);
 
+    // an aim-at bone's origin comes from basepos at runtime, so it follows the
+    // edit by how far the bone moved in its aim parent's frame
+    auto aimLocalOrigin = [&](const AimAtBone& ab) {
+        const Vector3 o = MatrixGetColumn(m.bones[ab.bone].boneToPose, 3);
+        return ab.parent >= 0 ? pm::VectorITransform(o, m.bones[ab.parent].boneToPose) : o;
+    };
+    std::vector<Vector3> aimBefore;
+    for (const AimAtBone& ab : m.aimatbones)
+        aimBefore.push_back(aimLocalOrigin(ab));
+
     bool changed = false;
     for (const BoneTransformEdit& ed : ctx.in->boneTransformEdits) {
         const int t = FindGlobalBone(m, ed.name);
@@ -1933,6 +1960,13 @@ bool ApplyBoneTransformEdits(Ctx& ctx, std::string* err) {
         // descendant moved by the same world delta, it reproduces their original
         // local pos/rot.
         RebuildLocalPose(ctx);
+        for (size_t i = 0; i < m.aimatbones.size(); i++) {
+            AimAtBone& ab = m.aimatbones[i];
+            const Vector3 after = aimLocalOrigin(ab);
+            ab.basepos = {ab.basepos.x + after.x - aimBefore[i].x,
+                          ab.basepos.y + after.y - aimBefore[i].y,
+                          ab.basepos.z + after.z - aimBefore[i].z};
+        }
     }
     return true;
 }
@@ -7308,19 +7342,29 @@ bool SetupHitBoxes(Ctx& ctx, std::string* err) {
                     hb.bmax = {hb.bmax.x + shift.x, hb.bmax.y + shift.y, hb.bmax.z + shift.z};
                     hb.angOffset = pm::MatrixAnglesDeg(M);
                 }
-                if (hb.capsuleRadius <= 0.0f &&
-                    (!std::isfinite(hb.bmin.x) || !std::isfinite(hb.bmin.y) ||
-                     !std::isfinite(hb.bmin.z) || !std::isfinite(hb.bmax.x) ||
-                     !std::isfinite(hb.bmax.y) || !std::isfinite(hb.bmax.z) ||
-                     hb.bmin.x >= hb.bmax.x || hb.bmin.y >= hb.bmax.y ||
-                     hb.bmin.z >= hb.bmax.z)) {
-                    std::fprintf(stderr,
-                                 "WARNING: box hitbox \"%s\" in set \"%s\" on bone \"%s\" "
-                                 "has invalid bounds: min (%g, %g, %g), max (%g, %g, %g); "
-                                 "bounds must be finite with min < max on every axis\n",
-                                 hb.name.c_str(), s.name.c_str(), hb.bonename.c_str(),
-                                 hb.bmin.x, hb.bmin.y, hb.bmin.z,
-                                 hb.bmax.x, hb.bmax.y, hb.bmax.z);
+                // The engine's ray-vs-box test does not reorder min/max, so an
+                // inverted axis turns the box inside out and bullets miss or hit wrong.
+                if (hb.capsuleRadius <= 0.0f) {
+                    char bounds[160];
+                    std::snprintf(bounds, sizeof(bounds),
+                                  "min (%g, %g, %g), max (%g, %g, %g)",
+                                  hb.bmin.x, hb.bmin.y, hb.bmin.z,
+                                  hb.bmax.x, hb.bmax.y, hb.bmax.z);
+                    const std::string where = "box hitbox \"" + hb.name + "\" in set \"" +
+                                              s.name + "\" on bone \"" + hb.bonename + "\"";
+                    if (!std::isfinite(hb.bmin.x) || !std::isfinite(hb.bmin.y) ||
+                        !std::isfinite(hb.bmin.z) || !std::isfinite(hb.bmax.x) ||
+                        !std::isfinite(hb.bmax.y) || !std::isfinite(hb.bmax.z) ||
+                        hb.bmin.x > hb.bmax.x || hb.bmin.y > hb.bmax.y ||
+                        hb.bmin.z > hb.bmax.z) {
+                        if (err) *err = where + " is inverted or non-finite: " + bounds +
+                                        "; min must be <= max on every axis";
+                        return false;
+                    }
+                    if (hb.bmin.x == hb.bmax.x || hb.bmin.y == hb.bmax.y ||
+                        hb.bmin.z == hb.bmax.z)
+                        std::fprintf(stderr, "WARNING: %s has zero thickness: %s\n",
+                                     where.c_str(), bounds);
                 }
             }
         }

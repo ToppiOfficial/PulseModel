@@ -134,6 +134,56 @@ int WeldCompare(const SrcVertex& a, const SrcVertex& b, WeldMode mode) {
     return 0;
 }
 
+// One face in model-absolute vertex indices, before FillMeshes groups it.
+struct MFace {
+    int material;
+    uint32_t a, b, c;
+    uint16_t tag = 0;
+};
+
+// PointMeshesToVertexAndFaceData / BuildFaceList, same shape as the loader's.
+// Vertices and faces must already be material-sorted.
+void FillMeshes(Source& out, const std::vector<MFace>& faces) {
+    const int numverts = static_cast<int>(out.vertex.size());
+    const int numfaces = static_cast<int>(faces.size());
+    out.mesh.assign(lim::kMaxSkins, SrcMesh{});
+    out.meshindex.assign(lim::kMaxSkins, 0);
+    for (int m = 0; m < lim::kMaxSkins; ++m) {
+        out.mesh[m].vertexoffset = numverts;
+        out.mesh[m].faceoffset = numfaces;
+    }
+    for (int i = 0; i < numverts; ++i) {
+        const int m = out.vertex[i].material;
+        out.mesh[m].numvertices++;
+        if (out.mesh[m].vertexoffset > i)
+            out.mesh[m].vertexoffset = i;
+    }
+    for (int i = 0; i < numfaces; ++i) {
+        const int m = faces[i].material;
+        out.mesh[m].numfaces++;
+        if (out.mesh[m].faceoffset > i)
+            out.mesh[m].faceoffset = i;
+    }
+    out.face.resize(numfaces);
+    const bool tagged = std::any_of(faces.begin(), faces.end(), [](const MFace& f) { return f.tag != 0; });
+    out.faceTag.assign(tagged ? numfaces : 0, 0);
+    out.nummeshes = 0;
+    for (int m = 0; m < lim::kMaxSkins; ++m) {
+        if (!out.mesh[m].numfaces)
+            continue;
+        out.meshindex[out.nummeshes++] = m;
+        const int base = out.mesh[m].vertexoffset;
+        for (int i = out.mesh[m].faceoffset; i < out.mesh[m].faceoffset + out.mesh[m].numfaces;
+             ++i) {
+            out.face[i].a = faces[i].a - base;
+            out.face[i].b = faces[i].b - base;
+            out.face[i].c = faces[i].c - base;
+            if (tagged)
+                out.faceTag[i] = faces[i].tag;
+        }
+    }
+}
+
 } // namespace
 
 void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle) {
@@ -740,10 +790,6 @@ bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* e
 
     // ---- faces: part face indices are MESH-relative, so they go through the
     // part's own vertexoffset before the merged remap.
-    struct MFace {
-        int material;
-        uint32_t a, b, c;
-    };
     std::vector<MFace> faces;
     for (size_t p = 0; p < parts.size(); ++p) {
         const Source& s = *parts[p];
@@ -765,41 +811,7 @@ bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* e
     std::stable_sort(faces.begin(), faces.end(),
                      [](const MFace& a, const MFace& b) { return a.material < b.material; });
 
-    // PointMeshesToVertexAndFaceData / BuildFaceList, same shape as the loader's
-    const int numverts = static_cast<int>(out.vertex.size());
-    const int numfaces = static_cast<int>(faces.size());
-    out.mesh.assign(lim::kMaxSkins, SrcMesh{});
-    out.meshindex.assign(lim::kMaxSkins, 0);
-    for (int m = 0; m < lim::kMaxSkins; ++m) {
-        out.mesh[m].vertexoffset = numverts;
-        out.mesh[m].faceoffset = numfaces;
-    }
-    for (int i = 0; i < numverts; ++i) {
-        const int m = out.vertex[i].material;
-        out.mesh[m].numvertices++;
-        if (out.mesh[m].vertexoffset > i)
-            out.mesh[m].vertexoffset = i;
-    }
-    for (int i = 0; i < numfaces; ++i) {
-        const int m = faces[i].material;
-        out.mesh[m].numfaces++;
-        if (out.mesh[m].faceoffset > i)
-            out.mesh[m].faceoffset = i;
-    }
-    out.face.resize(numfaces);
-    out.nummeshes = 0;
-    for (int m = 0; m < lim::kMaxSkins; ++m) {
-        if (!out.mesh[m].numfaces)
-            continue;
-        out.meshindex[out.nummeshes++] = m;
-        const int base = out.mesh[m].vertexoffset;
-        for (int i = out.mesh[m].faceoffset; i < out.mesh[m].faceoffset + out.mesh[m].numfaces;
-             ++i) {
-            out.face[i].a = faces[i].a - base;
-            out.face[i].b = faces[i].b - base;
-            out.face[i].c = faces[i].c - base;
-        }
-    }
+    FillMeshes(out, faces);
 
     // ---- delta shapes: one morph per NAME across the parts, so a flex authored
     // on both halves moves both. Vertex indices are model-relative, so they ride
@@ -846,6 +858,174 @@ bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* e
     }
 
     out.kind = LoadKind::Model;
+    return true;
+}
+
+bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o, std::string* err) {
+    auto fail = [&](const std::string& m) {
+        if (err) *err = m;
+        return false;
+    };
+    const int n = static_cast<int>(src.vertex.size());
+    for (SrcVertex& v : src.vertex)
+        if (v.outline < 0.0f)
+            v.outline = o.forceUse ? 1.0f : 0.0f;
+
+    std::string cd = o.cdmaterial;
+    if (!cd.empty() && cd.back() != '/' && cd.back() != '\\')
+        cd += '/';
+    std::map<int, int> outMat;
+    auto outlineMaterial = [&](int m) {
+        auto it = outMat.find(m);
+        if (it != outMat.end())
+            return it->second;
+        std::string name = cd + o.material;
+        if (o.perMaterial) {
+            const std::string& base = mats.textures[mats.materialToTexture[m]].name;
+            const size_t slash = base.find_last_of("/\\");
+            const std::string dir = !cd.empty() ? cd : slash == std::string::npos ? "" : base.substr(0, slash + 1);
+            name = dir + std::filesystem::path(base).stem().string() + "_toonoutline";
+        }
+        return outMat[m] = mats.UseTextureAsMaterial(mats.LookupTexture(name.c_str()));
+    };
+
+    // weld: one push direction per position, so split normals cannot crack the hull
+    std::vector<Vector3> push(n);
+    std::map<std::tuple<float, float, float>, Vector3> byPos;
+    for (int i = 0; i < n; ++i) {
+        push[i] = src.vertex[i].normal;
+        pm::VectorNormalize(push[i]);
+        if (o.weld) {
+            const Vector3& p = src.vertex[i].position;
+            Vector3& s = byPos[{p.x, p.y, p.z}];
+            s.x += push[i].x;
+            s.y += push[i].y;
+            s.z += push[i].z;
+        }
+    }
+    if (o.weld)
+        for (int i = 0; i < n; ++i) {
+            const Vector3& p = src.vertex[i].position;
+            Vector3 s = byPos[{p.x, p.y, p.z}];
+            if (pm::VectorNormalize(s) > 0.0f)
+                push[i] = s;
+        }
+
+    std::vector<SrcVertex> verts = src.vertex;
+    std::vector<int> origin; // per outline vertex, the source vertex it copies
+    std::vector<int> noWeldOf(n, -1);
+    auto less = [](const SrcVertex& a, const SrcVertex& b) { return WeldCompare(a, b, WeldMode::All) < 0; };
+    std::map<SrcVertex, int, decltype(less)> welded(less);
+    auto outlineVertex = [&](int v, int om) {
+        if (!o.weld && noWeldOf[v] >= 0)
+            return noWeldOf[v];
+        SrcVertex ov = src.vertex[v];
+        const float d = o.thickness * ov.outline;
+        ov.material = om;
+        ov.position = {ov.position.x + push[v].x * d, ov.position.y + push[v].y * d,
+                       ov.position.z + push[v].z * d};
+        ov.normal = {-push[v].x, -push[v].y, -push[v].z};
+        if (o.weld) {
+            auto it = welded.find(ov);
+            if (it != welded.end())
+                return it->second;
+        }
+        const int idx = static_cast<int>(verts.size());
+        verts.push_back(ov);
+        origin.push_back(v);
+        if (o.weld)
+            welded.emplace(ov, idx);
+        else
+            noWeldOf[v] = idx;
+        return idx;
+    };
+
+    std::vector<MFace> faces;
+    const bool tagged = !src.faceTag.empty();
+    for (int mi = 0; mi < src.nummeshes; ++mi) {
+        const int m = src.meshindex[mi];
+        const SrcMesh& mesh = src.mesh[m];
+        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f)
+            faces.push_back({m, mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
+                             mesh.vertexoffset + src.face[f].c, tagged ? src.faceTag[f] : uint16_t(0)});
+    }
+    const size_t numOrig = faces.size();
+    auto inRange = [&](uint32_t v) {
+        const float w = src.vertex[v].outline;
+        return w >= o.minWeight && w <= o.maxWeight;
+    };
+    for (size_t f = 0; f < numOrig; ++f) {
+        const MFace face = faces[f];
+        if (!inRange(face.a) || !inRange(face.b) || !inRange(face.c))
+            continue;
+        const int om = outlineMaterial(face.material);
+        if (om >= lim::kMaxSkins)
+            return fail("too many materials (max " + std::to_string(lim::kMaxSkins) + ")");
+        // inverse hull: reversed winding so only the back faces draw
+        faces.push_back({om, static_cast<uint32_t>(outlineVertex(face.a, om)),
+                         static_cast<uint32_t>(outlineVertex(face.c, om)),
+                         static_cast<uint32_t>(outlineVertex(face.b, om))});
+    }
+    if (faces.size() == numOrig)
+        return fail("min/max weight culls every face");
+    if (verts.size() > static_cast<size_t>(lim::kMaxVerts))
+        return fail("outlined mesh has " + std::to_string(verts.size()) + " vertices (max " +
+                    std::to_string(lim::kMaxVerts) + ")");
+    if (faces.size() > static_cast<size_t>(lim::kMaxTriangles))
+        return fail("outlined mesh has " + std::to_string(faces.size()) + " triangles (max " +
+                    std::to_string(lim::kMaxTriangles) + ")");
+
+    // the hull follows every flex its source vertex takes part in, re-aiming its
+    // offset along the flexed normal the way $inflate does
+    for (SrcMorphAnim& morph : src.morphs) {
+        std::vector<int> at(n, -1);
+        for (size_t i = 0; i < morph.vanims.size(); ++i)
+            if (morph.vanims[i].vertex >= 0 && morph.vanims[i].vertex < n)
+                at[morph.vanims[i].vertex] = static_cast<int>(i);
+        for (size_t k = 0; k < origin.size(); ++k) {
+            const int v = origin[k];
+            if (at[v] < 0)
+                continue;
+            SrcVertAnim va = morph.vanims[at[v]];
+            const float d = o.thickness * src.vertex[v].outline;
+            Vector3 flexed{push[v].x + va.normal.x, push[v].y + va.normal.y, push[v].z + va.normal.z};
+            if (pm::VectorNormalize(flexed) > 0.0f) {
+                va.pos.x += d * (flexed.x - push[v].x);
+                va.pos.y += d * (flexed.y - push[v].y);
+                va.pos.z += d * (flexed.z - push[v].z);
+            }
+            va.vertex = n + static_cast<int>(k);
+            va.normal = {-va.normal.x, -va.normal.y, -va.normal.z};
+            morph.vanims.push_back(va);
+        }
+    }
+
+    // regroup by material; the source's own vertices are already sorted
+    std::vector<int> order(verts.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        order[i] = static_cast<int>(i);
+    std::stable_sort(order.begin(), order.end(),
+                     [&](int a, int b) { return verts[a].material < verts[b].material; });
+    std::vector<int> remap(verts.size());
+    src.vertex.resize(verts.size());
+    for (size_t i = 0; i < order.size(); ++i) {
+        remap[order[i]] = static_cast<int>(i);
+        src.vertex[i] = verts[order[i]];
+    }
+    for (MFace& f : faces) {
+        f.a = remap[f.a];
+        f.b = remap[f.b];
+        f.c = remap[f.c];
+    }
+    std::stable_sort(faces.begin(), faces.end(),
+                     [](const MFace& a, const MFace& b) { return a.material < b.material; });
+    for (SrcMorphAnim& morph : src.morphs)
+        for (SrcVertAnim& va : morph.vanims)
+            if (va.vertex >= 0 && va.vertex < static_cast<int>(remap.size()))
+                va.vertex = remap[va.vertex];
+
+    FillMeshes(src, faces);
+    CalcModelTangentSpaces(src);
     return true;
 }
 

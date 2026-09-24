@@ -39,6 +39,14 @@ struct MeshFilter {
         mutable bool matched = false;
     };
     std::vector<RemoveEntry> removeNames;
+    // $cullvertex: drop every face touching a vertex whose weight in the named
+    // stream (e.g. cullvertex$0, case-insensitive) is above threshold. A mesh without it is skipped.
+    struct CullEntry {
+        std::string group;
+        float threshold = 0.0f;
+        bool matched = false;
+    };
+    std::vector<CullEntry> cullGroups;
 
     bool empty() const { return names.empty(); } // $exceptionlist only
 
@@ -60,6 +68,10 @@ struct MeshFilter {
     std::vector<TagEntry> tags;
     std::vector<TagEntry> inflateTags; // $inflate mesh: same shape, packed into the high byte
     int Tag(const std::string& meshName, const std::string& dagName);
+
+    // $toonoutline: DMX float vertex stream read into SrcVertex::outline (case-insensitive)
+    std::string outlineStream;
+    bool outlineStreamFound = false;
 };
 
 // $wrinklescale <morph> <scale> - what dmxedit's SetWrinkleScale would have
@@ -141,6 +153,18 @@ void RemoveSmallMeshes(Source& src, float limit);
 // cannot both be right - vertices are baked into bind space at load - so the
 // first one wins and the other deforms. Merge meshes off one rig.
 bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* err);
+
+// $toonoutline: append an inverse hull pushed out by thickness * SrcVertex::outline.
+// A face with a corner weight outside [minWeight, maxWeight] gets no hull. An
+// unencoded weight is 0, or 1 with forceUse.
+struct ToonOutlineOption {
+    float thickness = 0.0f, minWeight = 0.1f, maxWeight = 1.0f;
+    bool weld = true, perMaterial = false, forceUse = false;
+    std::string material = "toonoutline", cdmaterial;
+    int line = 0;
+};
+
+bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o, std::string* err);
 
 } // namespace pulse::source
 

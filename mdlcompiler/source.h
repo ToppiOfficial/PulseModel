@@ -35,6 +35,7 @@ struct SrcVertex {
     Vector4 tangentS; // built by CalcModelTangentSpaces; w = +/-1
     SrcBoneWeight boneweight;
     int material = 0; // GLOBAL material index (MaterialTable)
+    float outline = -1.0f; // $toonoutline's DMX vertex stream, -1 = not encoded
 };
 
 // Indices are relative to the owning mesh's vertexoffset.
