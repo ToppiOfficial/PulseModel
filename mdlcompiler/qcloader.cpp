@@ -4483,6 +4483,7 @@ bool CmdModelArchetype(Ctx& c, const Token& cmd) {
 bool CmdStaticProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Static; return true; }
 bool CmdSimpleProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Simple; return true; }
 bool CmdAutoCenter(Ctx& c, const Token&) { c.in.autoCenter = true; return true; }
+bool CmdNoModel(Ctx& c, const Token&) { c.in.noModel = true; return true; }
 
 // $vtxformat <int> - which .vtx strip/stripgroup layout to write. 0 = legacy
 // 27/25-byte headers (TF2/L4D2/GMod/HL2), 1 = full 35/33-byte headers with the
@@ -6673,6 +6674,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
     // scaled at parse time, where the reference calls scale_vertex
     hb.bmin = {hb.bmin.x * c.in.scale, hb.bmin.y * c.in.scale, hb.bmin.z * c.in.scale};
     hb.bmax = {hb.bmax.x * c.in.scale, hb.bmax.y * c.in.scale, hb.bmax.z * c.in.scale};
+    if (hb.capsuleRadius > 0.0f) hb.capsuleRadius *= c.in.scale;
 
     set.hitboxes.push_back(std::move(hb));
     if (set.hitboxes.size() > static_cast<size_t>(pulse::limits::kMaxHitboxesPerSet))
@@ -8723,6 +8725,7 @@ constexpr Command kCommands[] = {
     {"$staticprop", CmdStaticProp},
     {"$simpleprop", CmdSimpleProp},
     {"$autocenter", CmdAutoCenter},
+    {"$nomodel", CmdNoModel},
     {"$vtxformat", CmdVtxFormat},
     {"$nodx80", CmdNoDx80},
     {"$modelbudget", CmdModelBudget},

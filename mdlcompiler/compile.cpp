@@ -10156,6 +10156,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                                   : RadianEuler{0.0f, 0.0f, static_cast<float>(kPiD / 2.0)};
 
     out.outname = input.outname;
+    out.noModel = input.noModel;
     out.mats = &input.mats;
     // gamedatalist. CompiledModel already defaults surfaceprop to "default";
     // contents arrives resolved to a flag word.

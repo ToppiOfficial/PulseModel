@@ -45,11 +45,19 @@ struct AnimPose {
     pm::RadianEuler rot{};
 };
 
+// One flex controller's value per frame, animated as a combination operator control.
+struct FlexTrack {
+    std::string name;
+    float min = 0.0f, max = 1.0f;
+    std::vector<float> values;
+};
+
 // `path`: the skeleton plus one DmeChannelsClip holding `frames` at `fps`. The
 // joints are written at frame 0, the way an SMD's skeleton block doubles as its
 // bind pose, and every bone gets a channel so no bone falls back on that pose.
 bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string& clipName, int fps,
-                       const std::vector<std::vector<AnimPose>>& frames);
+                       const std::vector<std::vector<AnimPose>>& frames,
+                       const std::vector<FlexTrack>* flex = nullptr);
 
 struct PhysicsMeshInfo {
     bool written = false;

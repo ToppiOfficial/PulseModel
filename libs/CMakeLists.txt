@@ -56,3 +56,10 @@ add_library(pulse_dmx STATIC
 )
 target_include_directories(pulse_dmx PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pulse_dmx PUBLIC pulse_libs)
+
+# dr_wav / dr_mp3 (mackron/dr_libs, public domain or MIT-0) - vendored
+# single-header decoders, dr_wav v0.14.6 and dr_mp3 v0.7.4.
+add_library(pulse_drlibs STATIC
+    drlibs/drlibs_impl.c
+)
+target_include_directories(pulse_drlibs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/drlibs)

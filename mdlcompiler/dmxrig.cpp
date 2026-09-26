@@ -341,6 +341,7 @@ void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
             hb.bmin = {lo.x * in.scale, lo.y * in.scale, lo.z * in.scale};
             hb.bmax = {hi.x * in.scale, hi.y * in.scale, hi.z * in.scale};
             hb.capsuleRadius = box->GetFloat("radius", -1.0f); // <= 0 = a box
+            if (hb.capsuleRadius > 0.0f) hb.capsuleRadius *= in.scale;
             hb.angOffset = ToVec(box->GetVector3("orientation"));
             // the DmeHitbox element's own name is not the hitbox name - the
             // reference leaves these unnamed, like an $hbox with no `name`

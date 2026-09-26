@@ -2990,8 +2990,8 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
 
     // the reference gates the vertex/strip write on numbodyparts != 0: an
     // animation-only model gets no .vvd/.vtx. Build them anyway for the fixup
-    // pass, just don't save two empty files.
-    const bool hasGeometry = !m.bodyparts.empty();
+    // pass, and save the empty files only under $nomodel.
+    const bool hasGeometry = !m.bodyparts.empty() || m.noModel;
 
     // .vvd first pass
     if (hasGeometry) stage("vertex data (.vvd)");

@@ -1658,7 +1658,8 @@ const char* SetDmxOutput(const std::string& encoding, int formatModel) {
 int DmxModelVersion() { return g_formatModel; }
 
 bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string& clipName, int fps,
-                       const std::vector<std::vector<AnimPose>>& frames) {
+                       const std::vector<std::vector<AnimPose>>& frames,
+                       const std::vector<FlexTrack>* flex) {
     if (frames.empty() || fps <= 0)
         return false;
     std::FILE* f = std::fopen(path.c_str(), "wb");
@@ -1677,6 +1678,16 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         idLog[i] = q.NewId();
         idLayer[i] = q.NewId();
     }
+    // flex tracks: one control each, plus the channel/log/layer triple
+    const size_t numFlex = flex ? flex->size() : 0;
+    const std::string idCombo = numFlex ? q.NewId() : std::string();
+    std::vector<std::string> idControl(numFlex);
+    for (size_t i = 0; i < numFlex; ++i) {
+        idControl[i] = q.NewId();
+        idChan.push_back(q.NewId());
+        idLog.push_back(q.NewId());
+        idLayer.push_back(q.NewId());
+    }
 
     // The frame times a DmeChannelsClip is sampled at: whole seconds plus the
     // rounded remainder, which is how the importer reconstructs them - a key
@@ -1693,7 +1704,7 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         legacyTimes.push_back(ticks);
     }
 
-    WriteSkel(q, m, s, clipName, std::string(), std::string(), std::string(), idList, &frames[0]);
+    WriteSkel(q, m, s, clipName, std::string(), std::string(), idCombo, idList, &frames[0]);
 
     q.Begin("DmeAnimationList", idList, clipName);
     q.RefArray("animations", {idClip});
@@ -1770,6 +1781,54 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
                 q.QuatArray("values", rot);
             q.End();
         }
+    }
+
+    if (numFlex) {
+        q.Begin("DmeCombinationOperator", idCombo, "combinationOperator");
+        q.RefArray("controls", idControl);
+        q.RefArray("targets", {});
+        q.End();
+    }
+    for (size_t i = 0; i < numFlex; ++i) {
+        const FlexTrack& t = (*flex)[i];
+        std::vector<float> values = t.values;
+        values.resize(frames.size(), values.empty() ? 0.0f : values.back());
+        if (std::all_of(values.begin(), values.end(), [&](float v) { return v == values[0]; }))
+            values.resize(1);
+
+        q.Begin("DmeCombinationInputControl", idControl[i], t.name);
+        q.StrArray("rawControlNames", {t.name});
+        q.Bool("stereo", false);
+        q.Bool("eyelid", false);
+        q.Float("flexMin", t.min);
+        q.Float("flexMax", t.max);
+        q.Float("value", values[0]);
+        q.End();
+
+        const size_t n = static_cast<size_t>(s.numbones) * 2 + i;
+        q.Begin("DmeChannel", idChan[n], t.name);
+        q.Ref("fromElement", std::string());
+        q.Str("fromAttribute", "");
+        q.Int("fromIndex", 0);
+        q.Ref("toElement", idControl[i]);
+        q.Str("toAttribute", "value");
+        q.Int("toIndex", 0);
+        q.Int("mode", g_formatModel == 1 ? 1 : 3);
+        q.Ref("log", idLog[n]);
+        q.End();
+
+        q.Begin("DmeFloatLog", idLog[n], "log");
+        q.RefArray("layers", {idLayer[n]});
+        q.Bool("usedefaultvalue", false);
+        q.End();
+
+        q.Begin("DmeFloatLogLayer", idLayer[n], "log");
+        if (g_formatModel == 1)
+            q.IntArray("times", std::vector<int>(legacyTimes.begin(), legacyTimes.begin() + values.size()));
+        else
+            q.TimeArray("times", std::vector<float>(times.begin(), times.begin() + values.size()));
+        q.FloatArray("values", values);
+        q.End();
     }
 
     q.Save();

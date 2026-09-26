@@ -82,6 +82,9 @@ struct Mdl {
     std::vector<std::string> seqs;
     std::vector<std::string> acts; // "ACT_X <weight>", empty when the slot has none
     std::vector<bool> overrides;
+    std::vector<bool> autoplay;
+    std::vector<std::string> autolayers; // names every sequence here pulls in as a layer
+    std::vector<std::string> params; // pose parameters the sequence blends on, space-joined
     std::vector<std::string> includes;
 };
 
@@ -103,6 +106,14 @@ bool LoadMdl(const std::string& path, Mdl& out) {
     const auto str = [&](size_t off) {
         return off < out.bytes.size() ? std::string(base + off) : std::string();
     };
+    std::vector<std::string> poses;
+    for (int i = 0; i < hdr->numlocalposeparameters; ++i) {
+        const size_t at = static_cast<size_t>(hdr->localposeparamindex) +
+                          i * sizeof(fm::mstudioposeparamdesc_t);
+        if (at + sizeof(fm::mstudioposeparamdesc_t) > out.bytes.size()) break;
+        const auto* pd = reinterpret_cast<const fm::mstudioposeparamdesc_t*>(base + at);
+        poses.push_back(str(at + static_cast<size_t>(pd->sznameindex)));
+    }
     for (int i = 0; i < hdr->numlocalseq; ++i) {
         const size_t at = static_cast<size_t>(hdr->localseqindex) + i * sizeof(fm::mstudioseqdesc_t);
         if (at + sizeof(fm::mstudioseqdesc_t) > out.bytes.size()) break;
@@ -114,6 +125,26 @@ bool LoadMdl(const std::string& path, Mdl& out) {
         if (!act.empty()) act += " " + std::to_string(sd->actweight);
         out.acts.push_back(act);
         out.overrides.push_back((sd->flags & fm::STUDIO_OVERRIDE) != 0);
+        out.autoplay.push_back((sd->flags & fm::STUDIO_AUTOPLAY) != 0);
+        std::vector<std::string> used;
+        for (const int32_t p : sd->paramindex)
+            if (p >= 0 && static_cast<size_t>(p) < poses.size())
+                used.push_back(poses[static_cast<size_t>(p)]);
+        std::sort(used.begin(), used.end());
+        std::string params;
+        for (const std::string& u : used) params += (params.empty() ? "" : " ") + u;
+        out.params.push_back(params);
+    }
+    for (int i = 0; i < static_cast<int>(out.seqs.size()); ++i) {
+        const size_t at = static_cast<size_t>(hdr->localseqindex) + i * sizeof(fm::mstudioseqdesc_t);
+        const auto* sd = reinterpret_cast<const fm::mstudioseqdesc_t*>(base + at);
+        for (int k = 0; k < sd->numautolayers; ++k) {
+            const size_t la =
+                at + static_cast<size_t>(sd->autolayerindex) + k * sizeof(fm::mstudioautolayer_t);
+            if (la + sizeof(fm::mstudioautolayer_t) > out.bytes.size()) break;
+            const int s = reinterpret_cast<const fm::mstudioautolayer_t*>(base + la)->iSequence;
+            if (s >= 0 && s < static_cast<int>(out.seqs.size())) out.autolayers.push_back(out.seqs[s]);
+        }
     }
     for (int i = 0; i < hdr->numincludemodels; ++i) {
         const size_t at =
@@ -131,6 +162,8 @@ struct Slots {
     std::vector<std::string> names;
     std::vector<std::string> acts;
     std::vector<bool> overrides;
+    std::vector<std::string> params;
+    std::vector<bool> stub; // override slot still waiting for its first include
 };
 
 // The engine indexes sequences as: the model's own locals, then each
@@ -160,16 +193,23 @@ struct Resolver {
         for (size_t i = 0; i < m.seqs.size(); ++i) {
             const std::string key = Lower(m.seqs[i]);
             const std::string act = i < m.acts.size() ? m.acts[i] : std::string();
+            const std::string params = i < m.params.size() ? m.params[i] : std::string();
             const auto found = seen.find(key);
             if (found != seen.end()) {
                 if (order.overrides[found->second] && order.acts[found->second].empty())
                     order.acts[found->second] = act;
+                if (order.stub[found->second]) {
+                    order.params[found->second] = params;
+                    order.stub[found->second] = false;
+                }
                 continue;
             }
             seen[key] = order.names.size();
             order.names.push_back(m.seqs[i]);
             order.acts.push_back(act);
             order.overrides.push_back(i < m.overrides.size() && m.overrides[i]);
+            order.params.push_back(params);
+            order.stub.push_back(order.overrides.back());
         }
         for (const std::string& inc : m.includes)
             if (const Mdl* sub = Get(inc)) Walk(*sub, order, seen);
@@ -208,14 +248,29 @@ void Keys(const std::string& name, const std::set<std::string>& codes, std::stri
     }
 }
 
+// "ACT_X 1" -> "ACT_X".
+std::string ActName(const std::string& act) { return act.substr(0, act.find(' ')); }
+
 struct Index {
     std::map<std::string, std::string> swapped, stripped;
+    std::map<std::string, std::string> actOf;                 // lowered name -> activity
+    std::map<std::string, std::vector<std::string>> byAct;    // activity -> names
+    std::map<std::string, std::string> paramsOf;              // lowered name -> pose params
+    std::map<std::string, std::vector<std::string>> byParams; // pose params -> names
 
-    void Build(const std::vector<std::string>& names, const std::string& own,
+    void Build(const std::vector<std::string>& names, const std::vector<std::string>& acts,
+               const std::vector<std::string>& params, const std::string& own,
                const std::set<std::string>& codes) {
         std::set<std::string> ownSw, ownSt;
         std::string sw, st;
-        for (const std::string& n : names) {
+        for (size_t i = 0; i < names.size(); ++i) {
+            const std::string& n = names[i];
+            const std::string act = i < acts.size() ? ActName(acts[i]) : std::string();
+            actOf[Lower(n)] = act;
+            if (!act.empty()) byAct[act].push_back(n);
+            const std::string par = i < params.size() ? params[i] : std::string();
+            paramsOf[Lower(n)] = par;
+            if (!par.empty()) byParams[par].push_back(n);
             Keys(n, codes, sw, st);
             // A set carries some animations under another survivor's name
             // (anim_biker.mdl has NamVet_* entries). Own spelling wins the key.
@@ -234,7 +289,7 @@ struct Index {
 
 struct Result {
     std::vector<std::string> names;
-    std::vector<int> from; // chain index, or -1 for "kept the vanilla name"
+    std::vector<int> from; // chain index, -1 "kept the vanilla name", -2 inert
 };
 
 // Rig == target is the no-swap case, and every slot then reports from == -1
@@ -246,12 +301,16 @@ bool BlockFallback(bool flag, const Survivor& rig, const Survivor& tgt) {
 
 // A donor name may fill only one slot: a repeated $declaresequence compiles to
 // an empty sequence, so a second claimant drops to the next donor instead.
-Result Build(const std::vector<std::string>& order, const std::vector<Index>& idx,
+Result Build(const std::vector<std::string>& order, const std::vector<std::string>& acts,
+             const std::vector<std::string>& params, const std::vector<Index>& idx,
              const std::set<std::string>& codes, bool keepintro) {
     Result r;
     std::set<std::string> taken;
     std::string sw, st;
-    for (const std::string& v : order) {
+    for (size_t i = 0; i < order.size(); ++i) {
+        const std::string& v = order[i];
+        const std::string act = i < acts.size() ? ActName(acts[i]) : std::string();
+        const std::string par = i < params.size() ? params[i] : std::string();
         Keys(v, codes, sw, st);
         std::string pick;
         int from = -1;
@@ -272,12 +331,60 @@ Result Build(const std::vector<std::string>& order, const std::vector<Index>& id
                     break;
                 }
             }
+            // Sets can name one clip differently: ACT_DIESIMPLE is "Death" in L4D1 but
+            // "Collapse_to_Incap" in L4D2. Take the donor's sole holder of the activity.
+            // Gestures are called by name, so they keep the name match.
+            if (!pick.empty() && !act.empty() && act.compare(0, 8, "ACT_GEST") != 0 &&
+                idx[d].actOf.at(Lower(pick)) != act) {
+                const auto holders = idx[d].byAct.find(act);
+                if (holders != idx[d].byAct.end() && holders->second.size() == 1 &&
+                    !taken.count(Lower(holders->second[0])))
+                    pick = holders->second[0];
+            }
+            // Every set names its head look (head_yaw/head_pitch) differently, so it is matched
+            // by pose params. A name match that blends the head elsewhere is held inert.
+            const std::string pickPar =
+                pick.empty() ? std::string() : idx[d].paramsOf.at(Lower(pick));
+            const bool slotHead = par.find("head_") != std::string::npos;
+            if ((slotHead && (pick.empty() || pickPar != par)) ||
+                (!pick.empty() && pickPar != par && pickPar.find("head_") != std::string::npos)) {
+                const auto holders = idx[d].byParams.find(par);
+                if (slotHead && holders != idx[d].byParams.end() && holders->second.size() == 1 &&
+                    !taken.count(Lower(holders->second[0]))) {
+                    pick = holders->second[0];
+                    from = static_cast<int>(d);
+                } else if (!pick.empty()) {
+                    from = -2;
+                }
+            }
+        }
+        // No donor spells the name at all (Coach's limpwalk_Shotgun is LimpWalk_PumpShotgun
+        // elsewhere): take the first donor's sole holder of the activity.
+        for (size_t d = 0; d < idx.size() && pick.empty() && from != -2; ++d) {
+            if (act.empty() || act.compare(0, 8, "ACT_GEST") == 0) break;
+            const auto holders = idx[d].byAct.find(act);
+            if (holders != idx[d].byAct.end() && holders->second.size() == 1 &&
+                !taken.count(Lower(holders->second[0]))) {
+                pick = holders->second[0];
+                from = static_cast<int>(d);
+            }
+        }
+        // An earlier slot already claimed this name; a repeat declare would compile empty.
+        if (pick.empty() && taken.count(Lower(v))) from = -2;
+        if (from == -2) {
+            r.names.push_back(v); // named after every real pick is known, below
+            r.from.push_back(from);
+            continue;
         }
         if (pick.empty()) pick = v;
         taken.insert(Lower(pick));
         r.names.push_back(pick);
         r.from.push_back(from);
     }
+    // An inert slot keeps its vanilla name so it shadows the included copy, unless a real
+    // slot uses that name.
+    for (size_t i = 0; i < r.names.size(); ++i)
+        if (r.from[i] == -2 && !taken.insert(Lower(r.names[i])).second) r.names[i] += "_inert";
     return r;
 }
 
@@ -316,6 +423,16 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
     int local = 0;
     for (size_t i = static_cast<size_t>(skip); i < res.names.size(); ++i)
         if (!reachable.count(Lower(res.names[i]))) ++local;
+
+    // The rig's includes come first, so a name they supply already resolves to the rig's
+    // clip; zeroing it would also break the rig sequences that autolayer it.
+    std::set<std::string> rigIncs, rigSupplied, rigLayers;
+    for (const std::string& inc : includesOf(chain.empty() ? tgt : *chain[0]))
+        if (const Mdl* m = mdls.Get(inc)) {
+            rigIncs.insert(Lower(Leaf(inc)));
+            for (const std::string& s : m->seqs) rigSupplied.insert(Lower(s));
+            for (const std::string& s : m->autolayers) rigLayers.insert(Lower(s));
+        }
 
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
@@ -389,6 +506,15 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
                          res.names[i].c_str());
             continue;
         }
+        if (res.from[i] == -2) {
+            spacer(2);
+            std::string n = res.names[i];
+            if (rigSupplied.count(Lower(n))) emitted.insert(Lower(n += "_inert"));
+            std::fprintf(f, "$bindposesequence \"%s\" { noanimation }   // slot %d - no usable "
+                            "donor clip\n",
+                         n.c_str(), static_cast<int>(i));
+            continue;
+        }
         // A fidget is a cosmetic idle flourish and no donor set carries the
         // full list, so an unmatched one keeps the target's name and plays the
         // target's clip on a foreign rig. Zero it: the slot stays, the pool
@@ -445,7 +571,7 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
     if (nofallback) {
         bool any = false;
         for (size_t i = static_cast<size_t>(skip); i < res.names.size(); ++i) {
-            if (res.from[i] < 0) continue;
+            if (res.from[i] == -1) continue; // an inert slot (-2) also drops its name
             // Only names an include actually re-adds. A base-model local (a root
             // reference like "mechanic") is in no include, so nothing re-adds it.
             if (!reachable.count(Lower(order.names[i]))) continue;
@@ -457,6 +583,7 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
             // activity) drops it from the pool so only the donor swap competes.
             if (IsGestureName(order.names[i]) ||
                 order.acts[i].compare(0, 8, "ACT_GEST") == 0) continue;
+            if (rigSupplied.count(Lower(order.names[i]))) continue;
             // `emitted` holds every name the main loop wrote; a shared-name swap
             // declares the vanilla spelling itself, so skip any already present.
             if (!emitted.insert(Lower(order.names[i])).second) continue;
@@ -475,8 +602,11 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
             for (const std::string& inc : includesOf(h)) {
                 const Mdl* m = mdls.Get(inc);
                 if (!m) continue;
+                const bool rigOwn = rigIncs.count(Lower(Leaf(inc))) != 0;
                 for (size_t k = 0; k < m->seqs.size(); ++k) {
                     const std::string& n = m->seqs[k];
+                    if (rigLayers.count(Lower(n)) || (!rigOwn && rigSupplied.count(Lower(n))))
+                        continue;
                     const std::string act = k < m->acts.size() ? m->acts[k] : std::string();
                     if (act.empty() || act.compare(0, 8, "ACT_GEST") == 0 || IsGestureName(n)) continue;
                     if (keepintro && IsCampaignIntro(n)) continue;
@@ -494,6 +624,29 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
             for (const std::string& n : weighted)
                 std::fprintf(f, "$bindposesequence \"%s\" { noanimation }\n", n.c_str());
         }
+    }
+
+    // Every included autoplay runs at once, and each set's is its head look. Only the
+    // rig's may stay live, or several head looks stack and turn the head wrong.
+    std::vector<std::string> autoplays;
+    const auto collectAutoplay = [&](const Survivor& h) {
+        for (const std::string& inc : includesOf(h)) {
+            const Mdl* m = mdls.Get(inc);
+            if (!m || rigIncs.count(Lower(Leaf(inc)))) continue;
+            for (size_t k = 0; k < m->seqs.size(); ++k)
+                if (k < m->autoplay.size() && m->autoplay[k] &&
+                    !rigSupplied.count(Lower(m->seqs[k])) && emitted.insert(Lower(m->seqs[k])).second)
+                    autoplays.push_back(m->seqs[k]);
+        }
+    };
+    for (size_t d = 0; d < chain.size(); ++d)
+        if (won[d]) collectAutoplay(*chain[d]);
+    collectAutoplay(tgt);
+    if (!autoplays.empty()) {
+        std::fprintf(f, "\n// Autoplay head looks from the other included sets, zeroed so only\n"
+                        "// the rig's runs.\n");
+        for (const std::string& n : autoplays)
+            std::fprintf(f, "$bindposesequence \"%s\" { noanimation }\n", n.c_str());
     }
 
     std::fputc('\n', f);
@@ -584,7 +737,7 @@ int SelfTest() {
 
     // Own spelling beats a borrowed one for the same key, whatever the order.
     Index idx;
-    idx.Build({"NamVet_Idle_Rifle", "biker_Idle_Rifle"}, "biker", codes);
+    idx.Build({"NamVet_Idle_Rifle", "biker_Idle_Rifle"}, {}, {}, "biker", codes);
     if (idx.swapped["@_idle_rifle"] != "biker_Idle_Rifle") {
         std::fprintf(stderr, "own-codename tiebreak failed\n");
         ++bad;
@@ -593,9 +746,9 @@ int SelfTest() {
     // Two target slots wanting one donor name: the second must fall through
     // rather than declare a duplicate (a duplicate compiles to an empty slot).
     std::vector<Index> chain(2);
-    chain[0].Build({"biker_Idle_Rifle"}, "biker", codes);
-    chain[1].Build({"coach_Idle_Rifle", "Idle_Rifle"}, "coach", codes);
-    const Result r = Build({"coach_Idle_Rifle", "Idle_Rifle"}, chain, codes, false);
+    chain[0].Build({"biker_Idle_Rifle"}, {}, {}, "biker", codes);
+    chain[1].Build({"coach_Idle_Rifle", "Idle_Rifle"}, {}, {}, "coach", codes);
+    const Result r = Build({"coach_Idle_Rifle", "Idle_Rifle"}, {}, {}, chain, codes, false);
     if (r.names[0] != "biker_Idle_Rifle" || r.names[1] == r.names[0]) {
         std::fprintf(stderr, "claim-once failed: %s / %s\n", r.names[0].c_str(),
                      r.names[1].c_str());
@@ -698,10 +851,11 @@ int main(int argc, char** argv) {
 
         std::vector<Index> idx(chain.size());
         for (size_t d = 0; d < chain.size(); ++d)
-            idx[d].Build(orders[chain[d]->survivor].names, chain[d]->code, codes);
+            idx[d].Build(orders[chain[d]->survivor].names, orders[chain[d]->survivor].acts,
+                         orders[chain[d]->survivor].params, chain[d]->code, codes);
 
         const Slots& order = orders[job.second->survivor];
-        const Result built = Build(order.names, idx, codes, keepintro);
+        const Result built = Build(order.names, order.acts, order.params, idx, codes, keepintro);
 
         std::string path = out;
         if (path.empty() || all) {

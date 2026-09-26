@@ -10,10 +10,14 @@
 # release zip; a default build is unchanged.
 option(PULSE_BUILD_L4D_ANIMSWAP "Build the l4d_animswap subtool" ON)
 option(PULSE_BUILD_MESHTOOL "Build the meshtool subtool" ON)
+option(PULSE_BUILD_VMD2VALVEBIPED "Build the vmd2valvebiped subtool" ON)
 
 if(PULSE_BUILD_L4D_ANIMSWAP)
     add_subdirectory(l4d_animswap)
 endif()
 if(PULSE_BUILD_MESHTOOL)
     add_subdirectory(meshtool)
+endif()
+if(PULSE_BUILD_VMD2VALVEBIPED)
+    add_subdirectory(vmd2valvebiped)
 endif()
