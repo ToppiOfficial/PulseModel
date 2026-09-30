@@ -61,6 +61,7 @@ int Usage() {
     std::printf("                     [-forceversion <n>] [-dmxencoding <enc>] [-dmxmodel <n>]\n");
     std::printf("                     [-smdanimation] [-pulseqc]\n");
     std::printf("                     [-nomesh] [-noanimation] [-declaresequence]\n");
+    std::printf("                     [-datamodeljoints]\n");
     std::printf("\n");
     std::printf("  several inputs may be given (drag-and-drop); a folder decompiles every\n");
     std::printf("  .mdl under it, recursively. each model lands in a per-model folder under\n");
@@ -84,6 +85,9 @@ int Usage() {
     std::printf("  -declaresequence\n");
     std::printf("                also write a <name>.qci listing every sequence, in order, as\n");
     std::printf("                $declaresequence - paste into a model that $includemodel's this\n");
+    std::printf("  -datamodeljoints\n");
+    std::printf("                write hitboxes, procedural bones and jigglebones to a\n");
+    std::printf("                <name>_joints.dmx the script imports with $datamodeljoints\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms per process once the run ends\n");
     return 1;
@@ -3071,17 +3075,45 @@ int DecompileOne(const std::string& in, const std::string& root, const char* out
     }
     STAGE(WriteSkins, q, m);
     STAGE(WriteAttachments, q, m);
-    STAGE(WriteHitboxes, q, m);
+
+    // A category the joints file carries is not written again in raw form.
+    JointsInfo joints;
+    if (g_datamodeljoints) {
+        std::printf("\njoints:\n");
+        pulse::fatal::g_stage = "WriteJointsDmx";
+        const std::string jointsName = BaseName(dir) + "_joints";
+        joints = WriteJointsDmx(m, dir, jointsName, std::strcmp(Archetype(m), "general") == 0);
+        if (!joints.written) {
+            joints = JointsInfo();
+        } else {
+            q.Blank();
+            if (joints.namedHitboxes)
+                q.Line("// " + std::to_string(joints.namedHitboxes) +
+                       " hitbox name(s) are lost - a DMX hitbox has no name");
+            std::string line = "$datamodeljoints \"" + MeshFile(jointsName) + "\"";
+            if (joints.jiggle)
+                line += " jigglebones";
+            if (joints.procedural)
+                line += " proceduralbones";
+            if (joints.hitboxes)
+                line += " hitboxes";
+            q.Line(line);
+        }
+    }
+
+    if (!joints.hitboxes)
+        STAGE(WriteHitboxes, q, m);
     STAGE(WriteBones, q, m);
     STAGE(WriteBoneMerges, q, m);
     // stock has neither $driverbone nor $driveraimat - only the .vrd file form
-    if (g_studiomdl) {
+    if (!joints.procedural && g_studiomdl) {
         STAGE(WriteProceduralBones, q, m, dir);
-    } else {
+    } else if (!joints.procedural) {
         STAGE(WriteDriverBones, q, m);
         STAGE(WriteAimAtBones, q, m);
     }
-    STAGE(WriteJiggleBones, q, m);
+    if (!joints.jiggle)
+        STAGE(WriteJiggleBones, q, m);
     STAGE(WriteAnimBlocks, q, m, in);
     STAGE(WritePoseParams, q, m);
     STAGE(WriteIk, q, m);
@@ -3148,6 +3180,8 @@ int RunDecompile(int argc, char** argv) {
             g_noanim = true;
         else if (std::strcmp(argv[i], "-declaresequence") == 0)
             g_declareseq = true;
+        else if (std::strcmp(argv[i], "-datamodeljoints") == 0)
+            g_datamodeljoints = true;
         else if (std::strcmp(argv[i], "-pause") == 0)
             pulse::fatal::g_pause = true;
         else if (std::strcmp(argv[i], "-perfmetrics") == 0)

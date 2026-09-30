@@ -87,6 +87,7 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
 | `-dumpmaterials` | Print the names of materials used by the compiled model. |
 | `-perfmetrics` | Print wall time in ms for each stage of the compile. |
 | `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
+| `-datamodeljoints` | Write hitboxes, procedural bones and jigglebones to `meshes/<name>_joints.dmx` and import it with one `$datamodeljoints` line instead of the raw `$hboxset`/`$driverbone`/`.vrd`/`$jigglebone` commands. Follows `-dmxencoding`/`-dmxmodel`; works with `.qc` and `-pulseqc`. The script then needs `mdlcompiler` - stock studiomdl has no `$datamodeljoints`. Hitbox names are dropped (a DMX hitbox has none). |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
 The QC command `$minlod <lod>` sets the same zero-based minimum LOD. A
@@ -106,7 +107,8 @@ the job; it writes what it can parse and tells you what it skipped.
 ```
 mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
               [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-pulseqc]
-              [-nomesh] [-noanimation] [-declaresequence] [-pause] [-perfmetrics]
+              [-nomesh] [-noanimation] [-declaresequence] [-datamodeljoints]
+              [-pause] [-perfmetrics]
 ```
 
 Several inputs may be given at once (drag-and-drop works); a folder decompiles
@@ -125,7 +127,7 @@ the input. By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the
 | `-dmxmodel <n>` | The `format model` version they declare: 15 (default), 1, 18, or 22 (Source 2 ModelDoc). |
 | `-smdanimation` | Write animation clips as `.smd` instead of `.dmx`. |
 | `-pulseqc` | Write a `.pulseqc` instead of the default stock-studiomdl `.qc`. |
-| `-nomesh` | Skip the mesh `.dmx` files, the `.phy` hull and the `.vrd`; the script still lists their commands. |
+| `-nomesh` | Skip the mesh `.dmx` files, the `.phy` hull, the `.vrd` and the joints `.dmx`; the script still lists their commands. |
 | `-noanimation` | Skip the animation clip files; the script still lists the sequences and animations. |
 | `-declaresequence` | Also write a `<name>.qci` listing every sequence, in order, as `$declaresequence` - paste into a model that `$includemodel`'s this one. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |

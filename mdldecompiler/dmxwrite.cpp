@@ -16,9 +16,11 @@
 #include "dmxwrite.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <string>
 #include <system_error>
@@ -546,6 +548,9 @@ struct Dmx {
     uint32_t seed = 0;
     int next = 1;
     std::vector<Elem> elems;
+    std::string format = "model";
+    int formatVersion = g_formatModel;
+    int binaryVersion = BinaryVersionFor(g_formatModel);
 
     std::string NewId() {
         char b[48];
@@ -653,7 +658,7 @@ struct Dmx {
     }
 
     void SaveKv2() {
-        std::fprintf(f, "<!-- dmx encoding keyvalues2 1 format model %d -->\n\n", g_formatModel);
+        std::fprintf(f, "<!-- dmx encoding keyvalues2 1 format %s %d -->\n\n", format.c_str(), formatVersion);
         for (const Elem& e : elems) {
             std::fprintf(f,
                          "\"%s\"\n{\n\t\"id\" \"elementid\" \"%s\"\n\t\"name\" \"string\" \"%s\"\n",
@@ -669,7 +674,7 @@ struct Dmx {
         // The string table pools element class names and attribute names, plus -
         // from encoding 4 on - element names and scalar string values; before 4
         // those two are written inline. Array strings are always inline.
-        const int ev = BinaryVersionFor(g_formatModel);
+        const int ev = binaryVersion;
         const bool pooledValues = ev >= 4;
         const bool wideIndex = ev >= 5; // table indices widen to int32
         std::map<std::string, int> pool;
@@ -726,7 +731,7 @@ struct Dmx {
         };
 
         // the header line is null-terminated, the way the reader expects it
-        std::fprintf(f, "<!-- dmx encoding binary %d format model %d -->\n", ev, g_formatModel);
+        std::fprintf(f, "<!-- dmx encoding binary %d format %s %d -->\n", ev, format.c_str(), formatVersion);
         u8(0);
 
         if (ev >= 9)
@@ -853,7 +858,8 @@ Skel AllocSkel(Dmx& q, const Mdl& m) {
 void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
                const std::string& idMeshDag, const std::string& idMeshXform,
                const std::string& idCombo, const std::string& idAnimList = std::string(),
-               const std::vector<AnimPose>* pose0 = nullptr) {
+               const std::vector<AnimPose>* pose0 = nullptr,
+               const std::function<const char*(Dmx&, int)>* jointMarkup = nullptr) {
     const fm::mstudiobone_t* bones =
         m.At<fm::mstudiobone_t>(m.buf.data(), m.hdr->boneindex, m.hdr->numbones);
     const std::vector<std::string> boneNames = BoneNames(m);
@@ -939,6 +945,10 @@ void WriteSkel(Dmx& q, const Mdl& m, const Skel& s, const std::string& name,
         q.Begin("DmeDag", s.idJointDag[i], boneNames[i]);
         q.Ref("transform", s.idJointXform[i]);
         q.RefArray("children", kids);
+        // the markup writes its attributes onto this dag and names its class
+        if (jointMarkup)
+            if (const char* cls = (*jointMarkup)(q, i))
+                q.elems.back().cls = cls;
         q.End();
 
         // The euler `rot`, not the stored `quat`: the two are not always the
@@ -1643,6 +1653,21 @@ bool ReadPhyHulls(const Mdl& m, const std::string& phyPath, std::vector<PhyHull>
     return !out.empty();
 }
 
+// The frame times a DmeChannelsClip is sampled at: whole seconds plus the
+// rounded remainder, which is how the importer reconstructs them - a key
+// that lands anywhere else gets interpolated instead of read.
+void FrameTimes(size_t count, int fps, std::vector<float>& times, std::vector<int>& legacyTimes) {
+    times.reserve(count);
+    legacyTimes.reserve(count);
+    for (int k = 0; k < static_cast<int>(count); ++k) {
+        const int whole = k / fps;
+        const int ticks = whole * 10000 +
+                          Ticks(static_cast<float>(k - whole * fps) / static_cast<float>(fps));
+        times.push_back(static_cast<float>(ticks) / 10000.0f);
+        legacyTimes.push_back(ticks);
+    }
+}
+
 } // namespace
 
 const char* SetDmxOutput(const std::string& encoding, int formatModel) {
@@ -1689,20 +1714,9 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         idLayer.push_back(q.NewId());
     }
 
-    // The frame times a DmeChannelsClip is sampled at: whole seconds plus the
-    // rounded remainder, which is how the importer reconstructs them - a key
-    // that lands anywhere else gets interpolated instead of read.
     std::vector<float> times;
     std::vector<int> legacyTimes;
-    times.reserve(frames.size());
-    legacyTimes.reserve(frames.size());
-    for (int k = 0; k < static_cast<int>(frames.size()); ++k) {
-        const int whole = k / fps;
-        const int ticks = whole * 10000 +
-                          Ticks(static_cast<float>(k - whole * fps) / static_cast<float>(fps));
-        times.push_back(static_cast<float>(ticks) / 10000.0f);
-        legacyTimes.push_back(ticks);
-    }
+    FrameTimes(frames.size(), fps, times, legacyTimes);
 
     WriteSkel(q, m, s, clipName, std::string(), std::string(), idCombo, idList, &frames[0]);
 
@@ -1828,6 +1842,118 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         else
             q.TimeArray("times", std::vector<float>(times.begin(), times.begin() + values.size()));
         q.FloatArray("values", values);
+        q.End();
+    }
+
+    q.Save();
+    std::fclose(f);
+    return true;
+}
+
+bool WriteCameraDmx(const std::string& path, const std::string& clipName, int fps,
+                    const std::vector<AnimPose>& poses, const std::vector<float>& fov) {
+    if (poses.empty() || fov.size() != poses.size() || fps <= 0)
+        return false;
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+
+    Dmx q{f, Hash(clipName)};
+    q.format = "pulsecamera";
+    q.formatVersion = 1;
+    q.binaryVersion = 5;
+    const std::string idRoot = q.NewId(), idCam = q.NewId(), idXform = q.NewId(),
+                      idClip = q.NewId(), idFrame = q.NewId();
+    std::string idChan[3], idLog[3], idLayer[3];
+    for (int c = 0; c < 3; ++c) {
+        idChan[c] = q.NewId();
+        idLog[c] = q.NewId();
+        idLayer[c] = q.NewId();
+    }
+
+    std::vector<float> times;
+    std::vector<int> legacyTimes;
+    FrameTimes(poses.size(), fps, times, legacyTimes);
+
+    std::vector<pm::Vector3> pos;
+    std::vector<pm::Quaternion> rot;
+    for (const AnimPose& p : poses) {
+        pm::Quaternion qr;
+        pm::AngleQuaternion(p.rot, qr);
+        pos.push_back(p.pos);
+        rot.push_back(qr);
+    }
+    std::vector<float> fv = fov;
+    // an unchanging track is one key, as in WriteAnimationDmx
+    auto flat = [](const float* v, size_t n, size_t w) {
+        for (size_t k = w; k < n * w; ++k)
+            if (v[k] != v[k % w])
+                return false;
+        return true;
+    };
+    if (flat(&pos[0].x, pos.size(), 3))
+        pos.resize(1);
+    if (flat(&rot[0].x, rot.size(), 4))
+        rot.resize(1);
+    if (flat(fv.data(), fv.size(), 1))
+        fv.resize(1);
+
+    q.Begin("DmElement", idRoot, "root");
+    q.Ref("camera", idCam);
+    q.Ref("animation", idClip);
+    q.End();
+
+    q.Begin("DmeCamera", idCam, "mmd_camera");
+    q.Ref("transform", idXform);
+    q.Float("verticalFieldOfView", fv[0]);
+    q.End();
+
+    q.Begin("DmeTransform", idXform, "transform");
+    q.Vec3("position", pos[0]);
+    q.Quat("orientation", rot[0]);
+    q.End();
+
+    q.Begin("DmeChannelsClip", idClip, clipName);
+    q.Ref("timeFrame", idFrame);
+    q.Int("frameRate", fps);
+    q.RefArray("channels", {idChan[0], idChan[1], idChan[2]});
+    q.End();
+
+    q.Begin("DmeTimeFrame", idFrame, "timeFrame");
+    q.Time("start", 0.0f);
+    q.Time("duration", times.back());
+    q.Time("offset", 0.0f);
+    q.End();
+
+    static const char* const kChan[3] = {"position", "orientation", "fov"};
+    static const char* const kLog[3] = {"DmeVector3Log", "DmeQuaternionLog", "DmeFloatLog"};
+    static const char* const kLayer[3] = {"DmeVector3LogLayer", "DmeQuaternionLogLayer", "DmeFloatLogLayer"};
+    const size_t keys[3] = {pos.size(), rot.size(), fv.size()};
+    for (int c = 0; c < 3; ++c) {
+        q.Begin("DmeChannel", idChan[c], kChan[c]);
+        q.Ref("fromElement", std::string());
+        q.Str("fromAttribute", "");
+        q.Int("fromIndex", 0);
+        q.Ref("toElement", c < 2 ? idXform : idCam);
+        q.Str("toAttribute", c < 2 ? kChan[c] : "verticalFieldOfView");
+        q.Int("toIndex", 0);
+        q.Int("mode", 3);
+        q.Ref("log", idLog[c]);
+        q.End();
+
+        q.Begin(kLog[c], idLog[c], "log");
+        q.RefArray("layers", {idLayer[c]});
+        q.Bool("usedefaultvalue", false);
+        q.End();
+
+        q.Begin(kLayer[c], idLayer[c], "log");
+        q.TimeArray("times", std::vector<float>(times.begin(), times.begin() + keys[c]));
+        if (c == 0)
+            q.V3Array("values", pos);
+        else if (c == 1)
+            q.QuatArray("values", rot);
+        else
+            q.FloatArray("values", fv);
         q.End();
     }
 
@@ -1962,6 +2088,208 @@ PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
     std::fclose(f);
     std::printf("  wrote %s (%d hulls, %d tris)\n", path.c_str(), static_cast<int>(hulls.size()),
                 static_cast<int>(corner.size() / 3));
+    info.written = true;
+    return info;
+}
+
+// Degrees the way $datamodeljoints reads them, snapped like the script's angles.
+static float DegOf(float radians) {
+    return static_cast<float>(std::round(radians * pm::kRad2Deg * 10000.0) / 10000.0);
+}
+
+JointsInfo WriteJointsDmx(const Mdl& m, const std::string& dir, const std::string& name,
+                          bool bones) {
+    JointsInfo info;
+    const fm::studiohdr_t& h = *m.hdr;
+    const fm::mstudiobone_t* bt = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+    const std::vector<std::string> names = BoneNames(m);
+    const fm::mstudioattachment_t* atts =
+        m.At<fm::mstudioattachment_t>(m.buf.data(), h.localattachmentindex, h.numlocalattachments);
+    for (int i = 0; bones && bt && i < h.numbones; ++i) {
+        const int t = bt[i].proctype;
+        info.jiggle |= t == fm::STUDIO_PROC_JIGGLE;
+        info.procedural |= t == fm::STUDIO_PROC_QUATINTERP || t == fm::STUDIO_PROC_AIMATBONE ||
+                           t == fm::STUDIO_PROC_AIMATATTACH;
+    }
+    // autogenerated boxes stay with the compiler; the script keeps $skipboneinbbox
+    const fm::mstudiohitboxset_t* sets =
+        m.At<fm::mstudiohitboxset_t>(m.buf.data(), h.hitboxsetindex, h.numhitboxsets);
+    info.hitboxes = sets && h.numhitboxsets > 0 &&
+                    !(h.flags & fm::STUDIOHDR_FLAGS_AUTOGENERATED_HITBOX);
+    if (!info.jiggle && !info.procedural && !info.hitboxes)
+        return info;
+    if (g_nomesh) {
+        info.written = true;
+        return info;
+    }
+
+    const std::string meshDir = dir + "/meshes";
+    std::error_code ec;
+    std::filesystem::create_directories(meshDir, ec);
+    const std::string path = meshDir + "/" + name + ".dmx";
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        std::printf("  cannot write \"%s\"\n", path.c_str());
+        return info;
+    }
+
+    Dmx q{f, Hash(name)};
+    const Skel skel = AllocSkel(q, m);
+    auto boneName = [&](int32_t i) {
+        return i >= 0 && static_cast<size_t>(i) < names.size() ? names[i] : std::string();
+    };
+
+    // Attribute names and units are the ones LoadDmxJoints reads.
+    const std::function<const char*(Dmx&, int)> markup = [&](Dmx& d, int i) -> const char* {
+        const int type = bt[i].proctype;
+        if (type == fm::STUDIO_PROC_JIGGLE) {
+            const fm::mstudiojigglebone_t* j =
+                m.At<fm::mstudiojigglebone_t>(&bt[i], bt[i].procindex);
+            if (!j)
+                return nullptr;
+            const int32_t fl = j->flags;
+            d.Float("length", j->length);
+            d.Float("tipMass", j->tipMass);
+            d.Bool("lengthConstrained", (fl & fm::JIGGLE_HAS_LENGTH_CONSTRAINT) != 0);
+            d.Bool("angleConstrained", (fl & fm::JIGGLE_HAS_ANGLE_CONSTRAINT) != 0);
+            d.Float("angleLimit", DegOf(j->angleLimit));
+            d.Bool("yawConstrained", (fl & fm::JIGGLE_HAS_YAW_CONSTRAINT) != 0);
+            d.Float("yawMin", DegOf(j->minYaw));
+            d.Float("yawMax", DegOf(j->maxYaw));
+            d.Float("yawFriction", j->yawFriction);
+            d.Float("yawBounce", j->yawBounce);
+            d.Bool("pitchConstrained", (fl & fm::JIGGLE_HAS_PITCH_CONSTRAINT) != 0);
+            d.Float("pitchMin", DegOf(j->minPitch));
+            d.Float("pitchMax", DegOf(j->maxPitch));
+            d.Float("pitchFriction", j->pitchFriction);
+            d.Float("pitchBounce", j->pitchBounce);
+            d.Bool("flexible", (fl & fm::JIGGLE_IS_FLEXIBLE) != 0);
+            d.Bool("rigid", (fl & fm::JIGGLE_IS_RIGID) != 0);
+            d.Float("yawStiffness", j->yawStiffness);
+            d.Float("yawDamping", j->yawDamping);
+            d.Float("pitchStiffness", j->pitchStiffness);
+            d.Float("pitchDamping", j->pitchDamping);
+            d.Float("alongStiffness", j->alongStiffness);
+            d.Float("alongDamping", j->alongDamping);
+            d.Bool("baseSpring", (fl & fm::JIGGLE_HAS_BASE_SPRING) != 0);
+            d.Float("baseMass", j->baseMass);
+            d.Float("baseStiffness", j->baseStiffness);
+            d.Float("baseDamping", j->baseDamping);
+            d.Float("baseYawMin", j->baseMinLeft);
+            d.Float("baseYawMax", j->baseMaxLeft);
+            d.Float("baseYawFriction", j->baseLeftFriction);
+            d.Float("basePitchMin", j->baseMinUp);
+            d.Float("basePitchMax", j->baseMaxUp);
+            d.Float("basePitchFriction", j->baseUpFriction);
+            d.Float("baseAlongMin", j->baseMinForward);
+            d.Float("baseAlongMax", j->baseMaxForward);
+            d.Float("baseAlongFriction", j->baseForwardFriction);
+            d.Bool("boing", (fl & fm::JIGGLE_IS_BOING) != 0);
+            d.Float("boingImpactSpeed", j->boingImpactSpeed);
+            // stored as a cosine, authored in degrees
+            d.Float("boingImpactAngle",
+                    DegOf(std::acos(std::max(-1.0f, std::min(1.0f, j->boingImpactAngle)))));
+            d.Float("boingDampingRate", j->boingDampingRate);
+            d.Float("boingFrequency", j->boingFrequency);
+            d.Float("boingAmplitude", j->boingAmplitude);
+            // the DMX reader takes a pitch constraint on a flexible bone only
+            if ((fl & fm::JIGGLE_HAS_PITCH_CONSTRAINT) && !(fl & fm::JIGGLE_IS_FLEXIBLE))
+                std::printf("  jigglebone \"%s\": a pitch constraint on a non-flexible bone "
+                            "is not read back from DMX\n", names[i].c_str());
+            return "DmeJiggleBone";
+        }
+        if (type == fm::STUDIO_PROC_QUATINTERP) {
+            const fm::mstudioquatinterpbone_t* qi =
+                m.At<fm::mstudioquatinterpbone_t>(&bt[i], bt[i].procindex);
+            const fm::mstudioquatinterpinfo_t* tr =
+                qi ? m.At<fm::mstudioquatinterpinfo_t>(qi, qi->triggerindex, qi->numtriggers)
+                   : nullptr;
+            if (!tr || qi->numtriggers <= 0)
+                return nullptr;
+            // basePos 0 + unlockBones off: each target is the full parent-relative pose
+            std::vector<float> tol;
+            std::vector<pm::Quaternion> trig, rot;
+            std::vector<pm::Vector3> pos;
+            for (int t = 0; t < qi->numtriggers; ++t) {
+                tol.push_back(DegOf(1.0f / tr[t].inv_tolerance));
+                trig.push_back(tr[t].trigger);
+                rot.push_back(tr[t].quat);
+                pos.push_back(tr[t].pos);
+            }
+            d.Str("controlBone", boneName(qi->control));
+            d.Vec3("basePos", {0.0f, 0.0f, 0.0f});
+            d.Bool("unlockBones", false);
+            d.FloatArray("tolerances", tol);
+            d.QuatArray("triggerRotations", trig);
+            d.V3Array("targetPositions", pos);
+            d.QuatArray("targetRotations", rot);
+            return "DmeQuatInterpBone";
+        }
+        const bool attach = type == fm::STUDIO_PROC_AIMATATTACH;
+        if (attach || type == fm::STUDIO_PROC_AIMATBONE) {
+            const fm::mstudioaimatbone_t* ab =
+                m.At<fm::mstudioaimatbone_t>(&bt[i], bt[i].procindex);
+            if (!ab)
+                return nullptr;
+            std::string target;
+            if (!attach)
+                target = boneName(ab->aim);
+            else if (atts && ab->aim >= 0 && ab->aim < h.numlocalattachments)
+                target = m.Str(&atts[ab->aim], atts[ab->aim].sznameindex);
+            d.Str("aimTarget", target);
+            d.Str("parentBone", boneName(bt[i].parent));
+            d.Vec3("aimVector", ab->aimvector);
+            d.Vec3("upVector", ab->upvector);
+            d.Vec3("basePos", ab->basepos);
+            return "DmeAimAtBone";
+        }
+        return nullptr;
+    };
+
+    const std::string idSetList = info.hitboxes ? q.NewId() : std::string();
+    WriteSkel(q, m, skel, name, std::string(), std::string(), std::string(), std::string(),
+              nullptr, info.jiggle || info.procedural ? &markup : nullptr);
+
+    if (info.hitboxes) {
+        q.elems.front().attrs.push_back(Attr{"hitboxSetList", kElement, {}, {}, {idSetList}});
+        std::vector<std::string> setIds;
+        for (int s = 0; s < h.numhitboxsets; ++s)
+            setIds.push_back(q.NewId());
+        q.Begin("DmeHitboxSetList", idSetList, "hitboxSetList");
+        q.RefArray("hitboxSetList", setIds);
+        q.End();
+        for (int s = 0; s < h.numhitboxsets; ++s) {
+            const fm::mstudiobbox_t* boxes =
+                m.At<fm::mstudiobbox_t>(&sets[s], sets[s].hitboxindex, sets[s].numhitboxes);
+            const int n = boxes ? sets[s].numhitboxes : 0;
+            std::vector<std::string> boxIds;
+            for (int b = 0; b < n; ++b)
+                boxIds.push_back(q.NewId());
+            q.Begin("DmeHitboxSet", setIds[s], m.Str(&sets[s], sets[s].sznameindex));
+            q.RefArray("hitboxList", boxIds);
+            q.End();
+            for (int b = 0; b < n; ++b) {
+                const fm::mstudiobbox_t& box = boxes[b];
+                // a DmeHitbox carries no hitbox name
+                const std::string hbname = m.Str(&box, box.szhitboxnameindex);
+                if (hbname.find_first_not_of(" \t") != std::string::npos)
+                    ++info.namedHitboxes;
+                q.Begin("DmeHitbox", boxIds[b], "hitbox");
+                q.Str("boneName", boneName(box.bone));
+                q.Int("groupId", box.group);
+                q.Vec3("minBounds", box.bbmin);
+                q.Vec3("maxBounds", box.bbmax);
+                q.Float("radius", box.flCapsuleRadius); // <= 0 = a box, kept as stored
+                q.Vec3("orientation", {box.angOffsetOrientation.x, box.angOffsetOrientation.y,
+                                       box.angOffsetOrientation.z});
+                q.End();
+            }
+        }
+    }
+
+    q.Save();
+    std::fclose(f);
+    std::printf("  wrote %s\n", path.c_str());
     info.written = true;
     return info;
 }

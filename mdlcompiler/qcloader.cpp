@@ -82,9 +82,9 @@ struct Token {
     bool expanded = false;
 };
 
-// keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` line
-// and `/* */` block comments, and braces as standalone tokens even when jammed
-// against a word.
+// keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
+// line comments (the latter two only at a token start, and `;` also ends a word,
+// as stock does), `/* */` blocks, and braces as standalone tokens.
 bool Tokenize(const std::string& s, const std::string& file,
               std::vector<Token>& out, std::string* err) {
     int line = 1;
@@ -100,7 +100,7 @@ bool Tokenize(const std::string& s, const std::string& file,
             i++;
             continue;
         }
-        if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+        if (c == ';' || c == '#' || (c == '/' && i + 1 < s.size() && s[i + 1] == '/')) {
             while (i < s.size() && s[i] != '\n')
                 i++;
             continue;
@@ -144,7 +144,7 @@ bool Tokenize(const std::string& s, const std::string& file,
         while (i < s.size()) {
             const char d = s[i];
             if (std::isspace(static_cast<unsigned char>(d)) || d == '{' || d == '}' ||
-                d == '"' ||
+                d == '"' || d == ';' ||
                 (d == '/' && i + 1 < s.size() && (s[i + 1] == '/' || s[i + 1] == '*')))
                 break;
             t.text.push_back(d);
@@ -201,6 +201,7 @@ struct Ctx {
     source::MaterialTable physMats; // collision-only materials, kept out of the model's texture table
     std::map<std::string, int> namedAnims; // $animation name -> index into in.anims
     std::map<std::string, std::vector<Token>> cmdlists; // $cmdlist name -> body tokens
+    std::map<std::string, std::vector<Token>> lodCmdlists; // $lodcmdlist, keyed lowercased
     std::map<std::string, std::string> variables; // $definevariable, case-sensitive, shared across $include
     struct Macro {
         std::vector<std::string> params;
@@ -4483,7 +4484,7 @@ bool CmdModelArchetype(Ctx& c, const Token& cmd) {
 bool CmdStaticProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Static; return true; }
 bool CmdSimpleProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Simple; return true; }
 bool CmdAutoCenter(Ctx& c, const Token&) { c.in.autoCenter = true; return true; }
-bool CmdNoModel(Ctx& c, const Token&) { c.in.noModel = true; return true; }
+bool CmdForceWriteVertexData(Ctx& c, const Token&) { c.in.forceWriteVertexData = true; return true; }
 
 // $vtxformat <int> - which .vtx strip/stripgroup layout to write. 0 = legacy
 // 27/25-byte headers (TF2/L4D2/GMod/HL2), 1 = full 35/33-byte headers with the
@@ -6378,7 +6379,16 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             break;
 
         const std::string opt = Lower(t.text);
-        if (opt == "replacemodel") {
+        if (opt == "lodcmdlist") {
+            std::string name;
+            if (!c.Want("a $lodcmdlist name", t, name))
+                return false;
+            auto it = c.lodCmdlists.find(Lower(name));
+            if (it == c.lodCmdlists.end())
+                return c.Fail(t.line, "unknown lodcmdlist \"" + name + "\"");
+            // parsed as if written inline; $lodcmdlist rejects nesting
+            c.SpliceAt(c.pos, it->second);
+        } else if (opt == "replacemodel") {
             if (!ParseReplaceModel(c, t, lod)) return false;
         } else if (opt == "removemodel") {
             if (!ParseRemoveModel(c, t, lod)) return false;
@@ -6463,6 +6473,40 @@ bool CmdLod(Ctx& c, const Token& cmd) {
     }
 
     c.in.scriptLods.push_back(std::move(lod));
+    return true;
+}
+
+// $lodcmdlist <name> { <$lod options> ... } - raw tokens `lodcmdlist <name>`
+// splices into a $lod / $shadowlod block. Names match case-insensitively.
+bool CmdLodCmdList(Ctx& c, const Token& cmd) {
+    std::string name;
+    if (!c.Want("a name", cmd, name))
+        return false;
+    const std::string key = Lower(name);
+    if (c.lodCmdlists.count(key))
+        return c.Fail(cmd.line, "duplicate $lodcmdlist \"" + name + "\"");
+    if (!WantOpenBrace(c, cmd, cmd.text))
+        return false;
+
+    std::vector<Token> body;
+    const bool savedRaw = c.rawCollect;
+    c.rawCollect = true;
+    for (;;) {
+        if (c.Eof()) {
+            c.rawCollect = savedRaw;
+            return c.Fail(cmd.line, "$lodcmdlist \"" + name + "\" is missing '}'");
+        }
+        const Token t = c.toks[c.pos++];
+        if (!t.quoted && t.text == "}")
+            break;
+        if (!t.quoted && _stricmp(t.text.c_str(), "lodcmdlist") == 0) {
+            c.rawCollect = savedRaw;
+            return c.Fail(t.line, "$lodcmdlist \"" + name + "\" cannot nest a lodcmdlist");
+        }
+        body.push_back(t);
+    }
+    c.rawCollect = savedRaw;
+    c.lodCmdlists[key] = std::move(body);
     return true;
 }
 
@@ -8725,7 +8769,7 @@ constexpr Command kCommands[] = {
     {"$staticprop", CmdStaticProp},
     {"$simpleprop", CmdSimpleProp},
     {"$autocenter", CmdAutoCenter},
-    {"$nomodel", CmdNoModel},
+    {"$forcewritevertexdata", CmdForceWriteVertexData},
     {"$vtxformat", CmdVtxFormat},
     {"$nodx80", CmdNoDx80},
     {"$modelbudget", CmdModelBudget},
@@ -8815,6 +8859,7 @@ constexpr Command kCommands[] = {
     {"$allowrootlods", CmdAllowRootLods},
     {"$lod", CmdLod},
     {"$shadowlod", CmdLod},
+    {"$lodcmdlist", CmdLodCmdList},
 };
 
 std::string SupportedList();

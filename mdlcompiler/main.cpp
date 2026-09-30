@@ -57,6 +57,9 @@ static int Usage() {
     std::printf("                define a .pulseqc script variable ($name$) before the\n");
     std::printf("                script runs; repeatable. The script cannot override it\n");
     std::printf("  -striplods    ignore all $lod and $shadowlod commands\n");
+    std::printf("  -forcewritevertexdata\n");
+    std::printf("                save .vvd/.vtx even when the model has no geometry;\n");
+    std::printf("                same as $forcewritevertexdata in the script\n");
     std::printf("  -minlod <lod> discard higher-detail LODs and promote this LOD to root;\n");
     std::printf("                overrides $minlod in the script\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and stop\n");
@@ -101,6 +104,7 @@ static int RunCompile(int argc, char** argv) {
     bool noDx80 = false; // -nodx80: force-skip .dx80.vtx, overriding the script
     int launchMinLod = -1;
     bool stripLods = false;
+    bool forceWriteVertexData = false;
     bool definebones = false;
     bool verify = false;
     bool dumpMaterials = false;
@@ -154,6 +158,8 @@ static int RunCompile(int argc, char** argv) {
             noDx80 = true;
         } else if (std::strcmp(argv[i], "-striplods") == 0) {
             stripLods = true;
+        } else if (std::strcmp(argv[i], "-forcewritevertexdata") == 0) {
+            forceWriteVertexData = true;
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
             definebones = true;
         } else if (std::strcmp(argv[i], "-verify") == 0) {
@@ -201,6 +207,8 @@ static int RunCompile(int argc, char** argv) {
     if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs))
         return Fail("script error", err);
     auto tLoad = Clock::now();
+    if (forceWriteVertexData)
+        input.forceWriteVertexData = true;
     if (stripLods)
         input.minLod = 0;
     else if (launchMinLod >= 0)

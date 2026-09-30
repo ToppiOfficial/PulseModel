@@ -229,9 +229,10 @@ matrix3x4 AxisRot(int axis, float a) {
     return r;
 }
 
-// Camera eye and view axes at MMD frame f, in MMD space. Keys one frame apart
-// are a cut and hold the earlier key. Orbit is yaw, then roll, then pitch.
-void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector3& fwd, Vector3& up) {
+// Camera eye, view axes and vertical fov (degrees) at MMD frame f, in MMD space. Keys
+// one frame apart are a cut and hold the earlier key. Orbit is yaw, then roll, then pitch.
+void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector3& fwd, Vector3& up,
+                  float& fov) {
     const CamKey* a = &keys.front();
     const CamKey* b = a;
     float x = 0.0f;
@@ -255,6 +256,7 @@ void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector
     const float wr = w(3);
     const Vector3 rot{lerp(a->rot.x, b->rot.x, wr), lerp(a->rot.y, b->rot.y, wr), lerp(a->rot.z, b->rot.z, wr)};
     const float dist = std::fabs(lerp(a->dist, b->dist, w(4)));
+    fov = lerp(static_cast<float>(a->fov), static_cast<float>(b->fov), w(5));
 
     // MMD is left-handed, so every angle turns the opposite way to the RH formulas
     const matrix3x4 r = pm::ConcatTransforms(AxisRot(1, -rot.y),
@@ -938,10 +940,15 @@ int Usage() {
         "  lip sync) replacing any morph both key, go out as flex channels on the\n"
         "  .mdl's controllers, in model 22\n"
         "  only: the clip itself with -dmxmodel 22, and with -compile a model 22 copy\n"
-        "  of every clip in <game>/datamodel/<name without .mdl>/.\n\n"
+        "  of every clip in <game>/datamodel/flex_anims/.\n\n"
         "  Camera keys from <vmd name>_camera.vmd beside each .vmd, else from the .vmd\n"
         "  itself, go out as a <clip>_camera .smd moving only the root bone\n"
-        "  \"mmd_camera\": origin at the eye, +X along the view, +Z up.\n",
+        "  \"mmd_camera\": origin at the eye, +X along the view, +Z up.\n"
+        "  -camerafov <mode> also carries MMD's vertical fov (degrees):\n"
+        "                   bone - child bone \"mmd_camera_fov\", its local X is the fov\n"
+        "                   dmx  - <clip>_camera.dmx, `format pulsecamera 1`, for\n"
+        "                          PulseWorkshop; with -compile in\n"
+        "                          <game>/datamodel/camera_anims/\n",
         pulse::limits::kMaxAnimFrames);
     return 1;
 }
@@ -989,15 +996,24 @@ struct Clip {
 
 // Root bone the camera clip animates: origin at the eye, +X along the view, +Z up.
 const char* const kCameraBone = "mmd_camera";
+// -camerafov bone: child of kCameraBone, local X is the vertical fov in degrees.
+const char* const kCameraFovBone = "mmd_camera_fov";
 
-bool WriteCameraSmd(const std::string& path, const std::vector<AnimPose>& frames) {
+bool WriteCameraSmd(const std::string& path, const std::vector<AnimPose>& frames,
+                    const std::vector<float>* fov) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f)
         return false;
-    std::fprintf(f, "version 1\nnodes\n0 \"%s\" -1\nend\nskeleton\n", kCameraBone);
-    for (size_t k = 0; k < frames.size(); ++k)
+    std::fprintf(f, "version 1\nnodes\n0 \"%s\" -1\n", kCameraBone);
+    if (fov)
+        std::fprintf(f, "1 \"%s\" 0\n", kCameraFovBone);
+    std::fprintf(f, "end\nskeleton\n");
+    for (size_t k = 0; k < frames.size(); ++k) {
         std::fprintf(f, "time %zu\n0 %f %f %f %f %f %f\n", k, frames[k].pos.x, frames[k].pos.y,
                      frames[k].pos.z, frames[k].rot.x, frames[k].rot.y, frames[k].rot.z);
+        if (fov)
+            std::fprintf(f, "1 %f 0 0 0 0 0\n", (*fov)[k]);
+    }
     std::fprintf(f, "end\n");
     return std::fclose(f) == 0;
 }
@@ -1094,7 +1110,7 @@ std::string ConvertAudio(const std::string& src, const std::string& dst, std::st
 // An animation-only model: the reference skeleton, its bonemerge tags, and one
 // $sequence per clip. Joints go out exactly as the decompiler writes them.
 bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& modelname,
-                 const std::vector<Clip>& clips) {
+                 const std::vector<Clip>& clips, bool fovBone) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f)
         return false;
@@ -1116,8 +1132,12 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
                      parent.c_str(), mdldecompiler::V3(poses[i].pos).c_str(), deg(poses[i].rot.y).c_str(),
                      deg(poses[i].rot.z).c_str(), deg(poses[i].rot.x).c_str());
     }
-    if (std::any_of(clips.begin(), clips.end(), [](const Clip& c) { return c.camera; }))
+    if (std::any_of(clips.begin(), clips.end(), [](const Clip& c) { return c.camera; })) {
         std::fprintf(f, "$definebone \"%s\" \"\" 0 0 0 0 0 0  0 0 0 0 0 0\n", kCameraBone);
+        if (fovBone)
+            std::fprintf(f, "$definebone \"%s\" \"%s\" 0 0 0 0 0 0  0 0 0 0 0 0\n", kCameraFovBone,
+                         kCameraBone);
+    }
     bool merge = false;
     for (int i = 0; i < h.numbones; ++i) {
         if (!(bones[i].flags & fm::BONE_USED_BY_BONE_MERGE))
@@ -1145,7 +1165,7 @@ int main(int argc, char** argv) {
     PrintHeader();
     std::vector<std::string> vmdPaths;
     std::string mdlPath, pmxPath, outPath, compileName, gameDir, srcArg, faceMapPath;
-    std::string faceSet = "facs";
+    std::string faceSet = "facs", cameraFov;
     float armAngle = 35.0f, eyeRange = 30.0f;
     long startArg = -1, endArg = -1;
     bool uncompress = false, sound = false;
@@ -1171,6 +1191,7 @@ int main(int argc, char** argv) {
         else if (!_stricmp(a, "-dmxmodel")) dmxModel = std::atoi(next());
         else if (!_stricmp(a, "-facemap")) faceMapPath = next();
         else if (!_stricmp(a, "-faceset")) faceSet = next();
+        else if (!_stricmp(a, "-camerafov")) cameraFov = next();
         else return Usage();
     }
     if (vmdPaths.empty() || mdlPath.empty())
@@ -1181,6 +1202,9 @@ int main(int argc, char** argv) {
         return Fail("-sound writes a sequence event, so it needs -compile");
     if (const char* e = mdldecompiler::SetDmxOutput(dmxEncoding, dmxModel))
         return Fail(e);
+    if (!cameraFov.empty() && cameraFov != "bone" && cameraFov != "dmx")
+        return Fail("unknown -camerafov \"" + cameraFov + "\" (bone or dmx)");
+    const bool fovBone = cameraFov == "bone";
 
     std::string err;
     MmdSkel mmd = BuildMmdSkel();
@@ -1395,11 +1419,9 @@ int main(int argc, char** argv) {
                                  : (fs::path(vmdPaths[0]).parent_path() / (ClipName(compileName) + "_src")).string();
         fs::create_directories(srcDir, ec);
     }
-    const fs::path dataDir = compileName.empty() ? fs::path()
-                                                 : fs::path(gameDir) / "datamodel" /
-                                                       mdldecompiler::StripExt(compileName);
+    const fs::path dataDir = compileName.empty() ? fs::path() : fs::path(gameDir) / "datamodel";
     if (!dataDir.empty())
-        fs::create_directories(dataDir, ec);
+        fs::create_directories(dataDir / "flex_anims", ec);
     std::set<std::string> faceMissing;
 
     const int lower = mmd.Find("lower");
@@ -1574,7 +1596,7 @@ int main(int argc, char** argv) {
 
         // -compile: the SFM / PulseWorkshop copy, always model 22
         if (!dataDir.empty()) {
-            const std::string dataPath = (dataDir / (clip + ".dmx")).string();
+            const std::string dataPath = (dataDir / "flex_anims" / (clip + ".dmx")).string();
             mdldecompiler::SetDmxOutput(dmxEncoding, 22);
             const bool ok = mdldecompiler::WriteAnimationDmx(m, dataPath, clip, fps, frames, flex);
             mdldecompiler::SetDmxOutput(dmxEncoding, dmxModel);
@@ -1598,10 +1620,11 @@ int main(int argc, char** argv) {
         }
         if (!cams.empty()) {
             std::vector<AnimPose> cf(static_cast<size_t>(count));
+            std::vector<float> fov(static_cast<size_t>(count));
             for (long k = 0; k < count; ++k) {
                 const float f = static_cast<float>(first) + static_cast<float>(k) * 30.0f / fps;
                 Vector3 eye, look, up;
-                SampleCamera(cams, f, eye, look, up);
+                SampleCamera(cams, f, eye, look, up, fov[static_cast<size_t>(k)]);
                 look = pm::VectorRotate(look, M);
                 up = pm::VectorRotate(up, M);
                 const Vector3 lv = Cross(up, look);
@@ -1616,14 +1639,27 @@ int main(int argc, char** argv) {
             }
             const std::string camClip = clip + "_camera";
             const std::string camPath = (fs::path(path).parent_path() / (camClip + ".smd")).string();
-            if (!WriteCameraSmd(camPath, cf))
+            if (!WriteCameraSmd(camPath, cf, fovBone ? &fov : nullptr))
                 return Fail("cannot write \"" + camPath + "\"");
             clips.push_back({camClip, fps, std::string(), true});
-            std::printf("wrote %s\n  %zu camera keys from %s\n", camPath.c_str(), cams.size(),
-                        camFile ? camVmd.c_str() : "the motion");
-            if (srcDir.empty())
+            const auto [fovLo, fovHi] = std::minmax_element(fov.begin(), fov.end());
+            std::printf("wrote %s\n  %zu camera keys from %s, fov %g-%g degrees\n", camPath.c_str(),
+                        cams.size(), camFile ? camVmd.c_str() : "the motion", *fovLo, *fovHi);
+            if (srcDir.empty()) {
                 std::printf("  $sequence \"%s\" \"%s.smd\" fps %d - needs $definebone \"%s\" \"\" 0 0 0 0 0 0  0 0 0 0 0 0\n",
                             camClip.c_str(), camClip.c_str(), fps, kCameraBone);
+                if (fovBone)
+                    std::printf("  and $definebone \"%s\" \"%s\" 0 0 0 0 0 0  0 0 0 0 0 0\n", kCameraFovBone,
+                                kCameraBone);
+            }
+            if (cameraFov == "dmx") {
+                const fs::path camDir = dataDir.empty() ? fs::path(camPath).parent_path() : dataDir / "camera_anims";
+                fs::create_directories(camDir, ec);
+                const std::string camDmx = (camDir / (camClip + ".dmx")).string();
+                if (!mdldecompiler::WriteCameraDmx(camDmx, camClip, fps, cf, fov))
+                    return Fail("cannot write \"" + camDmx + "\"");
+                std::printf("wrote %s\n", camDmx.c_str());
+            }
         }
 
         // -sound: <vmd name>.wav (else .mp3) beside the .vmd, converted into
@@ -1672,7 +1708,7 @@ int main(int argc, char** argv) {
         return 0;
 
     const std::string qc = (fs::path(srcDir) / (ClipName(compileName) + ".qc")).string();
-    if (!WriteAnimQc(qc, m, compileName, clips))
+    if (!WriteAnimQc(qc, m, compileName, clips, fovBone))
         return Fail("cannot write \"" + qc + "\"");
     std::printf("wrote %s\n\n", qc.c_str());
 

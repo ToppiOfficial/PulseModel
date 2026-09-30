@@ -993,7 +993,7 @@ struct BoneSaveFrame {
 
 struct CompiledModel {
     std::string outname; // e.g. "testmodel/testcube" (no extension)
-    bool noModel = false; // $nomodel - save the empty .vvd/.vtx when there is no geometry
+    bool forceWriteVertexData = false; // $forcewritevertexdata - save the empty .vvd/.vtx when there is no geometry
     int gflags = 0;
     uint8_t constDirectionalLightDot = 0;
     uint8_t numAllowedRootLods = 0;
@@ -1109,7 +1109,7 @@ struct CompileInput {
     std::string outname;
     Archetype archetype = Archetype::General;
     bool autoCenter = false; // $autocenter
-    bool noModel = false;    // $nomodel
+    bool forceWriteVertexData = false; // $forcewritevertexdata
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.
     int vtxArchetype = 0;

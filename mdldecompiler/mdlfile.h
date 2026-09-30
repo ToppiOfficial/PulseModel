@@ -26,7 +26,9 @@ inline bool g_studiomdl = true;
 
 // Launch-option gates. -nomesh/-noanimation suppress side-file writing only; the
 // script keeps every command. -declaresequence writes a standalone .qci beside it.
+// -datamodeljoints moves hitboxes/procedural/jiggle bones into a $datamodeljoints .dmx.
 inline bool g_nomesh = false;
+inline bool g_datamodeljoints = false;
 inline bool g_noanim = false;
 inline bool g_declareseq = false;
 

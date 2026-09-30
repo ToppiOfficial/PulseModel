@@ -59,6 +59,11 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
                        const std::vector<std::vector<AnimPose>>& frames,
                        const std::vector<FlexTrack>* flex = nullptr);
 
+// `path`: a `format pulsecamera 1` file (binary 5 or keyvalues2) - a DmeCamera whose
+// transform and verticalFieldOfView (degrees) one DmeChannelsClip keys per frame.
+bool WriteCameraDmx(const std::string& path, const std::string& clipName, int fps,
+                    const std::vector<AnimPose>& poses, const std::vector<float>& fov);
+
 struct PhysicsMeshInfo {
     bool written = false;
     // some body carries more than one hull, so the reimport needs `concave`
@@ -70,6 +75,18 @@ struct PhysicsMeshInfo {
 // same bodies. Never fails the decompile - the .pulseqc stands on its own.
 PhysicsMeshInfo WritePhysicsMesh(const Mdl& m, const std::string& mdlPath,
                                  const std::string& dir, const std::string& name);
+
+struct JointsInfo {
+    bool jiggle = false, procedural = false, hitboxes = false; // categories in the file
+    bool written = false;
+    int namedHitboxes = 0; // hitbox names the DMX cannot carry
+};
+
+// -datamodeljoints: `dir`/meshes/<name>.dmx holding the jigglebones, procedural
+// bones (`bones` = general archetype) and authored hitboxes as DME markup for
+// $datamodeljoints. Nothing to write -> every category false, no file.
+JointsInfo WriteJointsDmx(const Mdl& m, const std::string& dir, const std::string& name,
+                          bool bones);
 
 } // namespace mdldecompiler
 
