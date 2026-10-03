@@ -67,7 +67,7 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
             [-vtxformat <0|1>] [-nodx80]
             [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
             [-perfmetrics]
-            [-dumpcommands] [-pause]
+            [-dumpcommands] [-dumpprocedural <file.json>] [-pause]
 ```
 
 | Option | Meaning |
@@ -87,7 +87,7 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
 | `-dumpmaterials` | Print the names of materials used by the compiled model. |
 | `-perfmetrics` | Print wall time in ms for each stage of the compile. |
 | `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
-| `-datamodeljoints` | Write hitboxes, procedural bones and jigglebones to `meshes/<name>_joints.dmx` and import it with one `$datamodeljoints` line instead of the raw `$hboxset`/`$driverbone`/`.vrd`/`$jigglebone` commands. Follows `-dmxencoding`/`-dmxmodel`; works with `.qc` and `-pulseqc`. The script then needs `mdlcompiler` - stock studiomdl has no `$datamodeljoints`. Hitbox names are dropped (a DMX hitbox has none). |
+| `-dumpprocedural <file.json>` | Write the final bone names and the jiggle, driver and aim-at bone rules as JSON (values as the `.mdl` stores them, bones by name), then stop - no model files are written. For tools that preview those rules live. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
 The QC command `$minlod <lod>` sets the same zero-based minimum LOD. A
@@ -130,6 +130,7 @@ the input. By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the
 | `-nomesh` | Skip the mesh `.dmx` files, the `.phy` hull, the `.vrd` and the joints `.dmx`; the script still lists their commands. |
 | `-noanimation` | Skip the animation clip files; the script still lists the sequences and animations. |
 | `-declaresequence` | Also write a `<name>.qci` listing every sequence, in order, as `$declaresequence` - paste into a model that `$includemodel`'s this one. |
+| `-datamodeljoints` | Write hitboxes, procedural bones and jigglebones to `meshes/<name>_joints.dmx` and import it with one `$datamodeljoints` line instead of the raw `$hboxset`/`$driverbone`/`.vrd`/`$jigglebone` commands. Follows `-dmxencoding`/`-dmxmodel`; works with `.qc` and `-pulseqc`. The script then needs `mdlcompiler` - stock studiomdl has no `$datamodeljoints`. Hitbox names are dropped (a DMX hitbox has none). |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 | `-perfmetrics` | Print wall time in ms per process once the run ends; a batch sums each process across all models. |
 

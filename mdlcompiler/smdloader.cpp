@@ -7,6 +7,7 @@
 #include "strcompat.h"
 
 #include "smdloader.h"
+#include "dependencies.h"
 
 #include <algorithm>
 #include <cmath>
@@ -60,6 +61,7 @@ struct LineReader {
 };
 
 bool ReadAllLines(const std::string& path, LineReader& r, std::string* err) {
+    pulse::dependencies::Note(path);
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         if (err) *err = "cannot open \"" + path + "\"";

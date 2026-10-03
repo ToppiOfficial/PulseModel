@@ -7,6 +7,7 @@
 #include "strcompat.h"
 
 #include "fbxloader.h"
+#include "dependencies.h"
 
 #include <cmath>
 #include <cstdio>
@@ -319,6 +320,7 @@ bool LoadFbxSource(const std::string& path, Source& out, MaterialTable& mats, fl
     opts.generate_missing_normals = true;
     opts.ignore_embedded = true;
 
+    pulse::dependencies::Note(path);
     ufbx_error error;
     ufbx_scene* scene = ufbx_load_file_len(path.c_str(), path.size(), &opts, &error);
     if (!scene) {

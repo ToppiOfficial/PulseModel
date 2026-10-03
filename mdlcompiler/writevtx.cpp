@@ -9,8 +9,11 @@
 #include "perf.h"
 #include "writer.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <map>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -857,80 +860,121 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
     const int numLODs = static_cast<int>(m.scriptLods.size());
 
     // ProcessModel: dx90, non-fixed-function, hw flex
-    int modelIdx = 0;
     { PULSE_PERF("vtx", "strip build");
+    const Builder base = b; // per-task copy source: owns its hwState, models still empty
+
+    struct MeshTask {
+        fmt::mstudiomodel_t* pStudioModel;
+        int modelIdx;
+        int meshID;
+        size_t work;
+    };
+    std::vector<MeshTask> tasks;
+    int modelIdx = 0;
     for (int bp = 0; bp < phdr->numbodyparts; bp++) {
         fmt::mstudiobodyparts_t* pBodyPart = b.bodypart(bp);
         for (int mo = 0; mo < pBodyPart->nummodels; mo++, modelIdx++) {
             fmt::mstudiomodel_t* pStudioModel = b.model(pBodyPart, mo);
-            cm::Model& model = m.models[modelIdx];
+            const cm::Model& model = m.models[modelIdx];
 
             b.models.emplace_back();
             VtxModel& newModel = b.models.back();
-
+            newModel.modelLODs.resize(numLODs);
             for (int lodID = 0; lodID < numLODs; lodID++) {
-                const cm::ScriptLod& scriptLod = m.scriptLods[lodID];
-                newModel.modelLODs.emplace_back();
-                VtxModelLOD& newLOD = newModel.modelLODs.back();
-                newLOD.switchPoint = scriptLod.switchValue;
-
+                newModel.modelLODs[lodID].switchPoint = m.scriptLods[lodID].switchValue;
                 // a blank choice has no meshes at any LOD
-                if (!model.source)
-                    continue;
+                if (model.source)
+                    newModel.modelLODs[lodID].meshes.resize(pStudioModel->nummeshes);
+            }
+            if (!model.source)
+                continue;
+            for (int meshID = 0; meshID < pStudioModel->nummeshes; meshID++) {
+                size_t work = 0;
+                for (const auto& faces : model.outMeshes[meshID].lodFaces)
+                    work += faces.size();
+                tasks.push_back({pStudioModel, modelIdx, meshID, work});
+            }
+        }
+    }
 
-                // null = removemodel dropped this model at this LOD
-                const source::Source* pLodSource =
-                    lodID < static_cast<int>(model.lodSources.size()) ? model.lodSources[lodID]
-                                                                     : nullptr;
+    // One mesh's LODs, in order. Meshes own disjoint vvdCopy vertex ranges, so
+    // tasks only share read-only data and can run on separate threads.
+    auto runMesh = [&](const MeshTask& t) {
+        Builder tb = base;
+        fmt::mstudiomodel_t* pStudioModel = t.pStudioModel;
+        fmt::mstudiomesh_t* pStudioMesh = tb.mesh(pStudioModel, t.meshID);
+        const cm::Model& model = m.models[t.modelIdx];
+        const cm::OutMesh& outMesh = model.outMeshes[t.meshID];
 
-                for (int meshID = 0; meshID < pStudioModel->nummeshes; meshID++) {
-                    fmt::mstudiomesh_t* pStudioMesh = b.mesh(pStudioModel, meshID);
-                    const cm::OutMesh& outMesh = model.outMeshes[meshID];
+        for (int lodID = 0; lodID < numLODs; lodID++) {
+            const cm::ScriptLod& scriptLod = m.scriptLods[lodID];
+            // null = removemodel dropped this model at this LOD
+            const source::Source* pLodSource =
+                lodID < static_cast<int>(model.lodSources.size()) ? model.lodSources[lodID]
+                                                                 : nullptr;
 
-                    newLOD.meshes.emplace_back();
-                    VtxMesh& newMesh = newLOD.meshes.back();
-                    // ComputeMeshFlags: a non-zero materialtype
-                    // means the eyeball pass claimed this mesh. MESH_IS_TEETH needs
-                    // $mouth teeth material matching, which is not implemented.
-                    newMesh.flags = pStudioMesh->materialtype != 0 ? kMeshIsEyes : 0;
+            VtxMesh& newMesh = b.models[t.modelIdx].modelLODs[lodID].meshes[t.meshID];
+            // ComputeMeshFlags: a non-zero materialtype
+            // means the eyeball pass claimed this mesh. MESH_IS_TEETH needs
+            // $mouth teeth material matching, which is not implemented.
+            newMesh.flags = pStudioMesh->materialtype != 0 ? kMeshIsEyes : 0;
 
-                    // removemodel / removemesh leave the mesh header in place
-                    // with no strip groups: the per-LOD mesh count has to stay
-                    // equal to the .mdl's or FixupToSortedLODVertexes rejects
-                    // the pair. (The reference `continue`s the whole LOD here,
-                    // writing zero meshes - which only holds together for a
-                    // blank model, and is why its removemodel produces nothing.)
-                    // BuildOutputMeshes already left the list empty for both.
-                    if (!pLodSource || lodID >= static_cast<int>(outMesh.lodFaces.size()))
+            // removemodel / removemesh leave the mesh header in place
+            // with no strip groups: the per-LOD mesh count has to stay
+            // equal to the .mdl's or FixupToSortedLODVertexes rejects
+            // the pair. (The reference `continue`s the whole LOD here,
+            // writing zero meshes - which only holds together for a
+            // blank model, and is why its removemodel produces nothing.)
+            // BuildOutputMeshes already left the list empty for both.
+            if (!pLodSource || lodID >= static_cast<int>(outMesh.lodFaces.size()))
+                continue;
+            const std::vector<source::SrcFace>& meshFaces = outMesh.lodFaces[lodID];
+            if (meshFaces.empty())
+                continue;
+
+            std::vector<bool> facesProcessed(meshFaces.size(), false);
+
+            // 4 passes: hw+flexed, hw+nonflexed, sw+flexed, sw+nonflexed.
+            // Empty groups are dropped below, so a model with no flexes
+            // still emits only hw+nonflexed. dx90 (hwFlex) keeps flexed
+            // groups hardware-skinned; dx80 clamps them to 1 bone, which
+            // routes them into the software-skinned pass.
+            const bool anyFlexed = scriptLod.facialAnimation && MeshHasFlexedVerts(pStudioMesh);
+            for (int isHWSkinned = 1; isHWSkinned >= 0; --isHWSkinned) {
+                for (int isFlexed = 1; isFlexed >= 0; --isFlexed) {
+                    if (isFlexed && !anyFlexed)
                         continue;
-                    const std::vector<source::SrcFace>& meshFaces = outMesh.lodFaces[lodID];
-                    if (meshFaces.empty())
-                        continue;
-
-                    std::vector<bool> facesProcessed(meshFaces.size(), false);
-
-                    // 4 passes: hw+flexed, hw+nonflexed, sw+flexed, sw+nonflexed.
-                    // Empty groups are dropped below, so a model with no flexes
-                    // still emits only hw+nonflexed. dx90 (hwFlex) keeps flexed
-                    // groups hardware-skinned; dx80 clamps them to 1 bone, which
-                    // routes them into the software-skinned pass.
-                    const bool anyFlexed =
-                        scriptLod.facialAnimation && MeshHasFlexedVerts(pStudioMesh);
-                    for (int isHWSkinned = 1; isHWSkinned >= 0; --isHWSkinned) {
-                        for (int isFlexed = 1; isFlexed >= 0; --isFlexed) {
-                            if (isFlexed && !anyFlexed)
-                                continue;
-                            StripGroup sg;
-                            ProcessStripGroup(b, &sg, isHWSkinned != 0, isFlexed != 0, hwFlex,
-                                              pStudioModel, pStudioMesh, meshFaces, facesProcessed,
-                                              b.maxBonesPerVert, b.maxBonesPerFace,
-                                              b.maxBonesPerStrip, !scriptLod.facialAnimation);
-                            PostProcessStripGroup(&sg, newMesh.stripGroups);
-                        }
-                    }
+                    StripGroup sg;
+                    ProcessStripGroup(tb, &sg, isHWSkinned != 0, isFlexed != 0, hwFlex,
+                                      pStudioModel, pStudioMesh, meshFaces, facesProcessed,
+                                      tb.maxBonesPerVert, tb.maxBonesPerFace,
+                                      tb.maxBonesPerStrip, !scriptLod.facialAnimation);
+                    PostProcessStripGroup(&sg, newMesh.stripGroups);
                 }
             }
         }
+    };
+
+    // biggest meshes first so one large mesh does not finish last alone
+    std::stable_sort(tasks.begin(), tasks.end(),
+                     [](const MeshTask& a, const MeshTask& c) { return a.work > c.work; });
+    const size_t numWorkers =
+        std::min<size_t>(tasks.size(), std::max(1u, std::thread::hardware_concurrency()));
+    if (numWorkers <= 1) {
+        for (const MeshTask& t : tasks)
+            runMesh(t);
+    } else {
+        std::atomic<size_t> next{0};
+        auto worker = [&] {
+            for (size_t i = next++; i < tasks.size(); i = next++)
+                runMesh(tasks[i]);
+        };
+        std::vector<std::thread> pool;
+        for (size_t w = 1; w < numWorkers; ++w)
+            pool.emplace_back(worker);
+        worker();
+        for (std::thread& th : pool)
+            th.join();
     }
 
     }
@@ -1088,7 +1132,7 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
     int deltaModel = 0, deltaLOD = 0, deltaMesh = 0, deltaStrip = 0, deltaStripGroup = 0;
     int deltaVert = 0, deltaIndex = 0, deltaBoneStateChange = 0;
 
-    modelIdx = 0;
+    int modelIdx = 0;
     for (int bp = 0; bp < phdr->numbodyparts; bp++) {
         fmt::mstudiobodyparts_t* pBodyPart = b.bodypart(bp);
         for (int mo = 0; mo < pBodyPart->nummodels; mo++, modelIdx++) {

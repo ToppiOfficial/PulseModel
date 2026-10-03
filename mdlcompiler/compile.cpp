@@ -10989,6 +10989,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // straight after the realign that produced them.
     if (!RemapProceduralBones(ctx, err))
         return false;
+    if (input.stopAfterProcedural)
+        return true;
 
     // per-bone contents, now that the bone table is final
     ApplyJointContents(ctx);

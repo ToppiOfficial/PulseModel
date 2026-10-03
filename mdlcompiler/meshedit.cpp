@@ -911,6 +911,41 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
                 push[i] = s;
         }
 
+    // thicknessclamp: Blender solidify's Clamp. A vertex whose shortest edge is
+    // under |thickness| * clamp scales by edge / that; the weight stream then
+    // scales what is left. Edges are measured between positions, not split verts.
+    std::vector<float> clampScale(n, 1.0f);
+    const float clampOffset = std::fabs(o.thickness) * o.thicknessClamp;
+    if (clampOffset > FLT_EPSILON) {
+        std::map<std::tuple<float, float, float>, float> lenSq;
+        auto key = [&](uint32_t v) {
+            const Vector3& p = src.vertex[v].position;
+            return std::make_tuple(p.x, p.y, p.z);
+        };
+        for (int mi = 0; mi < src.nummeshes; ++mi) {
+            const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
+            for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+                const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
+                                  mesh.vertexoffset + src.face[f].c};
+                for (int k = 0; k < 3; ++k) {
+                    const Vector3 &a = src.vertex[c[k]].position, &b = src.vertex[c[(k + 1) % 3]].position;
+                    const float l = (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z);
+                    if (l == 0.0f)
+                        continue;
+                    for (uint32_t v : {c[k], c[(k + 1) % 3]}) {
+                        auto it = lenSq.try_emplace(key(v), FLT_MAX).first;
+                        it->second = std::min(it->second, l);
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < n; ++i) {
+            auto it = lenSq.find(key(i));
+            if (it != lenSq.end() && it->second < clampOffset * clampOffset)
+                clampScale[i] = std::sqrt(it->second) / clampOffset;
+        }
+    }
+
     std::vector<SrcVertex> verts = src.vertex;
     std::vector<int> origin; // per outline vertex, the source vertex it copies
     std::vector<int> noWeldOf(n, -1);
@@ -920,7 +955,7 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
         if (!o.weld && noWeldOf[v] >= 0)
             return noWeldOf[v];
         SrcVertex ov = src.vertex[v];
-        const float d = o.thickness * ov.outline;
+        const float d = o.thickness * ov.outline * clampScale[v];
         ov.material = om;
         ov.position = {ov.position.x + push[v].x * d, ov.position.y + push[v].y * d,
                        ov.position.z + push[v].z * d};
@@ -987,7 +1022,7 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
             if (at[v] < 0)
                 continue;
             SrcVertAnim va = morph.vanims[at[v]];
-            const float d = o.thickness * src.vertex[v].outline;
+            const float d = o.thickness * src.vertex[v].outline * clampScale[v];
             Vector3 flexed{push[v].x + va.normal.x, push[v].y + va.normal.y, push[v].z + va.normal.z};
             if (pm::VectorNormalize(flexed) > 0.0f) {
                 va.pos.x += d * (flexed.x - push[v].x);

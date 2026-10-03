@@ -4,7 +4,7 @@ add_executable(mdlcompiler main.cpp dmxloader.cpp dmxrig.cpp smdloader.cpp
                fbxloader.cpp meshedit.cpp compile.cpp facemarkup.cpp
                flexreg.cpp qcloader.cpp writemdl.cpp writevtx.cpp writephy.cpp)
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 0.30.2)
+set(TOOL_VERSION 0.31.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(mdlcompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 
@@ -16,5 +16,6 @@ if(WIN32)
 endif()
 # pulse_vhacd is named directly (not just via pulse_phys) because the compile
 # stage calls the decomposition API for PhysicsShapeFromRender.
+find_package(Threads REQUIRED)
 target_link_libraries(mdlcompiler PRIVATE pulse_libs pulse_dmx pulse_math pulse_meshopt
-                                          pulse_phys pulse_vhacd pulse_ufbx)
+                                          pulse_phys pulse_vhacd pulse_ufbx Threads::Threads)

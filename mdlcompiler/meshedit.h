@@ -159,6 +159,7 @@ bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* e
 // unencoded weight is 0, or 1 with forceUse.
 struct ToonOutlineOption {
     float thickness = 0.0f, minWeight = 0.1f, maxWeight = 1.0f;
+    float thicknessClamp = 0.0f; // Blender solidify Clamp factor, 0 = off
     bool weld = true, perMaterial = false, forceUse = false;
     std::string material = "toonoutline", cdmaterial;
     int line = 0;

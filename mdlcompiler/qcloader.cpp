@@ -29,6 +29,7 @@
 #include "flexreg.h"
 #include "meshedit.h"
 #include "fbxloader.h"
+#include "dependencies.h"
 #include "smdloader.h"
 
 namespace pulse::loader {
@@ -518,6 +519,7 @@ struct MeshEdit {
 // caller builds from it is still built fresh and stays private.
 std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& full,
                                                      std::string* err) {
+    pulse::dependencies::Note(full.string());
     const std::string key = Lower(full.string());
     auto it = c.dmxCache.find(key);
     if (it != c.dmxCache.end())
@@ -868,7 +870,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             // $toonoutline <stream> <thickness> [<min> <max>] [noweld] [permaterial]
-            //              [forceuseoutline] [materialname <name>] [cdmaterial <dir>]
+            //              [forceuseoutline] [thicknessclamp <clamp>] [materialname <name>] [cdmaterial <dir>]
             if (o == "$toonoutline") {
                 if (edit.toonOutline)
                     return c.Fail(t->line, where + ": $toonoutline written twice");
@@ -908,6 +910,11 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                         ol.perMaterial = true;
                     } else if (kw == "forceuseoutline") {
                         ol.forceUse = true;
+                    } else if (kw == "thicknessclamp") {
+                        if (!c.WantFloat("a thickness clamp factor", *t, ol.thicknessClamp))
+                            return false;
+                        if (!std::isfinite(ol.thicknessClamp) || ol.thicknessClamp <= 0.0f)
+                            return c.Fail(k->line, where + ": $toonoutline thicknessclamp must be above 0");
                     } else if (kw == "materialname") {
                         if (!c.Want("a material name", *t, ol.material))
                             return false;
@@ -917,7 +924,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                             return false;
                     } else {
                         return c.Fail(k->line, where + ": $toonoutline expects noweld, permaterial, "
-                                                       "forceuseoutline, materialname or cdmaterial, got \"" +
+                                                       "forceuseoutline, thicknessclamp, materialname or cdmaterial, got \"" +
                                                        k->text + "\"");
                     }
                 }
@@ -5824,6 +5831,7 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
     if (full.empty())
         return c.Fail(cmd.line, "cannot find \"" + filename + "\" - looked in:" +
                                 LookedIn(tried));
+    pulse::dependencies::Note(full.string());
     std::ifstream f(full.string(), std::ios::binary);
     if (!f)
         return c.Fail(cmd.line, "cannot open \"" + full.string() + "\"");
@@ -8070,6 +8078,7 @@ bool SpliceInclude(Ctx& c) {
             return c.Fail(cmd.line, "$include: \"" + rel +
                                     "\" is already open - circular include");
 
+    pulse::dependencies::Note(full.string(), pulse::dependencies::Kind::Include);
     std::ifstream f(full, std::ios::binary);
     if (!f)
         return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
@@ -8943,6 +8952,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
                   const SearchDirs& fileDirs) {
     const std::string normalizedPath = pulse::FilePath(rawPath).string();
     const char* path = normalizedPath.c_str();
+    pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script);
     std::ifstream f(path, std::ios::binary);
     if (!f) {
         if (err) *err = std::string("cannot open \"") + path + "\"";

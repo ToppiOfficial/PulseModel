@@ -920,6 +920,14 @@ int Usage() {
         "                   44.1 kHz wav in <dir>/sound/mmd/\n"
         "  -start <frame>   first MMD frame (default 0)\n"
         "  -end <frame>     last MMD frame (default the motion's last key)\n"
+        "  -walkframe <n>   extract the root's ground travel as sequence movement\n"
+        "                   (LX LY): a walkframe every <n> clip frames, or 0 to place\n"
+        "                   them where the path turns or changes speed; keep <n>\n"
+        "                   coarse, a walkframe per frame is only worth it for\n"
+        "                   erratic travel\n"
+        "  -walktolerance <units>\n"
+        "                   with -walkframe 0: how far travel may stray from a steady\n"
+        "                   straight line before another walkframe (default 4)\n"
         "  -uncompressanim  keep every frame past the %d-frame limit, for engine\n"
         "                   branches that take more; default resamples to fit\n"
         "  -dmxencoding <enc>\n"
@@ -992,7 +1000,54 @@ struct Clip {
     int fps = 30;
     std::string sound; // path under sound/, empty for none
     bool camera = false; // an .smd holding only kCameraBone
+    std::string walk;    // walkframe options for its $sequence
 };
+
+// Walkframes for the root's ground (XY) travel. Every <every> frames when set,
+// else split where steady straight-line travel misses the path by over <tol>.
+std::string WalkFrames(const std::vector<std::vector<AnimPose>>& frames, int root, long every,
+                       float tol) {
+    const long last = static_cast<long>(frames.size()) - 1;
+    if (last < 1)
+        return std::string();
+    std::vector<long> keys;
+    if (every > 0) {
+        for (long f = every; f < last; f += every)
+            keys.push_back(f);
+    } else {
+        const auto at = [&](long f) { return frames[static_cast<size_t>(f)][root].pos; };
+        std::vector<std::pair<long, long>> todo{{0, last}};
+        while (!todo.empty()) {
+            const auto [a, b] = todo.back();
+            todo.pop_back();
+            const Vector3 pa = at(a), pb = at(b);
+            float worst = tol;
+            long split = -1;
+            for (long f = a + 1; f < b; ++f) {
+                const float u = static_cast<float>(f - a) / static_cast<float>(b - a);
+                const Vector3 pf = at(f);
+                const float dx = pf.x - (pa.x + (pb.x - pa.x) * u);
+                const float dy = pf.y - (pa.y + (pb.y - pa.y) * u);
+                const float d = std::sqrt(dx * dx + dy * dy);
+                if (d > worst) {
+                    worst = d;
+                    split = f;
+                }
+            }
+            if (split < 0)
+                continue;
+            keys.push_back(split);
+            todo.push_back({a, split});
+            todo.push_back({split, b});
+        }
+        std::sort(keys.begin(), keys.end());
+    }
+    keys.push_back(last);
+    std::string s;
+    for (long f : keys)
+        s += " walkframe " + std::to_string(f) + " LX LY";
+    return s;
+}
 
 // Root bone the camera clip animates: origin at the eye, +X along the view, +Z up.
 const char* const kCameraBone = "mmd_camera";
@@ -1148,8 +1203,8 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
     }
     std::fprintf(f, "\n$animblocksize 64\n\n");
     for (const Clip& c : clips) {
-        std::fprintf(f, "$sequence \"%s\" \"%s.%s\" fps %d", c.name.c_str(), c.name.c_str(),
-                     c.camera ? "smd" : "dmx", c.fps);
+        std::fprintf(f, "$sequence \"%s\" \"%s.%s\" fps %d%s", c.name.c_str(), c.name.c_str(),
+                     c.camera ? "smd" : "dmx", c.fps, c.walk.c_str());
         // client-side, fires at sequence start; a .wav/.mp3 name skips soundscripts
         if (!c.sound.empty())
             std::fprintf(f, " {\n    event AE_CL_PLAYSOUND 0 \"%s\"\n}", c.sound.c_str());
@@ -1168,6 +1223,8 @@ int main(int argc, char** argv) {
     std::string faceSet = "facs", cameraFov;
     float armAngle = 35.0f, eyeRange = 30.0f;
     long startArg = -1, endArg = -1;
+    long walkEvery = -1;
+    float walkTol = 4.0f;
     bool uncompress = false, sound = false;
     std::string dmxEncoding = "binary";
     int dmxModel = 15;
@@ -1186,6 +1243,12 @@ int main(int argc, char** argv) {
         else if (!_stricmp(a, "-start")) startArg = std::atol(next());
         else if (!_stricmp(a, "-end")) endArg = std::atol(next());
         else if (!_stricmp(a, "-uncompressanim")) uncompress = true;
+        else if (!_stricmp(a, "-walkframe")) {
+            walkEvery = std::atol(next());
+            if (walkEvery < 0)
+                return Fail("-walkframe must be 0 (auto) or more frames");
+        }
+        else if (!_stricmp(a, "-walktolerance")) walkTol = static_cast<float>(std::atof(next()));
         else if (!_stricmp(a, "-sound")) sound = true;
         else if (!_stricmp(a, "-dmxencoding")) dmxEncoding = next();
         else if (!_stricmp(a, "-dmxmodel")) dmxModel = std::atoi(next());
@@ -1198,6 +1261,8 @@ int main(int argc, char** argv) {
         return Usage();
     if (!outPath.empty() && (vmdPaths.size() > 1 || !compileName.empty()))
         return Fail("-o names one .dmx; it cannot be used with several -vmd or with -compile");
+    if (walkTol <= 0.0f)
+        return Fail("-walktolerance must be above 0");
     if (sound && compileName.empty())
         return Fail("-sound writes a sequence event, so it needs -compile");
     if (const char* e = mdldecompiler::SetDmxOutput(dmxEncoding, dmxModel))
@@ -1577,7 +1642,11 @@ int main(int argc, char** argv) {
         if (!mdldecompiler::WriteAnimationDmx(m, path, clip, fps, frames,
                                               dmxModel == 22 && srcDir.empty() ? flex : nullptr))
             return Fail("cannot write \"" + path + "\"");
-        clips.push_back({clip, fps, std::string()});
+        int root = pelvis;
+        while (t.parent[root] >= 0)
+            root = t.parent[root];
+        const std::string walkOpts = walkEvery >= 0 ? WalkFrames(frames, root, walkEvery, walkTol) : std::string();
+        clips.push_back({clip, fps, std::string(), false, walkOpts});
 
         std::printf("wrote %s\n", path.c_str());
         std::printf("  %ld frame%s at %d fps", count, count == 1 ? "" : "s", fps);
@@ -1691,8 +1760,8 @@ int main(int argc, char** argv) {
                 std::printf("  warning: -start trims the motion but not the audio - they will not line up\n");
         }
         if (srcDir.empty())
-            std::printf("  $sequence \"%s\" \"%s\" fps %d\n", clip.c_str(),
-                        mdldecompiler::BaseName(path).c_str(), fps);
+            std::printf("  $sequence \"%s\" \"%s\" fps %d%s\n", clip.c_str(),
+                        mdldecompiler::BaseName(path).c_str(), fps, walkOpts.c_str());
     }
     if (clips.empty())
         return Fail("none of the .vmd files keys a standard MMD bone - nothing to write");
