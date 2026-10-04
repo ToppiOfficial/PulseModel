@@ -375,8 +375,9 @@ bool RecoverIkBase(const Mdl& m, const std::string& mdlPath, std::vector<pm::Vec
         const float lf = a.numframes > 1 ? static_cast<float>(a.numframes - 1) : 1.0f;
         for (int r = 0; r < a.numikrules; ++r) {
             const int hand = chainEnd(rules[r].chain);
+            // bone -1 is a bone-less `touch ""`: its error is the hand in model space
             if (rules[r].type != fm::IK_SELF || rules[r].compressedikerrorindex == 0 || hand < 0 ||
-                rules[r].bone < 0 || rules[r].bone >= h.numbones)
+                rules[r].bone < -1 || rules[r].bone >= h.numbones)
                 continue;
             targets.push_back({i, rules[r].bone, hand, static_cast<int>(std::lround(rules[r].start * lf)),
                                static_cast<int>(std::lround(rules[r].end * lf)), &rules[r], rblk});
@@ -448,7 +449,8 @@ bool RecoverIkBase(const Mdl& m, const std::string& mdlPath, std::vector<pm::Vec
                                    : pm::ConcatTransforms(world[bones[b].parent], mm);
                 }
                 const pm::matrix3x4 loc =
-                    pm::ConcatTransforms(pm::MatrixInvert(world[t.touch]), world[t.hand]);
+                    t.touch < 0 ? world[t.hand]
+                                : pm::ConcatTransforms(pm::MatrixInvert(world[t.touch]), world[t.hand]);
                 pm::RadianEuler cr;
                 pm::Vector3 cp;
                 pm::MatrixAngles(loc, cr, cp);
@@ -499,76 +501,153 @@ void SetAnimFormat(bool smd) { g_smd = smd; }
 
 const char* AnimExt() { return g_smd ? ".smd" : ".dmx"; }
 
-void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::string& dir) {
-    const fm::studiohdr_t& h = *m.hdr;
-    const fm::mstudioanimdesc_t* descs =
-        m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
-    const fm::mstudiobone_t* bones =
-        m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
-    if (!descs || !bones || h.numlocalanim <= 0 || h.numbones <= 0)
-        return;
+namespace {
 
-    // demand-loaded sections live in the sibling .ani, addressed through the
-    // block table; without it those clips are skipped rather than half written
-    std::vector<char> ani;
-    const fm::mstudioanimblock_t* blocks =
-        m.At<fm::mstudioanimblock_t>(m.buf.data(), h.animblockindex, h.numanimblocks);
-    if (blocks && h.numanimblocks > 1)
-        ReadWhole(StripExt(mdlPath) + ".ani", ani);
-
-    const std::vector<std::string> boneNames = BoneNames(m);
-    const std::vector<AnimRef> refs = AnimRefs(m);
-    const std::string animDir = dir + "/anims";
-    std::error_code ec;
-    std::filesystem::create_directories(animDir, ec);
-
-    const Block local{m.buf.data(), m.buf.data() + m.buf.size()};
-    const Block ext{ani.empty() ? nullptr : ani.data(),
-                    ani.empty() ? nullptr : ani.data() + ani.size()};
-
-    // A delta clip is stored already subtracted, but the .pulseqc rebuilds it
-    // with `subtract "<base>" 0` - so the SMD has to carry the pose BEFORE the
-    // subtraction or the compiler takes it out twice. Decode the base once up
-    // front to put it back; where the file has no clip that can serve, the bind
-    // pose does, and gets written out as a clip of its own.
-    const int baseIndex = SubtractBase(m, refs);
-    std::vector<Pose> realBase, bindPose(static_cast<size_t>(h.numbones));
-    for (int j = 0; j < h.numbones; ++j)
-        bindPose[j] = Pose{bones[j].pos, bones[j].rot};
-    // the recovered IK base ships as a_bindpose, so its pose replaces the skeleton
-    // bind pose the synthesized clip would otherwise carry
-    if (m.ikRecovered && static_cast<int>(m.ikBasePos.size()) == h.numbones)
-        for (int j = 0; j < h.numbones; ++j)
-            bindPose[j] = Pose{m.ikBasePos[j], m.ikBaseRot[j]};
-    if (baseIndex >= 0) {
-        std::vector<std::vector<Pose>> f;
-        if (DecodeAnim(m, descs[baseIndex], bones, h.numbones, local, ext, blocks,
-                       h.numanimblocks, f) &&
-            !f.empty())
-            realBase = f[0];
-    }
-
-    // BuildRawTransforms yaws a source clip's ROOT bones by g_defaultrotation
-    // (+90 about Z) on the way in, so the clip goes back out with that removed.
-    // Child bones are parent-relative and never see it.
-    // Y-up bakes {pi/2,0,pi/2}, whose inverse is not a single negated euler.
+// Decodes a model's local clips into the space the decompile writes them: delta
+// and motion extraction undone, root bones un-yawed.
+struct ClipSource {
+    const Mdl& m;
+    const fm::mstudioanimdesc_t* descs = nullptr;
+    const fm::mstudiobone_t* bones = nullptr;
+    const fm::mstudioanimblock_t* blocks = nullptr;
+    Block local, ext;
+    int baseIndex = -1;
+    std::vector<Pose> realBase, bindPose;
     pm::matrix3x4 unrotate;
-    if (ModelUsesUpAxisY(m)) {
-        pm::matrix3x4 fwd;
-        pm::AngleMatrix(pm::RadianEuler{pm::kPiF / 2.0f, 0.0f, pm::kPiF / 2.0f}, fwd);
-        unrotate = pm::MatrixInvert(fwd);
-    } else {
-        pm::AngleMatrix(pm::RadianEuler{0.0f, 0.0f, -pm::kPiF / 2.0f}, unrotate);
+
+    ClipSource(const Mdl& mdl, const std::vector<char>& ani) : m(mdl) {
+        const fm::studiohdr_t& h = *m.hdr;
+        descs = m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
+        bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+        blocks = m.At<fm::mstudioanimblock_t>(m.buf.data(), h.animblockindex, h.numanimblocks);
+        local = {m.buf.data(), m.buf.data() + m.buf.size()};
+        ext = {ani.empty() ? nullptr : ani.data(), ani.empty() ? nullptr : ani.data() + ani.size()};
+
+        // BuildRawTransforms yaws a source clip's ROOT bones by g_defaultrotation
+        // (+90 about Z) on the way in, so the clip goes back out with that removed.
+        // Child bones are parent-relative and never see it.
+        // Y-up bakes {pi/2,0,pi/2}, whose inverse is not a single negated euler.
+        if (ModelUsesUpAxisY(m)) {
+            pm::matrix3x4 fwd;
+            pm::AngleMatrix(pm::RadianEuler{pm::kPiF / 2.0f, 0.0f, pm::kPiF / 2.0f}, fwd);
+            unrotate = pm::MatrixInvert(fwd);
+        } else {
+            pm::AngleMatrix(pm::RadianEuler{0.0f, 0.0f, -pm::kPiF / 2.0f}, unrotate);
+        }
+        if (!Valid())
+            return;
+
+        // A delta clip is stored already subtracted, but the .pulseqc rebuilds it
+        // with `subtract "<base>" 0` - so the SMD has to carry the pose BEFORE the
+        // subtraction or the compiler takes it out twice. Decode the base once up
+        // front to put it back; where the file has no clip that can serve, the bind
+        // pose does, and gets written out as a clip of its own.
+        baseIndex = SubtractBase(m, AnimRefs(m));
+        bindPose.resize(static_cast<size_t>(h.numbones));
+        for (int j = 0; j < h.numbones; ++j)
+            bindPose[j] = Pose{bones[j].pos, bones[j].rot};
+        // the recovered IK base ships as a_bindpose, so its pose replaces the skeleton
+        // bind pose the synthesized clip would otherwise carry
+        if (m.ikRecovered && static_cast<int>(m.ikBasePos.size()) == h.numbones)
+            for (int j = 0; j < h.numbones; ++j)
+                bindPose[j] = Pose{m.ikBasePos[j], m.ikBaseRot[j]};
+        if (baseIndex >= 0) {
+            std::vector<std::vector<Pose>> f;
+            if (DecodeAnim(m, descs[baseIndex], bones, h.numbones, local, ext, blocks,
+                           h.numanimblocks, f) &&
+                !f.empty())
+                realBase = f[0];
+        }
     }
-    auto unyawRoots = [&](std::vector<Pose>& fr) {
-        for (int j = 0; j < h.numbones; ++j) {
+
+    bool Valid() const {
+        return descs && bones && m.hdr->numlocalanim > 0 && m.hdr->numbones > 0;
+    }
+
+    void UnyawRoots(std::vector<Pose>& fr) const {
+        for (int j = 0; j < m.hdr->numbones; ++j) {
             if (bones[j].parent >= 0)
                 continue;
             pm::matrix3x4 mm;
             pm::AngleMatrix(fr[j].rot, fr[j].pos, mm);
             pm::MatrixAngles(pm::ConcatTransforms(unrotate, mm), fr[j].rot, fr[j].pos);
         }
-    };
+    }
+
+    // False when the clip's data is in a .ani that is missing or short.
+    bool Decode(int i, std::vector<std::vector<Pose>>& frames) const {
+        const fm::studiohdr_t& h = *m.hdr;
+        const fm::mstudioanimdesc_t& a = descs[i];
+        if (!DecodeAnim(m, a, bones, h.numbones, local, ext, blocks, h.numanimblocks, frames))
+            return false;
+
+        // Undo SubtractBaseAnimations. The script writes `subtract`, which the
+        // compiler runs with STUDIO_POST - so the delta is base^-1 * pose and
+        // pose - base, whatever the clip's own POST flag says. (`presubtract`
+        // is the other direction; nothing here emits it.) A bone the clip's
+        // weightlist zeroed was left absolute and is quietly wrong here - rare
+        // enough to live with.
+        if (a.flags & fm::STUDIO_DELTA) {
+            const std::vector<Pose>& subBase =
+                (baseIndex >= 0 && baseIndex < i && !realBase.empty()) ? realBase : bindPose;
+            for (std::vector<Pose>& fr : frames) {
+                for (int j = 0; j < h.numbones; ++j) {
+                    pm::Quaternion qbase, qd;
+                    pm::AngleQuaternion(subBase[j].rot, qbase);
+                    pm::AngleQuaternion(fr[j].rot, qd);
+                    pm::QuaternionSMAngles(1.0f, qbase, qd, fr[j].rot);
+                    fr[j].pos = {fr[j].pos.x + subBase[j].pos.x, fr[j].pos.y + subBase[j].pos.y,
+                                 fr[j].pos.z + subBase[j].pos.z};
+                }
+            }
+        }
+
+        // motion was extracted in the yawed compile space, so it goes back on
+        // before the yaw comes off
+        RestoreMotion(m, a, bones, h.numbones, frames);
+
+        for (std::vector<Pose>& fr : frames)
+            UnyawRoots(fr);
+        return true;
+    }
+};
+
+} // namespace
+
+bool DecodeClip(const Mdl& m, int anim, std::vector<std::vector<AnimPose>>& frames) {
+    const ClipSource src(m, m.ani);
+    return src.Valid() && anim >= 0 && anim < m.hdr->numlocalanim && src.Decode(anim, frames);
+}
+
+std::vector<AnimPose> BindPose(const Mdl& m) {
+    const ClipSource src(m, m.ani);
+    std::vector<Pose> pose;
+    for (int j = 0; src.bones && j < m.hdr->numbones; ++j)
+        pose.push_back(Pose{src.bones[j].pos, src.bones[j].rot});
+    if (src.bones)
+        src.UnyawRoots(pose);
+    return pose;
+}
+
+void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::string& dir) {
+    const fm::studiohdr_t& h = *m.hdr;
+    // demand-loaded sections live in the sibling .ani, addressed through the
+    // block table; without it those clips are skipped rather than half written
+    std::vector<char> ani;
+    if (m.At<fm::mstudioanimblock_t>(m.buf.data(), h.animblockindex, h.numanimblocks) &&
+        h.numanimblocks > 1)
+        ReadWhole(StripExt(mdlPath) + ".ani", ani);
+    const ClipSource src(m, ani);
+    if (!src.Valid())
+        return;
+    const fm::mstudioanimdesc_t* descs = src.descs;
+    const fm::mstudiobone_t* bones = src.bones;
+
+    const std::vector<std::string> boneNames = BoneNames(m);
+    const std::vector<AnimRef> refs = AnimRefs(m);
+    const std::string animDir = dir + "/anims";
+    std::error_code ec;
+    std::filesystem::create_directories(animDir, ec);
 
     auto emit = [&](const std::string& name, const std::vector<std::vector<Pose>>& frames,
                     int fps) {
@@ -608,9 +687,9 @@ void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::st
     };
 
     int written = 0, skipped = 0;
-    if (NeedsBindPoseAnim(m, baseIndex)) {
-        std::vector<std::vector<Pose>> one{bindPose};
-        unyawRoots(one[0]);
+    if (NeedsBindPoseAnim(m, src.baseIndex)) {
+        std::vector<std::vector<Pose>> one{src.bindPose};
+        src.UnyawRoots(one[0]);
         if (emit(kBindPoseAnim, one, 30)) // the fps the .pulseqc writes for it
             ++written;
     }
@@ -618,44 +697,15 @@ void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::st
         const fm::mstudioanimdesc_t& a = descs[i];
         if (a.flags & fm::STUDIO_OVERRIDE)
             continue; // $declareanimation - the data lives in the $includemodel
-        const int numframes = a.numframes > 0 ? a.numframes : 1;
 
         std::vector<std::vector<Pose>> frames;
-        if (!DecodeAnim(m, a, bones, h.numbones, local, ext, blocks, h.numanimblocks, frames)) {
+        if (!src.Decode(i, frames)) {
             std::printf("  \"%s\": animation data is in a .ani that is missing or short "
                         "- skipped\n",
                         refs[i].name.c_str());
             ++skipped;
             continue;
         }
-
-        // Undo SubtractBaseAnimations. The script writes `subtract`, which the
-        // compiler runs with STUDIO_POST - so the delta is base^-1 * pose and
-        // pose - base, whatever the clip's own POST flag says. (`presubtract`
-        // is the other direction; nothing here emits it.) A bone the clip's
-        // weightlist zeroed was left absolute and is quietly wrong here - rare
-        // enough to live with.
-        if (a.flags & fm::STUDIO_DELTA) {
-            const std::vector<Pose>& subBase =
-                (baseIndex >= 0 && baseIndex < i && !realBase.empty()) ? realBase : bindPose;
-            for (std::vector<Pose>& fr : frames) {
-                for (int j = 0; j < h.numbones; ++j) {
-                    pm::Quaternion qbase, qd;
-                    pm::AngleQuaternion(subBase[j].rot, qbase);
-                    pm::AngleQuaternion(fr[j].rot, qd);
-                    pm::QuaternionSMAngles(1.0f, qbase, qd, fr[j].rot);
-                    fr[j].pos = {fr[j].pos.x + subBase[j].pos.x, fr[j].pos.y + subBase[j].pos.y,
-                                 fr[j].pos.z + subBase[j].pos.z};
-                }
-            }
-        }
-
-        // motion was extracted in the yawed compile space, so it goes back on
-        // before the yaw comes off
-        RestoreMotion(m, a, bones, h.numbones, frames);
-
-        for (std::vector<Pose>& fr : frames)
-            unyawRoots(fr);
 
         // the clip's own fps, so the DMX key times land on the frames the
         // `fps` the script writes will sample

@@ -6,6 +6,7 @@
 #include "perf.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cctype>
 #include <cfloat>
@@ -15,7 +16,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "dmxloader.h"
@@ -6570,6 +6573,25 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 }
                 break;
             }
+            case AnimCmd::MatchPosition: {
+                if (!(panim.flags & STUDIO_DELTA)) {
+                    if (err) *err = "matchposition in " + panim.name + " needs a subtract before it";
+                    return false;
+                }
+                const int bone = FindGlobalBone(m, cmd.alignBone);
+                if (bone == -1) {
+                    if (err) *err = "unable to find bone " + cmd.alignBone +
+                                    " for matchposition in " + panim.name;
+                    return false;
+                }
+                for (int j = 0; j < panim.numframes; j++) {
+                    Vector3& p = panim.sanim[j][bone].pos;
+                    if (cmd.motiontype & 0x0001) p.x = 0.0f;
+                    if (cmd.motiontype & 0x0002) p.y = 0.0f;
+                    if (cmd.motiontype & 0x0004) p.z = 0.0f;
+                }
+                break;
+            }
             case AnimCmd::TransformBone: {
                 // transformbone: offset one bone across every frame. Unweighted
                 // by design - it moves the whole clip rather than blending into
@@ -8600,19 +8622,63 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
         }
     }
 
-    for (Anim& panim : m.anims) {
+    std::vector<matrix3x4> poseToBone(m.bones.size());
+    for (size_t k = 0; k < m.bones.size(); k++)
+        poseToBone[k] = pm::MatrixInvert(m.bones[k].boneToPose);
+
+    // Seam/LOD copies skin to the same bits, and VecMin/VecMax keep the
+    // accumulator on a tie, so dropping later duplicates leaves the boxes exact.
+    struct SkinVert {
+        Vector3 position;
+        int numbones;
+        int bone[lim::kMaxBoneWeights];
+        float weight[lim::kMaxBoneWeights];
+    };
+    struct SkinVertHash {
+        size_t operator()(const SkinVert& v) const {
+            const auto* p = reinterpret_cast<const unsigned char*>(&v);
+            size_t h = 14695981039346656037ull;
+            for (size_t i = 0; i < sizeof(SkinVert); i++)
+                h = (h ^ p[i]) * 1099511628211ull;
+            return h;
+        }
+    };
+    struct SkinVertEq {
+        bool operator()(const SkinVert& a, const SkinVert& b) const {
+            return std::memcmp(&a, &b, sizeof(SkinVert)) == 0;
+        }
+    };
+    std::vector<SkinVert> skinVerts;
+    {
+        std::unordered_set<SkinVert, SkinVertHash, SkinVertEq> seen;
+        for (const Model& model : m.models) {
+            for (const LodVertex& v : model.vertices) {
+                SkinVert s;
+                std::memset(&s, 0, sizeof(s));
+                s.position = v.position;
+                s.numbones = v.boneweight.numbones;
+                for (int mm = 0; mm < s.numbones; mm++) {
+                    s.bone[mm] = v.boneweight.bone[mm];
+                    s.weight[mm] = v.boneweight.weight[mm];
+                }
+                if (seen.insert(s).second)
+                    skinVerts.push_back(s);
+            }
+        }
+    }
+
+    // Cost is frames x vertices, so animations run in parallel; min/max is
+    // order-independent, so the boxes match a serial run bit for bit.
+    auto calcAnim = [&](Anim& panim) {
         Vector3 bmin{9999.0f, 9999.0f, 9999.0f};
         Vector3 bmax{-9999.0f, -9999.0f, -9999.0f};
 
+        std::vector<matrix3x4> bonetransform;
+        std::vector<matrix3x4> posetransform(m.bones.size());
         for (int j = 0; j < panim.numframes; j++) {
-            std::vector<matrix3x4> bonetransform;
             CalcBoneTransforms(ctx, panim, j, bonetransform);
-
-            std::vector<matrix3x4> posetransform(m.bones.size());
-            for (size_t k = 0; k < m.bones.size(); k++) {
-                matrix3x4 bonematrix = pm::MatrixInvert(m.bones[k].boneToPose);
-                posetransform[k] = pm::ConcatTransforms(bonetransform[k], bonematrix);
-            }
+            for (size_t k = 0; k < m.bones.size(); k++)
+                posetransform[k] = pm::ConcatTransforms(bonetransform[k], poseToBone[k]);
 
             // include hitboxes / bone render bounds
             for (size_t k = 0; k < m.bones.size(); k++) {
@@ -8623,22 +8689,46 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
             }
 
             // include vertices
-            for (Model& model : m.models) {
-                for (const LodVertex& v : model.vertices) {
-                    Vector3 pos{0, 0, 0};
-                    for (int mm = 0; mm < v.boneweight.numbones; mm++) {
-                        Vector3 tmp =
-                            pm::VectorTransform(v.position, posetransform[v.boneweight.bone[mm]]);
-                        pos.x += v.boneweight.weight[mm] * tmp.x;
-                        pos.y += v.boneweight.weight[mm] * tmp.y;
-                        pos.z += v.boneweight.weight[mm] * tmp.z;
-                    }
-                    bmin = VecMin(pos, bmin);
-                    bmax = VecMax(pos, bmax);
+            for (const SkinVert& v : skinVerts) {
+                Vector3 pos{0, 0, 0};
+                for (int mm = 0; mm < v.numbones; mm++) {
+                    Vector3 tmp = pm::VectorTransform(v.position, posetransform[v.bone[mm]]);
+                    pos.x += v.weight[mm] * tmp.x;
+                    pos.y += v.weight[mm] * tmp.y;
+                    pos.z += v.weight[mm] * tmp.z;
                 }
+                bmin = VecMin(pos, bmin);
+                bmax = VecMax(pos, bmax);
             }
         }
 
+        panim.bmin = bmin;
+        panim.bmax = bmax;
+    };
+
+    const size_t numWorkers =
+        std::min<size_t>(m.anims.size(), std::max(1u, std::thread::hardware_concurrency()));
+    if (numWorkers <= 1) {
+        for (Anim& panim : m.anims)
+            calcAnim(panim);
+    } else {
+        std::atomic<size_t> next{0};
+        auto worker = [&] {
+            for (size_t i = next++; i < m.anims.size(); i = next++)
+                calcAnim(m.anims[i]);
+        };
+        std::vector<std::thread> pool;
+        for (size_t w = 1; w < numWorkers; ++w)
+            pool.emplace_back(worker);
+        worker();
+        for (std::thread& th : pool)
+            th.join();
+    }
+
+    // Clamp serially so the warnings print in animation order.
+    for (Anim& panim : m.anims) {
+        Vector3& bmin = panim.bmin;
+        Vector3& bmax = panim.bmax;
         if (bmin.x < -kMaxCoord || bmin.y < -kMaxCoord || bmin.z < -kMaxCoord ||
             bmax.x > kMaxCoord || bmax.y > kMaxCoord || bmax.z > kMaxCoord) {
             std::fprintf(stderr,
@@ -8649,9 +8739,6 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
             bmin = VecMax(bmin, Vector3{-kMaxCoord, -kMaxCoord, -kMaxCoord});
             bmax = VecMin(bmax, Vector3{kMaxCoord, kMaxCoord, kMaxCoord});
         }
-
-        panim.bmin = bmin;
-        panim.bmax = bmax;
     }
 
     for (Sequence& seq : m.sequences) {
@@ -10453,6 +10540,11 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             case InCmd::TransformBone:
                 cmd.kind = AnimCmd::TransformBone;
                 cmd.xform = ic.xform;
+                break;
+            case InCmd::MatchPosition:
+                cmd.kind = AnimCmd::MatchPosition;
+                cmd.alignBone = ic.alignBone;
+                cmd.motiontype = ic.motiontype;
                 break;
             case InCmd::FixupLoop:
                 cmd.kind = AnimCmd::FixupLoop;

@@ -5,6 +5,7 @@
 
 #include <string>
 
+#include "dmxwrite.h"
 #include "mdlfile.h"
 
 namespace mdldecompiler {
@@ -23,6 +24,13 @@ void ComputeIkBaseRecovery(Mdl& m, const std::string& mdlPath);
 // AnimRefs() alias the .pulseqc writes. `mdlPath` locates a sibling .ani for
 // demand-loaded clips. Reports what it wrote and never fails the decompile.
 void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::string& dir);
+
+// Local animation `anim` as WriteAnimationFiles writes it, reading block data from
+// m.ani. False when that data is missing or short.
+bool DecodeClip(const Mdl& m, int anim, std::vector<std::vector<AnimPose>>& frames);
+
+// The skeleton's bind pose in the space DecodeClip returns.
+std::vector<AnimPose> BindPose(const Mdl& m);
 
 } // namespace mdldecompiler
 

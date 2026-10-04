@@ -156,7 +156,8 @@ bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* e
 
 // $toonoutline: append an inverse hull pushed out by thickness * SrcVertex::outline.
 // A face with a corner weight outside [minWeight, maxWeight] gets no hull. An
-// unencoded weight is 0, or 1 with forceUse.
+// unencoded weight is 0, or 1 with forceUse. perMaterial names each hull
+// material <source material>_<material>.
 struct ToonOutlineOption {
     float thickness = 0.0f, minWeight = 0.1f, maxWeight = 1.0f;
     float thicknessClamp = 0.0f; // Blender solidify Clamp factor, 0 = off

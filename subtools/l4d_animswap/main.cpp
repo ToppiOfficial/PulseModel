@@ -10,15 +10,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "animwrite.h"
+#include "dmxwrite.h"
 #include "format/mdl.h"
+#include "mdlfile.h"
 
 namespace fm = pulse::format;
+namespace dc = mdldecompiler;
 
 namespace {
 
@@ -388,12 +393,347 @@ Result Build(const std::vector<std::string>& order, const std::vector<std::strin
     return r;
 }
 
+// ------------------------------------------------------------------- retarget
+
+// Slots whose clip is rebuilt for the rig instead of riding the target's include.
+// cXmY_intro and The Passing's dlc1_* scene clips; their delta gestures stay declares.
+bool Retargetable(const std::string& name) {
+    return IsCampaignIntro(name) || Lower(name).compare(0, 5, "dlc1_") == 0;
+}
+
+std::string Quote(const std::string& s) { return "\"" + s + "\""; }
+
+// Rebuilds a target survivor's clip on the rig's skeleton: local rotations carry
+// over by bone name, translations keep the rig's bone lengths and add the clip's
+// offset from the target's bind pose, scaled by pelvis height (root height only).
+struct Retargeter {
+    std::string dir, outDir;
+    const Survivor* rig = nullptr;
+    dc::Mdl rigMdl;
+    bool rigOk = false;
+    std::map<std::string, dc::Mdl> cache;
+    int written = 0;
+
+    bool Load(const std::string& leaf, dc::Mdl& m) {
+        if (!dc::ReadWhole(dir + "/" + leaf, m.buf) || m.buf.size() < sizeof(fm::studiohdr_t))
+            return false;
+        m.hdr = reinterpret_cast<const fm::studiohdr_t*>(m.buf.data());
+        if (m.hdr->id != fm::kIdStudioHeader)
+            return false;
+        if (m.hdr->numanimblocks > 1)
+            dc::ReadWhole(dir + "/" + dc::StripExt(leaf) + ".ani", m.ani);
+        return true;
+    }
+
+    bool Init(const std::string& vanilla, const Survivor& r, const std::string& out) {
+        dir = vanilla;
+        rig = &r;
+        outDir = out;
+        rigOk = Load("survivor_" + std::string(r.code) + ".mdl", rigMdl) && rigMdl.hdr->numbones > 0;
+        if (!rigOk)
+            std::fprintf(stderr, "  -retarget: cannot read survivor_%s.mdl\n", r.code);
+        return rigOk;
+    }
+
+    const dc::Mdl* Get(const std::string& leaf) {
+        const std::string key = Lower(leaf);
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            dc::Mdl m;
+            if (!Load(leaf, m))
+                m.hdr = nullptr;
+            it = cache.emplace(key, std::move(m)).first;
+        }
+        return it->second.hdr ? &it->second : nullptr;
+    }
+
+    std::vector<std::vector<dc::AnimPose>> Remap(const dc::Mdl& src,
+                                                 const std::vector<std::vector<dc::AnimPose>>& in) {
+        const std::vector<std::string> sNames = dc::BoneNames(src), rNames = dc::BoneNames(rigMdl);
+        const std::vector<dc::AnimPose> sBind = dc::BindPose(src), rBind = dc::BindPose(rigMdl);
+        const auto* sBones =
+            src.At<fm::mstudiobone_t>(src.buf.data(), src.hdr->boneindex, src.hdr->numbones);
+        const auto* rBones =
+            rigMdl.At<fm::mstudiobone_t>(rigMdl.buf.data(), rigMdl.hdr->boneindex, rigMdl.hdr->numbones);
+        std::map<std::string, int> sIndex;
+        for (size_t s = 0; s < sNames.size(); ++s) sIndex[Lower(sNames[s])] = static_cast<int>(s);
+        const auto parentName = [](const std::vector<std::string>& names, int p) {
+            return p >= 0 && static_cast<size_t>(p) < names.size() ? Lower(names[p]) : std::string();
+        };
+
+        // A bone whose parent differs between the two skeletons keeps the rig's bind pose.
+        const size_t nr = rNames.size();
+        std::vector<int> map(nr, -1);
+        for (size_t j = 0; j < nr; ++j) {
+            const auto it = sIndex.find(Lower(rNames[j]));
+            if (it != sIndex.end() &&
+                parentName(sNames, sBones[it->second].parent) == parentName(rNames, rBones[j].parent))
+                map[j] = it->second;
+        }
+
+        float scale = 1.0f;
+        const auto pelvis = sIndex.find("valvebiped.bip01_pelvis");
+        for (size_t j = 0; j < nr && pelvis != sIndex.end(); ++j)
+            if (map[j] == pelvis->second && sBind[pelvis->second].pos.z > 1.0f)
+                scale = rBind[j].pos.z / sBind[pelvis->second].pos.z;
+
+        std::vector<std::vector<dc::AnimPose>> out(in.size(), rBind);
+        for (size_t f = 0; f < in.size(); ++f)
+            for (size_t j = 0; j < nr; ++j) {
+                const int s = map[j];
+                if (s < 0)
+                    continue;
+                const bool root = rBones[j].parent < 0;
+                const pm::Vector3 d{in[f][s].pos.x - sBind[s].pos.x, in[f][s].pos.y - sBind[s].pos.y,
+                                    in[f][s].pos.z - sBind[s].pos.z};
+                const float k = root ? 1.0f : scale;
+                out[f][j].rot = in[f][s].rot;
+                out[f][j].pos = {rBind[j].pos.x + d.x * k, rBind[j].pos.y + d.y * k,
+                                 rBind[j].pos.z + d.z * scale};
+            }
+        return out;
+    }
+
+    // The target's sequence rebuilt as a local $sequence on a retargeted clip, or
+    // empty when it cannot be (no single absolute animation behind it).
+    // `label` renames the rebuilt sequence; empty keeps `name`.
+    std::vector<std::string> Sequence(const std::vector<std::string>& includes,
+                                      const std::string& name, const std::string& label = {}) {
+        if (!rigOk)
+            return {};
+        for (const std::string& inc : includes) {
+            const dc::Mdl* m = Get(Leaf(inc));
+            if (!m)
+                continue;
+            const fm::studiohdr_t& h = *m->hdr;
+            const auto* seqs =
+                m->At<fm::mstudioseqdesc_t>(m->buf.data(), h.localseqindex, h.numlocalseq);
+            for (int i = 0; seqs && i < h.numlocalseq; ++i)
+                if (!(seqs[i].flags & fm::STUDIO_OVERRIDE) &&
+                    Lower(m->Str(&seqs[i], seqs[i].szlabelindex)) == Lower(name))
+                    return Build(*m, seqs[i], label.empty() ? name : label);
+        }
+        return {};
+    }
+
+    bool WriteClip(const std::string& clip, int fps,
+                   const std::vector<std::vector<dc::AnimPose>>& frames) {
+        std::error_code ec;
+        std::filesystem::create_directories(outDir + "/anims", ec);
+        if (!dc::WriteAnimationDmx(rigMdl, outDir + "/anims/" + clip + ".dmx", clip, fps, frames)) {
+            std::fprintf(stderr, "  -retarget: cannot write anims/%s.dmx\n", clip.c_str());
+            return false;
+        }
+        ++written;
+        return true;
+    }
+
+    // The pose a delta clip subtracts, retargeted and declared once as an $animation
+    // in `pre`. Same base DecodeClip added back, so base^-1 * pose is the original delta.
+    std::set<std::string> bases;
+    std::string Base(const dc::Mdl& m, int anim, std::vector<std::string>& pre) {
+        const std::vector<dc::AnimRef> refs = dc::AnimRefs(m);
+        const int base = dc::SubtractBase(m, refs);
+        const bool real = base >= 0 && base < anim;
+        // Named after its source model: every _light set has a bind-pose base, and they
+        // share one anims/ folder.
+        const std::string animName = (real ? refs[base].name : std::string(dc::kBindPoseAnim)) +
+                                     "_" + Lower(dc::StripExt(dc::BaseName(m.hdr->name)));
+        const std::string clip = animName + "_retarget_" + rig->survivor;
+        if (bases.insert(Lower(clip)).second) {
+            std::vector<std::vector<dc::AnimPose>> f;
+            if (real) {
+                if (!dc::DecodeClip(m, base, f) || f.empty())
+                    return {};
+                f.resize(1);
+            } else {
+                f.push_back(dc::BindPose(m));
+            }
+            if (!WriteClip(clip, 30, Remap(m, f)))
+                return {};
+            pre.push_back("$animation " + Quote(animName) + " " + Quote("anims/" + clip + ".dmx") +
+                          " { fps 30 ignorescale origin 0 0 0 ignoretransformbone angles "
+                          "ignoretransformbone position }  // the pose the deltas subtract");
+        }
+        return animName;
+    }
+
+    // `tag` goes into the clip file name; `deltas` rebuilds delta clips instead of
+    // skipping them, for a model with no $includemodel to fall back on.
+    std::vector<std::string> Build(const dc::Mdl& m, const fm::mstudioseqdesc_t& s,
+                                   const std::string& name, const std::string& tag = {},
+                                   bool deltas = false) {
+        const fm::studiohdr_t& h = *m.hdr;
+        const int16_t* grid = m.At<int16_t>(&s, s.animindexindex, 1);
+        const auto* anims =
+            m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
+        if (s.groupsize[0] * s.groupsize[1] != 1 || !grid || !anims || grid[0] < 0 ||
+            grid[0] >= h.numlocalanim) {
+            std::fprintf(stderr, "  -retarget: \"%s\" is a blend, kept as a declare\n", name.c_str());
+            return {};
+        }
+        const fm::mstudioanimdesc_t& a = anims[grid[0]];
+        std::vector<std::vector<dc::AnimPose>> frames;
+        // A delta layers on whatever plays under it, so it never stretches.
+        const bool delta = (a.flags & fm::STUDIO_DELTA) != 0;
+        if (delta && !deltas)
+            return {};
+        if (!dc::DecodeClip(m, grid[0], frames)) {
+            std::fprintf(stderr, "  -retarget: \"%s\" could not be decoded, kept as a declare\n",
+                         name.c_str());
+            return {};
+        }
+        std::vector<std::string> pre;
+        const std::string subtract = delta ? Base(m, grid[0], pre) : std::string();
+        if (delta && subtract.empty())
+            return {};
+        const std::string clip = name + tag + "_retarget_" + rig->survivor;
+        const int fps = a.fps > 0.0f ? static_cast<int>(a.fps + 0.5f) : 30;
+        if (!WriteClip(clip, fps, Remap(m, frames)))
+            return {};
+
+        const auto pick = [](const std::vector<std::string>& v, int i) {
+            return i >= 0 && static_cast<size_t>(i) < v.size() ? v[i] : std::string();
+        };
+        std::vector<std::string> labels;
+        const auto* seqs = m.At<fm::mstudioseqdesc_t>(m.buf.data(), h.localseqindex, h.numlocalseq);
+        for (int i = 0; seqs && i < h.numlocalseq; ++i)
+            labels.push_back(m.Str(&seqs[i], seqs[i].szlabelindex));
+        const std::vector<std::string> chains = dc::IkChainNames(m);
+
+        std::vector<std::string> out = pre;
+        out.push_back("$sequence " + Quote(name) + " {");
+        const auto opt = [&](const std::string& l) { out.push_back("    " + l); };
+        opt(Quote("anims/" + clip + ".dmx") + "  // " + std::to_string(a.numframes) + " frames");
+        std::string first = "fps " + dc::F(a.fps);
+        if (a.flags & fm::STUDIO_LOOPING) first += " loop";
+        if (a.flags & fm::STUDIO_NOFORCELOOP) first += " noforceloop";
+        if (a.flags & fm::STUDIO_SNAP) first += " snap";
+        if (a.flags & fm::STUDIO_POST) first += " post";
+        opt(first);
+        if (delta)
+            opt("subtract " + Quote(subtract) + " 0");
+        // Built at the rig's proportions and placement, so like the included vanilla
+        // clips it must not see the model's $scale, $origin or $transformbone edits.
+        opt("ignorescale");
+        opt("origin 0 0 0");
+        opt("ignoretransformbone angles");
+        opt("ignoretransformbone position");
+        const auto* mv = m.At<fm::mstudiomovement_t>(&a, a.movementindex, a.nummovements);
+        for (int k = 0; mv && k < a.nummovements; ++k) {
+            std::string ctrl;
+            for (const auto& c : dc::kMotionControls)
+                if (mv[k].motionflags & c.bit) ctrl += " " + std::string(c.name);
+            if (!ctrl.empty()) opt("walkframe " + std::to_string(mv[k].endframe) + ctrl);
+        }
+        // A touch on a bone the rig lacks (Nick's weapon_bolt on Zoey) fails the compile.
+        std::set<std::string> rigBones;
+        for (const std::string& b : dc::BoneNames(rigMdl)) rigBones.insert(Lower(b));
+        // A dropped rule is written commented out, so the modder can restore it per clip.
+        for (const std::string& r : dc::IkRules(m, a)) {
+            const size_t at = r.find(" touch \"");
+            // A delta's touch error is baked against the model's first animation, which
+            // on the modder's model (a T-pose a_reference) drags the hands out.
+            if (delta && at != std::string::npos) {
+                opt("// " + r);
+                continue;
+            }
+            if (at != std::string::npos) {
+                const size_t b = at + 8, e = r.find('"', b);
+                const std::string bone = r.substr(b, e - b);
+#if 0
+                // HACK: a bone-less touch pins the hand to a fixed model-space spot that a
+                // proportions layer lifting the pelvis leaves behind; pin to the pelvis.
+                if (bone.empty() && rigBones.count("valvebiped.bip01_pelvis")) {
+                    opt(r.substr(0, b) + "ValveBiped.Bip01_Pelvis" + r.substr(e));
+                    continue;
+                }
+#endif
+                // A bone-less touch pins the hand to a fixed model-space spot that a
+                // proportions layer lifting the pelvis leaves behind.
+                if (bone.empty()) {
+                    opt("// " + r);
+                    continue;
+                }
+                if (!rigBones.count(Lower(bone))) {
+                    std::fprintf(stderr, "  -retarget: \"%s\" drops an ikrule touching \"%s\", "
+                                         "%s has no such bone\n",
+                                 name.c_str(), bone.c_str(), rig->survivor);
+                    opt("// " + r);
+                    continue;
+                }
+            }
+            opt(r);
+        }
+
+        if (const char* act = m.Str(&s, s.szactivitynameindex); *act)
+            opt("activity " + Quote(act) + " " + std::to_string(s.actweight));
+        const int32_t f = s.flags & ~a.flags;
+        if (f & fm::STUDIO_AUTOPLAY) opt("autoplay");
+        if (f & fm::STUDIO_HIDDEN) opt("hidden");
+        if (f & fm::STUDIO_REALTIME) opt("realtime");
+        if (f & fm::STUDIO_WORLD_AND_RELATIVE) opt("worldrelative");
+        else if (f & fm::STUDIO_WORLD) opt("worldspace");
+        // `delta` is DELTA|POST, `predelta` DELTA alone - the decompiler's reading
+        if (s.flags & fm::STUDIO_DELTA) {
+            if (f & fm::STUDIO_POST) opt("delta");
+            else if (f & fm::STUDIO_DELTA) opt("predelta");
+        } else if ((f & fm::STUDIO_POST) && !(f & (fm::STUDIO_WORLD | fm::STUDIO_WORLD_AND_RELATIVE))) {
+            opt("post");
+        }
+        if (s.fadeintime != 0.2f) opt("fadein " + dc::F(s.fadeintime));
+        if (s.fadeouttime != 0.2f) opt("fadeout " + dc::F(s.fadeouttime));
+
+        const float lastframe = static_cast<float>(a.numframes - 1);
+        const auto* al = m.At<fm::mstudioautolayer_t>(&s, s.autolayerindex, s.numautolayers);
+        for (int k = 0; al && k < s.numautolayers; ++k) {
+            std::string tail;
+            if (al[k].flags & fm::STUDIO_AL_LOCAL) tail += " local";
+            if (al[k].flags & fm::STUDIO_AL_XFADE) tail += " xfade";
+            if (al[k].flags & fm::STUDIO_AL_SPLINE) tail += " spline";
+            if (al[k].flags & fm::STUDIO_AL_NOBLEND) tail += " noblend";
+            const std::string target = Quote(pick(labels, al[k].iSequence));
+            const bool ramp = al[k].start || al[k].peak || al[k].tail || al[k].end;
+            if (al[k].flags & fm::STUDIO_AL_POSE) {
+                std::fprintf(stderr, "  -retarget: \"%s\" drops a pose-driven layer\n", name.c_str());
+                continue;
+            }
+            if (!ramp && (al[k].flags & ~fm::STUDIO_AL_LOCAL) == 0) {
+                opt("addlayer " + target + tail);
+                continue;
+            }
+            opt("blendlayer " + target + " " + dc::F(al[k].start * lastframe) + " " +
+                dc::F(al[k].peak * lastframe) + " " + dc::F(al[k].tail * lastframe) + " " +
+                dc::F(al[k].end * lastframe) + tail);
+        }
+        const auto* locks = m.At<fm::mstudioiklock_t>(&s, s.iklockindex, s.numiklocks);
+        for (int k = 0; locks && k < s.numiklocks; ++k)
+            opt("iklock " + Quote(pick(chains, locks[k].chain)) + " " + dc::F(locks[k].flPosWeight) +
+                " " + dc::F(locks[k].flLocalQWeight));
+        const auto* ev = m.At<fm::mstudioevent_t>(&s, s.eventindex, s.numevents);
+        for (int k = 0; ev && k < s.numevents; ++k) {
+            const std::string id = (ev[k].type & fm::NEW_EVENT_STYLE)
+                                       ? Quote(m.Str(&ev[k], ev[k].szeventindex))
+                                       : std::to_string(ev[k].event);
+            std::string line = "event " + id + " " + std::to_string(std::lround(ev[k].cycle * lastframe));
+            const std::string o(ev[k].options, strnlen(ev[k].options, sizeof ev[k].options));
+            if (!o.empty()) line += " " + Quote(o);
+            opt("{ " + line + " }");
+        }
+        if (s.keyvaluesize > 0)
+            if (const char* kv = m.At<char>(&s, s.keyvalueindex, s.keyvaluesize))
+                opt("keyvalues { " + std::string(kv, strnlen(kv, s.keyvaluesize)) + " }");
+        out.push_back("}");
+        return out;
+    }
+};
+
 // --------------------------------------------------------------------- output
 
 bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
            const std::vector<const Survivor*>& chain, const Result& res, int skip, const Slots& order,
            Resolver& mdls, const std::string& ref, bool noanim, bool nofallback,
-           bool keepintro) {
+           bool keepintro, Retargeter* retarget) {
     nofallback = BlockFallback(nofallback, rig, tgt);
     std::vector<int> won(chain.size(), 0);
     int kept = 0;
@@ -527,6 +867,21 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
                          res.names[i].c_str(), static_cast<int>(i));
             continue;
         }
+        // -retarget: a slot left on the target's own clip gets that clip rebuilt on the
+        // rig. The local $sequence shadows the included one and holds the index.
+        if (retarget && res.from[i] == -1 && &rig != &tgt && Retargetable(res.names[i]) &&
+            !rigSupplied.count(Lower(res.names[i]))) {
+            const std::vector<std::string> lines = retarget->Sequence(includesOf(tgt), res.names[i]);
+            if (!lines.empty()) {
+                spacer(3);
+                std::fprintf(f, "// slot %d - %s's clip retargeted to %s\n", static_cast<int>(i),
+                             tgt.survivor, rig.survivor);
+                for (const std::string& l : lines) std::fprintf(f, "%s\n", l.c_str());
+                std::fputc('\n', f);
+                prevKind = -1;
+                continue;
+            }
+        }
         if (reachable.count(Lower(res.names[i]))) {
             spacer(0);
             std::fprintf(f, "$declaresequence \"%s\"\n", res.names[i].c_str());
@@ -563,6 +918,21 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
         if (!act.empty()) std::fprintf(f, " activity %s", act.c_str());
         std::fprintf(f, "   // slot %d - no $includemodel provides this\n", static_cast<int>(i));
     }
+
+    // c6m1's info_survivor_position asks Nick for "c6m3_intro_gambler", a name no
+    // model has; his clip is c6m1_intro_gambler. Added past the vanilla slots so no
+    // index moves. NOTE: disabled - left for Valve's map fix; flip to 1 to restore.
+#if 0
+    if (retarget && !std::strcmp(tgt.code, "gambler") && emitted.insert("c6m3_intro_gambler").second) {
+        const std::vector<std::string> lines =
+            retarget->Sequence(includesOf(tgt), "c6m1_intro_gambler", "c6m3_intro_gambler");
+        if (!lines.empty()) {
+            std::fprintf(f, "\n// The Passing's c6m1 calls Nick's intro \"c6m3_intro_gambler\" (a map typo);\n"
+                            "// this is his c6m1_intro_gambler clip under that name.\n");
+            for (const std::string& l : lines) std::fprintf(f, "%s\n", l.c_str());
+        }
+    }
+#endif
 
     // -nofallbackanimation: a replaced slot declares the donor's name, but the
     // fallback $includemodel re-adds the original vanilla-named sequence as a
@@ -666,6 +1036,58 @@ bool Write(const std::string& path, const Survivor& rig, const Survivor& tgt,
     return true;
 }
 
+// The target's map-placed survivor_<code>_light.mdl keeps every clip local with no
+// $includemodel, so its whole list is rebuilt on the rig, deltas included.
+bool WriteLight(const std::string& path, const Survivor& rig, const Survivor& tgt, Retargeter& rt) {
+    const std::string leaf = "survivor_" + std::string(tgt.code) + "_light.mdl";
+    const dc::Mdl* m = rt.Get(leaf);
+    if (!m)
+        return true;
+    const fm::studiohdr_t& h = *m->hdr;
+    const auto* seqs = m->At<fm::mstudioseqdesc_t>(m->buf.data(), h.localseqindex, h.numlocalseq);
+    if (!seqs || h.numlocalseq <= 0)
+        return true;
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        std::fprintf(stderr, "cannot write %s\n", path.c_str());
+        return false;
+    }
+    std::fprintf(f, "// l4d_animswap: %s's sequences rebuilt for a %s-rigged model.\n"
+                    "// The map-placed _light model, not the playermodel - compile it on its own.\n\n",
+                 leaf.c_str(), rig.survivor);
+    for (int i = 0; i < h.numlocalseq; ++i) {
+        const std::string name = m->Str(&seqs[i], seqs[i].szlabelindex);
+        const char* actName = m->Str(&seqs[i], seqs[i].szactivitynameindex);
+        const std::string act =
+            *actName ? std::string(actName) + " " + std::to_string(seqs[i].actweight) : std::string();
+        if (seqs[i].flags & fm::STUDIO_OVERRIDE) {
+            std::fprintf(f, "$declaresequence \"%s\"\n\n", name.c_str());
+            continue;
+        }
+        // Same convention as the playermodel script: the reference and ragdoll slots
+        // take the modder's own a_reference pose.
+        if (i == 0 || act.compare(0, 14, "ACT_DIERAGDOLL") == 0) {
+            std::fprintf(f, "$sequence \"%s\" { a_reference", name.c_str());
+            if (!act.empty()) std::fprintf(f, " activity %s", act.c_str());
+            std::fprintf(f, " }   // slot %d - provide an $animation named a_reference\n\n", i);
+            continue;
+        }
+        const std::vector<std::string> lines = rt.Build(*m, seqs[i], name, "_light", true);
+        if (lines.empty()) {
+            std::fprintf(f, "// REPLACE ME - slot %d could not be rebuilt; put your own $sequence here.\n"
+                            "$declaresequence \"%s\"\n\n",
+                         i, name.c_str());
+            continue;
+        }
+        std::fprintf(f, "// slot %d - %s's clip retargeted to %s\n", i, tgt.survivor, rig.survivor);
+        for (const std::string& l : lines) std::fprintf(f, "%s\n", l.c_str());
+        std::fputc('\n', f);
+    }
+    std::fclose(f);
+    std::printf("%s\n", path.c_str());
+    return true;
+}
+
 void PrintHeader() {
     std::printf("-------------------------------\n");
     std::printf("PulseModel [L4D2 Anim Swap]\n");
@@ -693,6 +1115,14 @@ void Usage() {
         "                  $bindposesequence, blocking a local server's activity fallback\n"
         "  -keepintro      do not zero L4D2 campaign intros (cXmY_intro); keep the\n"
         "                  target's own intro rather than a do-nothing clip\n"
+        "  -retarget       rebuild the target's own campaign intros and dlc1_* scene\n"
+        "                  clips (deltas excepted) on the rig's\n"
+        "                  skeleton as local $sequence, clips written beside the .qci\n"
+        "                  as anims/<name>_retarget_<rig>.dmx; compile them yourself.\n"
+        "                  A francis/zoey target also gets <out>_Light.qci, the map\n"
+        "                  _light model's whole list rebuilt on the rig\n"
+        "  -dmxencoding <enc>  retargeted clips: binary (default) or keyvalues2\n"
+        "  -dmxmodel <n>   retargeted clips' `format model`: 15 (default), 1, 18, 22\n"
         "  -o <file>       output path (default Anims_RigTo<Rig>_Replace<Target>.qci)\n"
         "  -all            every rig x replace pair, written into -outdir\n"
         "  -selftest       run the name-matching checks and exit\n\n"
@@ -778,11 +1208,11 @@ int SelfTest() {
 
 int main(int argc, char** argv) {
     PrintHeader();
-    std::string dir, out, outdir = ".", viaArg, ref;
+    std::string dir, out, outdir = ".", viaArg, ref, dmxEncoding = "binary";
     const Survivor* rig = nullptr;
     const Survivor* tgt = nullptr;
-    int skip = 2;
-    bool all = false, haveVia = false, noanim = false, nofallback = false, keepintro = false;
+    int skip = 2, dmxModel = 15;
+    bool retarget = false, all = false, haveVia = false, noanim = false, nofallback = false, keepintro = false;
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -798,12 +1228,19 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(a, "-usenoanimation")) noanim = true;
         else if (!std::strcmp(a, "-nofallbackanimation")) nofallback = true;
         else if (!std::strcmp(a, "-keepintro")) keepintro = true;
+        else if (!std::strcmp(a, "-retarget")) retarget = true;
+        else if (!std::strcmp(a, "-dmxencoding")) dmxEncoding = next();
+        else if (!std::strcmp(a, "-dmxmodel")) dmxModel = std::atoi(next());
         else if (!std::strcmp(a, "-all")) all = true;
         else if (!std::strcmp(a, "-selftest")) return SelfTest();
         else { Usage(); return 1; }
     }
     if (dir.empty() || skip < 0 || (!all && (!rig || !tgt))) {
         Usage();
+        return 1;
+    }
+    if (const char* err = dc::SetDmxOutput(dmxEncoding, dmxModel)) {
+        std::fprintf(stderr, "%s\n", err);
         return 1;
     }
 
@@ -865,9 +1302,24 @@ int main(int argc, char** argv) {
             path = (all ? outdir + "/" : std::string()) + "Anims_RigTo" + r + "_Replace" + t +
                    ".qci";
         }
+        Retargeter rt;
+        if (retarget) {
+            const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+            rt.Init(dir, *job.first, parent.empty() ? "." : parent.string());
+        }
         if (!Write(path, *job.first, *job.second, chain, built, skip, order, res, ref, noanim,
-                   nofallback, keepintro))
+                   nofallback, keepintro, retarget ? &rt : nullptr))
             return 1;
+        // Rig == target still needs it: the modder's model stands in for the _light one too.
+        if (retarget && rt.rigOk) {
+            const std::string stem = path.size() > 4 && Lower(path.substr(path.size() - 4)) == ".qci"
+                                         ? path.substr(0, path.size() - 4)
+                                         : path;
+            if (!WriteLight(stem + "_Light.qci", *job.first, *job.second, rt))
+                return 1;
+        }
+        if (rt.written)
+            std::printf("    %d clip(s) retargeted into %s/anims\n", rt.written, rt.outDir.c_str());
     }
     return 0;
 }

@@ -298,6 +298,87 @@ inline bool NeedsBindPoseAnim(const Mdl& m, int base) {
     return false;
 }
 
+inline std::vector<std::string> IkChainNames(const Mdl& m) {
+    const fm::studiohdr_t& h = *m.hdr;
+    std::vector<std::string> names;
+    const fm::mstudioikchain_t* c =
+        m.At<fm::mstudioikchain_t>(m.buf.data(), h.ikchainindex, h.numikchains);
+    for (int i = 0; c && i < h.numikchains; ++i)
+        names.push_back(m.Str(&c[i], c[i].sznameindex));
+    return names;
+}
+
+// The `walkframe` control names, in the bit order LookupControl declares them.
+struct MotionControl {
+    int32_t bit;
+    const char* name;
+};
+inline constexpr MotionControl kMotionControls[] = {
+    {fm::STUDIO_X, "X"},     {fm::STUDIO_Y, "Y"},     {fm::STUDIO_Z, "Z"},
+    {fm::STUDIO_XR, "XR"},   {fm::STUDIO_YR, "YR"},   {fm::STUDIO_ZR, "ZR"},
+    {fm::STUDIO_LX, "LX"},   {fm::STUDIO_LY, "LY"},   {fm::STUDIO_LZ, "LZ"},
+    {fm::STUDIO_LXR, "LXR"}, {fm::STUDIO_LYR, "LYR"}, {fm::STUDIO_LZR, "LZR"},
+    {fm::STUDIO_LINEAR, "LM"}, {fm::STUDIO_QUADRATIC_MOTION, "LQ"},
+};
+
+// ikrule is an animation option, so the rules ride on whichever animation owns
+// them - writing blend anim 0's set on the sequence would drop the rules of
+// every other grid animation and desync the compiler's per-rule realign check.
+// A chain's own height/pad/floor never reach the .mdl - only the resolved
+// per-rule copies do - so those are always written out rather than inherited.
+// The ramp and contact are cycle fractions of this animation. One line each,
+// for the { } body of whatever declared the animation.
+inline std::vector<std::string> IkRules(const Mdl& m, const fm::mstudioanimdesc_t& a) {
+    // In-mdl rules for a resident clip; a demand-loaded clip's rules live in the
+    // .ani and come back through BlockIkRules instead.
+    const fm::mstudioikrule_t* rules =
+        m.At<fm::mstudioikrule_t>(&a, a.ikruleindex, a.numikrules);
+    if (!rules)
+        rules = m.BlockIkRules(a);
+    if (!rules)
+        return {};
+    const std::vector<std::string> chains = IkChainNames(m);
+    const std::vector<std::string> boneNames = BoneNames(m);
+    const float lastframe = static_cast<float>(a.numframes - 1);
+    auto pick = [](const std::vector<std::string>& v, int i) {
+        return (i >= 0 && static_cast<size_t>(i) < v.size()) ? v[i] : std::string();
+    };
+    std::vector<std::string> out;
+    for (int k = 0; k < a.numikrules; ++k) {
+        const fm::mstudioikrule_t& r = rules[k];
+        std::string line = "ikrule \"" + pick(chains, r.chain) + "\"";
+        switch (r.type) {
+            case fm::IK_SELF: line += " touch \"" + pick(boneNames, r.bone) + "\""; break;
+            case fm::IK_GROUND: line += " footstep"; break;
+            case fm::IK_RELEASE: line += " release"; break;
+            case fm::IK_ATTACHMENT:
+                // raw string after the error streams, not the string table. A
+                // block clip's rule sits in the .ani, out of m.Str's range, so its
+                // attachment name comes back empty - unseen so far on real models.
+                line += " attachment \"" + std::string(m.Str(&r, r.szattachmentindex)) + "\"";
+                break;
+            default:
+                // IK_WORLD / IK_UNLATCH: no script spelling to write back
+                continue;
+        }
+        line += " height " + F(r.height) + " radius " + F(r.radius) + " floor " + F(r.floor);
+        // -1 is the "never set" the parser starts from; it survives as a
+        // negative cycle
+        if (r.contact >= 0.0f)
+            line += " contact " + std::to_string(std::lround(r.contact * lastframe));
+        line += " range " + std::to_string(std::lround(r.start * lastframe)) + " " +
+                std::to_string(std::lround(r.peak * lastframe)) + " " +
+                std::to_string(std::lround(r.tail * lastframe)) + " " +
+                std::to_string(std::lround(r.end * lastframe));
+        // A delta clip's touch error re-bakes against anims[0], so it round-trips
+        // only when that base holds the grip pose. RecoverIkBase finds it and
+        // ships it as a_bindpose (see Mdl::ikRecovered); the rule itself stays a
+        // plain touch.
+        out.push_back(std::move(line));
+    }
+    return out;
+}
+
 // A stereo flex is one delta split across two descs. DMX names them <base>L
 // then <base>R, the VTA `split` path every v44-48 model came from names them
 // <base>R then <base>L - same per-vertex side either way, so a VTA pair

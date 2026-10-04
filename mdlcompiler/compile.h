@@ -463,7 +463,7 @@ struct AnimCmd {
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
                 IkFixup, LocalHierarchy, Derivative, NoAnim, LinearDelta,
-                Compress, CounterRotate, ForceBonePosRot } kind = Weights;
+                Compress, CounterRotate, ForceBonePosRot, MatchPosition } kind = Weights;
     int weightlistIndex = 0; // Weights: index into CompileInput::weightlists+1 space
     int numframes = 0;       // NumFrames: the length to clip or pad to
     int subtractAnim = -1;   // Subtract: index into CompiledModel::anims
@@ -476,7 +476,7 @@ struct AnimCmd {
     // which motion components to match, and the frame of each animation
     int refAnim = -1;      // Align/Match/AppendAnim
     std::string alignBone; // Align/BoneDriver: "" = the root bone
-    int motiontype = 0;    // STUDIO_X/Y/Z/XR/YR/ZR bits
+    int motiontype = 0;    // STUDIO_X/Y/Z/XR/YR/ZR bits; MatchPosition: axes to zero
     int srcframe = 0;
     int destframe = 0;
     // BoneDriver: overwrite one position axis of a bone, flat across the clip
@@ -1401,7 +1401,7 @@ struct CompileInput {
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
                 IkFixup, LocalHierarchy, Derivative, NoAnim, LinearDelta,
-                Compress, CounterRotate, ForceBonePosRot } kind = Weights;
+                Compress, CounterRotate, ForceBonePosRot, MatchPosition } kind = Weights;
             std::string name;   // Weights: weightlist; Subtract/Align/Match: animation
                                 // CopyPose: an animation OR a sequence
             int frame = 0;      // Subtract: reference frame

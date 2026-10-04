@@ -203,6 +203,7 @@ struct Ctx {
     std::map<std::string, int> namedAnims; // $animation name -> index into in.anims
     std::map<std::string, std::vector<Token>> cmdlists; // $cmdlist name -> body tokens
     std::map<std::string, std::vector<Token>> lodCmdlists; // $lodcmdlist, keyed lowercased
+    std::map<std::string, std::vector<Token>> rendermeshCmdlists; // $rendermeshcmdlist, keyed lowercased
     std::map<std::string, std::string> variables; // $definevariable, case-sensitive, shared across $include
     struct Macro {
         std::vector<std::string> params;
@@ -750,6 +751,18 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 break;
             const std::string o = Lower(t->text);
 
+            if (o == "$rendermeshcmdlist") {
+                std::string list;
+                if (!c.Want("a $rendermeshcmdlist name", *t, list))
+                    return false;
+                auto it = c.rendermeshCmdlists.find(Lower(list));
+                if (it == c.rendermeshCmdlists.end())
+                    return c.Fail(t->line, where + ": unknown rendermeshcmdlist \"" + list + "\"");
+                // parsed as if written inline; the definition rejects nesting
+                c.SpliceAt(c.pos, it->second);
+                continue;
+            }
+
             if (o == "$exceptionlist") {
                 if (!edit.filter.empty())
                     return c.Fail(t->line, where + ": $exceptionlist written twice");
@@ -900,7 +913,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                     if (ol.minWeight > ol.maxWeight)
                         return c.Fail(t->line, where + ": $toonoutline min weight is above max weight");
                 }
-                bool named = false;
                 while (onLine()) {
                     const Token* k = c.Next();
                     const std::string kw = Lower(k->text);
@@ -918,7 +930,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                     } else if (kw == "materialname") {
                         if (!c.Want("a material name", *t, ol.material))
                             return false;
-                        named = true;
                     } else if (kw == "cdmaterial") {
                         if (!c.Want("a material directory", *t, ol.cdmaterial))
                             return false;
@@ -928,8 +939,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                                                        k->text + "\"");
                     }
                 }
-                if (named && ol.perMaterial)
-                    return c.Fail(t->line, where + ": $toonoutline materialname and permaterial contradict each other");
                 continue;
             }
 
@@ -1098,7 +1107,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            return c.Fail(t->line, where + ": expected $exceptionlist, $removemesh, $removemeshword, "
+            return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, $removemesh, $removemeshword, "
                                            "$cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
                                            "$use_skeletalaware_decimation, $scalebone, $toonoutline, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
@@ -2803,6 +2812,40 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 break;
             }
         }
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
+    // matchposition <bone> [axes...]: after `subtract`, zero that bone's position delta
+    // on the named axes (x, y, z or combined like xy/xyz; all three when none), e.g.
+    // keep the pelvis height a proportions delta would otherwise lift. Not stock.
+    // Not recommended unless you know the trade-off: children keep their own deltas,
+    // so pinning the pelvis sinks the feet by the same amount.
+    if (_stricmp(o.c_str(), "matchposition") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::MatchPosition;
+        if (!c.Want("a bone name", t, cmd.alignBone))
+            return -1;
+        while (!c.AtCommand() && !c.Eof() && !c.Cur().quoted && c.Cur().line == t.line) {
+            const std::string& n = c.Cur().text;
+            int bits = 0;
+            for (char ch : n) {
+                const int bit = (ch == 'x' || ch == 'X')   ? 0x0001  // STUDIO_X
+                                : (ch == 'y' || ch == 'Y') ? 0x0002  // STUDIO_Y
+                                : (ch == 'z' || ch == 'Z') ? 0x0004  // STUDIO_Z
+                                                           : 0;
+                if (!bit) {
+                    bits = 0;
+                    break;
+                }
+                bits |= bit;
+            }
+            if (!bits)
+                break;
+            cmd.motiontype |= bits;
+            c.pos++;
+        }
+        if (!cmd.motiontype)
+            cmd.motiontype = 0x0001 | 0x0002 | 0x0004;
         a.cmds.push_back(std::move(cmd));
         return 1;
     }
@@ -6518,6 +6561,49 @@ bool CmdLodCmdList(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $rendermeshcmdlist <name> { <$rendermesh body options> ... } - raw tokens that
+// `$rendermeshcmdlist <name>` splices into a $rendermesh body. Names match
+// case-insensitively; $exceptionlist is per-mesh and not allowed here.
+bool CmdRenderMeshCmdList(Ctx& c, const Token& cmd) {
+    std::string name;
+    if (!c.Want("a name", cmd, name))
+        return false;
+    const std::string key = Lower(name);
+    if (c.rendermeshCmdlists.count(key))
+        return c.Fail(cmd.line, "duplicate $rendermeshcmdlist \"" + name + "\"");
+    if (!WantOpenBrace(c, cmd, cmd.text))
+        return false;
+
+    const std::string where = "$rendermeshcmdlist \"" + name + "\"";
+    std::vector<Token> body;
+    const bool savedRaw = c.rawCollect;
+    c.rawCollect = true;
+    int depth = 0;
+    for (;;) {
+        if (c.Eof()) {
+            c.rawCollect = savedRaw;
+            return c.Fail(cmd.line, where + " is missing '}'");
+        }
+        const Token t = c.toks[c.pos++];
+        if (!t.quoted && t.text == "{")
+            ++depth;
+        if (!t.quoted && t.text == "}" && depth-- == 0)
+            break;
+        if (!t.quoted && _stricmp(t.text.c_str(), "$rendermeshcmdlist") == 0) {
+            c.rawCollect = savedRaw;
+            return c.Fail(t.line, where + " cannot nest a $rendermeshcmdlist");
+        }
+        if (!t.quoted && _stricmp(t.text.c_str(), "$exceptionlist") == 0) {
+            c.rawCollect = savedRaw;
+            return c.Fail(t.line, where + ": $exceptionlist is not supported in a cmdlist");
+        }
+        body.push_back(t);
+    }
+    c.rawCollect = savedRaw;
+    c.rendermeshCmdlists[key] = std::move(body);
+    return true;
+}
+
 // $texturegroup [name] accepts positional material rows or explicit $set blocks.
 // Legacy row 0 defines columns; later rows and each $set append skin families.
 // Family 0 uses the model's own materials, shared across all groups.
@@ -8739,6 +8825,7 @@ constexpr Command kCommands[] = {
     {"$addsearchdir", CmdAddSearchDir},
     {"$modelname", CmdModelName},
     {"$rendermesh", CmdRenderMesh},
+    {"$rendermeshcmdlist", CmdRenderMeshCmdList},
     {"$modelgroup", CmdModelGroup},
     {"$body", CmdLegacyBody},
     {"$bodygroup", CmdLegacyBody},

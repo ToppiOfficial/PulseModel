@@ -884,7 +884,7 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
             const std::string& base = mats.textures[mats.materialToTexture[m]].name;
             const size_t slash = base.find_last_of("/\\");
             const std::string dir = !cd.empty() ? cd : slash == std::string::npos ? "" : base.substr(0, slash + 1);
-            name = dir + std::filesystem::path(base).stem().string() + "_toonoutline";
+            name = dir + std::filesystem::path(base).stem().string() + "_" + o.material;
         }
         return outMat[m] = mats.UseTextureAsMaterial(mats.LookupTexture(name.c_str()));
     };
