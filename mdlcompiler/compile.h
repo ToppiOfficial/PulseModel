@@ -1239,11 +1239,13 @@ struct CompileInput {
     // bone alive (reference culls before RemapBones for the same reason)
     AnimCullMethod animCullMethod = AnimCullMethod::Aggressive;
 
-    // $setbindpose <file> <frame> [meshonly]: bake the mesh and rest skeleton.
-    // meshonly keeps the source skeleton. Null = unset; frame clamps to the clip.
+    // $setbindpose <file> <frame> [meshonly] [blockname <clip>]: bake the mesh and
+    // rest skeleton. meshonly keeps the source skeleton. Null = unset; frame clamps
+    // to the clip. An empty clip name takes the file's first non-BindPose clip.
     source::Source* bindPoseSource = nullptr;
     int bindPoseFrame = 0;
     bool bindPoseMeshOnly = false;
+    std::string bindPoseClip;
     // $setflex <morph> <strength>: fixed morph amounts baked into the rest mesh,
     // in script order, on top of any $setbindpose. Strength clamps to [0,1];
     // the morph's remaining delta scales by (1 - strength).

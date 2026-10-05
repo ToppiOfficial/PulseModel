@@ -467,14 +467,24 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
     if (!in.bindPoseSource && in.fixedFlexes.empty())
         return true;
 
-    // the pose clip: the file's first real animation, the bind pose if that is
-    // all it has (reference m_Animations[0])
+    // the pose clip: `blockname` if given, else the file's first real animation,
+    // the bind pose if that is all it has (reference m_Animations[0])
     src::Source* poseSrc = in.bindPoseSource;
     src::SourceAnim* poseClip = nullptr;
     int poseFrame = 0;
+    if (poseSrc && !in.bindPoseClip.empty()) {
+        poseClip = src::FindSourceAnim(*poseSrc, in.bindPoseClip.c_str());
+        if (!poseClip) {
+            if (err)
+                *err = "$setbindpose: unknown blockname \"" + in.bindPoseClip + "\" in \"" +
+                       poseSrc->filename + "\"";
+            return false;
+        }
+    }
     if (poseSrc) {
-        for (src::SourceAnim& sa : poseSrc->anims)
-            if (_stricmp(sa.name.c_str(), "BindPose") != 0) { poseClip = &sa; break; }
+        if (!poseClip)
+            for (src::SourceAnim& sa : poseSrc->anims)
+                if (_stricmp(sa.name.c_str(), "BindPose") != 0) { poseClip = &sa; break; }
         if (!poseClip && !poseSrc->anims.empty())
             poseClip = &poseSrc->anims[0];
         if (!poseClip || poseClip->frames.empty()) {

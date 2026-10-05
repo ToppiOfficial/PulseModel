@@ -23,6 +23,11 @@
 #include "qcloader.h"
 #include "writer.h"
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
 
@@ -68,12 +73,14 @@ static int Usage() {
     std::printf("  -verify       compile the model without writing output files\n");
     std::printf("  -dumpmaterials print the names of materials used by the model\n");
     std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
-    std::printf("  -dumpprocedural <file.json>\n");
-    std::printf("                write the final bone names and the jiggle, driver and\n");
-    std::printf("                aim-at bone rules as JSON, then stop; nothing else is written\n");
-    std::printf("  -dumpdependencies <file.txt>\n");
-    std::printf("                after a successful compile, write every file it read, one per\n");
-    std::printf("                line as <script|include|source>, a tab, then the absolute path\n");
+    std::printf("  -dumpprocedural\n");
+    std::printf("                print the final bone names and the jiggle, driver and aim-at\n");
+    std::printf("                bone rules as @proc lines on stdout, then stop; no files written\n");
+    std::printf("  -stdin        read the script's text from stdin; the script path is still\n");
+    std::printf("                given and resolves relative paths as if the text were saved there\n");
+    std::printf("  -dumpdependencies\n");
+    std::printf("                after a successful compile, print every file it read as\n");
+    std::printf("                @dep <script|include|source> <fnv1a-64 hex> <absolute path>\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms for each stage of the compile\n");
     return 1;
@@ -100,52 +107,39 @@ static void DumpDefineBones(const pulse::compile::CompiledModel& model) {
     std::printf("\n------------------------------------------------------------\n");
 }
 
-static void JsonString(std::FILE* f, const std::string& s) {
-    std::fputc('"', f);
+static void ProcString(const std::string& s) {
+    std::fputs(" \"", stdout);
     for (const char c : s) {
         if (c == '"' || c == '\\')
-            std::fprintf(f, "\\%c", c);
-        else if (static_cast<unsigned char>(c) < 0x20)
-            std::fprintf(f, "\\u%04x", c);
-        else
-            std::fputc(c, f);
+            std::putchar('\\');
+        std::putchar(c);
     }
-    std::fputc('"', f);
+    std::putchar('"');
 }
 
-static void JsonFloats(std::FILE* f, std::initializer_list<float> v) {
-    std::fputc('[', f);
-    bool first = true;
-    for (const float x : v) {
-        std::fprintf(f, first ? "%.9g" : ",%.9g", static_cast<double>(x));
-        first = false;
-    }
-    std::fputc(']', f);
+static void ProcFloats(std::initializer_list<float> v) {
+    for (const float x : v)
+        std::printf(" %.9g", static_cast<double>(x));
 }
 
-// -dumpprocedural: the procedural bone rules with the values the .mdl stores,
-// bones named rather than indexed, so a tool can lay them over a compiled model.
-static bool DumpProcedural(const pulse::compile::CompiledModel& m, const std::string& path) {
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f)
-        return false;
+// -dumpprocedural: the procedural bone rules with the values the .mdl stores, bones
+// named rather than indexed, one "@proc <kind>" line each; quoted names escape " and \.
+static void DumpProcedural(const pulse::compile::CompiledModel& m) {
     auto boneName = [&](int i) -> std::string {
         return i >= 0 && i < static_cast<int>(m.bones.size()) ? m.bones[i].name : std::string();
     };
 
-    std::fprintf(f, "{\"bones\":[");
-    for (size_t i = 0; i < m.bones.size(); i++) {
-        if (i) std::fputc(',', f);
-        JsonString(f, m.bones[i].name);
+    for (const pulse::compile::Bone& b : m.bones) {
+        std::fputs("@proc bone", stdout);
+        ProcString(b.name);
+        std::putchar('\n');
     }
 
-    std::fprintf(f, "],\n\"jiggle\":[");
-    for (size_t i = 0; i < m.jigglebones.size(); i++) {
-        const pulse::compile::JiggleBone& j = m.jigglebones[i];
-        std::fprintf(f, i ? ",\n{\"bone\":" : "\n{\"bone\":");
-        JsonString(f, boneName(j.bone));
-        std::fprintf(f, ",\"flags\":%d,\"values\":", j.flags);
-        JsonFloats(f, {j.length, j.tipMass, j.yawStiffness, j.yawDamping, j.pitchStiffness,
+    for (const pulse::compile::JiggleBone& j : m.jigglebones) {
+        std::fputs("@proc jiggle", stdout);
+        ProcString(boneName(j.bone));
+        std::printf(" %d", j.flags);
+        ProcFloats({j.length, j.tipMass, j.yawStiffness, j.yawDamping, j.pitchStiffness,
                        j.pitchDamping, j.alongStiffness, j.alongDamping, j.angleLimit, j.minYaw,
                        j.maxYaw, j.yawFriction, j.yawBounce, j.minPitch, j.maxPitch,
                        j.pitchFriction, j.pitchBounce, j.baseMass, j.baseStiffness, j.baseDamping,
@@ -153,45 +147,47 @@ static bool DumpProcedural(const pulse::compile::CompiledModel& m, const std::st
                        j.baseUpFriction, j.baseMinForward, j.baseMaxForward, j.baseForwardFriction,
                        j.boingImpactSpeed, j.boingImpactAngle, j.boingDampingRate,
                        j.boingFrequency, j.boingAmplitude});
-        std::fputc('}', f);
+        std::putchar('\n');
     }
 
-    std::fprintf(f, "],\n\"driver\":[");
-    for (size_t i = 0; i < m.proceduralbones.size(); i++) {
-        const pulse::compile::ProceduralBone& p = m.proceduralbones[i];
-        std::fprintf(f, i ? ",\n{\"bone\":" : "\n{\"bone\":");
-        JsonString(f, boneName(p.helper));
-        std::fprintf(f, ",\"driver\":");
-        JsonString(f, boneName(p.driver));
-        std::fprintf(f, ",\"triggers\":[");
-        for (size_t t = 0; t < p.triggers.size(); t++) {
-            const pulse::compile::ProceduralBoneTrigger& tr = p.triggers[t];
+    // 12 floats per trigger, as many triggers as the line holds
+    for (const pulse::compile::ProceduralBone& p : m.proceduralbones) {
+        std::fputs("@proc driver", stdout);
+        ProcString(boneName(p.helper));
+        ProcString(boneName(p.driver));
+        for (const pulse::compile::ProceduralBoneTrigger& tr : p.triggers) {
             // same double-then-narrow as the writer
             const float invTolerance = static_cast<float>(1.0 / static_cast<double>(tr.tolerance));
-            std::fprintf(f, t ? "," : "");
-            JsonFloats(f, {invTolerance, tr.trigger.x, tr.trigger.y, tr.trigger.z, tr.trigger.w,
-                           tr.pos.x, tr.pos.y, tr.pos.z,
-                           tr.quat.x, tr.quat.y, tr.quat.z, tr.quat.w});
+            ProcFloats({invTolerance, tr.trigger.x, tr.trigger.y, tr.trigger.z, tr.trigger.w,
+                        tr.pos.x, tr.pos.y, tr.pos.z,
+                        tr.quat.x, tr.quat.y, tr.quat.z, tr.quat.w});
         }
-        std::fprintf(f, "]}");
+        std::putchar('\n');
     }
 
-    std::fprintf(f, "],\n\"aimat\":[");
-    for (size_t i = 0; i < m.aimatbones.size(); i++) {
-        const pulse::compile::AimAtBone& a = m.aimatbones[i];
-        std::fprintf(f, i ? ",\n{\"bone\":" : "\n{\"bone\":");
-        JsonString(f, boneName(a.bone));
-        std::fprintf(f, ",\"parent\":");
-        JsonString(f, boneName(a.parent));
-        std::fprintf(f, ",\"attachment\":%s,\"aim\":", a.aimAttach == -1 ? "false" : "true");
-        JsonString(f, a.aimAttach == -1 ? boneName(a.aimBone) : a.aimname);
-        std::fprintf(f, ",\"vectors\":");
-        JsonFloats(f, {a.aimvector.x, a.aimvector.y, a.aimvector.z, a.upvector.x, a.upvector.y,
-                       a.upvector.z, a.basepos.x, a.basepos.y, a.basepos.z});
-        std::fputc('}', f);
+    for (const pulse::compile::AimAtBone& a : m.aimatbones) {
+        std::fputs("@proc aimat", stdout);
+        ProcString(boneName(a.bone));
+        ProcString(boneName(a.parent));
+        std::fputs(a.aimAttach == -1 ? " bone" : " attachment", stdout);
+        ProcString(a.aimAttach == -1 ? boneName(a.aimBone) : a.aimname);
+        ProcFloats({a.aimvector.x, a.aimvector.y, a.aimvector.z, a.upvector.x, a.upvector.y,
+                    a.upvector.z, a.basepos.x, a.basepos.y, a.basepos.z});
+        std::putchar('\n');
     }
-    std::fprintf(f, "]}\n");
-    return std::fclose(f) == 0;
+    std::fputs("@proc end\n", stdout);
+}
+
+static std::string ReadStdin() {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
+    std::string text;
+    char buf[65536];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0)
+        text.append(buf, n);
+    return text;
 }
 
 static int RunCompile(int argc, char** argv) {
@@ -210,8 +206,9 @@ static int RunCompile(int argc, char** argv) {
     bool definebones = false;
     bool verify = false;
     bool dumpMaterials = false;
-    std::string dumpProcedural;
-    std::string dependencyFile;
+    bool dumpProcedural = false;
+    bool scriptFromStdin = false;
+    bool dumpDependencies = false;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
@@ -269,13 +266,11 @@ static int RunCompile(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "-verify") == 0) {
             verify = true;
         } else if (std::strcmp(argv[i], "-dumpprocedural") == 0) {
-            if (i + 1 >= argc)
-                return Fail("bad option", "-dumpprocedural needs an output file");
-            dumpProcedural = argv[++i];
+            dumpProcedural = true;
+        } else if (std::strcmp(argv[i], "-stdin") == 0) {
+            scriptFromStdin = true;
         } else if (std::strcmp(argv[i], "-dumpdependencies") == 0) {
-            if (i + 1 >= argc)
-                return Fail("bad option", "-dumpdependencies needs an output file");
-            dependencyFile = argv[++i];
+            dumpDependencies = true;
             pulse::dependencies::g_enabled = true;
         } else if (std::strcmp(argv[i], "-dumpmaterials") == 0) {
             dumpMaterials = true;
@@ -317,7 +312,9 @@ static int RunCompile(int argc, char** argv) {
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs))
+    const std::string stdinText = scriptFromStdin ? ReadStdin() : std::string();
+    if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
+                                     scriptFromStdin ? &stdinText : nullptr))
         return Fail("script error", err);
     auto tLoad = Clock::now();
     if (forceWriteVertexData)
@@ -338,7 +335,7 @@ static int RunCompile(int argc, char** argv) {
         input.vtxArchetype = vtxFormat;
     if (noDx80)
         input.noDx80 = true;
-    input.stopAfterProcedural = !dumpProcedural.empty();
+    input.stopAfterProcedural = dumpProcedural;
 
     pulse::compile::CompiledModel model;
     g_stage = "compile";
@@ -346,12 +343,9 @@ static int RunCompile(int argc, char** argv) {
         return Fail("compile error", err);
     auto tCompile = Clock::now();
 
-    if (!dumpProcedural.empty()) {
+    if (dumpProcedural) {
         g_stage = "dumpprocedural";
-        if (!DumpProcedural(model, dumpProcedural))
-            return Fail("write error", "cannot write \"" + dumpProcedural + "\"");
-        std::printf("procedural bones written to %s (%.2f s)\n", dumpProcedural.c_str(),
-                    ms(t0, tCompile) / 1000.0);
+        DumpProcedural(model);
         return 0;
     }
 
@@ -376,8 +370,8 @@ static int RunCompile(int argc, char** argv) {
         if (!pulse::writer::WriteModelFiles(model, outdir, legacyVtx, writeDx80, &err))
             return Fail("write error", err);
     }
-    if (!dependencyFile.empty() && !pulse::dependencies::Write(dependencyFile))
-        return Fail("write error", "cannot write \"" + dependencyFile + "\"");
+    if (dumpDependencies)
+        pulse::dependencies::Print();
     auto tWrite = Clock::now();
     g_stage = "done";
 

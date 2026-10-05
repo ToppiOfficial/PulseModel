@@ -131,7 +131,8 @@ bool AddDagJoint(const std::vector<dmx::ElementPtr>* jointList, const dmx::Eleme
     lb.name = dag->name;
     lb.parent = parentIndex;
     const dmx::Element* shape = dag->GetElement("shape");
-    lb.isNonSkeletal = (shape && shape->className == "DmeMesh");
+    lb.isNonSkeletal =
+        shape && (shape->className == "DmeMesh" || shape->className == "DmePhysicsShape");
     out.localBone.push_back(lb);
 
     if (auto kids = dag->GetElementArray("children"))
@@ -328,7 +329,9 @@ void LoadAnimations(const dmx::Element* animationList, float flScale,
         SourceAnim anim;
         anim.name = clip->name;
 
+        // Model 22 exporters write frameRate as a float; round it to the int rate
         int fps = clip->GetInt("frameRate", 0);
+        if (fps <= 0) fps = static_cast<int>(std::lround(clip->GetFloat("frameRate", 0.0f)));
         if (fps <= 0) fps = 30;
 
         // clip start/end in ticks (timeFrame: start + duration)
@@ -843,6 +846,7 @@ struct LoadMeshInfo {
     FlexTemp* flex = nullptr; // enabled only for rendermesh loads
     MeshFilter* filter = nullptr; // $exceptionlist, null when unfiltered
     std::vector<pm::matrix3x4> bindPose; // per jointList entry
+    bool physics = false; // read DmePhysicsShape dags, not DmeMesh
 };
 
 // reference DefineUniqueVertices: register this mesh's
@@ -1420,6 +1424,57 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     return true;
 }
 
+// Each connected piece of a physics shape is rigid: its vertices all move onto
+// the bone with the largest summed weight across that piece. Per piece, not per
+// shape, so a mirrored L/R pair in one object lands on both sides.
+void PinToDominantBone(MeshTemp& tmp, size_t firstVertex, size_t firstFace) {
+    const size_t n = tmp.bone.size() - firstVertex;
+    std::vector<size_t> root(n);
+    for (size_t i = 0; i < n; ++i)
+        root[i] = i;
+    auto find = [&](size_t i) {
+        while (root[i] != i)
+            i = root[i] = root[root[i]];
+        return i;
+    };
+    auto join = [&](uint32_t a, uint32_t b) {
+        if (a < firstVertex || b < firstVertex || a - firstVertex >= n || b - firstVertex >= n)
+            return;
+        root[find(a - firstVertex)] = find(b - firstVertex);
+    };
+    for (size_t f = firstFace; f < tmp.face.size(); ++f) {
+        join(tmp.face[f].a, tmp.face[f].b);
+        join(tmp.face[f].b, tmp.face[f].c);
+    }
+
+    std::map<size_t, std::map<int, float>> total; // piece -> bone -> summed weight
+    for (size_t i = 0; i < n; ++i) {
+        const SrcBoneWeight& w = tmp.bone[firstVertex + i];
+        std::map<int, float>& piece = total[find(i)];
+        for (int k = 0; k < w.numbones; ++k)
+            piece[w.bone[k]] += w.weight[k];
+    }
+    std::map<size_t, int> best;
+    for (const auto& [piece, bones] : total) {
+        float bestWeight = -1.0f;
+        for (const auto& [bone, weight] : bones)
+            if (weight > bestWeight) {
+                best[piece] = bone;
+                bestWeight = weight;
+            }
+    }
+    for (size_t i = 0; i < n; ++i) {
+        auto it = best.find(find(i));
+        if (it == best.end())
+            continue;
+        SrcBoneWeight& w = tmp.bone[firstVertex + i];
+        w = SrcBoneWeight{};
+        w.numbones = 1;
+        w.bone[0] = it->second;
+        w.weight[0] = 1.0f;
+    }
+}
+
 // reference LoadMeshes recursion: aggregate dag-to-bind-pose transform
 bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
                          const pm::matrix3x4& parentToBindPose, int nBoneAssign) {
@@ -1439,13 +1494,17 @@ bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
     const dmx::Element* shape = dag->GetElement("shape");
     // an $exceptionlist rejection skips the shape only - the dag still becomes a
     // localBone, exactly as it would for a dag carrying no mesh at all
-    if (shape && shape->className == "DmeMesh" &&
+    if (shape && shape->className == (info.physics ? "DmePhysicsShape" : "DmeMesh") &&
         (!info.filter || info.filter->Keep(shape->name, dag->name))) {
         const dmx::Element* bindState = MeshBindState(shape);
         if (!bindState)
             return false;
+        const size_t firstVertex = info.tmp->bone.size();
+        const size_t firstFace = info.tmp->face.size();
         if (!LoadMesh(info, dag, shape, bindState, dagToBindPose, nBoneAssign))
             return false;
+        if (info.physics)
+            PinToDominantBone(*info.tmp, firstVertex, firstFace);
     }
 
     if (auto kids = dag->GetElementArray("children"))
@@ -1457,8 +1516,9 @@ bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
 
 bool LoadMeshes(const dmx::Element* model, float flScale, const BoneMap& boneMap,
                 MaterialTable& mats, MeshTemp& tmp, FlexTemp* flex, MeshFilter* filter,
-                Source& out) {
+                bool physics, Source& out) {
     LoadMeshInfo info;
+    info.physics = physics;
     info.filter = filter;
     info.source = &out;
     info.model = model;
@@ -2203,7 +2263,8 @@ bool DmxUpAxisY() { return s_bUpAxisY; }
 void ResetDmxUpAxis() { s_bUpAxisY = false; s_bUpAxisChecked = false; }
 
 bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, float scale,
-                   std::string* err, bool morphSource, MeshFilter* filter, bool animOnly) {
+                   std::string* err, bool morphSource, MeshFilter* filter, bool animOnly,
+                   bool physicsShapes) {
     const dmx::Element* root = dm.root;
     if (!root) {
         if (err) *err = "DMX has no root element";
@@ -2257,7 +2318,7 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
     if (!animOnly) {
         PULSE_PERF("load", "LoadMeshes");
         if (!LoadMeshes(model, scale, boneMap, mats, tmp, flexTemp.enabled ? &flexTemp : nullptr,
-                        filter, out)) {
+                        filter, physicsShapes, out)) {
             if (err) *err = "failed to load meshes";
             return false;
         }

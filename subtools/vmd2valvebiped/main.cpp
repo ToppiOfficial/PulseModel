@@ -838,7 +838,7 @@ std::vector<mdldecompiler::FlexTrack> FaceTracks(const Morphs& morphs, const Fac
 const char* const kEyeBones[3] = {"\x97\xbc\x96\xda", "\x8d\xb6\x96\xda", "\x89\x45\x96\xda"};
 
 // Gaze from the eye bones as -1..1 of `range` degrees on eyes_updown/eyes_rightleft, in
-// the engine's signs: +1 looks down / toward the model's left. The player scales it to range.
+// the engine's signs: +1 looks down / toward the model's left; -1..1 spans the model's range.
 void AddEyeTracks(const std::map<std::string, std::vector<Key>>& keys,
                   const std::vector<mdldecompiler::FlexTrack>& ctrls, const std::vector<float>& times,
                   float range, std::vector<mdldecompiler::FlexTrack>& out) {
@@ -939,7 +939,7 @@ int Usage() {
         "                   visemes (one controller per vowel, for rigs whose mouth\n"
         "                   shapes each normalise by the sum of all mouth controls)\n"
         "  -eyerange <deg>  MMD eye-bone angle written as full gaze deflection\n"
-        "                   (default 30); eyes go out as -1..1 of the model's range\n"
+        "                   (default 30), mapped onto the model's gaze range\n"
         "  -facemap <file>  MMD morph -> flex controller map replacing the built-in\n"
         "                   Valve face one: \"<morph> <controller>=<weight>...\" per\n"
         "                   line, <morph> a built-in id (a i u e o blink...), its\n"

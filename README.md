@@ -66,8 +66,7 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
             [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
             [-vtxformat <0|1>] [-nodx80]
             [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
-            [-perfmetrics]
-            [-dumpcommands] [-dumpprocedural <file.json>] [-pause]
+            [-perfmetrics] [-pause]
 ```
 
 | Option | Meaning |
@@ -86,12 +85,24 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
 | `-verify` | Compile the model without writing output files. |
 | `-dumpmaterials` | Print the names of materials used by the compiled model. |
 | `-perfmetrics` | Print wall time in ms for each stage of the compile. |
-| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
-| `-dumpprocedural <file.json>` | Write the final bone names and the jiggle, driver and aim-at bone rules as JSON (values as the `.mdl` stores them, bones by name), then stop - no model files are written. For tools that preview those rules live. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
 The QC command `$minlod <lod>` sets the same zero-based minimum LOD. A
 command-line `-minlod` value takes precedence.
+
+### For external tools
+
+These switches are for editors, previewers and other programs that run
+`mdlcompiler` themselves and read its output. They are not needed to compile a
+model by hand or from a compile GUI such as Crowbar. The output formats are
+described on the wiki's [Development](https://github.com/ToppiOfficial/PulseModel/wiki/development) page.
+
+| Option | Meaning |
+| --- | --- |
+| `-stdin` | Read the script's text from standard input; the script path is still given and paths resolve as if the text were saved there. |
+| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
+| `-dumpprocedural` | Print the final bone names and the jiggle, driver and aim-at bone rules as `@proc` lines, then stop - no files are written. |
+| `-dumpdependencies` | After a successful compile, print every file it read with a hash of its content as `@dep` lines, so a tool can tell when the model is out of date. |
 
 ## mdldecompiler
 

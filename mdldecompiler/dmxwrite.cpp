@@ -1653,6 +1653,15 @@ bool ReadPhyHulls(const Mdl& m, const std::string& phyPath, std::vector<PhyHull>
     return !out.empty();
 }
 
+// Model 22 writes frameRate as a float (Source 2 convention); older models keep
+// the int stock studiomdl reads.
+void FrameRate(Dmx& q, int fps) {
+    if (g_formatModel >= 22)
+        q.Float("frameRate", static_cast<float>(fps));
+    else
+        q.Int("frameRate", fps);
+}
+
 // The frame times a DmeChannelsClip is sampled at: whole seconds plus the
 // rounded remainder, which is how the importer reconstructs them - a key
 // that lands anywhere else gets interpolated instead of read.
@@ -1703,9 +1712,8 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         idLog[i] = q.NewId();
         idLayer[i] = q.NewId();
     }
-    // flex tracks: one control each, plus the channel/log/layer triple
+    // flex tracks: one global flex controller operator each, plus the channel/log/layer triple
     const size_t numFlex = flex ? flex->size() : 0;
-    const std::string idCombo = numFlex ? q.NewId() : std::string();
     std::vector<std::string> idControl(numFlex);
     for (size_t i = 0; i < numFlex; ++i) {
         idControl[i] = q.NewId();
@@ -1718,7 +1726,7 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
     std::vector<int> legacyTimes;
     FrameTimes(frames.size(), fps, times, legacyTimes);
 
-    WriteSkel(q, m, s, clipName, std::string(), std::string(), idCombo, idList, &frames[0]);
+    WriteSkel(q, m, s, clipName, std::string(), std::string(), std::string(), idList, &frames[0]);
 
     q.Begin("DmeAnimationList", idList, clipName);
     q.RefArray("animations", {idClip});
@@ -1726,7 +1734,7 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
 
     q.Begin("DmeChannelsClip", idClip, clipName);
     q.Ref("timeFrame", idFrame);
-    q.Int("frameRate", fps);
+    FrameRate(q, fps);
     q.RefArray("channels", idChan);
     q.End();
 
@@ -1797,26 +1805,20 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         }
     }
 
-    if (numFlex) {
-        q.Begin("DmeCombinationOperator", idCombo, "combinationOperator");
-        q.RefArray("controls", idControl);
-        q.RefArray("targets", {});
-        q.End();
-    }
     for (size_t i = 0; i < numFlex; ++i) {
+        // SFM's game-model flex target: flexWeight is the controller's 0..1 share of min..max
         const FlexTrack& t = (*flex)[i];
+        const float span = t.max - t.min;
         std::vector<float> values = t.values;
-        values.resize(frames.size(), values.empty() ? 0.0f : values.back());
+        values.resize(frames.size(), values.empty() ? t.min : values.back());
+        for (float& v : values)
+            v = span != 0.0f ? (v - t.min) / span : 0.0f;
         if (std::all_of(values.begin(), values.end(), [&](float v) { return v == values[0]; }))
             values.resize(1);
 
-        q.Begin("DmeCombinationInputControl", idControl[i], t.name);
-        q.StrArray("rawControlNames", {t.name});
-        q.Bool("stereo", false);
-        q.Bool("eyelid", false);
-        q.Float("flexMin", t.min);
-        q.Float("flexMax", t.max);
-        q.Float("value", values[0]);
+        q.Begin("DmeGlobalFlexControllerOperator", idControl[i], t.name);
+        q.Float("flexWeight", values[0]);
+        q.Ref("gameModel", std::string());
         q.End();
 
         const size_t n = static_cast<size_t>(s.numbones) * 2 + i;
@@ -1825,7 +1827,7 @@ bool WriteAnimationDmx(const Mdl& m, const std::string& path, const std::string&
         q.Str("fromAttribute", "");
         q.Int("fromIndex", 0);
         q.Ref("toElement", idControl[i]);
-        q.Str("toAttribute", "value");
+        q.Str("toAttribute", "flexWeight");
         q.Int("toIndex", 0);
         q.Int("mode", g_formatModel == 1 ? 1 : 3);
         q.Ref("log", idLog[n]);
@@ -1915,7 +1917,7 @@ bool WriteCameraDmx(const std::string& path, const std::string& clipName, int fp
 
     q.Begin("DmeChannelsClip", idClip, clipName);
     q.Ref("timeFrame", idFrame);
-    q.Int("frameRate", fps);
+    FrameRate(q, fps);
     q.RefArray("channels", {idChan[0], idChan[1], idChan[2]});
     q.End();
 

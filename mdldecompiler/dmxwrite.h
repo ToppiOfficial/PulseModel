@@ -45,7 +45,8 @@ struct AnimPose {
     pm::RadianEuler rot{};
 };
 
-// One flex controller's value per frame, animated as a combination operator control.
+// One flex controller's raw value per frame in min..max. Written as SFM keys it: a
+// DmeGlobalFlexControllerOperator's flexWeight, normalised to 0..1.
 struct FlexTrack {
     std::string name;
     float min = 0.0f, max = 1.0f;

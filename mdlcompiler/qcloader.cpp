@@ -200,6 +200,8 @@ struct Ctx {
     // loads (each $rendermesh reopens it) is read and parsed once.
     std::map<std::string, std::shared_ptr<pulse::dmx::Datamodel>> dmxCache;
     source::MaterialTable physMats; // collision-only materials, kept out of the model's texture table
+    bool dataModelPhysics = false;  // a $datamodelphysics supplied the collision shapes
+    int shapelessPhysicsModelLine = 0; // $physicsmodel with no $physicsshape, warned at the end
     std::map<std::string, int> namedAnims; // $animation name -> index into in.anims
     std::map<std::string, std::vector<Token>> cmdlists; // $cmdlist name -> body tokens
     std::map<std::string, std::vector<Token>> lodCmdlists; // $lodcmdlist, keyed lowercased
@@ -4615,8 +4617,8 @@ bool CmdRenderPass(Ctx& c, const Token& cmd) {
 bool CmdOpaque(Ctx& c, const Token&) { c.in.renderPass = 1; return true; }
 bool CmdMostlyOpaque(Ctx& c, const Token&) { c.in.renderPass = 2; return true; }
 
-// $setbindpose <file> <frame> [meshonly] - bake the rest mesh and skeleton.
-// The pose file contributes no geometry or materials.
+// $setbindpose <file> <frame> [meshonly] [blockname <clip>] - bake the rest mesh
+// and skeleton. The pose file contributes no geometry or materials.
 bool CmdSetBindPose(Ctx& c, const Token& cmd) {
     std::string file;
     if (!c.Want("a pose source filename", cmd, file))
@@ -4633,10 +4635,18 @@ bool CmdSetBindPose(Ctx& c, const Token& cmd) {
         return false;
     c.in.bindPoseSource = src;
     c.in.bindPoseFrame = frame;
-    if (!c.Eof() && c.Cur().line == cmd.line &&
-        _stricmp(c.Cur().text.c_str(), "meshonly") == 0) {
-        c.in.bindPoseMeshOnly = true;
-        ++c.pos;
+    while (!c.Eof() && c.Cur().line == cmd.line) {
+        const std::string& o = c.Cur().text;
+        if (_stricmp(o.c_str(), "meshonly") == 0) {
+            c.in.bindPoseMeshOnly = true;
+            ++c.pos;
+        } else if (_stricmp(o.c_str(), "blockname") == 0) {
+            ++c.pos;
+            if (!c.Want("a source clip name", cmd, c.in.bindPoseClip))
+                return false;
+        } else {
+            break;
+        }
     }
     return true;
 }
@@ -7671,8 +7681,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
     }
 
     if (c.in.physShapes.size() == shapesBefore)
-        std::fprintf(stderr, "warning: %s line %d: $physicsmodel has no $physicsshape\n",
-                     c.file.c_str(), cmd.line);
+        c.shapelessPhysicsModelLine = cmd.line;
 
     // A zero or negative $mass is not rejected - the per-solid mass floor in
     // writephy clamps every body to 1 kg, which is what stock lands on too.
@@ -7714,6 +7723,8 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
     std::string file;
     if (!c.Want("a collision source filename", cmd, file))
         return false;
+    if (c.dataModelPhysics)
+        return c.Fail(cmd.line, cmd.text + " cannot be combined with $datamodelphysics");
     if (Lower(file) == "blank")
         return c.Fail(cmd.line, cmd.text + " requires a source file; use $physicsmodel for generation");
 
@@ -7889,6 +7900,45 @@ bool CmdCollisionModel(Ctx& c, const Token& cmd) {
 
 bool CmdCollisionJoints(Ctx& c, const Token& cmd) {
     return CmdLegacyCollision(c, cmd, cm::PhysicsBuildMode::Ragdoll);
+}
+
+// $datamodelphysics <file> - the DmePhysicsShape dags of a model DMX, each one
+// rigid on its most-weighted bone. Joints and mass stay in $physicsmodel.
+bool CmdDataModelPhysics(Ctx& c, const Token& cmd) {
+    std::string file;
+    if (!c.Want("a source filename", cmd, file))
+        return false;
+    if (c.in.physBuildMode != cm::PhysicsBuildMode::Auto)
+        return c.Fail(cmd.line, "$datamodelphysics cannot be combined with $collisionmodel "
+                                "or $collisionjoints");
+
+    const std::string resolved = WithDmxExtension(file);
+    auto dm = LoadRigDmx(c, cmd, resolved, "physics");
+    if (!dm)
+        return false;
+    auto src = std::make_unique<source::Source>();
+    src->filename = resolved;
+    src->kind = source::LoadKind::Collision;
+    std::string err;
+    if (!source::LoadDmxSource(*dm, *src, c.physMats, c.in.scale, &err, false, nullptr, false,
+                               /*physicsShapes=*/true))
+        return c.Fail(cmd.line, "$datamodelphysics \"" + file + "\": " + err);
+    if (src->face.empty())
+        return c.Fail(cmd.line, "$datamodelphysics \"" + file + "\" has no DmePhysicsShape");
+
+    // concave: each shape is its own island, so it gets its own hull even when
+    // several shapes share a bone
+    cm::PhysicsShape sh;
+    sh.name = pulse::FilePath(resolved).stem().string();
+    sh.source = src.get();
+    sh.concave = true;
+    c.in.sources.push_back(std::move(src));
+    c.in.physShapes.push_back(std::move(sh));
+    if (c.in.physShapes.size() > static_cast<size_t>(pulse::limits::kMaxPhysShapes))
+        return c.Fail(cmd.line, "too many physics shapes (max " +
+                                std::to_string(pulse::limits::kMaxPhysShapes) + ")");
+    c.dataModelPhysics = true;
+    return true;
 }
 
 // The $physicsmodel body commands, written at top level. Listed in the command
@@ -8834,6 +8884,7 @@ constexpr Command kCommands[] = {
     {"$bodygrouppreset", CmdModelGroupPreset},
     {"$datamodeljoints", CmdDataModelJoints},
     {"$datamodelflexes", CmdDataModelFlexes},
+    {"$datamodelphysics", CmdDataModelPhysics},
     {"$wrinklescale", CmdWrinkleScale},
     {"$animation", CmdAnimation},
     {"$bindposeanimation", CmdBindPoseAnimation},
@@ -9036,18 +9087,23 @@ bool IsQcScriptPath(const char* path) {
 
 bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
                   const ScriptVars& defvars, const SearchDirs& includeDirs,
-                  const SearchDirs& fileDirs) {
+                  const SearchDirs& fileDirs, const std::string* scriptText) {
     const std::string normalizedPath = pulse::FilePath(rawPath).string();
     const char* path = normalizedPath.c_str();
-    pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script);
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
-        if (err) *err = std::string("cannot open \"") + path + "\"";
-        return false;
+    pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script, scriptText);
+    std::string text;
+    if (scriptText) {
+        text = *scriptText;
+    } else {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            if (err) *err = std::string("cannot open \"") + path + "\"";
+            return false;
+        }
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        text = buf.str();
     }
-    std::ostringstream buf;
-    buf << f.rdbuf();
-    std::string text = buf.str();
     StripUtf8Bom(text);
 
     Ctx c{out};
@@ -9097,6 +9153,9 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     // geometry that never groups it is not - the meshes would not ship.
     if (out.bodyparts.empty() && !c.rendermeshes.empty())
         printf("WARNING: %s: $rendermesh but no $modelgroup\n", c.file.c_str());
+    if (c.shapelessPhysicsModelLine && !c.dataModelPhysics)
+        std::fprintf(stderr, "warning: %s line %d: $physicsmodel has no $physicsshape\n",
+                     c.file.c_str(), c.shapelessPhysicsModelLine);
 
     // set once every source has been read (the DMX loader latches it on the
     // first model carrying an upAxis attribute)
