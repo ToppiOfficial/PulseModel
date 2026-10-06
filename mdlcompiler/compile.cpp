@@ -923,6 +923,41 @@ void MapJiggleBones(Ctx& ctx) {
     }
 }
 
+// $culljigglebones: a jigglebone counts as skinned when it or any descendant
+// is weighted by an active source's vertex. Must precede TagUsedBones, whose
+// procedural keep would otherwise hold the bone alive.
+void CullUnskinnedJiggleBones(Ctx& ctx) {
+    std::vector<JiggleBone>& jbs = ctx.out->jigglebones;
+    if (!ctx.in->cullJiggleBones || jbs.empty())
+        return;
+
+    std::vector<std::string> skinned;
+    for (const auto& sp : ctx.in->sources) {
+        const src::Source* psource = sp.get();
+        if (!psource->isActiveModel)
+            continue;
+        std::vector<char> used(psource->numbones, 0);
+        for (const src::SrcVertex& v : psource->vertex)
+            for (int k = 0; k < v.boneweight.numbones; ++k)
+                for (int n = v.boneweight.bone[k]; n != -1 && !used[n];
+                     n = psource->localBone[n].parent)
+                    used[n] = 1;
+        for (int j = 0; j < psource->numbones; j++)
+            if (used[j])
+                skinned.push_back(psource->localBone[j].name);
+    }
+
+    for (int i = static_cast<int>(jbs.size()) - 1; i >= 0; --i) {
+        bool isSkinned = false;
+        for (const std::string& n : skinned)
+            isSkinned |= _stricmp(n.c_str(), jbs[i].bonename.c_str()) == 0;
+        if (isSkinned)
+            continue;
+        std::printf("Culling unskinned jigglebone \"%s\"\n", jbs[i].bonename.c_str());
+        jbs.erase(jbs.begin() + i);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MapAimAtBones (TagProceduralBones' aim-at half)
 //
@@ -994,6 +1029,28 @@ bool MapAimAtBones(Ctx& ctx, std::string* err) {
                     ab.aimname.c_str());
     }
     return true;
+}
+
+// The engine solves bones in index order, so an aim target whose bone sorts
+// after the aim-at bone is read from the previous frame (one-frame lag).
+void WarnAimAtTargetOrder(const Ctx& ctx) {
+    const CompiledModel& m = *ctx.out;
+    for (const AimAtBone& ab : m.aimatbones) {
+        int target = ab.aimBone;
+        if (ab.aimAttach >= 0) {
+            target = -1;
+            for (const Attachment& att : m.attachments)
+                if (att.name == ab.aimname)
+                    target = att.bone;
+        }
+        if (target <= ab.bone)
+            continue;
+        std::fprintf(stderr,
+                     "WARNING: aimconstraint \"%s\" (bone %d) aims at \"%s\" whose bone \"%s\" "
+                     "(bone %d) is solved after it - the aim lags one frame\n",
+                     ab.bonename.c_str(), ab.bone, ab.aimname.c_str(),
+                     m.bones[target].name.c_str(), target);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -11026,6 +11083,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // unknown morph controller must not keep its bone alive (reference does
     // both inside the same per-source TagFlexDriverBones call).
     PruneFlexDriverBones(ctx);
+    CullUnskinnedJiggleBones(ctx);
 
     { PULSE_TIME_PASS("TagUsedBones"); TagUsedBones(ctx); }
     {
@@ -11164,6 +11222,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         return false;
     if (!LinkAttachments(ctx, err))
         return false;
+    WarnAimAtTargetOrder(ctx);
 
     // $lockbonelengths, immediately before the rules like the reference
     { PULSE_TIME_PASS("LockBoneLengths");

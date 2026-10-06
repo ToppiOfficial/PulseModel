@@ -5391,6 +5391,13 @@ bool CmdAlwaysCollapse(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $culljigglebones: drop every $jigglebone whose bone and descendants carry no
+// vertex weight, leaving the bone to the normal cull/collapse.
+bool CmdCullJiggleBones(Ctx& c, const Token&) {
+    c.in.cullJiggleBones = true;
+    return true;
+}
+
 // $hierarchy <child> <parent> (Cmd_ForcedHierarchy, "$heirarchy" is stock's own
 // misspelling and works too): reparent a bone. Applied once the global bone
 // table exists, so it can join two source skeletons that were exported apart.
@@ -8968,6 +8975,7 @@ constexpr Command kCommands[] = {
     {"$physicsnocollide", CmdPhysicsOutsideModel},
     {"$assumeworldspace", CmdPhysicsOutsideModel},
     {"$jigglebone", CmdJiggleBone},
+    {"$culljigglebones", CmdCullJiggleBones},
     {"$driverbone", CmdDriverBone},
     {"$driveraimat", CmdDriverAimAt},
     {"$proceduralbones", CmdProceduralBones},
