@@ -4496,8 +4496,11 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
 bool GeneratePrimitiveShapes(const CompiledModel& m, const CompileInput& in,
                              const RadianEuler& defaultRotation,
                              std::vector<GeneratedShape>& out, std::string* err) {
+    // the inverse of the ragdoll path's pose -> bone space, $origin included
     matrix3x4 modelXform;
     pm::AngleMatrix(defaultRotation, modelXform);
+    MatrixSetColumn(pm::VectorRotate({-in.adjust.x, -in.adjust.y, -in.adjust.z}, modelXform),
+                    3, modelXform);
     for (const PhysicsShape& shape : in.physShapes) {
         if (shape.kind != PhysicsShapeKind::Primitive)
             continue;
