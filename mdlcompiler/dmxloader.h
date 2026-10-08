@@ -26,7 +26,8 @@ namespace pulse::source {
 // `animOnly` = skeleton + channel clips only, no mesh dags read at all (materials
 // never reach `mats`, no morphs).
 // `physicsShapes` = $datamodelphysics: read the DmePhysicsShape dags instead of
-// the DmeMesh ones, each connected piece pinned to its most-weighted bone.
+// the DmeMesh ones, each connected piece pinned to its most-weighted bone, plus
+// the root's physicsPrimitiveList as one rigid hull per merge group.
 bool LoadDmxSource(const pulse::dmx::Datamodel& dm, Source& out,
                    MaterialTable& mats, float scale, std::string* err,
                    bool morphSource = false, MeshFilter* filter = nullptr,

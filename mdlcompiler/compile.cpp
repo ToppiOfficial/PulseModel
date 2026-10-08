@@ -8673,6 +8673,7 @@ void CompressIKErrors(Ctx& ctx) {
 // CalcSequenceBoundingBoxes
 void CalcSequenceBoundingBoxes(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
+    const bool legacy = ctx.in->legacySequenceBounds;
 
     // SetupFullBoneRenderBounds: bone vertex bounds + hitboxes
     std::vector<Vector3> boundsMin(m.bones.size()), boundsMax(m.bones.size());
@@ -8692,6 +8693,21 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
     std::vector<matrix3x4> poseToBone(m.bones.size());
     for (size_t k = 0; k < m.bones.size(); k++)
         poseToBone[k] = pm::MatrixInvert(m.bones[k].boneToPose);
+
+    // Each influencing bone contains the vertex in its local space. Their
+    // transformed boxes enclose normalized, nonnegative weighted skinning.
+    if (!legacy) {
+        for (const Model& model : m.models) {
+            for (const LodVertex& v : model.vertices) {
+                for (int n = 0; n < v.boneweight.numbones; ++n) {
+                    const int bone = v.boneweight.bone[n];
+                    const Vector3 p = pm::VectorTransform(v.position, poseToBone[bone]);
+                    boundsMin[bone] = VecMin(p, boundsMin[bone]);
+                    boundsMax[bone] = VecMax(p, boundsMax[bone]);
+                }
+            }
+        }
+    }
 
     // Seam/LOD copies skin to the same bits, and VecMin/VecMax keep the
     // accumulator on a tie, so dropping later duplicates leaves the boxes exact.
@@ -8716,7 +8732,7 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
         }
     };
     std::vector<SkinVert> skinVerts;
-    {
+    if (legacy) {
         std::unordered_set<SkinVert, SkinVertHash, SkinVertEq> seen;
         for (const Model& model : m.models) {
             for (const LodVertex& v : model.vertices) {
@@ -8734,18 +8750,19 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
         }
     }
 
-    // Cost is frames x vertices, so animations run in parallel; min/max is
-    // order-independent, so the boxes match a serial run bit for bit.
+    // Animations run in parallel with shared, read-only geometry bounds.
     auto calcAnim = [&](Anim& panim) {
         Vector3 bmin{9999.0f, 9999.0f, 9999.0f};
         Vector3 bmax{-9999.0f, -9999.0f, -9999.0f};
 
         std::vector<matrix3x4> bonetransform;
-        std::vector<matrix3x4> posetransform(m.bones.size());
+        std::vector<matrix3x4> posetransform(legacy ? m.bones.size() : 0);
         for (int j = 0; j < panim.numframes; j++) {
             CalcBoneTransforms(ctx, panim, j, bonetransform);
-            for (size_t k = 0; k < m.bones.size(); k++)
-                posetransform[k] = pm::ConcatTransforms(bonetransform[k], poseToBone[k]);
+            if (legacy) {
+                for (size_t k = 0; k < m.bones.size(); k++)
+                    posetransform[k] = pm::ConcatTransforms(bonetransform[k], poseToBone[k]);
+            }
 
             // include hitboxes / bone render bounds
             for (size_t k = 0; k < m.bones.size(); k++) {

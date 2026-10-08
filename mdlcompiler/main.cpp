@@ -71,6 +71,7 @@ static int Usage() {
     std::printf("                overrides $minlod in the script\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and stop\n");
     std::printf("  -verify       compile the model without writing output files\n");
+    std::printf("  -legacysequencebounds   calculate sequence bounds by skinning every vertex\n");
     std::printf("  -dumpmaterials print the names of materials used by the model\n");
     std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
     std::printf("  -dumpprocedural\n");
@@ -203,6 +204,7 @@ static int RunCompile(int argc, char** argv) {
     int launchMinLod = -1;
     bool stripLods = false;
     bool forceWriteVertexData = false;
+    bool legacySequenceBounds = false;
     bool definebones = false;
     bool verify = false;
     bool dumpMaterials = false;
@@ -265,6 +267,8 @@ static int RunCompile(int argc, char** argv) {
             definebones = true;
         } else if (std::strcmp(argv[i], "-verify") == 0) {
             verify = true;
+        } else if (std::strcmp(argv[i], "-legacysequencebounds") == 0) {
+            legacySequenceBounds = true;
         } else if (std::strcmp(argv[i], "-dumpprocedural") == 0) {
             dumpProcedural = true;
         } else if (std::strcmp(argv[i], "-stdin") == 0) {
@@ -317,6 +321,7 @@ static int RunCompile(int argc, char** argv) {
                                      scriptFromStdin ? &stdinText : nullptr))
         return Fail("script error", err);
     auto tLoad = Clock::now();
+    input.legacySequenceBounds = legacySequenceBounds;
     if (forceWriteVertexData)
         input.forceWriteVertexData = true;
     if (stripLods)

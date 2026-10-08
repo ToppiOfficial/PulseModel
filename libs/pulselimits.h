@@ -155,6 +155,7 @@ inline constexpr int kMaxExtraSkinnedBones = kUncapped; // compile-time cost onl
 // [tool] Budgets, not format ceilings - the format caps per-hull, not per-solid.
 inline constexpr int kMaxGeneratedHulls = 128;   // VHACD merge target when max_hulls is 0
 inline constexpr int kMaxSolidVerts     = 16384; // fatal, not advisory - dense hulls crash vphysics on load
+inline constexpr int kMaxCapsuleSegments = 64;  // [tool] DmePhysicsCapsule "segments"
 
 } // namespace pulse::limits
 

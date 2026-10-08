@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -16,6 +17,7 @@
 
 #include "math/math.h"
 #include "pulselimits.h"
+#include "convexhull.h"
 namespace pulse::source {
 
 namespace dmx = pulse::dmx;
@@ -2262,6 +2264,217 @@ SourceAnim* FindSourceAnim(Source& src, const char* name) {
 bool DmxUpAxisY() { return s_bUpAxisY; }
 void ResetDmxUpAxis() { s_bUpAxisY = false; s_bUpAxisChecked = false; }
 
+// Sphere uses the capsule's two latitudes per hemisphere: equator and 45 degrees.
+// "segments" sets each ring's vertex count; three shared rings plus two poles.
+bool TessellateSphere(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
+    const pm::Vector3 c = ToV3(e->GetVector3("position"));
+    const float r = e->GetFloat("radius");
+    if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) ||
+        !std::isfinite(r) || r <= 0.0f) {
+        std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid position or "
+                             "nonpositive/non-finite radius, skipped\n",
+                     e->GetString("boneName") ? e->GetString("boneName")->c_str() : "");
+        return false;
+    }
+    const int segments = std::clamp(e->GetInt("segments", 6), 3, lim::kMaxCapsuleSegments);
+    constexpr int rings = 2;
+    for (int ring = 1 - rings; ring < rings; ++ring) {
+        const float lat = ring * (pm::kPiF * 0.5f / rings);
+        const float radial = r * std::cos(lat), height = r * std::sin(lat);
+        for (int k = 0; k < segments; ++k) {
+            const float angle = k * (2.0f * pm::kPiF / segments);
+            pts.push_back({c.x + radial * std::cos(angle), c.y + radial * std::sin(angle),
+                           c.z + height});
+        }
+    }
+    pts.push_back({c.x, c.y, c.z - r});
+    pts.push_back({c.x, c.y, c.z + r});
+    return true;
+}
+
+// DmePhysicsCapsule: the hull of two spheres, rings laid out along the segment.
+// Optional int "segments" sets the points per ring (default 6).
+void TessellateCapsule(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
+    const int kSegments = std::clamp(e->GetInt("segments", 6), 3, lim::kMaxCapsuleSegments);
+    constexpr int kRings = 2; // latitudes per hemisphere, equator included
+    const pm::Vector3 p[2] = {ToV3(e->GetVector3("point0")), ToV3(e->GetVector3("point1"))};
+    const float r[2] = {std::max(0.0f, e->GetFloat("radius0")),
+                        std::max(0.0f, e->GetFloat("radius1"))};
+    pm::Vector3 ax{p[1].x - p[0].x, p[1].y - p[0].y, p[1].z - p[0].z};
+    const float len = std::sqrt(ax.x * ax.x + ax.y * ax.y + ax.z * ax.z);
+    ax = len > 1e-6f ? pm::Vector3{ax.x / len, ax.y / len, ax.z / len} : pm::Vector3{0, 0, 1};
+    const pm::Vector3 ref = std::fabs(ax.z) < 0.9f ? pm::Vector3{0, 0, 1} : pm::Vector3{1, 0, 0};
+    pm::Vector3 u{ax.y * ref.z - ax.z * ref.y, ax.z * ref.x - ax.x * ref.z,
+                  ax.x * ref.y - ax.y * ref.x};
+    const float ul = std::sqrt(u.x * u.x + u.y * u.y + u.z * u.z);
+    u = {u.x / ul, u.y / ul, u.z / ul};
+    const pm::Vector3 v{ax.y * u.z - ax.z * u.y, ax.z * u.x - ax.x * u.z, ax.x * u.y - ax.y * u.x};
+    auto add = [&](const pm::Vector3& c, float rad, float ca, float sa, float lat) {
+        const float cl = std::cos(lat), sl = std::sin(lat);
+        pts.push_back({c.x + rad * (cl * (ca * u.x + sa * v.x) + sl * ax.x),
+                       c.y + rad * (cl * (ca * u.y + sa * v.y) + sl * ax.y),
+                       c.z + rad * (cl * (ca * u.z + sa * v.z) + sl * ax.z)});
+    };
+    for (int s = 0; s < 2; ++s) {
+        if (r[s] <= 0.0f) {
+            pts.push_back(p[s]);
+            continue;
+        }
+        for (int hemi = -1; hemi <= 1; hemi += 2) {
+            for (int ring = hemi < 0 ? 1 : 0; ring < kRings; ++ring) {
+                const float lat = hemi * ring * (pm::kPiF * 0.5f / kRings);
+                for (int k = 0; k < kSegments; ++k) {
+                    const float a = k * (2.0f * pm::kPiF / kSegments);
+                    add(p[s], r[s], std::cos(a), std::sin(a), lat);
+                }
+            }
+            add(p[s], r[s], 1.0f, 0.0f, hemi * pm::kPiF * 0.5f);
+        }
+    }
+}
+
+// DmePhysicsBox: R = Rz * Ry * Rx (Blender XYZ euler, degrees) about the box center
+void TessellateBox(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
+    const dmx::Vector3 mn = e->GetVector3("minBounds"), mx = e->GetVector3("maxBounds");
+    const dmx::Vector3 o = e->GetVector3("orientation");
+    const pm::Vector3 c{(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
+    const pm::Vector3 h{std::fabs(mx.x - mn.x) * 0.5f, std::fabs(mx.y - mn.y) * 0.5f,
+                        std::fabs(mx.z - mn.z) * 0.5f};
+    const float cx = std::cos(o.x * pm::kDeg2Rad), sx = std::sin(o.x * pm::kDeg2Rad);
+    const float cy = std::cos(o.y * pm::kDeg2Rad), sy = std::sin(o.y * pm::kDeg2Rad);
+    const float cz = std::cos(o.z * pm::kDeg2Rad), sz = std::sin(o.z * pm::kDeg2Rad);
+    const float R[3][3] = {{cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx},
+                           {sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx},
+                           {-sy, cy * sx, cy * cx}};
+    for (int i = 0; i < 8; ++i) {
+        const float d[3] = {(i & 1) ? h.x : -h.x, (i & 2) ? h.y : -h.y, (i & 4) ? h.z : -h.z};
+        pts.push_back({c.x + R[0][0] * d[0] + R[0][1] * d[1] + R[0][2] * d[2],
+                       c.y + R[1][0] * d[0] + R[1][1] * d[1] + R[1][2] * d[2],
+                       c.z + R[2][0] * d[0] + R[2][1] * d[1] + R[2][2] * d[2]});
+    }
+}
+
+// root.physicsPrimitiveList for $datamodelphysics. Per bone, every merge=true
+// primitive shares one hull and each merge=false one is its own convex; each
+// hull is a closed mesh rigid on that bone, so it stays one collision island.
+void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable& mats,
+                           MeshTemp& tmp, const Source& out) {
+    const dmx::Element* list = root->GetElement("physicsPrimitiveList");
+    const std::vector<dmx::ElementPtr>* prims = list ? list->GetElementArray("primitives") : nullptr;
+    if (!prims)
+        return;
+
+    struct Group { int bone; std::vector<pm::Vector3> pts; };
+    std::vector<Group> groups;
+    std::map<int, size_t> merged; // bone -> its merge=true group
+    for (const dmx::Element* e : *prims) {
+        if (!e)
+            continue;
+        const bool capsule = e->className == "DmePhysicsCapsule";
+        const bool sphere = e->className == "DmePhysicsSphere";
+        if (!capsule && !sphere && e->className != "DmePhysicsBox")
+            continue;
+        const std::string* boneName = e->GetString("boneName");
+        int bone = -1;
+        for (size_t i = 0; boneName && i < out.localBone.size(); ++i)
+            if (_stricmp(out.localBone[i].name.c_str(), boneName->c_str()) == 0) {
+                bone = static_cast<int>(i);
+                break;
+            }
+        if (bone < 0) {
+            std::fprintf(stderr, "warning: %s on unknown bone \"%s\", skipped\n",
+                         e->className.c_str(), boneName ? boneName->c_str() : "");
+            continue;
+        }
+        std::vector<pm::Vector3> spherePoints;
+        if (sphere) {
+            if (!TessellateSphere(e, spherePoints))
+                continue;
+            const float radius = std::fabs(e->GetFloat("radius") * scale);
+            const bool finitePoints = std::all_of(spherePoints.begin(), spherePoints.end(),
+                [&](const pm::Vector3& p) {
+                    const pm::Vector3 w = pm::VectorTransform(
+                        {p.x * scale, p.y * scale, p.z * scale}, out.boneToPose[bone]);
+                    return std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z);
+                });
+            if (!std::isfinite(radius) || radius <= 0.0f || !finitePoints) {
+                std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid "
+                                     "converted position or radius, skipped\n", boneName->c_str());
+                continue;
+            }
+        }
+        const bool merge = e->GetBool("merge", true);
+        auto it = merged.find(bone);
+        if (!merge || it == merged.end()) {
+            if (merge)
+                merged[bone] = groups.size();
+            groups.push_back({bone, {}});
+        }
+        std::vector<pm::Vector3>& pts = merge ? groups[merged[bone]].pts : groups.back().pts;
+        if (sphere)
+            pts.insert(pts.end(), spherePoints.begin(), spherePoints.end());
+        else if (capsule)
+            TessellateCapsule(e, pts);
+        else
+            TessellateBox(e, pts);
+    }
+
+    int material = -1;
+    for (const Group& g : groups) {
+        std::vector<float> xyz;
+        xyz.reserve(g.pts.size() * 3);
+        for (const pm::Vector3& p : g.pts) {
+            const pm::Vector3 w = pm::VectorTransform({p.x * scale, p.y * scale, p.z * scale},
+                                                      out.boneToPose[g.bone]);
+            xyz.insert(xyz.end(), {w.x, w.y, w.z});
+        }
+        phys::ConvexHullResult hull =
+            phys::BuildConvexHull(xyz.data(), static_cast<int>(g.pts.size()));
+        if (hull.degenerate || hull.indices.empty()) {
+            std::fprintf(stderr, "warning: flat physics primitive on bone \"%s\", skipped\n",
+                         out.localBone[g.bone].name.c_str());
+            continue;
+        }
+        if (material < 0)
+            material = mats.UseTextureAsMaterial(mats.LookupTexture("physics_primitive"));
+
+        pm::Vector3 mid{};
+        for (const phys::HullVert& hv : hull.vertices)
+            mid = {mid.x + hv.x, mid.y + hv.y, mid.z + hv.z};
+        const float inv = 1.0f / static_cast<float>(hull.vertices.size());
+        mid = {mid.x * inv, mid.y * inv, mid.z * inv};
+
+        const uint32_t base = static_cast<uint32_t>(tmp.vertex.size());
+        const uint32_t nbase = static_cast<uint32_t>(tmp.normal.size());
+        const uint32_t tbase = static_cast<uint32_t>(tmp.texcoord.size());
+        tmp.texcoord.push_back({});
+        for (const phys::HullVert& hv : hull.vertices) {
+            tmp.vertex.push_back({hv.x, hv.y, hv.z});
+            SrcBoneWeight w;
+            w.numbones = 1;
+            w.bone[0] = g.bone;
+            w.weight[0] = 1.0f;
+            tmp.bone.push_back(w);
+            tmp.outline.push_back(-1.0f);
+            pm::Vector3 n{hv.x - mid.x, hv.y - mid.y, hv.z - mid.z};
+            const float nl = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+            tmp.normal.push_back(nl > 0.0f ? pm::Vector3{n.x / nl, n.y / nl, n.z / nl}
+                                           : pm::Vector3{0, 0, 1});
+        }
+        // hull is CCW from outside; the loader stores the reference (v1, v3, v2) winding
+        for (size_t i = 0; i + 2 < hull.indices.size(); i += 3) {
+            TmpFace f{};
+            f.material = material;
+            const uint32_t a = hull.indices[i], b = hull.indices[i + 2], c = hull.indices[i + 1];
+            f.a = base + a, f.na = nbase + a;
+            f.b = base + b, f.nb = nbase + b;
+            f.c = base + c, f.nc = nbase + c;
+            f.ta = f.tb = f.tc = tbase;
+            tmp.face.push_back(f);
+        }
+    }
+}
+
 bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, float scale,
                    std::string* err, bool morphSource, MeshFilter* filter, bool animOnly,
                    bool physicsShapes) {
@@ -2322,6 +2535,8 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
             if (err) *err = "failed to load meshes";
             return false;
         }
+        if (physicsShapes)
+            LoadPhysicsPrimitives(root, scale, mats, tmp, out);
         if (!tmp.face.empty())
             { PULSE_PERF("load", "BuildIndividualMeshes"); BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out); }
     }
