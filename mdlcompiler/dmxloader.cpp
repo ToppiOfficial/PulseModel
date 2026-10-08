@@ -2265,18 +2265,10 @@ bool DmxUpAxisY() { return s_bUpAxisY; }
 void ResetDmxUpAxis() { s_bUpAxisY = false; s_bUpAxisChecked = false; }
 
 // Sphere uses the capsule's two latitudes per hemisphere: equator and 45 degrees.
-// "segments" sets each ring's vertex count; three shared rings plus two poles.
-bool TessellateSphere(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
-    const pm::Vector3 c = ToV3(e->GetVector3("position"));
-    const float r = e->GetFloat("radius");
-    if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) ||
-        !std::isfinite(r) || r <= 0.0f) {
-        std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid position or "
-                             "nonpositive/non-finite radius, skipped\n",
-                     e->GetString("boneName") ? e->GetString("boneName")->c_str() : "");
-        return false;
-    }
-    const int segments = std::clamp(e->GetInt("segments", 6), 3, lim::kMaxCapsuleSegments);
+// `segments` sets each ring's vertex count; three shared rings plus two poles.
+void TessellateSphere(const pm::Vector3& c, float r, int segments,
+                      std::vector<pm::Vector3>& pts) {
+    segments = std::clamp(segments, 3, lim::kMaxCapsuleSegments);
     constexpr int rings = 2;
     for (int ring = 1 - rings; ring < rings; ++ring) {
         const float lat = ring * (pm::kPiF * 0.5f / rings);
@@ -2289,17 +2281,15 @@ bool TessellateSphere(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
     }
     pts.push_back({c.x, c.y, c.z - r});
     pts.push_back({c.x, c.y, c.z + r});
-    return true;
 }
 
-// DmePhysicsCapsule: the hull of two spheres, rings laid out along the segment.
-// Optional int "segments" sets the points per ring (default 6).
-void TessellateCapsule(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
-    const int kSegments = std::clamp(e->GetInt("segments", 6), 3, lim::kMaxCapsuleSegments);
+// The hull of two spheres, rings laid out along the segment.
+void TessellateCapsule(const pm::Vector3& p0, const pm::Vector3& p1, float radius0,
+                       float radius1, int segments, std::vector<pm::Vector3>& pts) {
+    const int kSegments = std::clamp(segments, 3, lim::kMaxCapsuleSegments);
     constexpr int kRings = 2; // latitudes per hemisphere, equator included
-    const pm::Vector3 p[2] = {ToV3(e->GetVector3("point0")), ToV3(e->GetVector3("point1"))};
-    const float r[2] = {std::max(0.0f, e->GetFloat("radius0")),
-                        std::max(0.0f, e->GetFloat("radius1"))};
+    const pm::Vector3 p[2] = {p0, p1};
+    const float r[2] = {std::max(0.0f, radius0), std::max(0.0f, radius1)};
     pm::Vector3 ax{p[1].x - p[0].x, p[1].y - p[0].y, p[1].z - p[0].z};
     const float len = std::sqrt(ax.x * ax.x + ax.y * ax.y + ax.z * ax.z);
     ax = len > 1e-6f ? pm::Vector3{ax.x / len, ax.y / len, ax.z / len} : pm::Vector3{0, 0, 1};
@@ -2333,10 +2323,9 @@ void TessellateCapsule(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
     }
 }
 
-// DmePhysicsBox: R = Rz * Ry * Rx (Blender XYZ euler, degrees) about the box center
-void TessellateBox(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
-    const dmx::Vector3 mn = e->GetVector3("minBounds"), mx = e->GetVector3("maxBounds");
-    const dmx::Vector3 o = e->GetVector3("orientation");
+// R = Rz * Ry * Rx (Blender XYZ euler, degrees) about the box center
+void TessellateBox(const pm::Vector3& mn, const pm::Vector3& mx, const pm::Vector3& o,
+                   std::vector<pm::Vector3>& pts) {
     const pm::Vector3 c{(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
     const pm::Vector3 h{std::fabs(mx.x - mn.x) * 0.5f, std::fabs(mx.y - mn.y) * 0.5f,
                         std::fabs(mx.z - mn.z) * 0.5f};
@@ -2353,6 +2342,35 @@ void TessellateBox(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
                        c.z + R[2][0] * d[0] + R[2][1] * d[1] + R[2][2] * d[2]});
     }
 }
+
+namespace {
+
+bool SphereFromElement(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
+    const pm::Vector3 c = ToV3(e->GetVector3("position"));
+    const float r = e->GetFloat("radius");
+    if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) ||
+        !std::isfinite(r) || r <= 0.0f) {
+        std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid position or "
+                             "nonpositive/non-finite radius, skipped\n",
+                     e->GetString("boneName") ? e->GetString("boneName")->c_str() : "");
+        return false;
+    }
+    TessellateSphere(c, r, e->GetInt("segments", 6), pts);
+    return true;
+}
+
+void CapsuleFromElement(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
+    TessellateCapsule(ToV3(e->GetVector3("point0")), ToV3(e->GetVector3("point1")),
+                      e->GetFloat("radius0"), e->GetFloat("radius1"), e->GetInt("segments", 6),
+                      pts);
+}
+
+void BoxFromElement(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
+    TessellateBox(ToV3(e->GetVector3("minBounds")), ToV3(e->GetVector3("maxBounds")),
+                  ToV3(e->GetVector3("orientation")), pts);
+}
+
+} // namespace
 
 // root.physicsPrimitiveList for $datamodelphysics. Per bone, every merge=true
 // primitive shares one hull and each merge=false one is its own convex; each
@@ -2388,7 +2406,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
         }
         std::vector<pm::Vector3> spherePoints;
         if (sphere) {
-            if (!TessellateSphere(e, spherePoints))
+            if (!SphereFromElement(e, spherePoints))
                 continue;
             const float radius = std::fabs(e->GetFloat("radius") * scale);
             const bool finitePoints = std::all_of(spherePoints.begin(), spherePoints.end(),
@@ -2414,9 +2432,9 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
         if (sphere)
             pts.insert(pts.end(), spherePoints.begin(), spherePoints.end());
         else if (capsule)
-            TessellateCapsule(e, pts);
+            CapsuleFromElement(e, pts);
         else
-            TessellateBox(e, pts);
+            BoxFromElement(e, pts);
     }
 
     int material = -1;

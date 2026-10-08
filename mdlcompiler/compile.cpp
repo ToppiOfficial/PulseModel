@@ -4491,6 +4491,38 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
     return true;
 }
 
+// Each $physicsshape primitive becomes one generated hull, posed off its bone
+// into the same space the render-generated hulls use.
+bool GeneratePrimitiveShapes(const CompiledModel& m, const CompileInput& in,
+                             const RadianEuler& defaultRotation,
+                             std::vector<GeneratedShape>& out, std::string* err) {
+    matrix3x4 modelXform;
+    pm::AngleMatrix(defaultRotation, modelXform);
+    for (const PhysicsShape& shape : in.physShapes) {
+        if (shape.kind != PhysicsShapeKind::Primitive)
+            continue;
+        const int globalBone = FindGlobalBone(m, shape.parentBone);
+        if (globalBone < 0) {
+            if (err) *err = "$physicsshape primitive names bone \"" + shape.parentBone +
+                            "\" which is not in the compiled model";
+            return false;
+        }
+        const matrix3x4 boneToPose =
+            pm::ConcatTransforms(modelXform, m.bones[globalBone].boneToPose);
+        GeneratedShape gen;
+        gen.globalBone = globalBone;
+        gen.name = shape.name;
+        gen.maxConvex = shape.maxConvex;
+        gen.hulls.emplace_back();
+        for (const Vector3& p : shape.primitivePoints) {
+            const Vector3 w = pm::VectorTransform(p, boneToPose);
+            gen.hulls.back().push_back({w.x, w.y, w.z});
+        }
+        out.push_back(std::move(gen));
+    }
+    return true;
+}
+
 // Turn a generated shape's point clouds into convexes, optionally moving them
 // out of global pose space into a bone's own space first (the ragdoll case).
 bool ConvexesFromGenerated(const GeneratedShape& gen, const matrix3x4* poseToBoneSpace,
@@ -5036,7 +5068,8 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     // Generated shapes run first: their hulls decide bones too, so the single
     // body vs ragdoll call below has to see them.
     std::vector<GeneratedShape> generated;
-    if (!GenerateRenderShapes(m, in, ctx.defaultRotation, generated, err))
+    if (!GenerateRenderShapes(m, in, ctx.defaultRotation, generated, err) ||
+        !GeneratePrimitiveShapes(m, in, ctx.defaultRotation, generated, err))
         return false;
 
     // ---- resolve the physics bone set ------------------------------------

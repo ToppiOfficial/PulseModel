@@ -742,6 +742,7 @@ struct BoneFlexDriver {
 enum class PhysicsShapeKind {
     FromFile,   // "PhysicsShapeFromFile"   - an authored collision mesh
     FromRender, // "PhysicsShapeFromRender" - hulls generated off the render mesh
+    Primitive,  // $physicsshape primitive - one box/sphere/capsule hull on parentBone
 };
 
 // How a `PhysicsShapeFromFile` maps its source's skinning onto the model.
@@ -802,6 +803,9 @@ struct PhysicsShape {
     // an exclusion list, so by default every body's render geometry is used
     std::vector<std::string> exceptionMeshNames;
     std::vector<const source::Source*> exceptionSources;
+
+    // ---- Primitive --------------------------------------------------------
+    std::vector<Vector3> primitivePoints; // tessellated, scaled, in parentBone space
 };
 
 // one axis of a `PhysicsJoint` constraint

@@ -9,6 +9,7 @@
 #define PULSEMDL_DMXLOADER_H
 
 #include <string>
+#include <vector>
 
 #include "dmx/dmx.h"
 #include "meshedit.h"
@@ -37,6 +38,15 @@ bool LoadDmxSource(const pulse::dmx::Datamodel& dm, Source& out,
 // skeleton/mesh/morphs). A file with no combination operator yields an empty
 // rig, not an error.
 bool LoadDmxFlexRig(const pulse::dmx::Datamodel& dm, FlexRig& out, std::string* err);
+
+// Physics primitive point clouds, shared by physicsPrimitiveList and
+// `$physicsshape primitive`. Box orientation is XYZ euler degrees.
+void TessellateSphere(const math::Vector3& center, float radius, int segments,
+                      std::vector<math::Vector3>& pts);
+void TessellateCapsule(const math::Vector3& p0, const math::Vector3& p1, float radius0,
+                       float radius1, int segments, std::vector<math::Vector3>& pts);
+void TessellateBox(const math::Vector3& mins, const math::Vector3& maxs,
+                   const math::Vector3& orientation, std::vector<math::Vector3>& pts);
 
 // True when the loaded DmeModel declared upAxis "Y*" (reference sets
 // g_defaultrotation = (pi/2, 0, pi/2) in that case). Sticky across loads,
