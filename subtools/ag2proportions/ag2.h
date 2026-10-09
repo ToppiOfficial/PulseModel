@@ -22,6 +22,11 @@ inline constexpr const char* kStockGraph = "animation/graphs/worldmodel/worldmod
 inline constexpr const char* kStockUiGraph = "animation/graphs/ui/uimodel.vnmgraph";
 inline constexpr const char* kStockSkeleton = "animation/skeletons/characters/worldmodel.vnmskel";
 
+// Generated assets, relative to the output folder.
+inline constexpr const char* kWorldGraphFile = "graphs/proportions_worldmodel.vnmgraph";
+inline constexpr const char* kUiGraphFile = "graphs/proportions_uimodel.vnmgraph";
+inline constexpr const char* kClipFile = "anims/proportions.vnmclip";
+
 // One model to wrap. Paths are absolute once loaded; empty means "use the default".
 struct Job {
     fs::path vmdl;

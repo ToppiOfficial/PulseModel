@@ -275,9 +275,9 @@ void BuildWorkspace(const fs::path& ws, const Toolchain& t, const fs::path& cs2,
     // the clip compile needs the skeleton's source form at its canonical path
     kv::WriteFile((content / kStockSkeleton).u8string(), kv::WriteText(descriptor));
     const fs::path sources = content / fs::u8path(paths.relative);
-    fs::create_directories(sources);
-    for (const char* name : {"reference.dmx", "proportions.dmx", "proportions.vnmclip", "proportions_worldmodel.vnmgraph",
-                             "proportions_uimodel.vnmgraph"})
+    fs::create_directories(sources / "graphs");
+    fs::create_directories(sources / "anims");
+    for (const char* name : {"reference.dmx", "proportions.dmx", kClipFile, kWorldGraphFile, kUiGraphFile})
         fs::copy_file(paths.output / name, sources / name);
 }
 
@@ -333,7 +333,7 @@ void Compile(const Options& options, const Paths& paths, const std::vector<uint8
         const fs::path game = ws / "game/ag2", content = ws / "content/ag2";
         const kv::Value expected = kv::ReadResource(skeleton);
 
-        for (const char* name : {"proportions.vnmclip", "proportions_worldmodel.vnmgraph", "proportions_uimodel.vnmgraph"}) {
+        for (const char* name : {kClipFile, kWorldGraphFile, kUiGraphFile}) {
             const std::string asset = paths.relative + "/" + name;
             fs::path exe = ws / "game/bin" / tools.platform / tools.files[0];
             std::vector<std::string> args{"-game", game.u8string(), "-i", (content / fs::u8path(asset)).u8string(),
@@ -350,7 +350,7 @@ void Compile(const Options& options, const Paths& paths, const std::vector<uint8
                 env.push_back({"WINEPATH", WinePath(tools.bin) + ";" + WinePath(tools.modBin)});
             }
 #endif
-            const fs::path log = ws / (std::string(name) + ".compile.log");
+            const fs::path log = ws / (fs::u8path(name).filename().u8string() + ".compile.log");
             const int code = RunProcess(exe, args, ws, log, env);
             const fs::path compiled = game / fs::u8path(asset + "_c");
             if (code != 0 || !fs::exists(compiled) || ReadText(log).find("0 failed") == std::string::npos)
@@ -371,8 +371,9 @@ void Compile(const Options& options, const Paths& paths, const std::vector<uint8
         }
 
         const fs::path published = paths.cs2 / "game/csgo_addons" / paths.addon.filename() / fs::u8path(paths.relative);
-        fs::create_directories(published);
-        for (const char* name : {"proportions.vnmclip_c", "proportions_worldmodel.vnmgraph_c", "proportions_uimodel.vnmgraph_c"}) {
+        for (const char* source : {kClipFile, kWorldGraphFile, kUiGraphFile}) {
+            const fs::path name = fs::u8path(std::string(source) + "_c");
+            fs::create_directories((published / name).parent_path());
             fs::copy_file(game / fs::u8path(paths.relative) / name, published / name,
                           fs::copy_options::overwrite_existing);
             std::cout << "Compiled: " << (published / name).u8string() << '\n';

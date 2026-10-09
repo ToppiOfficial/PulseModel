@@ -21,7 +21,7 @@ using std::runtime_error;
 
 // Every file a run writes into the output folder; a rerun clears these first.
 const char* const kGeneratedFiles[] = {
-    "proportions_worldmodel.vnmgraph", "proportions_uimodel.vnmgraph", "proportions.vnmclip", "proportions.dmx", "reference.dmx",
+    kWorldGraphFile, kUiGraphFile, kClipFile, "proportions.dmx", "reference.dmx",
     "model_with_helpers.dmx", "debug/rig_merged.dmx", "debug/skeleton_descriptor.kv3",
     "debug/report.kv3", "debug/MODEL_SETUP.txt",
 };
@@ -247,8 +247,8 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
         if (!found)
             InsertHelperNode(model, binding, binding.parent >= 0 ? stock[binding.parent].name : std::string());
     }
-    const std::string graph = paths.relative + "/proportions_worldmodel.vnmgraph";
-    const std::string uiGraph = paths.relative + "/proportions_uimodel.vnmgraph";
+    const std::string graph = paths.relative + "/" + kWorldGraphFile;
+    const std::string uiGraph = paths.relative + "/" + kUiGraphFile;
     kv::Value* list = nullptr;
     Walk(model, [&](kv::Value& node) {
         if (ClassOf(node) == "AnimGraph2List")
@@ -306,7 +306,7 @@ std::string SetupNotes(const Paths& paths, const std::vector<Bone>& dmxHelpers, 
                        const std::vector<Bone>& stock, const std::vector<std::string>& warnings, bool wroteModel) {
     std::string note = "AG2 PROPORTIONS (experimental)\n\n"
                        "Set the worldmodel AnimGraph2 to:\n  " +
-                       paths.relative + "/proportions_worldmodel.vnmgraph\n\n";
+                       paths.relative + "/" + kWorldGraphFile + "\n\n";
     if (!dmxHelpers.empty()) {
         note += "Missing weapon helpers were added to model_with_helpers.dmx. Point the matching\n"
                 "SkeletonFile and RenderMeshFile imports at:\n  " + paths.relative + "/model_with_helpers.dmx\n"
@@ -361,7 +361,7 @@ kv::Value Report(const Job& job, const std::string& rig, const std::string& pose
         {"model", job.vmdl.generic_u8string()},
         {"rig", rig},
         {"pose", pose},
-        {"graph", paths.relative + "/proportions_worldmodel.vnmgraph"},
+        {"graph", paths.relative + "/" + kWorldGraphFile},
         {"boneTranslations", bones},
         {"compiled", false},
     };
@@ -373,8 +373,8 @@ bool IsInfoNote(const std::string& warning) { return warning.rfind("standalone p
 // What the user has to do next, on the console; the full notes are --debug only.
 void PrintSummary(const Paths& paths, const std::vector<Bone>& dmxHelpers, const std::vector<Bone>& nodeHelpers,
                   const std::vector<Bone>& stock, const std::vector<std::string>& warnings, const Job& job) {
-    std::cout << "Set the worldmodel AnimGraph2 to " << paths.relative << "/proportions_worldmodel.vnmgraph\n"
-              << "Set the uimodel AnimGraph2 to " << paths.relative << "/proportions_uimodel.vnmgraph\n";
+    std::cout << "Set the worldmodel AnimGraph2 to " << paths.relative << "/" << kWorldGraphFile << "\n"
+              << "Set the uimodel AnimGraph2 to " << paths.relative << "/" << kUiGraphFile << "\n";
     if (job.writeModel)
         std::cout << "Edited " << job.vmdl.filename().u8string() << " (original kept as "
                   << job.vmdl.filename().u8string() << ".bak)\n";
@@ -432,7 +432,7 @@ void Generate(const Job& job, const Options& options) {
         skeletonBytes = kv::ReadFile(job.vnmskel.u8string());
         RequireSameSkeleton(installed, ReadStockSkeleton(skeletonBytes));
     }
-    const std::string clip = paths.relative + "/proportions.vnmclip";
+    const std::string clip = paths.relative + "/" + kClipFile;
     const std::vector<uint8_t> graphBytes = package.Read(std::string(kStockGraph) + "_c");
     const std::vector<uint8_t> uiGraphBytes = package.Read(std::string(kStockUiGraph) + "_c");
     const kv::Value graph = WrapperGraph(kv::ReadResource(graphBytes), kStockGraph, clip);
@@ -556,7 +556,8 @@ void Generate(const Job& job, const Options& options) {
     for (const char* name : kGeneratedFiles)
         clear(paths.output / name);
     std::error_code ec;
-    fs::remove(paths.output / "debug", ec); // only when empty
+    for (const char* folder : {"debug", "graphs", "anims"})
+        fs::remove(paths.output / folder, ec); // only when empty
     std::cout << "Output: " << paths.output.u8string() << '\n';
 
     WriteHeldPose(paths.output / "reference.dmx", installed.bones, installed.lowLodCount);
@@ -566,9 +567,9 @@ void Generate(const Job& job, const Options& options) {
         if (!dmx::Save(*helperCopy, (paths.output / "model_with_helpers.dmx").u8string(), &err))
             throw runtime_error(err);
     }
-    kv::WriteFile((paths.output / "proportions.vnmclip").u8string(), kv::WriteText(ProportionClip(paths.relative)));
-    kv::WriteFile((paths.output / "proportions_worldmodel.vnmgraph").u8string(), kv::WriteText(graph));
-    kv::WriteFile((paths.output / "proportions_uimodel.vnmgraph").u8string(), kv::WriteText(uiGraph));
+    kv::WriteFile((paths.output / kClipFile).u8string(), kv::WriteText(ProportionClip(paths.relative)));
+    kv::WriteFile((paths.output / kWorldGraphFile).u8string(), kv::WriteText(graph));
+    kv::WriteFile((paths.output / kUiGraphFile).u8string(), kv::WriteText(uiGraph));
     if (job.writeModel) {
         AddWeaponHelpers(*rig, installed.bones, {}, {});
         EditModel(vmdlText, vmdl, job, paths, modelDmx, !dmxHelpers.empty(), installed.bones,
