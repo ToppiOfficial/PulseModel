@@ -25,4 +25,4 @@ if(WIN32)
     target_sources(l4d_animswap PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
                                     "${CMAKE_SOURCE_DIR}/utf8.manifest")
 endif()
-target_link_libraries(l4d_animswap PRIVATE pulse_libs pulse_math)
+target_link_libraries(l4d_animswap PRIVATE pulse_libs pulse_math pulse_dmx)

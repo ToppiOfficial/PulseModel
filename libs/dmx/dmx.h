@@ -1,16 +1,11 @@
 // dmx.h - PulseMDL
 //
-// Generic DMX (Datamodel Exchange) reader. This is a clean-room C++ port of the
-// format logic from Artfunkel's Datamodel.NET (MIT); no .NET dependency.
+// Generic DMX (Datamodel Exchange) reader and writer. A clean-room C++ port of
+// the format logic from Artfunkel's Datamodel.NET (MIT); no .NET dependency.
 //
-// It exposes a generic element/attribute graph (NOT model-specific). The MDL
-// loader maps this graph into the compiler's internal source structures.
-//
-// Supported encodings:
-//   - keyvalues2 / keyvalues2_flat (text)  - fully implemented + tested.
-//   - binary                               - common encoding versions.
-// All `format model` versions are accepted; version-specific meaning is the
-// MDL loader's concern, not the reader's.
+// One generic element/attribute graph (NOT model-specific) for both directions.
+// Encodings: keyvalues2 (read: also _flat and nested; write: flat) and binary
+// (read 1-5 and 9, write 2-5 and 9). Version meaning is the caller's concern.
 
 #ifndef PULSEMDL_DMX_H
 #define PULSEMDL_DMX_H
@@ -137,10 +132,87 @@ private:
     std::map<Guid, Element*> by_id_;
 };
 
+Guid NewGuid(); // random v4
+inline bool IsNull(const Guid& g) { return g == Guid{}; }
+
+// Writes `dm` in its own encoding, encoding_version, format and format_version.
+// Elements go out in `elements` order (root first); a "name" string attribute
+// is carried by the element header instead.
+bool Save(const Datamodel& dm, std::vector<uint8_t>& out, std::string* err = nullptr);
+bool Save(const Datamodel& dm, const std::string& path, std::string* err = nullptr);
+
+// Builds a fresh document element by element. Elements are stored in Begin order
+// and a reference may name an element Begun later; Finish() resolves them.
+class Builder {
+public:
+    Builder(const std::string& format, int formatVersion, const std::string& encoding,
+            int encodingVersion, uint32_t seed = 0);
+
+    // Deterministic: the seed fills the first groups, a counter the last.
+    Guid NewId();
+
+    Element& Begin(const char* className, const Guid& id, const std::string& name);
+    void End() {} // keeps emit sites reading as blocks
+    Element& Current() { return *current_; }
+    Element* Root() { return dm_->root; }
+
+    Attribute& Push(const char* key, AttrType type, AttrValue value);
+    void Str(const char* k, const std::string& v) { Push(k, AttrType::String, v); }
+    void Int(const char* k, int32_t v) { Push(k, AttrType::Int, v); }
+    void Float(const char* k, float v) { Push(k, AttrType::Float, v); }
+    void Bool(const char* k, bool v) { Push(k, AttrType::Bool, v); }
+    void Time(const char* k, float seconds) { Push(k, AttrType::Time, dmx::Time{seconds}); }
+    template <class V> void Vec3(const char* k, const V& v) {
+        Push(k, AttrType::Vector3, Vector3{v.x, v.y, v.z});
+    }
+    template <class Q> void Quat(const char* k, const Q& q) {
+        Push(k, AttrType::Quaternion, Quaternion{q.x, q.y, q.z, q.w});
+    }
+    void Ref(const char* k, const Guid& id) { Ref(Current(), k, id); }
+    void Ref(Element& on, const char* k, const Guid& id);
+    void RefArray(const char* k, const std::vector<Guid>& ids);
+    void IntArray(const char* k, const std::vector<int32_t>& v) { Push(k, AttrType::IntArray, v); }
+    void FloatArray(const char* k, const std::vector<float>& v) { Push(k, AttrType::FloatArray, v); }
+    void TimeArray(const char* k, const std::vector<float>& seconds);
+    void StrArray(const char* k, const std::vector<std::string>& v) { Push(k, AttrType::StringArray, v); }
+    template <class Q> void QuatArray(const char* k, const std::vector<Q>& v) {
+        std::vector<Quaternion> out;
+        out.reserve(v.size());
+        for (const Q& q : v) out.push_back({q.x, q.y, q.z, q.w});
+        Push(k, AttrType::QuaternionArray, std::move(out));
+    }
+    template <class V> void V3Array(const char* k, const std::vector<V>& v) {
+        std::vector<Vector3> out;
+        out.reserve(v.size());
+        for (const V& p : v) out.push_back({p.x, p.y, p.z});
+        Push(k, AttrType::Vector3Array, std::move(out));
+    }
+    template <class V> void V2Array(const char* k, const std::vector<V>& v) {
+        std::vector<Vector2> out;
+        out.reserve(v.size());
+        for (const V& p : v) out.push_back({p.x, p.y});
+        Push(k, AttrType::Vector2Array, std::move(out));
+    }
+
+    // Resolves references (an id never Begun becomes null) and hands the document over.
+    Datamodel& Finish();
+    bool Save(const std::string& path, std::string* err = nullptr) { return dmx::Save(Finish(), path, err); }
+
+private:
+    struct PendingRef { Element* owner; size_t attr; std::vector<Guid> ids; bool array; };
+    std::unique_ptr<Datamodel> dm_;
+    Element* current_ = nullptr;
+    std::vector<PendingRef> pending_;
+    uint32_t seed_;
+    uint32_t next_ = 1;
+};
+
 // Codec entry points (buffer is the bytes *after* the header line). Internal,
 // but declared here so the codecs can be in separate translation units.
 bool ParseKeyValues2(Datamodel& dm, const char* body, size_t len, std::string* err);
 bool ParseBinary(Datamodel& dm, const uint8_t* body, size_t len, std::string* err);
+bool WriteKeyValues2(const Datamodel& dm, std::string& out, std::string* err);
+bool WriteBinary(const Datamodel& dm, std::string& out, std::string* err);
 
 } // namespace pulse::dmx
 

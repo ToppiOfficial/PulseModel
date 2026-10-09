@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 # No project-wide version: each tool sets TOOL_VERSION in its own CMakeLists,
 # feeding both its -version printout and its Win32 version resource.
-# C is enabled only for the vendored ufbx single-file reader; all of our own
-# code is C++.
+# C is enabled for vendored dependencies; all toolkit code is C++.
 project(PulseModel LANGUAGES CXX C)
 
 # LTO (-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON) measured ~6% faster compiles

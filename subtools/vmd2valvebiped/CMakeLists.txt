@@ -20,4 +20,4 @@ if(WIN32)
     target_sources(vmd2valvebiped PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
                                           "${CMAKE_SOURCE_DIR}/utf8.manifest")
 endif()
-target_link_libraries(vmd2valvebiped PRIVATE pulse_libs pulse_math pulse_drlibs)
+target_link_libraries(vmd2valvebiped PRIVATE pulse_libs pulse_math pulse_drlibs pulse_dmx)

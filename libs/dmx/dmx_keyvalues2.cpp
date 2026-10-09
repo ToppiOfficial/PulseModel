@@ -1,4 +1,4 @@
-// dmx_keyvalues2.cpp - text (keyvalues2 / keyvalues2_flat) DMX decoder.
+// dmx_keyvalues2.cpp - text (keyvalues2 / keyvalues2_flat) DMX decoder and encoder.
 //
 // Grammar (per element):
 //   "ClassName" { "attr" "type" value  ... }
@@ -19,8 +19,10 @@
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <optional>
+#include <type_traits>
 
 namespace pulse::dmx {
 namespace {
@@ -497,6 +499,89 @@ private:
 bool ParseKeyValues2(Datamodel& dm, const char* body, size_t len, std::string* err) {
     Parser p(dm, body, len);
     return p.Run(err);
+}
+
+namespace {
+
+const char* const kTypeNames[] = {
+    "", "element", "int", "float", "bool", "string", "binary", "time", "color",
+    "vector2", "vector3", "vector4", "qangle", "quaternion", "matrix",
+    "element_array", "int_array", "float_array", "bool_array", "string_array", "binary_array",
+    "time_array", "color_array", "vector2_array", "vector3_array", "vector4_array",
+    "qangle_array", "quaternion_array", "matrix_array",
+};
+
+// %.9g round-trips a float exactly.
+std::string G(float v) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.9g", v);
+    return b;
+}
+
+template <class T> struct IsArrayValue : std::false_type {};
+template <class T> struct IsArrayValue<std::vector<T>> : std::true_type {};
+template <> struct IsArrayValue<Binary> : std::false_type {};
+
+template <class T> std::string Text(const T& v) {
+    if constexpr (std::is_same_v<T, ElementPtr>) return v ? GuidToString(v->id) : std::string();
+    else if constexpr (std::is_same_v<T, int32_t>) return std::to_string(v);
+    else if constexpr (std::is_same_v<T, float>) return G(v);
+    else if constexpr (std::is_same_v<T, bool>) return v ? "1" : "0";
+    else if constexpr (std::is_same_v<T, std::string>) return v;
+    else if constexpr (std::is_same_v<T, Binary>) {
+        static constexpr char hex[] = "0123456789ABCDEF";
+        std::string s;
+        for (uint8_t b : v) { s += hex[b >> 4]; s += hex[b & 15]; }
+        return s;
+    } else if constexpr (std::is_same_v<T, Time>) return G(v.seconds);
+    else if constexpr (std::is_same_v<T, Color>)
+        return std::to_string(v.r) + " " + std::to_string(v.g) + " " + std::to_string(v.b) + " " +
+               std::to_string(v.a);
+    else if constexpr (std::is_same_v<T, Vector2>) return G(v.x) + " " + G(v.y);
+    else if constexpr (std::is_same_v<T, Vector3> || std::is_same_v<T, QAngle>)
+        return G(v.x) + " " + G(v.y) + " " + G(v.z);
+    else if constexpr (std::is_same_v<T, Vector4> || std::is_same_v<T, Quaternion>)
+        return G(v.x) + " " + G(v.y) + " " + G(v.z) + " " + G(v.w);
+    else if constexpr (std::is_same_v<T, Matrix>) {
+        std::string s;
+        for (int i = 0; i < 16; ++i) s += (i ? " " : "") + G(v.m[i]);
+        return s;
+    } else return {};
+}
+
+} // namespace
+
+// Flat form: every element at top level, references by id.
+bool WriteKeyValues2(const Datamodel& dm, std::string& out, std::string* /*err*/) {
+    char header[160];
+    std::snprintf(header, sizeof header, "<!-- dmx encoding %s %d format %s %d -->\n\n",
+                  dm.encoding.c_str(), dm.encoding_version, dm.format.c_str(), dm.format_version);
+    out += header;
+    for (const auto& e : dm.elements) {
+        out += "\"" + e->className + "\"\n{\n";
+        out += "\t\"id\" \"elementid\" \"" + GuidToString(e->id) + "\"\n";
+        out += "\t\"name\" \"string\" \"" + e->name + "\"\n";
+        for (const Attribute& a : e->attributes) {
+            if (a.name == "name" && a.type == AttrType::String) continue;
+            const std::string head = "\t\"" + a.name + "\" \"" + kTypeNames[static_cast<int>(a.type)] + "\"";
+            std::visit([&](const auto& v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (IsArrayValue<T>::value) {
+                    using V = typename T::value_type;
+                    out += head + "\n\t[\n";
+                    for (size_t k = 0; k < v.size(); ++k) {
+                        out += std::is_same_v<V, ElementPtr> ? "\t\t\"element\" \"" : "\t\t\"";
+                        out += Text(static_cast<V>(v[k])) + (k + 1 < v.size() ? "\",\n" : "\"\n");
+                    }
+                    out += "\t]\n";
+                } else if constexpr (!std::is_same_v<T, std::monostate>) {
+                    out += head + " \"" + Text(v) + "\"\n";
+                }
+            }, a.value);
+        }
+        out += "}\n\n";
+    }
+    return true;
 }
 
 } // namespace pulse::dmx

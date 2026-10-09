@@ -1,0 +1,52 @@
+<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+	assettypes = {
+		nmgraph_asset = {
+			_class = "CResourceAssetTypeInfo"
+			m_FriendlyName = "Animation Graph 2"
+			m_Ext = "vnmgraph"
+			m_CompilerIdentifier = "CompileNmGraph"
+			m_Blocks = [
+				{
+					m_BlockID = "DATA"
+					m_Encoding = "RESOURCE_ENCODING_KV3"
+				},
+			]
+			m_CompileDependsOnResourceTypes = [
+				"vnmskel",
+				"vnmgraph",
+				"vnmclip",
+			]
+		}
+		nmclip_asset = {
+			_class = "CResourceAssetTypeInfo"
+			m_FriendlyName = "Animation Clip 2"
+			m_Ext = "vnmclip"
+			m_CompilerIdentifier = "CompileNmClip"
+			m_Blocks = [
+				{
+					m_BlockID = "DATA"
+					m_Encoding = "RESOURCE_ENCODING_KV3"
+				},
+			]
+			m_CompileDependsOnResourceTypes = [
+				"vnmskel",
+			]
+		}
+		nmskeleton_asset = {
+			_class = "CResourceAssetTypeInfo"
+			m_FriendlyName = "Animation Skeleton 2"
+			m_Ext = "vnmskel"
+			m_CompilerIdentifier = "CompileNmSkeleton"
+			m_Blocks = [
+				{
+					m_BlockID = "DATA"
+					m_Encoding = "RESOURCE_ENCODING_KV3"
+				},
+			]
+			m_CompileDependsOnResourceTypes = [
+				"vnmskel",
+			]
+		}
+	}
+}

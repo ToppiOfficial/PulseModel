@@ -21,3 +21,8 @@ endif()
 if(PULSE_BUILD_VMD2VALVEBIPED)
     add_subdirectory(vmd2valvebiped)
 endif()
+
+option(PULSE_BUILD_AG2PROPORTIONS "Build the experimental AG2 proportions subtool" ON)
+if(PULSE_BUILD_AG2PROPORTIONS)
+    add_subdirectory(ag2proportions)
+endif()

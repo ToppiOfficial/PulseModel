@@ -63,3 +63,17 @@ add_library(pulse_drlibs STATIC
     drlibs/drlibs_impl.c
 )
 target_include_directories(pulse_drlibs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/drlibs)
+
+# Zstandard decompression, used under its BSD-3-Clause license.
+add_library(pulse_zstd STATIC
+    zstd/common/debug.c zstd/common/entropy_common.c zstd/common/error_private.c
+    zstd/common/fse_decompress.c zstd/common/zstd_common.c zstd/common/xxhash.c
+    zstd/decompress/huf_decompress.c zstd/decompress/zstd_ddict.c
+    zstd/decompress/zstd_decompress.c zstd/decompress/zstd_decompress_block.c
+)
+target_compile_definitions(pulse_zstd PRIVATE ZSTD_LEGACY_SUPPORT=0 ZSTD_DISABLE_ASM=1)
+target_include_directories(pulse_zstd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/zstd)
+
+add_library(pulse_keyvalues3 STATIC keyvalues3/kv3.cpp keyvalues3/kv3_binary.cpp)
+target_include_directories(pulse_keyvalues3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pulse_keyvalues3 PRIVATE pulse_zstd PUBLIC pulse_libs)

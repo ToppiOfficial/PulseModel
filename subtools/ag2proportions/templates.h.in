@@ -1,0 +1,3 @@
+#pragma once
+inline constexpr const char* kWrapperTemplate = R"AG2(@AG2_WRAPPER@)AG2";
+inline constexpr const char* kAssetTypesTemplate = R"AG2(@AG2_ASSET_TYPES@)AG2";

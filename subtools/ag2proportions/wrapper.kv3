@@ -1,0 +1,1624 @@
+<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+	_class = "CNmGraphDocument"
+	m_nVersion = 0
+	m_pRootGraph = {
+		_class = "CNmGraphDocFlowGraph"
+		m_ID = "c8b398f7-9967-4fae-bd21-82bc7ee8d7ab"
+		m_nodes = [
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "e53fb365-7037-4d1f-83e6-32b5e5e4db0f"
+				m_name = "action"
+				m_floatingComment = ""
+				m_position = [
+					0,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "58c70d39-a717-4a05-aab4-dfa0c969aa2e"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "166d108a-ef29-4595-a34f-d659ea42192c"
+				m_name = "action_reset"
+				m_floatingComment = ""
+				m_position = [
+					350,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "dc3e146a-63eb-4101-921a-ebf3c754ba21"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "3637c7e8-4812-4880-bff5-36d9af3c2db5"
+				m_name = "attack_type"
+				m_floatingComment = ""
+				m_position = [
+					700,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "41940054-9427-4a13-ae49-4f6e282bcaf2"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "c6bbf95f-61f4-463b-afaf-3ed314407eb4"
+				m_name = "attack_variation"
+				m_floatingComment = ""
+				m_position = [
+					1050,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "ca3385a8-ea6c-4e96-9b27-18e148f9057c"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "fbe5563f-51dc-4f6e-8363-9ba847353db9"
+				m_name = "deploy_variation"
+				m_floatingComment = ""
+				m_position = [
+					1400,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "c67f2bdf-9a82-4d75-8f75-c5921cf49a85"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "1d787017-9a1a-4b91-ad69-91522be28cd1"
+				m_name = "idle_variation"
+				m_floatingComment = ""
+				m_position = [
+					1750,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "0674298d-f50a-4663-a8ec-c9f5e0c412d7"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "092ac390-3752-47d9-9b34-8699ba817ab2"
+				m_name = "attack_throw_strength"
+				m_floatingComment = ""
+				m_position = [
+					2100,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "8c84c57c-1a37-43c1-8e1a-4330e06b23e6"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "3c431667-09b5-4db7-8eb4-b40d872fa9a9"
+				m_name = "weapon_ammo"
+				m_floatingComment = ""
+				m_position = [
+					2450,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "324a7f8d-1916-4bae-ab56-157c82aa926b"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "85009b43-bb43-4a09-a7ad-3e7e0baa26cf"
+				m_name = "weapon_ammo_max"
+				m_floatingComment = ""
+				m_position = [
+					2800,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "35ca9964-0ac9-4fae-a28b-09d92308b0a8"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "9485c166-d570-4655-8ead-2451130dcb49"
+				m_name = "weapon_ammo_reserve"
+				m_floatingComment = ""
+				m_position = [
+					3150,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "e2a34721-ce6c-4b7c-80d0-1d51d5d89940"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "0c678a8f-d5d7-4e1a-ae0b-c3576b7d6d92"
+				m_name = "weapon_category"
+				m_floatingComment = ""
+				m_position = [
+					3500,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "c3d079a1-77d3-4c0e-8c8b-f1410178d84e"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "716506ca-ec03-4f3e-b0e4-6c3dfc323ec8"
+				m_name = "weapon_extra_info"
+				m_floatingComment = ""
+				m_position = [
+					3850,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "e4776268-6449-48fa-879a-fe07cac506d2"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "55f4f53d-f89d-4ada-84f0-1b9f4081d84c"
+				m_name = "weapon_ironsight_amount"
+				m_floatingComment = ""
+				m_position = [
+					4200,
+					1700.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "050f13db-80f9-444a-b2f7-88275159eb18"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "008ad8dd-2e3e-4f90-8d3f-5db48064620e"
+				m_name = "weapon_is_silenced"
+				m_floatingComment = ""
+				m_position = [
+					0,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "a215ed55-28f3-4ae6-ae9f-1e0fb5a331e3"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "3fe150f7-6368-4714-9d57-40404afc2d03"
+				m_name = "weapon_type"
+				m_floatingComment = ""
+				m_position = [
+					350,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "7614830f-6c25-4bc5-be41-1e5968fbaf96"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "5900cff7-9f5e-41dc-9d98-dab4850c9d8d"
+				m_name = "reload_stage"
+				m_floatingComment = ""
+				m_position = [
+					700,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "5aa52e77-234f-4ce1-acc0-5ffc234414b0"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "bdb09bd2-4b0c-4ecd-9d0f-0bc4030ab150"
+				m_name = "move_speed_horizontal"
+				m_floatingComment = ""
+				m_position = [
+					1050,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "ccfd83b6-58cc-41f8-b8c5-17baff716e18"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "ae5999dd-534e-464b-8db0-28a03f1fd9e4"
+				m_name = "move_crouch_amount"
+				m_floatingComment = ""
+				m_position = [
+					1400,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "aba20470-6865-43c9-b3ff-b7327291c26d"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "503f0692-da39-431c-9ffa-c42931e1b053"
+				m_name = "move_type"
+				m_floatingComment = ""
+				m_position = [
+					1750,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "3da380a5-e654-4f0f-b065-25356fa046af"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "63d040d5-6aac-4370-affa-657e38ef5ad7"
+				m_name = "air_height_above_ground"
+				m_floatingComment = ""
+				m_position = [
+					2100,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "d59521e3-6a3e-4ac1-8a87-f34e72f1fe22"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "329acf53-49a5-43f0-86e5-ded81ce210b0"
+				m_name = "flashed_amount"
+				m_floatingComment = ""
+				m_position = [
+					2450,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "c4d7b80e-c624-4b87-a740-e4e23dcd6cf7"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "5d17ab6d-2ae1-47ec-b4dd-df42548f0785"
+				m_name = "flinch_head_type"
+				m_floatingComment = ""
+				m_position = [
+					2800,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "f4894f20-52dc-473c-85d5-ae80e71e5ac4"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "9923a95d-1932-487c-97be-824f4237f461"
+				m_name = "flinch_body_type"
+				m_floatingComment = ""
+				m_position = [
+					3150,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "4acadacd-b85f-4a79-aedf-e201730386d0"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "5477dba7-de52-4bf2-9b53-4a590214c5b0"
+				m_name = "flinch_body_restart"
+				m_floatingComment = ""
+				m_position = [
+					3500,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "d1bec9ad-3205-4252-baaa-5b8341f76320"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "6a4513c4-1039-4c84-bf75-e9c7ca6ff20f"
+				m_name = "flinch_head_restart"
+				m_floatingComment = ""
+				m_position = [
+					3850,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "04fdbc88-2a6e-4cba-a9ca-f3e32f720263"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "ab06b945-4ef1-4c8c-82d4-78db5110c74b"
+				m_name = "flinch_is_on_fire"
+				m_floatingComment = ""
+				m_position = [
+					4200,
+					1930.971313,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "5ec365fa-d171-4603-9d38-a07c3c9f93ce"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "d81b272d-3aa0-4c51-8c86-bc87e950c1de"
+				m_name = "aim_angle_pitch"
+				m_floatingComment = ""
+				m_position = [
+					0,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "50375b92-2ef1-43ce-96aa-a28a3250ecc3"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "165fa879-e486-42cb-ac7b-6f85d8402151"
+				m_name = "aim_angle_yaw"
+				m_floatingComment = ""
+				m_position = [
+					350,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "29274b0c-a143-4073-b9dc-74318e410218"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "9e9c700b-841c-4e5d-9b94-58009854bdbf"
+				m_name = "ladder_angle_yaw"
+				m_floatingComment = ""
+				m_position = [
+					700,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "104204d9-f163-4222-818a-2553aff9d4bc"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "ee642acb-27b0-430d-a6b5-cd76fd6a46c7"
+				m_name = "ladder_angle_yaw_backwards"
+				m_floatingComment = ""
+				m_position = [
+					1050,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "d99e4e10-0b9b-44b5-b770-b21a8b228e41"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "011c9abc-dbb0-4992-a0db-fe4bc6fb2f19"
+				m_name = "ground_action_direction_id"
+				m_floatingComment = ""
+				m_position = [
+					1400,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "fb1a3316-ba00-4653-9a7d-509c963b6956"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "07e0f6b6-3661-4da6-a706-fa305cee3312"
+				m_name = "move_direction_id"
+				m_floatingComment = ""
+				m_position = [
+					1750,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "f5c6ad73-9c8f-4053-af64-9927344f9457"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "da375ea0-8c76-49a1-9395-6a98b0830b41"
+				m_name = "ground_action"
+				m_floatingComment = ""
+				m_position = [
+					2100,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "53c1d770-3095-4d30-8516-aaf4585d009b"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "05114985-2d78-4ec4-995a-ffea214f0e12"
+				m_name = "weapon_is_legacy_model"
+				m_floatingComment = ""
+				m_position = [
+					2450,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "3be67cce-8f27-4fa2-94ef-cf86ed013ead"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "48a011e4-b326-4f40-b711-c77ddb0572ae"
+				m_name = "move_speed_x"
+				m_floatingComment = ""
+				m_position = [
+					2800,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "f76c16f0-ede2-4305-be2d-a144bde5f3a5"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "ddda6779-579c-4327-b62c-d6910aa3d5e1"
+				m_name = "move_speed_y"
+				m_floatingComment = ""
+				m_position = [
+					3150,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "16179ecc-c23c-400f-9026-de501c3e8dba"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "24799783-a6f0-42cc-8232-ecc04efebc26"
+				m_name = "ground_turn_angle_or_velocity"
+				m_floatingComment = ""
+				m_position = [
+					3500,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "ff2b1fec-4c46-44e9-bce4-8125afc90928"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocIDControlParameterNode"
+				m_ID = "d10239fe-9011-43e8-aa24-ee6e3355a33f"
+				m_name = "air_action"
+				m_floatingComment = ""
+				m_position = [
+					3850,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "e0fdd86a-8b7f-4fe2-bdc6-5eb76ff74033"
+						m_name = "Value"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = ""
+				m_expectedValues = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "44712033-20f5-43a4-a4db-b0160d7b51d1"
+				m_name = "weapon_drop_amount"
+				m_floatingComment = ""
+				m_position = [
+					4200,
+					2160.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "7ef37cc9-60da-4318-a411-1c1d810a1dc0"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "66a63d60-7806-4110-9e0f-cc08e7b3463f"
+				m_name = "attack_is_final_bullets"
+				m_floatingComment = ""
+				m_position = [
+					0,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "522c9619-cbd2-4d12-a1e6-280d847e3772"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "a93074b7-49e4-4869-a6a6-1c9f172e70e7"
+				m_name = "is_defusing"
+				m_floatingComment = ""
+				m_position = [
+					350,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "d6660fb4-e536-4c85-b05b-9ad3aa2c3e27"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "fe7be338-9ae0-474f-9fe1-0e8cca7e565e"
+				m_name = "ladder_cycle"
+				m_floatingComment = ""
+				m_position = [
+					700,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "fa4b7f4e-fa7b-4f61-baa7-8e9f5a588ecc"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocBoolControlParameterNode"
+				m_ID = "b6c82302-2b1f-44ae-9fc9-29e198904939"
+				m_name = "move_is_walking"
+				m_floatingComment = ""
+				m_position = [
+					1050,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "8fec3e97-f5fd-4a72-b055-30f7cd49de9c"
+						m_name = "Value"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = false
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "f16205f1-ed86-42e6-9ab3-6d1b13631205"
+				m_name = "move_speed_horizontal_previous"
+				m_floatingComment = ""
+				m_position = [
+					1400,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "36204626-b7e5-496f-ac48-8dcf8798ff1c"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocTargetControlParameterNode"
+				m_ID = "30dbcd98-4309-417b-9a35-58bd30902901"
+				m_name = "ik_left_foot"
+				m_floatingComment = ""
+				m_position = [
+					1750,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "6237b39a-da28-4d4c-9ca3-b9931e45e02f"
+						m_name = "Value"
+						m_type = "Target"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+			},
+			{
+				_class = "CNmGraphDocTargetControlParameterNode"
+				m_ID = "d716c984-9f58-4235-abcd-9f0db2c4b40c"
+				m_name = "ik_right_foot"
+				m_floatingComment = ""
+				m_position = [
+					2100,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "99c4fff7-5725-4484-a1b0-ba4a7560a245"
+						m_name = "Value"
+						m_type = "Target"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+			},
+			{
+				_class = "CNmGraphDocFloatControlParameterNode"
+				m_ID = "34fead5f-2b0e-4821-a2a7-e6525760b88e"
+				m_name = "weapon_action_speedscale"
+				m_floatingComment = ""
+				m_position = [
+					2450,
+					2390.971191,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "55c3d37f-88d6-4123-abaa-ce0978f207d9"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+				m_groupName = ""
+				m_dictionaryParameterBinding = "00000000-0000-0000-0000-000000000000"
+				m_previewStartValue = 0
+				m_previewMin = 0
+				m_previewMax = 1
+			},
+			{
+				_class = "CNmGraphDocReferencedGraphNode"
+				m_ID = "d4240027-6f31-4580-aae7-884b7a8e632e"
+				m_name = "ValvePlayerGraph"
+				m_floatingComment = ""
+				m_position = [
+					0,
+					0,
+				]
+				m_inputPins = [
+					{
+						m_ID = "f9c16db3-c0e5-4de6-8d5a-eb7c02bfc9b1"
+						m_name = "Fallback"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_outputPins = [
+					{
+						m_ID = "44b5a44a-f9f1-474f-a8ec-477666bf2978"
+						m_name = "Pose"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_pDefaultVariationData = {
+					_class = "CNmGraphDocReferencedGraphNode::CData"
+					m_variation = "animation/graphs/worldmodel/worldmodel.vnmgraph"
+				}
+				m_overrides = [
+
+				]
+				m_defaultResourceName = ""
+			},
+			{
+				_class = "CNmGraphDocClipNode"
+				m_ID = "67824d12-33d2-4593-8e1b-b476ba33d0c2"
+				m_name = "ProportionDelta"
+				m_floatingComment = ""
+				m_position = [
+					0,
+					250,
+				]
+				m_inputPins = [
+					{
+						m_ID = "9476586b-193d-4497-9aea-5c5b6396d6e8"
+						m_name = "Play In Reverse"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "1dec7460-9775-42ac-afe2-2bd9c4d420b2"
+						m_name = "Reset Time"
+						m_type = "Bool"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_outputPins = [
+					{
+						m_ID = "6df487ac-1c2a-4c56-ab65-538aa6480be0"
+						m_name = "Pose"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_pDefaultVariationData = {
+					_class = "CNmGraphDocClipNode::CData"
+					m_clip = ""
+					m_flSpeedMultiplier = 1
+					m_nStartSyncEventOffset = 0
+				}
+				m_overrides = [
+
+				]
+				m_defaultResourceName = ""
+				m_bSampleRootMotion = false
+				m_bAllowLooping = true
+				m_graphEvents = [
+
+				]
+			},
+			{
+				_class = "CNmGraphDocLocalLayerNode"
+				m_ID = "24c7e84b-63b8-438e-8885-91199d2b9962"
+				m_name = "ProportionLayer"
+				m_floatingComment = ""
+				m_position = [
+					600,
+					250,
+				]
+				m_inputPins = [
+					{
+						m_ID = "d7540786-087b-419c-bd2d-42c5f53df092"
+						m_name = "Layer"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "46b85000-9403-4991-b971-0d91b3613bad"
+						m_name = "Weight"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "a6d583b1-5161-40b7-8fc6-005060419be0"
+						m_name = "Root Motion Weight"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "4ee84d9b-45a2-4556-bece-c133af9c205b"
+						m_name = "BoneMask"
+						m_type = "BoneMask"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_outputPins = [
+					{
+						m_ID = "c841909f-ac51-4a3d-95b9-3e576d08d2bc"
+						m_name = "Layer"
+						m_type = "Special"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_isSynchronized = false
+				m_ignoreEvents = true
+				m_blendMode = "Additive"
+			},
+			{
+				_class = "CNmGraphDocLayerBlendNode"
+				m_ID = "4497566d-72e6-4ddb-9c60-c6d4e8535b92"
+				m_name = "Layer Blend"
+				m_floatingComment = ""
+				m_position = [
+					900,
+					0,
+				]
+				m_inputPins = [
+					{
+						m_ID = "5ce8aad1-be36-471a-ae9c-b103894b41f2"
+						m_name = "Base Node"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "a4442a64-c9a9-4af4-a312-7869f9de2da7"
+						m_name = "Layer 0"
+						m_type = "Special"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_outputPins = [
+					{
+						m_ID = "ebb35114-5905-4b18-9630-5173d647295f"
+						m_name = "Pose"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_onlySampleBaseRootMotion = true
+			},
+			{
+				_class = "CNmGraphDocPoseResultNode"
+				m_ID = "174378dc-944f-41e0-8978-1f7601cbcc21"
+				m_name = ""
+				m_floatingComment = ""
+				m_position = [
+					1200,
+					0,
+				]
+				m_inputPins = [
+					{
+						m_ID = "21d5167f-b658-4b57-b2ad-e01a05618100"
+						m_name = "Out"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_outputPins = [
+
+				]
+				m_resultType = "Pose"
+			},
+			{
+				_class = "CnmGraphDocConstFloatNode"
+				m_ID = "91b3afd3-14ec-404e-841c-a9eeb45c904b"
+				m_name = "FullWeight"
+				m_floatingComment = ""
+				m_position = [
+					300,
+					400,
+				]
+				m_inputPins = [
+
+				]
+				m_outputPins = [
+					{
+						m_ID = "957d88db-d59d-4ec5-b2a9-2e09c7cebf15"
+						m_name = "Value"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_flValue = 1
+			},
+			{
+				_class = "CnmGraphDocSnapWeaponNode"
+				m_ID = "f392ed88-2484-4e7b-99cf-7da70f7e16f0"
+				m_name = "Snap Weapon After Proportions"
+				m_floatingComment = ""
+				m_position = [
+					3384,
+					656.821655,
+				]
+				m_inputPins = [
+					{
+						m_ID = "8740b309-1994-4e89-a119-ed9320df2ad3"
+						m_name = "Input"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "a7eafc60-703d-45e5-9370-5463230e84ce"
+						m_name = "Flashed Amount"
+						m_type = "Float"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "ebcd907b-eaaa-4d79-9049-3501228a6944"
+						m_name = "Weapon Category"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+					{
+						m_ID = "13eba486-b78a-447e-9be7-2ec6d3366bff"
+						m_name = "Weapon Type"
+						m_type = "ID"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = false
+					},
+				]
+				m_outputPins = [
+					{
+						m_ID = "72bf46e8-8a30-42ce-91bb-5ea074b482a6"
+						m_name = "Result"
+						m_type = "Pose"
+						m_bIsDynamicPin = false
+						m_bAllowMultipleOutConnections = true
+					},
+				]
+			},
+		]
+		m_graphType = "BlendTree"
+		m_viewOffset = [
+			0,
+			0,
+		]
+		m_flViewZoom = 1
+		m_connections = [
+			{
+				m_ID = "b4891dde-68f9-4230-96f1-fb514ffc4c3f"
+				m_fromNodeID = "d4240027-6f31-4580-aae7-884b7a8e632e"
+				m_outputPinID = "44b5a44a-f9f1-474f-a8ec-477666bf2978"
+				m_toNodeID = "4497566d-72e6-4ddb-9c60-c6d4e8535b92"
+				m_inputPinID = "5ce8aad1-be36-471a-ae9c-b103894b41f2"
+			},
+			{
+				m_ID = "c4afa130-02a1-448c-ba41-af30e904f42d"
+				m_fromNodeID = "67824d12-33d2-4593-8e1b-b476ba33d0c2"
+				m_outputPinID = "6df487ac-1c2a-4c56-ab65-538aa6480be0"
+				m_toNodeID = "24c7e84b-63b8-438e-8885-91199d2b9962"
+				m_inputPinID = "d7540786-087b-419c-bd2d-42c5f53df092"
+			},
+			{
+				m_ID = "7d6416d1-be1b-43f2-b874-047ab4482155"
+				m_fromNodeID = "91b3afd3-14ec-404e-841c-a9eeb45c904b"
+				m_outputPinID = "957d88db-d59d-4ec5-b2a9-2e09c7cebf15"
+				m_toNodeID = "24c7e84b-63b8-438e-8885-91199d2b9962"
+				m_inputPinID = "46b85000-9403-4991-b971-0d91b3613bad"
+			},
+			{
+				m_ID = "4bd052ad-1e1f-4ec9-bd24-2ae85c7d3e22"
+				m_fromNodeID = "24c7e84b-63b8-438e-8885-91199d2b9962"
+				m_outputPinID = "c841909f-ac51-4a3d-95b9-3e576d08d2bc"
+				m_toNodeID = "4497566d-72e6-4ddb-9c60-c6d4e8535b92"
+				m_inputPinID = "a4442a64-c9a9-4af4-a312-7869f9de2da7"
+			},
+			{
+				m_ID = "007d483b-f6f8-4668-8461-7846366ca106"
+				m_fromNodeID = "f392ed88-2484-4e7b-99cf-7da70f7e16f0"
+				m_outputPinID = "72bf46e8-8a30-42ce-91bb-5ea074b482a6"
+				m_toNodeID = "174378dc-944f-41e0-8978-1f7601cbcc21"
+				m_inputPinID = "21d5167f-b658-4b57-b2ad-e01a05618100"
+			},
+			{
+				m_ID = "e92cb0c4-a400-4276-874f-7008806c834a"
+				m_fromNodeID = "329acf53-49a5-43f0-86e5-ded81ce210b0"
+				m_outputPinID = "c4d7b80e-c624-4b87-a740-e4e23dcd6cf7"
+				m_toNodeID = "f392ed88-2484-4e7b-99cf-7da70f7e16f0"
+				m_inputPinID = "a7eafc60-703d-45e5-9370-5463230e84ce"
+			},
+			{
+				m_ID = "e06677c6-6522-4e5c-9ff7-3eac1906f1a0"
+				m_fromNodeID = "0c678a8f-d5d7-4e1a-ae0b-c3576b7d6d92"
+				m_outputPinID = "c3d079a1-77d3-4c0e-8c8b-f1410178d84e"
+				m_toNodeID = "f392ed88-2484-4e7b-99cf-7da70f7e16f0"
+				m_inputPinID = "ebcd907b-eaaa-4d79-9049-3501228a6944"
+			},
+			{
+				m_ID = "5fff0b7f-d186-497f-80b9-0e5dce4f5ee7"
+				m_fromNodeID = "3fe150f7-6368-4714-9d57-40404afc2d03"
+				m_outputPinID = "7614830f-6c25-4bc5-be41-1e5968fbaf96"
+				m_toNodeID = "f392ed88-2484-4e7b-99cf-7da70f7e16f0"
+				m_inputPinID = "13eba486-b78a-447e-9be7-2ec6d3366bff"
+			},
+			{
+				m_ID = "4a571edd-743b-48ab-8edd-39f285ba0788"
+				m_fromNodeID = "4497566d-72e6-4ddb-9c60-c6d4e8535b92"
+				m_outputPinID = "ebb35114-5905-4b18-9630-5173d647295f"
+				m_toNodeID = "f392ed88-2484-4e7b-99cf-7da70f7e16f0"
+				m_inputPinID = "8740b309-1994-4e89-a119-ed9320df2ad3"
+			},
+		]
+	}
+	m_variationHierarchy = {
+		m_variations = [
+			{
+				m_ID = "Default"
+				m_parentID = ""
+				m_skeleton = "animation/skeletons/characters/worldmodel.vnmskel"
+			},
+		]
+	}
+	m_debugParameterSets = [
+
+	]
+	m_dictionaryIDSetIDs = [
+
+	]
+}

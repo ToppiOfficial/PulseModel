@@ -5,7 +5,10 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <random>
+#include <unordered_set>
 
 namespace pulse::dmx {
 
@@ -217,6 +220,141 @@ std::unique_ptr<Datamodel> Datamodel::Load(const std::string& path,
         return nullptr;
     }
     return LoadFromMemory(buf.get(), sz, err);
+}
+
+// --- Writing ---------------------------------------------------------------
+Guid NewGuid() {
+    static thread_local std::mt19937_64 rng(std::random_device{}());
+    Guid id{};
+    for (auto& byte : id) byte = static_cast<uint8_t>(rng());
+    id[6] = static_cast<uint8_t>((id[6] & 0x0F) | 0x40);
+    id[8] = static_cast<uint8_t>((id[8] & 0x3F) | 0x80);
+    return id;
+}
+
+// AttrValue's alternatives are declared in AttrType order, so a well-formed
+// attribute has value.index() == type.
+static bool CheckWritable(const Datamodel& dm, std::string* err) {
+    auto fail = [&](const std::string& m) {
+        if (err) *err = "dmx write: " + m;
+        return false;
+    };
+    if (!dm.root || dm.elements.empty() || dm.elements.front().get() != dm.root)
+        return fail("the root must be the first element");
+    std::unordered_set<const Element*> owned;
+    for (const auto& e : dm.elements) owned.insert(e.get());
+    auto inside = [&](ElementPtr e) { return !e || owned.count(e) != 0; };
+    for (const auto& e : dm.elements) {
+        for (const Attribute& a : e->attributes) {
+            const std::string where = e->className + "." + a.name;
+            if (!a.semantic.empty()) return fail(where + " has custom type " + a.semantic);
+            if (a.type == AttrType::Unknown || a.value.index() != static_cast<size_t>(a.type))
+                return fail(where + " value does not match its type");
+            if (auto p = std::get_if<ElementPtr>(&a.value); p && !inside(*p))
+                return fail(where + " references an element outside the document");
+            if (auto v = std::get_if<std::vector<ElementPtr>>(&a.value))
+                for (ElementPtr p : *v)
+                    if (!inside(p)) return fail(where + " references an element outside the document");
+        }
+    }
+    return true;
+}
+
+bool Save(const Datamodel& dm, std::vector<uint8_t>& out, std::string* err) {
+    if (!CheckWritable(dm, err)) return false;
+    std::string text;
+    bool ok = false;
+    if (dm.encoding == "binary") {
+        ok = WriteBinary(dm, text, err);
+    } else if (dm.encoding == "keyvalues2" || dm.encoding == "keyvalues2_flat") {
+        ok = WriteKeyValues2(dm, text, err);
+    } else if (err) {
+        *err = "unsupported DMX encoding: " + dm.encoding;
+    }
+    if (!ok) return false;
+    out.assign(text.begin(), text.end());
+    return true;
+}
+
+bool Save(const Datamodel& dm, const std::string& path, std::string* err) {
+    std::vector<uint8_t> bytes;
+    if (!Save(dm, bytes, err)) return false;
+    std::ofstream f(std::filesystem::u8path(path), std::ios::binary);
+    if (f) f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!f) {
+        if (err) *err = "cannot write file: " + path;
+        return false;
+    }
+    return true;
+}
+
+// --- Builder ---------------------------------------------------------------
+Builder::Builder(const std::string& format, int formatVersion, const std::string& encoding,
+                 int encodingVersion, uint32_t seed)
+    : dm_(std::make_unique<Datamodel>()), seed_(seed) {
+    dm_->format = format;
+    dm_->format_version = formatVersion;
+    dm_->encoding = encoding;
+    dm_->encoding_version = encodingVersion;
+}
+
+// Same bytes as the text form "%08x-%04x-%04x-%04x-%012x" (seed, seed>>16,
+// seed, seed>>8, counter), the decompiler's long-standing id layout.
+Guid Builder::NewId() {
+    Guid g{};
+    auto put = [&](int at, uint64_t v, int bytes) {
+        for (int i = bytes - 1; i >= 0; --i, v >>= 8) g[at + i] = static_cast<uint8_t>(v);
+    };
+    put(0, seed_, 4);
+    put(4, (seed_ >> 16) & 0xFFFF, 2);
+    put(6, seed_ & 0xFFFF, 2);
+    put(8, (seed_ >> 8) & 0xFFFF, 2);
+    put(10, next_++, 6);
+    return g;
+}
+
+Element& Builder::Begin(const char* className, const Guid& id, const std::string& name) {
+    current_ = dm_->CreateElement(id, className);
+    current_->name = name;
+    if (!dm_->root) dm_->root = current_;
+    return *current_;
+}
+
+Attribute& Builder::Push(const char* key, AttrType type, AttrValue value) {
+    current_->attributes.push_back({key, type, std::move(value)});
+    return current_->attributes.back();
+}
+
+void Builder::Ref(Element& on, const char* k, const Guid& id) {
+    on.attributes.push_back({k, AttrType::Element, ElementPtr{}});
+    pending_.push_back({&on, on.attributes.size() - 1, {id}, false});
+}
+
+void Builder::RefArray(const char* k, const std::vector<Guid>& ids) {
+    Push(k, AttrType::ElementArray, std::vector<ElementPtr>(ids.size()));
+    pending_.push_back({current_, current_->attributes.size() - 1, ids, true});
+}
+
+void Builder::TimeArray(const char* k, const std::vector<float>& seconds) {
+    std::vector<dmx::Time> v;
+    v.reserve(seconds.size());
+    for (float s : seconds) v.push_back({s});
+    Push(k, AttrType::TimeArray, std::move(v));
+}
+
+Datamodel& Builder::Finish() {
+    for (const PendingRef& p : pending_) {
+        AttrValue& value = p.owner->attributes[p.attr].value;
+        if (!p.array) {
+            value = IsNull(p.ids[0]) ? nullptr : dm_->FindById(p.ids[0]);
+            continue;
+        }
+        auto& refs = std::get<std::vector<ElementPtr>>(value);
+        for (size_t i = 0; i < p.ids.size(); ++i)
+            refs[i] = IsNull(p.ids[i]) ? nullptr : dm_->FindById(p.ids[i]);
+    }
+    pending_.clear();
+    return *dm_;
 }
 
 } // namespace pulse::dmx

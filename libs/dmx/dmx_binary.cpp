@@ -1,4 +1,4 @@
-// dmx_binary.cpp - binary DMX decoder.
+// dmx_binary.cpp - binary DMX decoder and encoder.
 //
 // Covers every version Valve emitted: 1 (no dictionary at all), 2/3 (inline
 // string values, 16-bit dictionary), 4 (dictionary string values), 5 and 9
@@ -11,8 +11,13 @@
 
 #include "dmx/dmx.h"
 
+#include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
+#include <type_traits>
+#include <unordered_map>
 
 namespace pulse::dmx {
 namespace {
@@ -289,6 +294,143 @@ bool ParseBinary(Datamodel& dm, const uint8_t* body, size_t len, std::string* er
         }
     }
     return r.ok() ? true : fail("truncated stream");
+}
+
+namespace {
+
+// Little-endian appender for the encoder.
+class Writer {
+public:
+    explicit Writer(std::string& out) : out_(out) {}
+    void U8(uint8_t v) { out_.push_back(static_cast<char>(v)); }
+    void U16(uint16_t v) { Raw(&v, 2); }
+    void I32(int32_t v) { Raw(&v, 4); }
+    void F32(float v) { Raw(&v, 4); }
+    void CStr(const std::string& s) { out_.append(s.c_str(), s.size() + 1); }
+    void Raw(const void* p, size_t n) { out_.append(static_cast<const char*>(p), n); }
+
+private:
+    std::string& out_;
+};
+
+// Inverse of TypeFromId.
+uint8_t TypeToId(AttrType t, int ev) {
+    const int id = static_cast<int>(t);
+    if (ev < 9 || !IsArrayType(t)) return static_cast<uint8_t>(id);
+    return static_cast<uint8_t>((id - static_cast<int>(AttrType::ElementArray) + 1) | 0x20);
+}
+
+int32_t Ticks(float seconds) { return static_cast<int32_t>(std::floor(10000.0f * seconds + 0.5f)); }
+
+// Every std::vector alternative except Binary, which is a scalar byte blob.
+template <class T> struct IsArrayValue : std::false_type {};
+template <class T> struct IsArrayValue<std::vector<T>> : std::true_type {};
+template <> struct IsArrayValue<Binary> : std::false_type {};
+
+bool IsNameAttribute(const Attribute& a) { return a.name == "name" && a.type == AttrType::String; }
+
+} // namespace
+
+bool WriteBinary(const Datamodel& dm, std::string& out, std::string* err) {
+    const int ev = dm.encoding_version;
+    if (ev < 2 || (ev > 5 && ev != 9)) {
+        if (err) *err = "binary dmx: cannot write encoding version " + std::to_string(ev);
+        return false;
+    }
+    // The table pools class and attribute names, plus element names and scalar
+    // string values from encoding 4 on (inline before). Array strings are inline.
+    const bool pooledValues = ev >= 4;
+    const bool wideIndex = ev >= 5;
+    std::map<std::string, int> pool;
+    std::vector<const std::string*> strings;
+    auto intern = [&](const std::string& s) {
+        const auto ins = pool.emplace(s, static_cast<int>(strings.size()));
+        if (ins.second) strings.push_back(&ins.first->first);
+    };
+    std::unordered_map<const Element*, int32_t> index;
+    for (size_t k = 0; k < dm.elements.size(); ++k) {
+        const Element& e = *dm.elements[k];
+        index[&e] = static_cast<int32_t>(k);
+        intern(e.className);
+        if (pooledValues) intern(e.name);
+        for (const Attribute& a : e.attributes) {
+            if (IsNameAttribute(a)) continue;
+            intern(a.name);
+            if (a.type == AttrType::String && pooledValues) intern(std::get<std::string>(a.value));
+        }
+    }
+
+    Writer w(out);
+    auto sidx = [&](const std::string& s) {
+        const int i = pool.at(s);
+        if (wideIndex) w.I32(i);
+        else w.U16(static_cast<uint16_t>(i));
+    };
+    auto ref = [&](const Element* e) { w.I32(e ? index.at(e) : -1); };
+
+    char header[160];
+    std::snprintf(header, sizeof header, "<!-- dmx encoding binary %d format %s %d -->\n", ev,
+                  dm.format.c_str(), dm.format_version);
+    out += header;
+    w.U8(0); // the reader expects a null-terminated header line
+    if (ev >= 9) w.I32(0); // prefix element count
+
+    if (pooledValues) w.I32(static_cast<int32_t>(strings.size()));
+    else w.U16(static_cast<uint16_t>(strings.size()));
+    for (const std::string* s : strings) w.CStr(*s);
+
+    w.I32(static_cast<int32_t>(dm.elements.size()));
+    for (const auto& e : dm.elements) {
+        sidx(e->className);
+        if (pooledValues) sidx(e->name);
+        else w.CStr(e->name);
+        w.Raw(e->id.data(), e->id.size());
+    }
+
+    // A string inside an array is always inline; a scalar one follows pooledValues.
+    auto value = [&](const auto& v, bool inArray) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, ElementPtr>) ref(v);
+        else if constexpr (std::is_same_v<T, int32_t>) w.I32(v);
+        else if constexpr (std::is_same_v<T, float>) w.F32(v);
+        else if constexpr (std::is_same_v<T, bool>) w.U8(v ? 1 : 0);
+        else if constexpr (std::is_same_v<T, std::string>) {
+            if (pooledValues && !inArray) sidx(v);
+            else w.CStr(v);
+        } else if constexpr (std::is_same_v<T, Binary>) {
+            w.I32(static_cast<int32_t>(v.size()));
+            w.Raw(v.data(), v.size());
+        } else if constexpr (std::is_same_v<T, Time>) w.I32(Ticks(v.seconds));
+        else if constexpr (std::is_same_v<T, Color>) { w.U8(v.r); w.U8(v.g); w.U8(v.b); w.U8(v.a); }
+        else if constexpr (std::is_same_v<T, Vector2>) { w.F32(v.x); w.F32(v.y); }
+        else if constexpr (std::is_same_v<T, Vector3> || std::is_same_v<T, QAngle>) {
+            w.F32(v.x); w.F32(v.y); w.F32(v.z);
+        } else if constexpr (std::is_same_v<T, Vector4> || std::is_same_v<T, Quaternion>) {
+            w.F32(v.x); w.F32(v.y); w.F32(v.z); w.F32(v.w);
+        } else if constexpr (std::is_same_v<T, Matrix>) {
+            for (float f : v.m) w.F32(f);
+        }
+    };
+    for (const auto& e : dm.elements) {
+        int32_t count = 0;
+        for (const Attribute& a : e->attributes) count += IsNameAttribute(a) ? 0 : 1;
+        w.I32(count);
+        for (const Attribute& a : e->attributes) {
+            if (IsNameAttribute(a)) continue;
+            sidx(a.name);
+            w.U8(TypeToId(a.type, ev));
+            std::visit([&](const auto& v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (IsArrayValue<T>::value) {
+                    w.I32(static_cast<int32_t>(v.size()));
+                    for (const auto& item : v) value(static_cast<typename T::value_type>(item), true);
+                } else if constexpr (!std::is_same_v<T, std::monostate>) {
+                    value(v, false);
+                }
+            }, a.value);
+        }
+    }
+    return true;
 }
 
 } // namespace pulse::dmx
