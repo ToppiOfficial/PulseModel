@@ -83,6 +83,7 @@ std::vector<std::string> BoneNames(pulse::dmx::Datamodel& dm);
 bool IsCoreBone(const std::string& name);
 std::string BoneParent(pulse::dmx::Datamodel& dm, const std::string& name); // "" for a root or missing bone
 size_t CountBones(pulse::dmx::Datamodel& dm); // CS2 core bones in the rig, 0 if none
+std::vector<Bone> ModelBoneBindings(pulse::dmx::Datamodel& dm, const std::vector<Bone>& stock);
 // `modelRig`: the VMDL's merged rig (needs root_motion), not a proportions DMX.
 std::vector<Bone> TargetPose(pulse::dmx::Datamodel& pose, const std::vector<Bone>& stock,
                              std::vector<std::string>& warnings, bool modelRig);

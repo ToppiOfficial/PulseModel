@@ -17,22 +17,42 @@ namespace {
 using ag2::fs::path;
 
 const char* const kUsage =
-    "ag2proportions - CS2 AnimGraph2 proportion wrapper (experimental)\n"
-    "Usage: ag2proportions <job.kv3 | model.vmdl> [...] [options]\n"
-    "  --generate-only          write source assets without compiling them\n"
-    "  --debug                  also write debug/ files for issue reports\n"
-    "  --compiler-runner wine   Linux: run the Windows resourcecompiler through Wine\n"
-    "A job file is KV3 with these keys, paths relative to the job file:\n"
-    "  vmdl         the model (required)\n"
-    "  model_dmx    rig DMX (default: the VMDL's SkeletonFile import)\n"
-    "  proportions  held-pose DMX (default: the rig's bind pose)\n"
-    "  vnmskel      compiled worldmodel.vnmskel_c (default: from the CS2 VPK)\n"
-    "  write_model  true to edit the VMDL in place (original kept as .vmdl.bak)\n"
-    "A .vmdl given directly is edited in place, as with write_model = true.\n"
-    "Output goes to a folder beside the VMDL, named after it.\n";
+    "CS2 AnimGraph2 proportion wrapper (experimental)\n\n"
+    "Usage:\n"
+    "  ag2proportions <model.vmdl> [...] [options]\n"
+    "  ag2proportions <job.kv3> [...] [options]\n\n"
+    "Options:\n"
+    "  --generate-only          Write source assets without compiling them.\n"
+    "  --debug                  Write debug/ files for issue reports.\n"
+    "  --compiler-runner wine   Run the Windows Resource Compiler through Wine\n"
+    "                           on Linux.\n"
+    "  --help, -h               Show this help.\n"
+    "  --version                Show the tool version.\n\n"
+    "Job file (KV3):\n"
+    "  Paths are relative to the job file.\n\n"
+    "  vmdl           Model to process (required).\n"
+    "  model_dmx      Rig DMX.\n"
+    "                 Default: the VMDL's SkeletonFile import.\n"
+    "  proportions    Held-pose DMX.\n"
+    "                 Default: the rig's bind pose.\n"
+    "  vnmskel        Compiled worldmodel.vnmskel_c.\n"
+    "                 Default: read from the installed CS2 VPK.\n"
+    "  write_model    Edit the VMDL in place when true (default: false).\n"
+    "                 The original is kept as <model>.vmdl.bak.\n\n"
+    "Model input and output:\n"
+    "  A VMDL passed directly is edited in place (write_model = true).\n"
+    "  Output goes beside the VMDL, in a folder named after the model.\n\n";
 
 bool HasExtension(const path& file, const char* ext) {
     return _stricmp(file.extension().u8string().c_str(), ext) == 0;
+}
+
+void PrintHeader() {
+    std::cout << "-------------------------------\n"
+                 "PulseModel [AG2 Proportions]\n"
+                 "version:   " << PULSEMODEL_VERSION << '\n'
+              << "developer: ToppiOfficial\n"
+                 "-------------------------------\n";
 }
 
 ag2::Job LoadJob(const path& file) {
@@ -65,6 +85,7 @@ ag2::Job LoadJob(const path& file) {
 }
 
 int Main(const std::vector<std::string>& args) {
+    PrintHeader();
     ag2::Options options;
     std::vector<path> jobs;
     for (size_t i = 1; i < args.size(); ++i) {

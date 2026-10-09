@@ -202,6 +202,20 @@ std::unique_ptr<dmx::Datamodel> LoadDmx(const fs::path& path) {
 // Appends `helper` under the Bone node named after its stock parent.
 void InsertHelperNode(kv::Value& model, const Bone& helper, const std::string& parentName) {
     bool placed = false;
+    if (parentName.empty()) {
+        Walk(model, [&](kv::Value& node) {
+            if (placed || ClassOf(node) != "Skeleton")
+                return;
+            if (!node.Has("children"))
+                node["children"] = kv::Value::Array{};
+            node["children"].Items().push_back(HelperNode(helper));
+            placed = true;
+        });
+        if (!placed)
+            model["rootNode"]["children"].Items().push_back(kv::Value::Object{
+                {"_class", "Skeleton"}, {"children", kv::Value::Array{HelperNode(helper)}}});
+        return;
+    }
     Walk(model, [&](kv::Value& node) {
         if (placed || ClassOf(node) != "Bone" || !node.Has("name") ||
             _stricmp(node.At("name").String().c_str(), parentName.c_str()) != 0)
@@ -219,10 +233,20 @@ void InsertHelperNode(kv::Value& model, const Bone& helper, const std::string& p
 // import to the helper DMX, node helpers as Bone nodes). The first edit keeps
 // the untouched file as <name>.vmdl.bak, which ModelDoc never compiles.
 void EditModel(const std::string& originalText, kv::Value model, const Job& job, const Paths& paths,
-               const fs::path& modelDmx, bool dmxHelpers, const std::vector<Bone>& nodeHelpers,
-               const std::vector<Bone>& stock) {
-    for (const Bone& helper : nodeHelpers)
-        InsertHelperNode(model, helper, stock[helper.parent].name);
+               const fs::path& modelDmx, bool dmxHelpers,
+               const std::vector<Bone>& stock, const std::vector<Bone>& retainedBones) {
+    for (const Bone& binding : retainedBones) {
+        bool found = false;
+        Walk(model, [&](kv::Value& node) {
+            if (ClassOf(node) == "Bone" && node.Has("name") &&
+                _stricmp(node.At("name").String().c_str(), binding.name.c_str()) == 0) {
+                node["do_not_discard"] = true;
+                found = true;
+            }
+        });
+        if (!found)
+            InsertHelperNode(model, binding, binding.parent >= 0 ? stock[binding.parent].name : std::string());
+    }
     const std::string graph = paths.relative + "/proportions.vnmgraph";
     kv::Value* list = nullptr;
     Walk(model, [&](kv::Value& node) {
@@ -236,19 +260,18 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
     }
     // uimodel and hudmodel keep their stock graphs: the UI preview bone-merges the
     // model onto Valve's skeleton (hardcoded), so proportions cannot show there.
-    bool haveDefault = false, haveWorld = false;
+    bool haveWorld = false;
     for (auto& node : (*list)["children"].Items()) {
         const std::string cls = ClassOf(node);
-        if (cls == "DefaultAnimGraph2") {
-            node["filename"] = graph;
-            haveDefault = true;
-        } else if (cls == "AnimGraph2" && node.Has("name") && node.At("name").String() == "worldmodel") {
+        if (cls == "AnimGraph2" && node.Has("name") && node.At("name").String() == "worldmodel") {
             node["filename"] = graph;
             haveWorld = true;
         }
     }
-    if (!haveDefault)
-        (*list)["children"].Items().push_back(kv::Value::Object{{"_class", "DefaultAnimGraph2"}, {"filename", graph}});
+    auto& graphs = (*list)["children"].Items();
+    graphs.erase(std::remove_if(graphs.begin(), graphs.end(), [&](const kv::Value& node) {
+        return ClassOf(node) == "DefaultAnimGraph2" && node.Has("filename") && node.At("filename").String() == graph;
+    }), graphs.end());
     if (!haveWorld)
         (*list)["children"].Items().push_back(
             kv::Value::Object{{"_class", "AnimGraph2"}, {"name", "worldmodel"}, {"filename", graph}});
@@ -276,7 +299,7 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
 std::string SetupNotes(const Paths& paths, const std::vector<Bone>& dmxHelpers, const std::vector<Bone>& nodeHelpers,
                        const std::vector<Bone>& stock, const std::vector<std::string>& warnings, bool wroteModel) {
     std::string note = "AG2 PROPORTIONS (experimental)\n\n"
-                       "Set DefaultAnimGraph2 and the worldmodel AnimGraph2 to:\n  " +
+                       "Set the worldmodel AnimGraph2 to:\n  " +
                        paths.relative + "/proportions.vnmgraph\n\n";
     if (!dmxHelpers.empty()) {
         note += "Missing weapon helpers were added to model_with_helpers.dmx. Point the matching\n"
@@ -303,7 +326,9 @@ std::string SetupNotes(const Paths& paths, const std::vector<Bone>& dmxHelpers, 
         note += "\n";
     }
     if (wroteModel)
-        note += "An edited VMDL copy was written beside these files. Attachments still need authoring.\n\n";
+        note += "The input VMDL was edited in place; its first backup is <model>.vmdl.bak.\n\n";
+    note += "Keep root_motion -> wpnPivot -> wpn as Bone nodes with do_not_discard enabled.\n"
+            "write_model retains this chain using the model's existing bind transforms.\n\n";
     note += "Attachment starting points (keep any you already tuned):\n"
             "  weapon         parent wpn     origin 0 0 0         angles 0 0 0\n"
             "  weapon_hand_r  parent hand_R  origin -2.6 -1.4 0   angles 0 180 0\n"
@@ -342,7 +367,7 @@ bool IsInfoNote(const std::string& warning) { return warning.rfind("standalone p
 // What the user has to do next, on the console; the full notes are --debug only.
 void PrintSummary(const Paths& paths, const std::vector<Bone>& dmxHelpers, const std::vector<Bone>& nodeHelpers,
                   const std::vector<Bone>& stock, const std::vector<std::string>& warnings, const Job& job) {
-    std::cout << "Set DefaultAnimGraph2 and the worldmodel AnimGraph2 to " << paths.relative
+    std::cout << "Set the worldmodel AnimGraph2 to " << paths.relative
               << "/proportions.vnmgraph\n";
     if (job.writeModel)
         std::cout << "Edited " << job.vmdl.filename().u8string() << " (original kept as "
@@ -461,10 +486,8 @@ void Generate(const Job& job, const Options& options) {
             warnings.push_back("VMDL Bone node " + o.name + " differs from the SkeletonFile's by " +
                                std::to_string(o.moved) + " units and wins; its proportions come from the node");
         } else {
-            // overwrite_existing keeps the file's local position under the node's parent
             warnings.push_back("VMDL Bone node nests " + o.name + " under a different parent than the " +
-                               "SkeletonFile, which keeps its file position (overwrite_existing); that position " +
-                               "is now read in the new parent's space. Match the file's hierarchy to the nodes");
+                               "SkeletonFile; its file transform is converted into the retained parent's space");
         }
     }
 
@@ -537,8 +560,11 @@ void Generate(const Job& job, const Options& options) {
     }
     kv::WriteFile((paths.output / "proportions.vnmclip").u8string(), kv::WriteText(ProportionClip(paths.relative)));
     kv::WriteFile((paths.output / "proportions.vnmgraph").u8string(), kv::WriteText(graph));
-    if (job.writeModel)
-        EditModel(vmdlText, vmdl, job, paths, modelDmx, !dmxHelpers.empty(), nodeHelpers, installed.bones);
+    if (job.writeModel) {
+        AddWeaponHelpers(*rig, installed.bones, {}, {});
+        EditModel(vmdlText, vmdl, job, paths, modelDmx, !dmxHelpers.empty(), installed.bones,
+                  ModelBoneBindings(*rig, installed.bones));
+    }
     // what the clip was built from, for issue reports
     if (options.debug) {
         std::string rigName;

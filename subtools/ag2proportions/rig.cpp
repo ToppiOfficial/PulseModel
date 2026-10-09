@@ -166,6 +166,16 @@ public:
         const auto it = parents_.find(joint);
         return it == parents_.end() ? nullptr : it->second;
     }
+    pm::matrix3x4 WorldTransform(const dmx::Element* joint) const {
+        if (!joint) {
+            const dmx::Element* transform = model_->GetElement("transform");
+            return transform ? pm::QuaternionMatrix(RotationOf(transform), PositionOf(transform))
+                             : pm::QuaternionMatrix(pm::Quaternion{}, pm::Vector3{});
+        }
+        const dmx::Element* transform = TransformOf(joint);
+        return pm::ConcatTransforms(WorldTransform(Parent(joint)),
+                                    pm::QuaternionMatrix(RotationOf(transform), PositionOf(transform)));
+    }
     std::string JointClass() const {
         return joints_.empty() ? "DmeJoint" : joints_.begin()->second->className;
     }
@@ -293,6 +303,13 @@ std::unique_ptr<dmx::Datamodel> BuildRig(const std::vector<Bone>& nodes, const s
         return joint;
     };
     auto nameOf = [](const dmx::Element* e) { return e ? e->name : std::string(); };
+    std::function<pm::matrix3x4(const dmx::Element*)> world = [&](const dmx::Element* joint) {
+        if (!joint)
+            return pm::QuaternionMatrix(pm::Quaternion{}, pm::Vector3{});
+        const dmx::Element* transform = TransformOf(joint);
+        return pm::ConcatTransforms(world(parentOf.at(joint)),
+                                    pm::QuaternionMatrix(RotationOf(transform), PositionOf(transform)));
+    };
 
     for (const Bone& node : nodes) {
         dmx::Element* parent = node.parent >= 0 ? joints.at(nodes[node.parent].name) : nullptr;
@@ -330,8 +347,14 @@ std::unique_ptr<dmx::Datamodel> BuildRig(const std::vector<Bone>& nodes, const s
                             overrides->push_back(o);
                     }
                     if (file.overwrite) {
-                        const pm::Vector3 position = PositionOf(transform);
-                        const pm::Quaternion rotation = RotationOf(transform);
+                        pm::Vector3 position = PositionOf(transform);
+                        pm::Quaternion rotation = RotationOf(transform);
+                        if (_stricmp(nameOf(parentOf[it->second]).c_str(), nameOf(source.Parent(child)).c_str()) != 0) {
+                            // Keep the file's model-space pose when the merge retains another parent.
+                            const pm::matrix3x4 local = pm::ConcatTransforms(
+                                pm::MatrixInvert(world(parentOf[it->second])), source.WorldTransform(child));
+                            pm::MatrixAngles(local, rotation, position);
+                        }
                         Set(existing, "position", dmx::AttrType::Vector3, dmx::Vector3{position.x, position.y, position.z});
                         Set(existing, "orientation", dmx::AttrType::Quaternion,
                             dmx::Quaternion{rotation.x, rotation.y, rotation.z, rotation.w});
@@ -371,6 +394,28 @@ std::string BoneParent(dmx::Datamodel& dm, const std::string& name) {
     const dmx::Element* joint = rig.Find(name);
     const dmx::Element* parent = joint ? rig.Parent(joint) : nullptr;
     return parent ? parent->name : std::string();
+}
+
+std::vector<Bone> ModelBoneBindings(dmx::Datamodel& dm, const std::vector<Bone>& stock) {
+    const Rig rig(dm);
+    std::vector<Bone> bones;
+    for (const Bone& bone : stock) {
+        if (bone.name != "root_motion" && !IsModelHelper(bone.name))
+            continue;
+        const dmx::Element* joint = rig.Find(bone.name);
+        if (!joint)
+            throw runtime_error("missing model bone " + bone.name);
+        const dmx::Element* parent = rig.Parent(joint);
+        const std::string expected = bone.parent >= 0 ? stock[bone.parent].name : std::string();
+        if (_stricmp((parent ? parent->name : std::string()).c_str(), expected.c_str()) != 0)
+            throw runtime_error("model bone " + bone.name + " must be under " + expected);
+        Bone binding = bone;
+        const dmx::Element* transform = TransformOf(joint);
+        binding.position = PositionOf(transform);
+        binding.rotation = RotationOf(transform);
+        bones.push_back(binding);
+    }
+    return bones;
 }
 
 bool IsCoreBone(const std::string& name) {
