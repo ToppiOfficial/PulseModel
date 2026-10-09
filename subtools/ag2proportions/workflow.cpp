@@ -367,7 +367,7 @@ kv::Value Report(const Job& job, const std::string& rig, const std::string& pose
     };
 }
 
-bool IsBindRotationNote(const std::string& warning) { return warning.rfind("bind rotation differs", 0) == 0; }
+bool IsAxisNote(const std::string& warning) { return warning.rfind("bone axes differ", 0) == 0; }
 bool IsInfoNote(const std::string& warning) { return warning.rfind("standalone pelvis", 0) == 0; }
 
 // What the user has to do next, on the console; the full notes are --debug only.
@@ -391,13 +391,13 @@ void PrintSummary(const Paths& paths, const std::vector<Bone>& dmxHelpers, const
                         a[1].Number(), a[2].Number());
         }
     }
-    const auto rotations = std::count_if(warnings.begin(), warnings.end(), IsBindRotationNote);
+    const auto axes = std::count_if(warnings.begin(), warnings.end(), IsAxisNote);
     for (const std::string& warning : warnings)
-        if (!IsBindRotationNote(warning))
+        if (!IsAxisNote(warning))
             std::cout << (IsInfoNote(warning) ? "NOTE: " : "WARNING: ") << warning << '\n';
-    if (rotations)
-        std::cout << "NOTE: " << rotations << " bones have a bind rotation unlike stock; the clip moves "
-                  << "translations only (--debug lists them)\n";
+    if (axes)
+        std::cout << "WARNING: " << axes << " bones have axes unlike stock and may be placed off "
+                  << "(--debug lists them)\n";
 }
 
 } // namespace

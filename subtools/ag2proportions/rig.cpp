@@ -66,6 +66,15 @@ void RequireFinite(const pm::Vector3& v, const std::string& bone) {
         throw runtime_error("invalid position on " + bone);
 }
 
+// Degrees between two offsets; 0 when either is too short to have a direction.
+float OffsetAngle(const pm::Vector3& a, const pm::Vector3& b) {
+    const float la = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z), lb = std::sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
+    if (la < 0.05f || lb < 0.05f)
+        return 0.0f;
+    const float c = (a.x * b.x + a.y * b.y + a.z * b.z) / (la * lb);
+    return std::acos(std::fmin(1.0f, std::fmax(-1.0f, c))) * pm::kRad2Deg;
+}
+
 float RotationDot(const pm::Quaternion& a, const pm::Quaternion& b) {
     return std::abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
 }
@@ -449,10 +458,6 @@ std::vector<Bone> TargetPose(dmx::Datamodel& pose, const std::vector<Bone>& stoc
             (!parent || _stricmp(parent->name.c_str(), stock[bone.parent].name.c_str()) != 0))
             throw runtime_error("the pose hierarchy differs from stock at " + bone.name);
 
-        if (RotationDot(RotationOf(transform), bone.rotation) < 0.999f)
-            warnings.push_back("bind rotation differs on " + bone.name +
-                               "; the clip changes translations only, check your rig axes");
-
         const auto it = held.find(transform);
         pm::Vector3 position = it != held.end() ? it->second : PositionOf(transform);
         // A pelvis with no root_motion above it is in model space: keep the
@@ -466,6 +471,16 @@ std::vector<Bone> TargetPose(dmx::Datamodel& pose, const std::vector<Bone>& stoc
             warnings.push_back("standalone pelvis: custom height, stock horizontal origin");
         }
         RequireFinite(position, bone.name);
+        // The clip moves translations along stock axes. A T/A-pose or body shape
+        // turns an offset by well under 75 degrees; swapped or flipped bone axes
+        // turn it by about 90 or 180.
+        if (!standalonePelvis) {
+            const float angle = OffsetAngle(position, bone.position);
+            if (angle > 75.0f)
+                warnings.push_back("bone axes differ on " + bone.name + ": its offset from " +
+                                   stock[bone.parent].name + " points " + std::to_string(static_cast<int>(angle)) +
+                                   " degrees from stock, so the clip may place it off");
+        }
         target[i].position = position;
     }
     return target;
