@@ -242,6 +242,7 @@ Toolchain FindToolchain(const fs::path& cs2, bool windowsBinaries) {
 // installed is modified.
 void BuildWorkspace(const fs::path& ws, const Toolchain& t, const fs::path& cs2, const Paths& paths,
                     const std::vector<uint8_t>& skeleton, const std::vector<uint8_t>& graph,
+                    const std::vector<uint8_t>& uiGraph,
                     const kv::Value& descriptor) {
     const fs::path game = ws / "game/ag2", content = ws / "content/ag2";
     fs::create_directories(ws / "game/bin" / t.platform);
@@ -269,12 +270,14 @@ void BuildWorkspace(const fs::path& ws, const Toolchain& t, const fs::path& cs2,
                       kv::Quote((cs2 / "game/core").generic_u8string()) + " Mod ag2 } } }\n");
     kv::WriteFile((game / (std::string(kStockSkeleton) + "_c")).u8string(), skeleton);
     kv::WriteFile((game / (std::string(kStockGraph) + "_c")).u8string(), graph);
+    kv::WriteFile((game / (std::string(kStockUiGraph) + "_c")).u8string(), uiGraph);
 
     // the clip compile needs the skeleton's source form at its canonical path
     kv::WriteFile((content / kStockSkeleton).u8string(), kv::WriteText(descriptor));
     const fs::path sources = content / fs::u8path(paths.relative);
     fs::create_directories(sources);
-    for (const char* name : {"reference.dmx", "proportions.dmx", "proportions.vnmclip", "proportions.vnmgraph"})
+    for (const char* name : {"reference.dmx", "proportions.dmx", "proportions.vnmclip", "proportions.vnmgraph",
+                             "proportions_ui.vnmgraph"})
         fs::copy_file(paths.output / name, sources / name);
 }
 
@@ -313,7 +316,7 @@ void ValidateGraph(const kv::Value& graph) {
 } // namespace
 
 void Compile(const Options& options, const Paths& paths, const std::vector<uint8_t>& skeleton,
-             const std::vector<uint8_t>& graph, const kv::Value& descriptor) {
+             const std::vector<uint8_t>& graph, const std::vector<uint8_t>& uiGraph, const kv::Value& descriptor) {
 #ifdef _WIN32
     (void)options;
     const bool windowsBinaries = true;
@@ -326,11 +329,11 @@ void Compile(const Options& options, const Paths& paths, const std::vector<uint8
                         ("pulse-ag2-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) +
                          "-" + std::to_string(random()));
     try {
-        BuildWorkspace(ws, tools, paths.cs2, paths, skeleton, graph, descriptor);
+        BuildWorkspace(ws, tools, paths.cs2, paths, skeleton, graph, uiGraph, descriptor);
         const fs::path game = ws / "game/ag2", content = ws / "content/ag2";
         const kv::Value expected = kv::ReadResource(skeleton);
 
-        for (const char* name : {"proportions.vnmclip", "proportions.vnmgraph"}) {
+        for (const char* name : {"proportions.vnmclip", "proportions.vnmgraph", "proportions_ui.vnmgraph"}) {
             const std::string asset = paths.relative + "/" + name;
             fs::path exe = ws / "game/bin" / tools.platform / tools.files[0];
             std::vector<std::string> args{"-game", game.u8string(), "-i", (content / fs::u8path(asset)).u8string(),
@@ -369,7 +372,7 @@ void Compile(const Options& options, const Paths& paths, const std::vector<uint8
 
         const fs::path published = paths.cs2 / "game/csgo_addons" / paths.addon.filename() / fs::u8path(paths.relative);
         fs::create_directories(published);
-        for (const char* name : {"proportions.vnmclip_c", "proportions.vnmgraph_c"}) {
+        for (const char* name : {"proportions.vnmclip_c", "proportions.vnmgraph_c", "proportions_ui.vnmgraph_c"}) {
             fs::copy_file(game / fs::u8path(paths.relative) / name, published / name,
                           fs::copy_options::overwrite_existing);
             std::cout << "Compiled: " << (published / name).u8string() << '\n';

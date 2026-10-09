@@ -19,6 +19,7 @@ namespace kv = pulse::keyvalues3;
 namespace pm = pulse::math;
 
 inline constexpr const char* kStockGraph = "animation/graphs/worldmodel/worldmodel.vnmgraph";
+inline constexpr const char* kStockUiGraph = "animation/graphs/ui/uimodel.vnmgraph";
 inline constexpr const char* kStockSkeleton = "animation/skeletons/characters/worldmodel.vnmskel";
 
 // One model to wrap. Paths are absolute once loaded; empty means "use the default".
@@ -105,6 +106,6 @@ void Generate(const Job& job, const Options& options);
 
 // compiler.cpp
 void Compile(const Options& options, const Paths& paths, const std::vector<uint8_t>& skeleton,
-             const std::vector<uint8_t>& graph, const kv::Value& descriptor);
+             const std::vector<uint8_t>& graph, const std::vector<uint8_t>& uiGraph, const kv::Value& descriptor);
 
 } // namespace ag2

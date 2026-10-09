@@ -21,7 +21,7 @@ using std::runtime_error;
 
 // Every file a run writes into the output folder; a rerun clears these first.
 const char* const kGeneratedFiles[] = {
-    "proportions.vnmgraph", "proportions.vnmclip", "proportions.dmx", "reference.dmx",
+    "proportions.vnmgraph", "proportions_ui.vnmgraph", "proportions.vnmclip", "proportions.dmx", "reference.dmx",
     "model_with_helpers.dmx", "debug/rig_merged.dmx", "debug/skeleton_descriptor.kv3",
     "debug/report.kv3", "debug/MODEL_SETUP.txt",
 };
@@ -248,6 +248,7 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
             InsertHelperNode(model, binding, binding.parent >= 0 ? stock[binding.parent].name : std::string());
     }
     const std::string graph = paths.relative + "/proportions.vnmgraph";
+    const std::string uiGraph = paths.relative + "/proportions_ui.vnmgraph";
     kv::Value* list = nullptr;
     Walk(model, [&](kv::Value& node) {
         if (ClassOf(node) == "AnimGraph2List")
@@ -258,14 +259,16 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
         children.push_back(kv::Value::Object{{"_class", "AnimGraph2List"}, {"children", kv::Value::Array{}}});
         list = &children.back();
     }
-    // uimodel and hudmodel keep their stock graphs: the UI preview bone-merges the
-    // model onto Valve's skeleton (hardcoded), so proportions cannot show there.
-    bool haveWorld = false;
+    // The game plays the entries named worldmodel and uimodel (the UI preview).
+    bool haveWorld = false, haveUi = false;
     for (auto& node : (*list)["children"].Items()) {
         const std::string cls = ClassOf(node);
         if (cls == "AnimGraph2" && node.Has("name") && node.At("name").String() == "worldmodel") {
             node["filename"] = graph;
             haveWorld = true;
+        } else if (cls == "AnimGraph2" && node.Has("name") && node.At("name").String() == "uimodel") {
+            node["filename"] = uiGraph;
+            haveUi = true;
         }
     }
     auto& graphs = (*list)["children"].Items();
@@ -275,6 +278,9 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
     if (!haveWorld)
         (*list)["children"].Items().push_back(
             kv::Value::Object{{"_class", "AnimGraph2"}, {"name", "worldmodel"}, {"filename", graph}});
+    if (!haveUi)
+        (*list)["children"].Items().push_back(
+            kv::Value::Object{{"_class", "AnimGraph2"}, {"name", "uimodel"}, {"filename", uiGraph}});
 
 
     Walk(model, [&](kv::Value& node) {
@@ -367,8 +373,8 @@ bool IsInfoNote(const std::string& warning) { return warning.rfind("standalone p
 // What the user has to do next, on the console; the full notes are --debug only.
 void PrintSummary(const Paths& paths, const std::vector<Bone>& dmxHelpers, const std::vector<Bone>& nodeHelpers,
                   const std::vector<Bone>& stock, const std::vector<std::string>& warnings, const Job& job) {
-    std::cout << "Set the worldmodel AnimGraph2 to " << paths.relative
-              << "/proportions.vnmgraph\n";
+    std::cout << "Set the worldmodel AnimGraph2 to " << paths.relative << "/proportions.vnmgraph\n"
+              << "Set the uimodel AnimGraph2 to " << paths.relative << "/proportions_ui.vnmgraph\n";
     if (job.writeModel)
         std::cout << "Edited " << job.vmdl.filename().u8string() << " (original kept as "
                   << job.vmdl.filename().u8string() << ".bak)\n";
@@ -428,7 +434,9 @@ void Generate(const Job& job, const Options& options) {
     }
     const std::string clip = paths.relative + "/proportions.vnmclip";
     const std::vector<uint8_t> graphBytes = package.Read(std::string(kStockGraph) + "_c");
+    const std::vector<uint8_t> uiGraphBytes = package.Read(std::string(kStockUiGraph) + "_c");
     const kv::Value graph = WrapperGraph(kv::ReadResource(graphBytes), kStockGraph, clip);
+    const kv::Value uiGraph = WrapperGraph(kv::ReadResource(uiGraphBytes), kStockUiGraph, clip);
 
     // The rig as ModelDoc builds it from the Bone nodes and the files.
     std::vector<std::string> warnings;
@@ -560,6 +568,7 @@ void Generate(const Job& job, const Options& options) {
     }
     kv::WriteFile((paths.output / "proportions.vnmclip").u8string(), kv::WriteText(ProportionClip(paths.relative)));
     kv::WriteFile((paths.output / "proportions.vnmgraph").u8string(), kv::WriteText(graph));
+    kv::WriteFile((paths.output / "proportions_ui.vnmgraph").u8string(), kv::WriteText(uiGraph));
     if (job.writeModel) {
         AddWeaponHelpers(*rig, installed.bones, {}, {});
         EditModel(vmdlText, vmdl, job, paths, modelDmx, !dmxHelpers.empty(), installed.bones,
@@ -584,7 +593,7 @@ void Generate(const Job& job, const Options& options) {
     PrintSummary(paths, dmxHelpers, nodeHelpers, installed.bones, warnings, job);
 
     if (!options.generateOnly)
-        Compile(options, paths, skeletonBytes, graphBytes, descriptor);
+        Compile(options, paths, skeletonBytes, graphBytes, uiGraphBytes, descriptor);
     std::cout << "DONE: " << paths.output.u8string()
               << (options.generateOnly ? " (source assets only)\n" : " (graph and clip compiled)\n");
 }
