@@ -1,11 +1,16 @@
 // main.cpp - ag2proportions command line: each argument is a KV3 job file or
-// a .vmdl, which runs as a job with every default.
+// a .vmdl, which runs with every default and is edited in place.
 
 #include <iostream>
 #include <stdexcept>
 
 #include "ag2.h"
 #include "strcompat.h"
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -23,6 +28,7 @@ const char* const kUsage =
     "  proportions  held-pose DMX (default: the rig's bind pose)\n"
     "  vnmskel      compiled worldmodel.vnmskel_c (default: from the CS2 VPK)\n"
     "  write_model  true to edit the VMDL in place (original kept as .vmdl.bak)\n"
+    "A .vmdl given directly is edited in place, as with write_model = true.\n"
     "Output goes to a folder beside the VMDL, named after it.\n";
 
 bool HasExtension(const path& file, const char* ext) {
@@ -33,6 +39,7 @@ ag2::Job LoadJob(const path& file) {
     ag2::Job job;
     if (HasExtension(file, ".vmdl")) {
         job.vmdl = file;
+        job.writeModel = true; // a dragged model should come out wired up
         return job;
     }
     const auto bytes = ag2::kv::ReadFile(file.u8string());
@@ -104,16 +111,28 @@ int Main(const std::vector<std::string>& args) {
 } // namespace
 
 #ifdef _WIN32
+// A drag-and-drop launch owns its console, which closes on exit; keep it open
+// so the instructions and errors can be read. A terminal launch is unchanged.
+void PauseIfOwnConsole() {
+    DWORD processes[2];
+    if (GetConsoleProcessList(processes, 2) == 1) {
+        std::cout << "\nPress Enter to close.";
+        std::cin.get();
+    }
+}
+
 int wmain(int argc, wchar_t** argv) {
     std::vector<std::string> args;
     for (int i = 0; i < argc; ++i)
         args.push_back(std::filesystem::path(argv[i]).u8string());
+    int code = 1;
     try {
-        return Main(args);
+        code = Main(args);
     } catch (const std::exception& e) {
         std::cerr << "ERROR: " << e.what() << '\n';
-        return 1;
     }
+    PauseIfOwnConsole();
+    return code;
 }
 #else
 int main(int argc, char** argv) {

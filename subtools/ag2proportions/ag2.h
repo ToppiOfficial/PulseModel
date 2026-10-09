@@ -69,20 +69,27 @@ struct HelperPlan {
     std::vector<Bone> inRig, asNodes;
 };
 
-// ModelDoc's merge: a Bone node sets a same-named rig bone's parent (file children
-// stay attached) and, unless `fileWins` (SkeletonFile merge_behavior
-// "overwrite_existing"), its transform; new names are added. Null `rig` starts empty.
-std::unique_ptr<pulse::dmx::Datamodel> MergeBoneNodes(std::unique_ptr<pulse::dmx::Datamodel> rig,
-                                                      const std::vector<Bone>& nodes, bool fileWins = false,
-                                                      std::vector<NodeOverride>* overrides = nullptr);
+// A SkeletonFile (or the body render mesh) in VMDL order.
+struct RigFile {
+    pulse::dmx::Datamodel* dm;
+    bool overwrite; // merge_behavior "overwrite_existing"
+};
+
+// ModelDoc's skeleton from the enabled Bone nodes and files; `overrides` reports
+// Bone nodes that a file disagrees with.
+std::unique_ptr<pulse::dmx::Datamodel> BuildRig(const std::vector<Bone>& nodes, const std::vector<RigFile>& files,
+                                                std::vector<NodeOverride>* overrides = nullptr);
+std::vector<std::string> BoneNames(pulse::dmx::Datamodel& dm);
 bool IsCoreBone(const std::string& name);
 std::string BoneParent(pulse::dmx::Datamodel& dm, const std::string& name); // "" for a root or missing bone
 size_t CountBones(pulse::dmx::Datamodel& dm); // CS2 core bones in the rig, 0 if none
 // `modelRig`: the VMDL's merged rig (needs root_motion), not a proportions DMX.
 std::vector<Bone> TargetPose(pulse::dmx::Datamodel& pose, const std::vector<Bone>& stock,
                              std::vector<std::string>& warnings, bool modelRig);
+// Helpers named in `present` are skipped; one whose parent is only in `nodeNames`
+// (or another node helper) goes to asNodes.
 HelperPlan AddWeaponHelpers(pulse::dmx::Datamodel& model, const std::vector<Bone>& stock,
-                            const std::vector<std::string>& nodeNames);
+                            const std::vector<std::string>& present, const std::vector<std::string>& nodeNames);
 void WriteHeldPose(const fs::path& path, const std::vector<Bone>& bones, int lowLodCount);
 
 // graph.cpp

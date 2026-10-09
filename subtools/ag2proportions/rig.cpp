@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdint>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <stdexcept>
 
@@ -255,54 +256,102 @@ std::vector<int> CompiledChildren(const std::vector<Bone>& bones, int lowLodCoun
 
 } // namespace
 
-std::unique_ptr<dmx::Datamodel> MergeBoneNodes(std::unique_ptr<dmx::Datamodel> rig, const std::vector<Bone>& nodes,
-                                               bool fileWins, std::vector<NodeOverride>* overrides) {
-    if (!rig) {
-        rig = std::make_unique<dmx::Datamodel>();
-        rig->encoding = "binary";
-        rig->encoding_version = 9;
-        rig->format = "model";
-        rig->format_version = 22;
-        rig->root = rig->CreateElement(StableId("root"), "DmElement");
-        rig->root->name = "root";
-        dmx::Element* model = rig->CreateElement(StableId("model"), "DmeModel");
-        model->name = "model";
-        Set(model, "jointList", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
-        Set(rig->root, "skeleton", dmx::AttrType::Element, model);
-    }
-    Rig bones(*rig);
-    // nodes come parent-first, so a node's parent is already in the rig
-    for (const Bone& node : nodes) {
-        dmx::Element* parent = node.parent >= 0 ? bones.Find(nodes[node.parent].name) : nullptr;
-        dmx::Element* joint = bones.Find(node.name);
-        if (joint) {
-            dmx::Element* t = TransformOf(joint);
-            const pm::Vector3 was = PositionOf(t);
-            NodeOverride o{joint->name,
-                           fileWins ? 0.0f
-                                    : std::abs(was.x - node.position.x) + std::abs(was.y - node.position.y) +
-                                          std::abs(was.z - node.position.z),
-                           bones.Parent(joint) != parent};
-            if (overrides && (o.moved > 1e-3f || o.reparented))
-                overrides->push_back(o);
-            if (!fileWins) {
-                Set(t, "position", dmx::AttrType::Vector3, dmx::Vector3{node.position.x, node.position.y, node.position.z});
-                Set(t, "orientation", dmx::AttrType::Quaternion,
-                    dmx::Quaternion{node.rotation.x, node.rotation.y, node.rotation.z, node.rotation.w});
-            }
-            bones.Reparent(joint, parent);
-            continue;
-        }
-        joint = rig->CreateElement(StableId("node:" + node.name), bones.JointClass());
-        joint->name = node.name;
+// ModelDoc takes enabled Bone nodes first, then SkeletonFiles in order.
+// Files add new names under their own parents. Existing bones keep their
+// parents; overwrite_existing replaces their transforms.
+std::unique_ptr<dmx::Datamodel> BuildRig(const std::vector<Bone>& nodes, const std::vector<RigFile>& files,
+                                         std::vector<NodeOverride>* overrides) {
+    auto rig = std::make_unique<dmx::Datamodel>();
+    rig->encoding = "binary";
+    rig->encoding_version = 9;
+    rig->format = "model";
+    rig->format_version = 22;
+    rig->root = rig->CreateElement(StableId("root"), "DmElement");
+    rig->root->name = "root";
+    dmx::Element* model = rig->CreateElement(StableId("model"), "DmeModel");
+    model->name = "model";
+    Set(model, "jointList", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
+    Set(model, "children", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
+    Set(rig->root, "skeleton", dmx::AttrType::Element, model);
+
+    std::map<std::string, dmx::Element*, NoCase> joints;
+    std::map<const dmx::Element*, dmx::Element*> parentOf; // nullptr: under the DmeModel
+    std::map<const dmx::Element*, bool> isNode;
+    auto add = [&](const std::string& name, const pm::Vector3& position, const pm::Quaternion& rotation,
+                   dmx::Element* parent) {
+        if (joints.count(name))
+            throw runtime_error("two Bone nodes are named " + name);
+        dmx::Element* joint = rig->CreateElement(StableId("rig joint:" + name), "DmeJoint");
+        joint->name = name;
         Set(joint, "transform", dmx::AttrType::Element,
-            NewTransform(*rig, "node transform:" + node.name, node.name, node.position, node.rotation));
-        // re-fetched: Reparent may add attributes to the DmeModel
-        ElementArray(bones.Model(), "jointList").push_back(joint);
-        bones.Add(joint);
-        bones.Reparent(joint, parent);
+            NewTransform(*rig, "rig transform:" + name, name, position, rotation));
+        Set(joint, "children", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
+        ElementArray(model, "jointList").push_back(joint);
+        ElementArray(parent ? parent : model, "children").push_back(joint);
+        joints[name] = joint;
+        parentOf[joint] = parent;
+        return joint;
+    };
+    auto nameOf = [](const dmx::Element* e) { return e ? e->name : std::string(); };
+
+    for (const Bone& node : nodes) {
+        dmx::Element* parent = node.parent >= 0 ? joints.at(nodes[node.parent].name) : nullptr;
+        isNode[add(node.name, node.position, node.rotation, parent)] = true;
+    }
+
+    for (const RigFile& file : files) {
+        const Rig source(*file.dm);
+        // parent-first walk of the file's hierarchy
+        std::function<void(const dmx::Element*)> visit = [&](const dmx::Element* from) {
+            const auto* children = from->GetElementArray("children");
+            if (!children)
+                return;
+            for (dmx::Element* child : *children) {
+                if (!child || source.Find(child->name) != child)
+                    continue;
+                const dmx::Element* transform = TransformOf(child);
+                const auto it = joints.find(child->name);
+                if (it == joints.end()) {
+                    const dmx::Element* fileParent = source.Parent(child);
+                    const auto parent = fileParent ? joints.find(fileParent->name) : joints.end();
+                    add(child->name, PositionOf(transform), RotationOf(transform),
+                        parent == joints.end() ? nullptr : parent->second);
+                } else {
+                    dmx::Element* existing = TransformOf(it->second);
+                    if (isNode[it->second] && overrides) {
+                        const pm::Vector3 a = PositionOf(existing), b = PositionOf(transform);
+                        NodeOverride o{it->second->name,
+                                       file.overwrite ? 0.0f
+                                                      : std::abs(a.x - b.x) + std::abs(a.y - b.y) + std::abs(a.z - b.z),
+                                       file.overwrite &&
+                                           _stricmp(nameOf(parentOf[it->second]).c_str(),
+                                                    nameOf(source.Parent(child)).c_str()) != 0};
+                        if (o.moved > 1e-3f || o.reparented)
+                            overrides->push_back(o);
+                    }
+                    if (file.overwrite) {
+                        const pm::Vector3 position = PositionOf(transform);
+                        const pm::Quaternion rotation = RotationOf(transform);
+                        Set(existing, "position", dmx::AttrType::Vector3, dmx::Vector3{position.x, position.y, position.z});
+                        Set(existing, "orientation", dmx::AttrType::Quaternion,
+                            dmx::Quaternion{rotation.x, rotation.y, rotation.z, rotation.w});
+                    }
+                }
+                visit(child);
+            }
+        };
+        visit(source.Model());
     }
     return rig;
+}
+
+std::vector<std::string> BoneNames(dmx::Datamodel& dm) {
+    const Rig rig(dm);
+    std::vector<std::string> names;
+    for (const dmx::Element* e : *rig.Model()->GetElementArray("jointList"))
+        if (e && rig.Find(e->name) == e)
+            names.push_back(e->name);
+    return names;
 }
 
 size_t CountBones(dmx::Datamodel& dm) {
@@ -390,7 +439,7 @@ static Bone ModelHelperBind(const Bone& bone, const std::vector<Bone>& stock) {
 }
 
 HelperPlan AddWeaponHelpers(dmx::Datamodel& model, const std::vector<Bone>& stock,
-                            const std::vector<std::string>& nodeNames) {
+                            const std::vector<std::string>& present, const std::vector<std::string>& nodeNames) {
     auto named = [](const std::vector<std::string>& names, const std::string& name) {
         for (const std::string& n : names)
             if (_stricmp(n.c_str(), name.c_str()) == 0)
@@ -410,7 +459,7 @@ HelperPlan AddWeaponHelpers(dmx::Datamodel& model, const std::vector<Bone>& stoc
 
     // stock order is parent-first, so a helper's helper parent is placed before it
     for (const Bone& stockBone : stock) {
-        if (!IsModelHelper(stockBone.name) || rig.Find(stockBone.name) || named(nodeNames, stockBone.name))
+        if (!IsModelHelper(stockBone.name) || rig.Find(stockBone.name) || named(present, stockBone.name))
             continue;
         const Bone bone = ModelHelperBind(stockBone, stock);
         const std::string parentName = bone.parent >= 0 ? stock[bone.parent].name : std::string();

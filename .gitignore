@@ -80,3 +80,6 @@ testsamples/
 CLAUDE.md
 AGENTS.md
 /local-animgraph2/
+
+# agent notes, not shipped
+subtools/ag2proportions/README.md

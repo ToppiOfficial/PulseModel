@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <variant>
 #include <stdexcept>
 
 #include "ag2.h"
@@ -26,8 +27,18 @@ const char* const kGeneratedFiles[] = {
 };
 
 
+bool Disabled(const kv::Value& node) {
+    if (!node.Has("disabled"))
+        return false;
+    const kv::Value& flag = node.At("disabled");
+    return std::holds_alternative<bool>(flag.data) && flag.Boolean();
+}
+
+// Visits every enabled node; a node ModelDoc has disabled is skipped with its children.
 void Walk(kv::Value& value, const std::function<void(kv::Value&)>& visit) {
     if (value.IsObject()) {
+        if (Disabled(value))
+            return;
         visit(value);
         for (auto& member : value.Members())
             Walk(member.second, visit);
@@ -76,17 +87,23 @@ fs::path ResolveImport(const std::string& name, const Paths& paths, const fs::pa
     throw runtime_error("cannot find VMDL import " + name);
 }
 
-// Empty when the VMDL has no SkeletonFile (a Bone-node skeleton).
-fs::path SkeletonImport(kv::Value& vmdl, const Paths& paths, const fs::path& vmdlPath) {
-    std::vector<std::string> imports;
+struct SkeletonSource {
+    fs::path path;
+    bool overwrite = false;
+};
+
+// The enabled SkeletonFiles in VMDL order; ModelDoc merges them in that order.
+std::vector<SkeletonSource> SkeletonImports(kv::Value& vmdl, const Paths& paths, const fs::path& vmdlPath) {
+    std::vector<SkeletonSource> sources;
     Walk(vmdl, [&](kv::Value& node) {
-        if (ClassOf(node) == "SkeletonFile" && node.Has("filename"))
-            imports.push_back(node.At("filename").String());
+        if (ClassOf(node) != "SkeletonFile" || !node.Has("filename"))
+            return;
+        SkeletonSource source;
+        source.path = ResolveImport(node.At("filename").String(), paths, vmdlPath);
+        source.overwrite = node.Has("merge_behavior") && node.At("merge_behavior").String() == "overwrite_existing";
+        sources.push_back(source);
     });
-    if (imports.size() > 1)
-        throw runtime_error("the VMDL has " + std::to_string(imports.size()) +
-                            " SkeletonFile imports; set model_dmx in the job");
-    return imports.empty() ? fs::path() : ResolveImport(imports.front(), paths, vmdlPath);
+    return sources;
 }
 
 // Without a SkeletonFile, ModelDoc takes the bones from the render meshes: use
@@ -126,7 +143,7 @@ pm::Vector3 Triple(const kv::Value& v, const std::string& bone) {
 std::vector<Bone> BoneNodes(const kv::Value& vmdl) {
     std::vector<Bone> bones;
     std::function<void(const kv::Value&, int)> visit = [&](const kv::Value& node, int parent) {
-        if (!node.IsObject())
+        if (!node.IsObject() || Disabled(node))
             return;
         if (ClassOf(node) == "Bone") {
             Bone b;
@@ -144,6 +161,8 @@ std::vector<Bone> BoneNodes(const kv::Value& vmdl) {
     };
     std::function<void(const kv::Value&)> findSkeletons = [&](const kv::Value& node) {
         if (node.IsObject()) {
+            if (Disabled(node))
+                return;
             if (ClassOf(node) == "Skeleton") {
                 visit(node, -1);
                 return;
@@ -357,15 +376,22 @@ void Generate(const Job& job, const Options& options) {
     const Paths paths = Locate(job.vmdl);
     const std::string vmdlText = ReadText(job.vmdl);
     kv::Value vmdl = kv::ParseText(vmdlText);
-    // the rig file: model_dmx, else the SkeletonFile, else the body render mesh
-    fs::path modelDmx = job.modelDmx.empty() ? SkeletonImport(vmdl, paths, job.vmdl) : job.modelDmx;
+    // rig files: model_dmx (in place of every SkeletonFile), else the enabled
+    // SkeletonFiles, else the body render mesh
+    std::vector<SkeletonSource> sources;
+    if (!job.modelDmx.empty())
+        sources.push_back({job.modelDmx, false});
+    else
+        sources = SkeletonImports(vmdl, paths, job.vmdl);
     bool meshRig = false;
-    if (modelDmx.empty()) {
-        modelDmx = RenderMeshRig(vmdl, paths, job.vmdl);
-        meshRig = !modelDmx.empty();
+    if (sources.empty()) {
+        const fs::path mesh = RenderMeshRig(vmdl, paths, job.vmdl);
+        if (!mesh.empty())
+            sources.push_back({mesh, false});
+        meshRig = !mesh.empty();
     }
     const std::vector<Bone> nodes = BoneNodes(vmdl);
-    if (modelDmx.empty() && nodes.empty())
+    if (sources.empty() && nodes.empty())
         throw runtime_error("the VMDL has no skeleton (no SkeletonFile, render mesh bones or Bone nodes); set model_dmx in the job");
 
     const Vpk package(paths.cs2 / "game/csgo/pak01_dir.vpk");
@@ -379,15 +405,16 @@ void Generate(const Job& job, const Options& options) {
     const std::vector<uint8_t> graphBytes = package.Read(std::string(kStockGraph) + "_c");
     const kv::Value graph = WrapperGraph(kv::ReadResource(graphBytes), kStockGraph, clip);
 
-    // The rig as ModelDoc builds it: the file with the VMDL's Bone nodes on top.
+    // The rig as ModelDoc builds it from the Bone nodes and the files.
     std::vector<std::string> warnings;
     std::vector<NodeOverride> overrides;
-    bool fileWins = false;
-    Walk(vmdl, [&](kv::Value& node) {
-        fileWins |= !meshRig && ClassOf(node) == "SkeletonFile" && node.Has("merge_behavior") &&
-                    node.At("merge_behavior").String() == "overwrite_existing";
-    });
-    const auto rig = MergeBoneNodes(modelDmx.empty() ? nullptr : LoadDmx(modelDmx), nodes, fileWins, &overrides);
+    std::vector<std::unique_ptr<dmx::Datamodel>> loaded;
+    std::vector<RigFile> files;
+    for (const SkeletonSource& source : sources) {
+        loaded.push_back(LoadDmx(source.path));
+        files.push_back({loaded.back().get(), source.overwrite});
+    }
+    const auto rig = BuildRig(nodes, files, &overrides);
     std::vector<Bone> target = TargetPose(*rig, installed.bones, warnings, true);
     std::vector<uint8_t> mergedRig; // for debug/, before any helper is added
     std::string err;
@@ -431,8 +458,8 @@ void Generate(const Job& job, const Options& options) {
             continue;
         overridden.push_back(o.name);
         if (o.moved > 1e-3f) {
-            warnings.push_back("VMDL Bone node " + o.name + " moves the rig's " + o.name + " by " +
-                               std::to_string(o.moved) + " units; its proportions come from the node");
+            warnings.push_back("VMDL Bone node " + o.name + " differs from the SkeletonFile's by " +
+                               std::to_string(o.moved) + " units and wins; its proportions come from the node");
         } else {
             // overwrite_existing keeps the file's local position under the node's parent
             warnings.push_back("VMDL Bone node nests " + o.name + " under a different parent than the " +
@@ -441,26 +468,32 @@ void Generate(const Job& job, const Options& options) {
         }
     }
 
-    // Missing helpers go where their parent lives: into an untouched copy of a
-    // SkeletonFile, or as Bone nodes. ModelDoc culls a render mesh's unweighted
-    // bones, so with a render-mesh rig only Bone nodes count.
+    // Missing helpers go where root_motion lives: into an untouched copy of the
+    // first SkeletonFile that has it, or as Bone nodes. ModelDoc culls a render
+    // mesh's unweighted bones, so with a render-mesh rig only Bone nodes count.
     std::vector<std::string> nodeNames;
     for (const Bone& node : nodes)
         nodeNames.push_back(node.name);
+    const std::vector<std::string> present = BoneNames(*rig);
+    fs::path modelDmx; // the file the helper copy is made from
     std::unique_ptr<dmx::Datamodel> helperCopy;
     std::vector<Bone> dmxHelpers, nodeHelpers;
-    if (meshRig) {
-        if (std::none_of(nodes.begin(), nodes.end(), [](const Bone& b) { return b.name == "root_motion"; }))
-            throw runtime_error("the skeleton comes from a render mesh, whose unweighted bones ModelDoc culls; "
-                                "add root_motion as a VMDL Bone node");
-        nodeHelpers = AddWeaponHelpers(*MergeBoneNodes(nullptr, nodes), installed.bones, {}).inRig;
-    } else if (!modelDmx.empty()) {
+    if (meshRig &&
+        std::none_of(nodes.begin(), nodes.end(), [](const Bone& b) { return b.name == "root_motion"; }))
+        throw runtime_error("the skeleton comes from a render mesh, whose unweighted bones ModelDoc culls; "
+                            "add root_motion as a VMDL Bone node");
+    for (size_t i = 0; i < sources.size() && !meshRig && modelDmx.empty(); ++i) {
+        const std::vector<std::string> names = BoneNames(*loaded[i]);
+        if (std::find(names.begin(), names.end(), "root_motion") != names.end())
+            modelDmx = sources[i].path;
+    }
+    if (!modelDmx.empty()) {
         helperCopy = LoadDmx(modelDmx);
-        HelperPlan plan = AddWeaponHelpers(*helperCopy, installed.bones, nodeNames);
+        HelperPlan plan = AddWeaponHelpers(*helperCopy, installed.bones, present, nodeNames);
         dmxHelpers = std::move(plan.inRig);
         nodeHelpers = std::move(plan.asNodes);
     } else {
-        nodeHelpers = AddWeaponHelpers(*rig, installed.bones, {}).inRig;
+        nodeHelpers = AddWeaponHelpers(*BuildRig(nodes, {}), installed.bones, present, nodeNames).inRig;
     }
     std::sort(warnings.begin(), warnings.end());
     warnings.erase(std::unique(warnings.begin(), warnings.end()), warnings.end());
@@ -481,7 +514,10 @@ void Generate(const Job& job, const Options& options) {
     fs::create_directories(paths.output);
     // a job may read a previous run's helper copy; never delete an input
     auto clear = [&](const fs::path& file) {
-        for (const fs::path& input : {modelDmx, job.proportions, job.vnmskel})
+        std::vector<fs::path> inputs{job.proportions, job.vnmskel};
+        for (const SkeletonSource& source : sources)
+            inputs.push_back(source.path);
+        for (const fs::path& input : inputs)
             if (!input.empty() && fs::exists(file) && fs::equivalent(file, input))
                 return;
         fs::remove(file);
@@ -505,9 +541,12 @@ void Generate(const Job& job, const Options& options) {
         EditModel(vmdlText, vmdl, job, paths, modelDmx, !dmxHelpers.empty(), nodeHelpers, installed.bones);
     // what the clip was built from, for issue reports
     if (options.debug) {
-        std::string rigName = modelDmx.empty() ? "VMDL Bone nodes" : modelDmx.generic_u8string();
-        if (!modelDmx.empty() && !nodes.empty())
-            rigName += " + " + std::to_string(nodes.size()) + " VMDL Bone nodes";
+        std::string rigName;
+        for (const SkeletonSource& source : sources)
+            rigName += (rigName.empty() ? "" : " + ") + source.path.generic_u8string() +
+                       (source.overwrite ? " (overwrite_existing)" : "");
+        if (!nodes.empty())
+            rigName += (rigName.empty() ? "" : " + ") + std::to_string(nodes.size()) + " VMDL Bone nodes";
         const std::string poseName = job.proportions.empty() ? rigName : job.proportions.generic_u8string();
         kv::WriteFile((paths.output / "debug/rig_merged.dmx").u8string(), mergedRig);
         kv::WriteFile((paths.output / "debug/skeleton_descriptor.kv3").u8string(), kv::WriteText(descriptor));
