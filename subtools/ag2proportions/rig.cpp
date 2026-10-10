@@ -524,4 +524,15 @@ void WriteHeldPose(const fs::path& path, const std::vector<Bone>& bones, int low
     SaveModelDmx(path, "worldmodel", bones, children, true);
 }
 
+// Every shipped agent model also carries eye_target, which the vnmskel lacks.
+std::vector<Bone> ModelStock(const std::vector<Bone>& stock) {
+    std::vector<Bone> bones = stock;
+    for (size_t i = 0; i < stock.size(); ++i)
+        if (stock[i].name == "head_0") {
+            bones.push_back({"eye_target", static_cast<int>(i), {0, 100, 0}, {0.5f, 0.5f, 0.5f, 0.5f}});
+            break;
+        }
+    return bones;
+}
+
 } // namespace ag2

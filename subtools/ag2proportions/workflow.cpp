@@ -441,8 +441,9 @@ void Generate(const Job& job, const Options& options) {
     const kv::Value uiGraph = WrapperGraph(kv::ReadResource(uiGraphBytes), kStockUiGraph, clip);
 
     std::vector<std::string> warnings;
+    const std::vector<Bone> modelStock = ModelStock(installed.bones);
     const SkeletonBuild skeleton =
-        BuildSkeleton(ReadRig(*LoadDmx(rigSource.path), rigSource.scale, false), installed.bones, nodes);
+        BuildSkeleton(ReadRig(*LoadDmx(rigSource.path), rigSource.scale, false), modelStock, nodes);
     const std::vector<Bone> target =
         job.proportions.empty()
             ? TargetPose(skeleton.bones, installed.bones, warnings)
@@ -517,7 +518,7 @@ void Generate(const Job& job, const Options& options) {
     kv::WriteFile((paths.output / kWorldGraphFile).u8string(), kv::WriteText(graph));
     kv::WriteFile((paths.output / kUiGraphFile).u8string(), kv::WriteText(uiGraph));
     if (job.writeModel)
-        EditModel(vmdlText, vmdl, job, paths, StockBoneNodes(skeleton.bones, installed.bones));
+        EditModel(vmdlText, vmdl, job, paths, StockBoneNodes(skeleton.bones, modelStock));
     // what the clip was built from, for issue reports
     if (options.debug) {
         const std::string rigName = rigSource.path.generic_u8string();

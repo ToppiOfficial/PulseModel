@@ -85,6 +85,7 @@ std::vector<Bone> ReadRig(pulse::dmx::Datamodel& dm, float scale, bool held);
 bool HasStockLengths(const std::vector<Bone>& rig, const std::vector<const std::vector<Bone>*>& skeletons);
 SkeletonBuild BuildSkeleton(const std::vector<Bone>& rig, const std::vector<Bone>& stock,
                             const std::vector<Bone>& nodes);
+std::vector<Bone> ModelStock(const std::vector<Bone>& stock); // stock plus the agent-only bones
 std::vector<Bone> TargetPose(const std::vector<Bone>& skeleton, const std::vector<Bone>& stock,
                              std::vector<std::string>& warnings);
 void WriteSkeleton(const fs::path& path, const std::vector<Bone>& bones);
