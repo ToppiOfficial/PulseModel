@@ -21,7 +21,7 @@ using std::runtime_error;
 
 // Every file a run writes into the output folder; a rerun clears these first.
 const char* const kGeneratedFiles[] = {
-    kWorldGraphFile, kUiGraphFile, kClipFile, "proportions.dmx", "reference.dmx",
+    kWorldGraphFile, kUiGraphFile, kClipFile, kProportionsFile, kReferenceFile,
     "model_with_helpers.dmx", "debug/rig_merged.dmx", "debug/skeleton_descriptor.kv3",
     "debug/report.kv3", "debug/MODEL_SETUP.txt",
 };
@@ -560,9 +560,10 @@ void Generate(const Job& job, const Options& options) {
         fs::remove(paths.output / folder, ec); // only when empty
     std::cout << "Output: " << paths.output.u8string() << '\n';
 
-    WriteHeldPose(paths.output / "reference.dmx", installed.bones, installed.lowLodCount);
-    WriteHeldPose(paths.output / "proportions.dmx", target, installed.lowLodCount);
-    const kv::Value descriptor = SkeletonDescriptor(ReadStockSkeleton(skeletonBytes), paths.relative + "/reference.dmx");
+    fs::create_directories((paths.output / kReferenceFile).parent_path());
+    WriteHeldPose(paths.output / kReferenceFile, installed.bones, installed.lowLodCount);
+    WriteHeldPose(paths.output / kProportionsFile, target, installed.lowLodCount);
+    const kv::Value descriptor = SkeletonDescriptor(ReadStockSkeleton(skeletonBytes), paths.relative + "/" + kReferenceFile);
     if (!dmxHelpers.empty()) {
         if (!dmx::Save(*helperCopy, (paths.output / "model_with_helpers.dmx").u8string(), &err))
             throw runtime_error(err);

@@ -277,7 +277,7 @@ void BuildWorkspace(const fs::path& ws, const Toolchain& t, const fs::path& cs2,
     const fs::path sources = content / fs::u8path(paths.relative);
     fs::create_directories(sources / "graphs");
     fs::create_directories(sources / "anims");
-    for (const char* name : {"reference.dmx", "proportions.dmx", kClipFile, kWorldGraphFile, kUiGraphFile})
+    for (const char* name : {kReferenceFile, kProportionsFile, kClipFile, kWorldGraphFile, kUiGraphFile})
         fs::copy_file(paths.output / name, sources / name);
 }
 

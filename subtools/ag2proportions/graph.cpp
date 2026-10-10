@@ -111,7 +111,7 @@ void RequireSameSkeleton(const StockSkeleton& installed, const StockSkeleton& su
     }
 }
 
-// The stock skeleton's source form, rebuilt over reference.dmx. Only the
+// The stock skeleton's source form, rebuilt over the reference pose. Only the
 // isolated compiler workspace uses it; the installed skeleton is never replaced.
 kv::Value SkeletonDescriptor(const StockSkeleton& stock, const std::string& referenceDmx) {
     kv::Value::Array highLod;
@@ -130,10 +130,10 @@ kv::Value SkeletonDescriptor(const StockSkeleton& stock, const std::string& refe
 
 kv::Value ProportionClip(const std::string& relative) {
     return kv::Value::Object{
-        {"m_sourceFilename", relative + "/proportions.dmx"},
+        {"m_sourceFilename", relative + "/" + kProportionsFile},
         {"m_animationSkeletonName", kStockSkeleton},
         {"m_additiveType", "RelativeToAnimationFrame"},
-        {"m_additiveBaseFilename", relative + "/reference.dmx"},
+        {"m_additiveBaseFilename", relative + "/" + kReferenceFile},
         {"m_additiveBaseFrame", "FirstFrame"},
         {"m_nAdditiveBaseFrameIdx", 0},
         {"m_bonesToSampleInModelSpace", kv::Value::Array{}},
