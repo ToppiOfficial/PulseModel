@@ -21,9 +21,8 @@ using std::runtime_error;
 
 // Every file a run writes into the output folder; a rerun clears these first.
 const char* const kGeneratedFiles[] = {
-    kWorldGraphFile, kUiGraphFile, kClipFile, kProportionsFile, kReferenceFile,
-    "model_with_helpers.dmx", "debug/rig_merged.dmx", "debug/skeleton_descriptor.kv3",
-    "debug/report.kv3", "debug/MODEL_SETUP.txt",
+    kWorldGraphFile, kUiGraphFile, kClipFile, kProportionsFile, kReferenceFile, kSkeletonFile,
+    "debug/skeleton_descriptor.kv3", "debug/report.kv3", "debug/MODEL_SETUP.txt",
 };
 
 
@@ -87,47 +86,52 @@ fs::path ResolveImport(const std::string& name, const Paths& paths, const fs::pa
     throw runtime_error("cannot find VMDL import " + name);
 }
 
-struct SkeletonSource {
+struct RigSource {
     fs::path path;
-    bool overwrite = false;
+    float scale = 1.0f; // the import's import_scale, baked into the skeleton
 };
 
-// The enabled SkeletonFiles in VMDL order; ModelDoc merges them in that order.
-std::vector<SkeletonSource> SkeletonImports(kv::Value& vmdl, const Paths& paths, const fs::path& vmdlPath) {
-    std::vector<SkeletonSource> sources;
+// model_dmx, else the render mesh carrying the most CS2 core bones (the body),
+// else the SkeletonFile that does. The generated skeleton is never a source.
+RigSource FindRig(kv::Value& vmdl, const Job& job, const Paths& paths) {
+    const fs::path generated = paths.output / kSkeletonFile;
+    std::vector<RigSource> meshes, files;
     Walk(vmdl, [&](kv::Value& node) {
-        if (ClassOf(node) != "SkeletonFile" || !node.Has("filename"))
+        const std::string cls = ClassOf(node);
+        if ((cls != "RenderMeshFile" && cls != "SkeletonFile") || !node.Has("filename"))
             return;
-        SkeletonSource source;
-        source.path = ResolveImport(node.At("filename").String(), paths, vmdlPath);
-        source.overwrite = node.Has("merge_behavior") && node.At("merge_behavior").String() == "overwrite_existing";
-        sources.push_back(source);
+        const std::string name = node.At("filename").String();
+        if (_stricmp(fs::u8path(name).extension().u8string().c_str(), ".dmx") != 0)
+            return;
+        RigSource source{ResolveImport(name, paths, job.vmdl),
+                         node.Has("import_scale") ? static_cast<float>(node.At("import_scale").Number()) : 1.0f};
+        if (fs::exists(generated) && fs::equivalent(source.path, generated))
+            return;
+        (cls == "RenderMeshFile" ? meshes : files).push_back(source);
     });
-    return sources;
-}
-
-// Without a SkeletonFile, ModelDoc takes the bones from the render meshes: use
-// the one carrying the most CS2 core bones (the body). Empty if none has any.
-fs::path RenderMeshRig(kv::Value& vmdl, const Paths& paths, const fs::path& vmdlPath) {
-    std::vector<std::string> imports;
-    Walk(vmdl, [&](kv::Value& node) {
-        if (ClassOf(node) == "RenderMeshFile" && node.Has("filename") &&
-            fs::u8path(node.At("filename").String()).extension() == ".dmx")
-            imports.push_back(node.At("filename").String());
-    });
-    fs::path best;
-    size_t bestCount = 0;
-    for (const std::string& name : imports) {
-        const fs::path file = ResolveImport(name, paths, vmdlPath);
-        std::string err;
-        auto dm = dmx::Datamodel::Load(file.u8string(), &err);
-        const size_t count = dm ? CountBones(*dm) : 0;
-        if (count > bestCount) {
-            best = file;
-            bestCount = count;
-        }
+    if (!job.modelDmx.empty()) {
+        for (const auto* list : {&meshes, &files})
+            for (const RigSource& source : *list)
+                if (fs::equivalent(source.path, job.modelDmx))
+                    return {job.modelDmx, source.scale};
+        return {job.modelDmx, 1.0f};
     }
-    return best;
+    for (const auto* list : {&meshes, &files}) {
+        RigSource best;
+        size_t bestCount = 0;
+        for (const RigSource& source : *list) {
+            std::string err;
+            auto dm = dmx::Datamodel::Load(source.path.u8string(), &err);
+            const size_t count = dm ? CountBones(*dm) : 0;
+            if (count > bestCount) {
+                best = source;
+                bestCount = count;
+            }
+        }
+        if (bestCount)
+            return best;
+    }
+    throw runtime_error("no DMX import carries the CS2 body bones; set model_dmx in the job");
 }
 
 pm::Vector3 Triple(const kv::Value& v, const std::string& bone) {
@@ -178,19 +182,6 @@ std::vector<Bone> BoneNodes(const kv::Value& vmdl) {
     return bones;
 }
 
-// A stock helper as a ModelDoc Bone node, for a Bone-node skeleton.
-kv::Value HelperNode(const Bone& bone) {
-    pm::RadianEuler e;
-    pm::QuaternionAngles(bone.rotation, e);
-    return kv::Value::Object{
-        {"_class", "Bone"},
-        {"name", bone.name},
-        {"origin", kv::Value::Array{double(bone.position.x), double(bone.position.y), double(bone.position.z)}},
-        {"angles", kv::Value::Array{double(e.y * pm::kRad2Deg), double(e.z * pm::kRad2Deg), double(e.x * pm::kRad2Deg)}},
-        {"do_not_discard", true},
-    };
-}
-
 std::unique_ptr<dmx::Datamodel> LoadDmx(const fs::path& path) {
     std::string err;
     auto dm = dmx::Datamodel::Load(path.u8string(), &err);
@@ -199,54 +190,45 @@ std::unique_ptr<dmx::Datamodel> LoadDmx(const fs::path& path) {
     return dm;
 }
 
-// Appends `helper` under the Bone node named after its stock parent.
-void InsertHelperNode(kv::Value& model, const Bone& helper, const std::string& parentName) {
-    bool placed = false;
-    if (parentName.empty()) {
-        Walk(model, [&](kv::Value& node) {
-            if (placed || ClassOf(node) != "Skeleton")
-                return;
-            if (!node.Has("children"))
-                node["children"] = kv::Value::Array{};
-            node["children"].Items().push_back(HelperNode(helper));
-            placed = true;
-        });
-        if (!placed)
-            model["rootNode"]["children"].Items().push_back(kv::Value::Object{
-                {"_class", "Skeleton"}, {"children", kv::Value::Array{HelperNode(helper)}}});
-        return;
-    }
-    Walk(model, [&](kv::Value& node) {
-        if (placed || ClassOf(node) != "Bone" || !node.Has("name") ||
-            _stricmp(node.At("name").String().c_str(), parentName.c_str()) != 0)
+// write_model: the VMDL is edited in place (the generated skeleton as its only
+// SkeletonFile, no Bone nodes, graph bindings). The first edit keeps the
+// untouched file as <name>.vmdl.bak, which ModelDoc never compiles.
+void EditModel(const std::string& originalText, kv::Value model, const Job& job, const Paths& paths) {
+    std::function<void(kv::Value&)> strip = [&](kv::Value& node) {
+        if (!node.IsObject() || !node.Has("children") || !node.At("children").IsArray())
             return;
-        if (!node.Has("children"))
-            node["children"] = kv::Value::Array{};
-        node["children"].Items().push_back(HelperNode(helper));
-        placed = true;
+        auto& children = node["children"].Items();
+        children.erase(std::remove_if(children.begin(), children.end(), [](const kv::Value& child) {
+            const std::string cls = ClassOf(child);
+            return (cls == "SkeletonFile" || cls == "Bone") && !Disabled(child);
+        }), children.end());
+        for (kv::Value& child : children)
+            strip(child);
+    };
+    kv::Value* skeleton = nullptr;
+    Walk(model, [&](kv::Value& node) {
+        if (ClassOf(node) != "Skeleton")
+            return;
+        strip(node);
+        if (!skeleton)
+            skeleton = &node;
     });
-    if (!placed)
-        throw runtime_error("no Bone node " + parentName + " to hold weapon helper " + helper.name);
-}
-
-// write_model: the VMDL is edited in place (worldmodel graph bindings, the rig
-// import to the helper DMX, node helpers as Bone nodes). The first edit keeps
-// the untouched file as <name>.vmdl.bak, which ModelDoc never compiles.
-void EditModel(const std::string& originalText, kv::Value model, const Job& job, const Paths& paths,
-               const fs::path& modelDmx, bool dmxHelpers,
-               const std::vector<Bone>& stock, const std::vector<Bone>& retainedBones) {
-    for (const Bone& binding : retainedBones) {
-        bool found = false;
-        Walk(model, [&](kv::Value& node) {
-            if (ClassOf(node) == "Bone" && node.Has("name") &&
-                _stricmp(node.At("name").String().c_str(), binding.name.c_str()) == 0) {
-                node["do_not_discard"] = true;
-                found = true;
-            }
-        });
-        if (!found)
-            InsertHelperNode(model, binding, binding.parent >= 0 ? stock[binding.parent].name : std::string());
+    if (!skeleton) {
+        auto& children = model["rootNode"]["children"].Items();
+        children.push_back(kv::Value::Object{{"_class", "Skeleton"}, {"children", kv::Value::Array{}}});
+        skeleton = &children.back();
     }
+    if (!skeleton->Has("children"))
+        (*skeleton)["children"] = kv::Value::Array{};
+    auto& skeletonChildren = (*skeleton)["children"].Items();
+    skeletonChildren.insert(skeletonChildren.begin(), kv::Value::Object{
+        {"_class", "SkeletonFile"},
+        {"name", "ag2_skeleton"},
+        {"filename", paths.relative + "/" + kSkeletonFile},
+        {"import_scale", 1.0},
+        {"merge_behavior", "do_not_modify_existing"},
+    });
+
     const std::string graph = paths.relative + "/" + kWorldGraphFile;
     const std::string uiGraph = paths.relative + "/" + kUiGraphFile;
     kv::Value* list = nullptr;
@@ -282,16 +264,6 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
         (*list)["children"].Items().push_back(
             kv::Value::Object{{"_class", "AnimGraph2"}, {"name", "uimodel"}, {"filename", uiGraph}});
 
-
-    Walk(model, [&](kv::Value& node) {
-        if (!node.Has("filename"))
-            return;
-        const std::string name = node.At("filename").String();
-        const fs::path file = fs::u8path(name);
-        if (file.extension() == ".dmx" && dmxHelpers && fs::equivalent(ResolveImport(name, paths, job.vmdl), modelDmx))
-            node["filename"] = paths.relative + "/model_with_helpers.dmx";
-    });
-
     const size_t header = originalText.find("-->");
     if (header == std::string::npos)
         throw runtime_error("the VMDL has no KV3 header");
@@ -302,39 +274,25 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
     kv::WriteFile(job.vmdl.u8string(), originalText.substr(0, header + 3) + "\n" + kv::TextBody(model) + "\n");
 }
 
-std::string SetupNotes(const Paths& paths, const std::vector<Bone>& dmxHelpers, const std::vector<Bone>& nodeHelpers,
-                       const std::vector<Bone>& stock, const std::vector<std::string>& warnings, bool wroteModel) {
+std::string SetupNotes(const Paths& paths, const SkeletonBuild& skeleton, const std::vector<std::string>& warnings,
+                       bool wroteModel) {
     std::string note = "AG2 PROPORTIONS (experimental)\n\n"
-                       "Set the worldmodel AnimGraph2 to:\n  " +
-                       paths.relative + "/" + kWorldGraphFile + "\n\n";
-    if (!dmxHelpers.empty()) {
-        note += "Missing weapon helpers were added to model_with_helpers.dmx. Point the matching\n"
-                "SkeletonFile and RenderMeshFile imports at:\n  " + paths.relative + "/model_with_helpers.dmx\n"
-                "or author these bones yourself to fine-tune them:\n";
-        for (const Bone& h : dmxHelpers)
-            note += "  " + h.name + " (parent " + stock[h.parent].name + ")\n";
+                       "Use this as the VMDL's only SkeletonFile, with no Bone nodes (write_model does this):\n  " +
+                       paths.relative + "/" + kSkeletonFile + "\n\n";
+    auto list = [&](const char* title, const std::vector<std::string>& names) {
+        if (names.empty())
+            return;
+        note += title;
+        for (const std::string& name : names)
+            note += "  " + name + "\n";
         note += "\n";
-    }
-    if (!nodeHelpers.empty()) {
-        note += "Missing weapon helpers whose parent is a VMDL Bone node; add them as Bone nodes\n"
-                "under that parent (write_model does this):\n";
-        auto inline3 = [](const kv::Value& v) {
-            char b[96];
-            const auto& i = v.Items();
-            std::snprintf(b, sizeof b, "[ %.6g %.6g %.6g ]", i[0].Number(), i[1].Number(), i[2].Number());
-            return std::string(b);
-        };
-        for (const Bone& h : nodeHelpers) {
-            const kv::Value node = HelperNode(h);
-            note += "  " + h.name + " under " + stock[h.parent].name + ": origin " + inline3(node.At("origin")) +
-                    " angles " + inline3(node.At("angles")) + "\n";
-        }
-        note += "\n";
-    }
+    };
+    list("Stock bones added at their stock offset:\n", skeleton.added);
+    list("Bones moved under their stock parent (model-space pose kept):\n", skeleton.reparented);
+    list("Bones kept from VMDL Bone nodes:\n", skeleton.fromNodes);
+    note += "Set the worldmodel AnimGraph2 to:\n  " + paths.relative + "/" + kWorldGraphFile + "\n\n";
     if (wroteModel)
         note += "The input VMDL was edited in place; its first backup is <model>.vmdl.bak.\n\n";
-    note += "Keep root_motion -> wpnPivot -> wpn as Bone nodes with do_not_discard enabled.\n"
-            "write_model retains this chain using the model's existing bind transforms.\n\n";
     note += "Attachment starting points (keep any you already tuned):\n"
             "  weapon         parent wpn     origin 0 0 0         angles 0 0 0\n"
             "  weapon_hand_r  parent hand_R  origin -2.6 -1.4 0   angles 0 180 0\n"
@@ -368,33 +326,23 @@ kv::Value Report(const Job& job, const std::string& rig, const std::string& pose
 }
 
 bool IsAxisNote(const std::string& warning) { return warning.rfind("bone axes differ", 0) == 0; }
-bool IsInfoNote(const std::string& warning) { return warning.rfind("standalone pelvis", 0) == 0; }
 
 // What the user has to do next, on the console; the full notes are --debug only.
-void PrintSummary(const Paths& paths, const std::vector<Bone>& dmxHelpers, const std::vector<Bone>& nodeHelpers,
-                  const std::vector<Bone>& stock, const std::vector<std::string>& warnings, const Job& job) {
-    std::cout << "Set the worldmodel AnimGraph2 to " << paths.relative << "/" << kWorldGraphFile << "\n"
-              << "Set the uimodel AnimGraph2 to " << paths.relative << "/" << kUiGraphFile << "\n";
+void PrintSummary(const Paths& paths, const SkeletonBuild& skeleton, const std::vector<std::string>& warnings,
+                  const Job& job) {
+    std::cout << "Skeleton " << paths.relative << "/" << kSkeletonFile << ": " << skeleton.added.size()
+              << " stock bones added, " << skeleton.reparented.size() << " moved under their stock parent\n";
     if (job.writeModel)
         std::cout << "Edited " << job.vmdl.filename().u8string() << " (original kept as "
                   << job.vmdl.filename().u8string() << ".bak)\n";
-    if (!dmxHelpers.empty() && !job.writeModel)
-        std::cout << "Weapon helpers added to model_with_helpers.dmx; point the SkeletonFile import at it\n";
-    if (!nodeHelpers.empty() && !job.writeModel) {
-        std::cout << "Add these Bone nodes:\n";
-        for (const Bone& h : nodeHelpers) {
-            const kv::Value node = HelperNode(h);
-            const auto& o = node.At("origin").Items();
-            const auto& a = node.At("angles").Items();
-            std::printf("  %s under %s: origin [ %g %g %g ] angles [ %g %g %g ]\n", h.name.c_str(),
-                        stock[h.parent].name.c_str(), o[0].Number(), o[1].Number(), o[2].Number(), a[0].Number(),
-                        a[1].Number(), a[2].Number());
-        }
-    }
+    else
+        std::cout << "Make it the VMDL's only SkeletonFile and remove the VMDL's Bone nodes\n"
+                  << "Set the worldmodel AnimGraph2 to " << paths.relative << "/" << kWorldGraphFile << "\n"
+                  << "Set the uimodel AnimGraph2 to " << paths.relative << "/" << kUiGraphFile << "\n";
     const auto axes = std::count_if(warnings.begin(), warnings.end(), IsAxisNote);
     for (const std::string& warning : warnings)
         if (!IsAxisNote(warning))
-            std::cout << (IsInfoNote(warning) ? "NOTE: " : "WARNING: ") << warning << '\n';
+            std::cout << "WARNING: " << warning << '\n';
     if (axes)
         std::cout << "WARNING: " << axes << " bones have axes unlike stock and may be placed off "
                   << "(--debug lists them)\n";
@@ -407,23 +355,8 @@ void Generate(const Job& job, const Options& options) {
     const Paths paths = Locate(job.vmdl);
     const std::string vmdlText = ReadText(job.vmdl);
     kv::Value vmdl = kv::ParseText(vmdlText);
-    // rig files: model_dmx (in place of every SkeletonFile), else the enabled
-    // SkeletonFiles, else the body render mesh
-    std::vector<SkeletonSource> sources;
-    if (!job.modelDmx.empty())
-        sources.push_back({job.modelDmx, false});
-    else
-        sources = SkeletonImports(vmdl, paths, job.vmdl);
-    bool meshRig = false;
-    if (sources.empty()) {
-        const fs::path mesh = RenderMeshRig(vmdl, paths, job.vmdl);
-        if (!mesh.empty())
-            sources.push_back({mesh, false});
-        meshRig = !mesh.empty();
-    }
+    const RigSource rigSource = FindRig(vmdl, job, paths);
     const std::vector<Bone> nodes = BoneNodes(vmdl);
-    if (sources.empty() && nodes.empty())
-        throw runtime_error("the VMDL has no skeleton (no SkeletonFile, render mesh bones or Bone nodes); set model_dmx in the job");
 
     const Vpk package(paths.cs2 / "game/csgo/pak01_dir.vpk");
     std::vector<uint8_t> skeletonBytes = package.Read(std::string(kStockSkeleton) + "_c");
@@ -438,23 +371,15 @@ void Generate(const Job& job, const Options& options) {
     const kv::Value graph = WrapperGraph(kv::ReadResource(graphBytes), kStockGraph, clip);
     const kv::Value uiGraph = WrapperGraph(kv::ReadResource(uiGraphBytes), kStockUiGraph, clip);
 
-    // The rig as ModelDoc builds it from the Bone nodes and the files.
     std::vector<std::string> warnings;
-    std::vector<NodeOverride> overrides;
-    std::vector<std::unique_ptr<dmx::Datamodel>> loaded;
-    std::vector<RigFile> files;
-    for (const SkeletonSource& source : sources) {
-        loaded.push_back(LoadDmx(source.path));
-        files.push_back({loaded.back().get(), source.overwrite});
-    }
-    const auto rig = BuildRig(nodes, files, &overrides);
-    std::vector<Bone> target = TargetPose(*rig, installed.bones, warnings, true);
-    std::vector<uint8_t> mergedRig; // for debug/, before any helper is added
-    std::string err;
-    if (!dmx::Save(*rig, mergedRig, &err))
-        throw runtime_error(err);
-    if (!job.proportions.empty())
-        target = TargetPose(*LoadDmx(job.proportions), installed.bones, warnings, false);
+    const SkeletonBuild skeleton =
+        BuildSkeleton(ReadRig(*LoadDmx(rigSource.path), rigSource.scale, false), installed.bones, nodes);
+    const std::vector<Bone> target =
+        job.proportions.empty()
+            ? TargetPose(skeleton.bones, installed.bones, warnings)
+            : TargetPose(BuildSkeleton(ReadRig(*LoadDmx(job.proportions), rigSource.scale, true), installed.bones, {})
+                             .bones,
+                         installed.bones, warnings);
     // Weapon attachments are the user's to author and tune; only their bones are checked.
     struct WeaponAttachment { const char *name, *parent; };
     const WeaponAttachment kAttachments[] = {{"weapon", "wpn"}, {"weapon_hand_r", "hand_R"}, {"weapon_hand_l", "hand_L"}};
@@ -475,57 +400,17 @@ void Generate(const Job& job, const Options& options) {
                                "; Valve's agents put it on " + want.parent);
     }
 
-    // ModelDoc refuses a primary root bone that the merge left under a parent
+    // ModelDoc refuses a primary root bone that has a parent
     Walk(vmdl, [&](kv::Value& node) {
         if (ClassOf(node) != "BoneMarkupList" || !node.Has("primary_root_bone"))
             return;
         const std::string root = node.At("primary_root_bone").String();
-        const std::string parent = root.empty() ? std::string() : BoneParent(*rig, root);
-        if (!parent.empty())
-            warnings.push_back("BoneMarkupList primary_root_bone \"" + root + "\" sits under " + parent +
-                               ", so ModelDoc will refuse to compile; remove it or name a root bone");
+        for (const Bone& bone : skeleton.bones)
+            if (!root.empty() && _stricmp(bone.name.c_str(), root.c_str()) == 0 && bone.parent >= 0)
+                warnings.push_back("BoneMarkupList primary_root_bone \"" + root + "\" sits under " +
+                                   skeleton.bones[bone.parent].name +
+                                   ", so ModelDoc will refuse to compile; remove it or name a root bone");
     });
-    std::vector<std::string> overridden;
-    for (const NodeOverride& o : overrides) {
-        if (!IsCoreBone(o.name))
-            continue;
-        overridden.push_back(o.name);
-        if (o.moved > 1e-3f) {
-            warnings.push_back("VMDL Bone node " + o.name + " differs from the SkeletonFile's by " +
-                               std::to_string(o.moved) + " units and wins; its proportions come from the node");
-        } else {
-            warnings.push_back("VMDL Bone node nests " + o.name + " under a different parent than the " +
-                               "SkeletonFile; its file transform is converted into the retained parent's space");
-        }
-    }
-
-    // Missing helpers go where root_motion lives: into an untouched copy of the
-    // first SkeletonFile that has it, or as Bone nodes. ModelDoc culls a render
-    // mesh's unweighted bones, so with a render-mesh rig only Bone nodes count.
-    std::vector<std::string> nodeNames;
-    for (const Bone& node : nodes)
-        nodeNames.push_back(node.name);
-    const std::vector<std::string> present = BoneNames(*rig);
-    fs::path modelDmx; // the file the helper copy is made from
-    std::unique_ptr<dmx::Datamodel> helperCopy;
-    std::vector<Bone> dmxHelpers, nodeHelpers;
-    if (meshRig &&
-        std::none_of(nodes.begin(), nodes.end(), [](const Bone& b) { return b.name == "root_motion"; }))
-        throw runtime_error("the skeleton comes from a render mesh, whose unweighted bones ModelDoc culls; "
-                            "add root_motion as a VMDL Bone node");
-    for (size_t i = 0; i < sources.size() && !meshRig && modelDmx.empty(); ++i) {
-        const std::vector<std::string> names = BoneNames(*loaded[i]);
-        if (std::find(names.begin(), names.end(), "root_motion") != names.end())
-            modelDmx = sources[i].path;
-    }
-    if (!modelDmx.empty()) {
-        helperCopy = LoadDmx(modelDmx);
-        HelperPlan plan = AddWeaponHelpers(*helperCopy, installed.bones, present, nodeNames);
-        dmxHelpers = std::move(plan.inRig);
-        nodeHelpers = std::move(plan.asNodes);
-    } else {
-        nodeHelpers = AddWeaponHelpers(*BuildRig(nodes, {}), installed.bones, present, nodeNames).inRig;
-    }
     std::sort(warnings.begin(), warnings.end());
     warnings.erase(std::unique(warnings.begin(), warnings.end()), warnings.end());
 
@@ -535,20 +420,13 @@ void Generate(const Job& job, const Options& options) {
         change = std::max(change, std::abs(target[i].position.x - installed.bones[i].position.x) +
                                       std::abs(target[i].position.y - installed.bones[i].position.y) +
                                       std::abs(target[i].position.z - installed.bones[i].position.z));
-    if (change < 1e-3f) {
-        std::string zero = "the target pose equals the stock skeleton, so the clip changes nothing";
-        if (!overridden.empty())
-            zero += "; VMDL Bone nodes replace your SkeletonFile's core bones (keep nodes for bones the file lacks)";
-        warnings.insert(warnings.begin(), zero);
-    }
+    if (change < 1e-3f)
+        warnings.insert(warnings.begin(), "the target pose equals the stock skeleton, so the clip changes nothing");
 
     fs::create_directories(paths.output);
-    // a job may read a previous run's helper copy; never delete an input
+    // a job may read a previous run's output; never delete an input
     auto clear = [&](const fs::path& file) {
-        std::vector<fs::path> inputs{job.proportions, job.vnmskel};
-        for (const SkeletonSource& source : sources)
-            inputs.push_back(source.path);
-        for (const fs::path& input : inputs)
+        for (const fs::path& input : {job.proportions, job.vnmskel, rigSource.path})
             if (!input.empty() && fs::exists(file) && fs::equivalent(file, input))
                 return;
         fs::remove(file);
@@ -556,43 +434,32 @@ void Generate(const Job& job, const Options& options) {
     for (const char* name : kGeneratedFiles)
         clear(paths.output / name);
     std::error_code ec;
-    for (const char* folder : {"debug", "graphs", "anims"})
+    for (const char* folder : {"debug", "graphs", "anims", "dmx"})
         fs::remove(paths.output / folder, ec); // only when empty
     std::cout << "Output: " << paths.output.u8string() << '\n';
 
-    fs::create_directories((paths.output / kReferenceFile).parent_path());
+    for (const char* name : {kSkeletonFile, kReferenceFile})
+        fs::create_directories((paths.output / name).parent_path());
+    WriteSkeleton(paths.output / kSkeletonFile, skeleton.bones);
     WriteHeldPose(paths.output / kReferenceFile, installed.bones, installed.lowLodCount);
     WriteHeldPose(paths.output / kProportionsFile, target, installed.lowLodCount);
     const kv::Value descriptor = SkeletonDescriptor(ReadStockSkeleton(skeletonBytes), paths.relative + "/" + kReferenceFile);
-    if (!dmxHelpers.empty()) {
-        if (!dmx::Save(*helperCopy, (paths.output / "model_with_helpers.dmx").u8string(), &err))
-            throw runtime_error(err);
-    }
     kv::WriteFile((paths.output / kClipFile).u8string(), kv::WriteText(ProportionClip(paths.relative)));
     kv::WriteFile((paths.output / kWorldGraphFile).u8string(), kv::WriteText(graph));
     kv::WriteFile((paths.output / kUiGraphFile).u8string(), kv::WriteText(uiGraph));
-    if (job.writeModel) {
-        AddWeaponHelpers(*rig, installed.bones, {}, {});
-        EditModel(vmdlText, vmdl, job, paths, modelDmx, !dmxHelpers.empty(), installed.bones,
-                  ModelBoneBindings(*rig, installed.bones));
-    }
+    if (job.writeModel)
+        EditModel(vmdlText, vmdl, job, paths);
     // what the clip was built from, for issue reports
     if (options.debug) {
-        std::string rigName;
-        for (const SkeletonSource& source : sources)
-            rigName += (rigName.empty() ? "" : " + ") + source.path.generic_u8string() +
-                       (source.overwrite ? " (overwrite_existing)" : "");
-        if (!nodes.empty())
-            rigName += (rigName.empty() ? "" : " + ") + std::to_string(nodes.size()) + " VMDL Bone nodes";
+        const std::string rigName = rigSource.path.generic_u8string();
         const std::string poseName = job.proportions.empty() ? rigName : job.proportions.generic_u8string();
-        kv::WriteFile((paths.output / "debug/rig_merged.dmx").u8string(), mergedRig);
         kv::WriteFile((paths.output / "debug/skeleton_descriptor.kv3").u8string(), kv::WriteText(descriptor));
         kv::WriteFile((paths.output / "debug/report.kv3").u8string(),
                       kv::WriteText(Report(job, rigName, poseName, paths, installed.bones, target)));
         kv::WriteFile((paths.output / "debug/MODEL_SETUP.txt").u8string(),
-                      SetupNotes(paths, dmxHelpers, nodeHelpers, installed.bones, warnings, job.writeModel));
+                      SetupNotes(paths, skeleton, warnings, job.writeModel));
     }
-    PrintSummary(paths, dmxHelpers, nodeHelpers, installed.bones, warnings, job);
+    PrintSummary(paths, skeleton, warnings, job);
 
     if (!options.generateOnly)
         Compile(options, paths, skeletonBytes, graphBytes, uiGraphBytes, descriptor);

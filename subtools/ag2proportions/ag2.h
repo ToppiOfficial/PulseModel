@@ -28,11 +28,12 @@ inline constexpr const char* kUiGraphFile = "graphs/proportions_uimodel.vnmgraph
 inline constexpr const char* kClipFile = "anims/proportions.vnmclip";
 inline constexpr const char* kProportionsFile = "anims/proportions.dmx";
 inline constexpr const char* kReferenceFile = "anims/reference.dmx";
+inline constexpr const char* kSkeletonFile = "dmx/ag2_skeleton.dmx";
 
 // One model to wrap. Paths are absolute once loaded; empty means "use the default".
 struct Job {
     fs::path vmdl;
-    fs::path modelDmx;    // default: the VMDL's SkeletonFile import
+    fs::path modelDmx;    // default: the body RenderMeshFile import
     fs::path proportions; // default: the model DMX's bind pose
     fs::path vnmskel;     // default: read from the installed pak01 VPK
     bool writeModel = false;
@@ -65,40 +66,24 @@ struct StockSkeleton {
 };
 
 // rig.cpp
-// A Bone node that changed a rig bone it replaced.
-struct NodeOverride {
-    std::string name;
-    float moved = 0;  // summed position change
-    bool reparented = false;
-};
-// Model weapon helpers (wpnPivot, wpn) a rig lacks: `inRig` were added to the DMX,
-// `asNodes` have a parent that only exists as a VMDL Bone node.
-struct HelperPlan {
-    std::vector<Bone> inRig, asNodes;
+// The model's complete skeleton, parent-first in local space.
+struct SkeletonBuild {
+    std::vector<Bone> bones;
+    std::vector<std::string> added;      // stock bones the rig lacked
+    std::vector<std::string> reparented; // "bone -> stock parent"
+    std::vector<std::string> fromNodes;  // non-stock VMDL Bone nodes carried over
 };
 
-// A SkeletonFile (or the body render mesh) in VMDL order.
-struct RigFile {
-    pulse::dmx::Datamodel* dm;
-    bool overwrite; // merge_behavior "overwrite_existing"
-};
-
-// ModelDoc's skeleton from the enabled Bone nodes and files; `overrides` reports
-// Bone nodes that a file disagrees with.
-std::unique_ptr<pulse::dmx::Datamodel> BuildRig(const std::vector<Bone>& nodes, const std::vector<RigFile>& files,
-                                                std::vector<NodeOverride>* overrides = nullptr);
-std::vector<std::string> BoneNames(pulse::dmx::Datamodel& dm);
-bool IsCoreBone(const std::string& name);
-std::string BoneParent(pulse::dmx::Datamodel& dm, const std::string& name); // "" for a root or missing bone
 size_t CountBones(pulse::dmx::Datamodel& dm); // CS2 core bones in the rig, 0 if none
-std::vector<Bone> ModelBoneBindings(pulse::dmx::Datamodel& dm, const std::vector<Bone>& stock);
-// `modelRig`: the VMDL's merged rig (needs root_motion), not a proportions DMX.
-std::vector<Bone> TargetPose(pulse::dmx::Datamodel& pose, const std::vector<Bone>& stock,
-                             std::vector<std::string>& warnings, bool modelRig);
-// Helpers named in `present` are skipped; one whose parent is only in `nodeNames`
-// (or another node helper) goes to asNodes.
-HelperPlan AddWeaponHelpers(pulse::dmx::Datamodel& model, const std::vector<Bone>& stock,
-                            const std::vector<std::string>& present, const std::vector<std::string>& nodeNames);
+// A DMX's joints parent-first in local space, scaled; `held` takes a pose's first keys.
+std::vector<Bone> ReadRig(pulse::dmx::Datamodel& dm, float scale, bool held);
+// Stock bones get stock parents at their rig model-space pose; missing ones take
+// their stock local offset. Other rig bones keep their parents.
+SkeletonBuild BuildSkeleton(const std::vector<Bone>& rig, const std::vector<Bone>& stock,
+                            const std::vector<Bone>& nodes);
+std::vector<Bone> TargetPose(const std::vector<Bone>& skeleton, const std::vector<Bone>& stock,
+                             std::vector<std::string>& warnings);
+void WriteSkeleton(const fs::path& path, const std::vector<Bone>& bones);
 void WriteHeldPose(const fs::path& path, const std::vector<Bone>& bones, int lowLodCount);
 
 // graph.cpp

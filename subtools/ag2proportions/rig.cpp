@@ -1,5 +1,5 @@
-// rig.cpp - the DMX side: a rig's joints, the target pose, weapon helper
-// insertion and the two held-pose animation DMXs.
+// rig.cpp - the DMX side: a rig's joints, the generated skeleton, the target
+// pose and the two held-pose animation DMXs.
 
 #include <algorithm>
 #include <climits>
@@ -99,47 +99,14 @@ pm::Quaternion RotationOf(const dmx::Element* transform) {
     return Normalized({q->x, q->y, q->z, q->w});
 }
 
-void Set(dmx::Element* e, const char* name, dmx::AttrType type, dmx::AttrValue value) {
-    for (dmx::Attribute& a : e->attributes) {
-        if (a.name == name) {
-            a.type = type;
-            a.value = std::move(value);
-            return;
-        }
-    }
-    e->attributes.push_back({name, type, std::move(value)});
-}
+pm::matrix3x4 Local(const Bone& bone) { return pm::QuaternionMatrix(bone.rotation, bone.position); }
 
-std::vector<dmx::Element*>& ElementArray(dmx::Element* e, const char* name) {
-    if (!e->Get(name))
-        Set(e, name, dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
-    for (dmx::Attribute& a : e->attributes)
-        if (a.name == name)
-            if (auto* refs = std::get_if<std::vector<dmx::Element*>>(&a.value))
-                return *refs;
-    throw runtime_error(e->className + "." + name + " is not an element array");
-}
-
-// Derived from `key` (two FNV-1a passes) so a rerun writes the same bytes.
-dmx::Guid StableId(const std::string& key) {
-    dmx::Guid id{};
-    uint64_t h[2] = {14695981039346656037ull, 0x9e3779b97f4a7c15ull};
-    for (uint64_t& v : h)
-        for (unsigned char c : "ag2proportions:" + key)
-            v = (v ^ c) * 1099511628211ull;
-    for (int i = 0; i < 16; ++i)
-        id[i] = static_cast<uint8_t>(h[i / 8] >> (8 * (i % 8)));
-    return id;
-}
-
-dmx::Element* NewTransform(dmx::Datamodel& dm, const std::string& key, const std::string& name,
-                           const pm::Vector3& position, const pm::Quaternion& rotation) {
-    dmx::Element* t = dm.CreateElement(StableId(key), "DmeTransform");
-    t->name = name;
-    Set(t, "position", dmx::AttrType::Vector3, dmx::Vector3{position.x, position.y, position.z});
-    Set(t, "orientation", dmx::AttrType::Quaternion,
-        dmx::Quaternion{rotation.x, rotation.y, rotation.z, rotation.w});
-    return t;
+// Model-space transforms of a parent-first bone list.
+std::vector<pm::matrix3x4> WorldTransforms(const std::vector<Bone>& bones) {
+    std::vector<pm::matrix3x4> world;
+    for (const Bone& bone : bones)
+        world.push_back(bone.parent >= 0 ? pm::ConcatTransforms(world[bone.parent], Local(bone)) : Local(bone));
+    return world;
 }
 
 // A DMX's skeleton by bone name: the DmeModel's jointList without mesh dags.
@@ -158,11 +125,9 @@ public:
         for (dmx::Element* e : *list) {
             const dmx::Element* shape = e ? e->GetElement("shape") : nullptr;
             if (e && e->GetElement("transform") && !(shape && shape->className == "DmeMesh"))
-                Add(e);
+                if (!joints_.emplace(e->name, e).second)
+                    throw runtime_error("duplicate bone " + e->name);
         }
-        Link(model_);
-        for (const auto& joint : joints_)
-            Link(joint.second);
     }
 
     dmx::Element* Model() const { return model_; }
@@ -170,54 +135,15 @@ public:
         const auto it = joints_.find(name);
         return it == joints_.end() ? nullptr : it->second;
     }
-    // nullptr for a bone that hangs off the DmeModel directly
-    dmx::Element* Parent(const dmx::Element* joint) const {
-        const auto it = parents_.find(joint);
-        return it == parents_.end() ? nullptr : it->second;
-    }
-    pm::matrix3x4 WorldTransform(const dmx::Element* joint) const {
-        if (!joint) {
-            const dmx::Element* transform = model_->GetElement("transform");
-            return transform ? pm::QuaternionMatrix(RotationOf(transform), PositionOf(transform))
-                             : pm::QuaternionMatrix(pm::Quaternion{}, pm::Vector3{});
-        }
-        const dmx::Element* transform = TransformOf(joint);
-        return pm::ConcatTransforms(WorldTransform(Parent(joint)),
-                                    pm::QuaternionMatrix(RotationOf(transform), PositionOf(transform)));
-    }
-    std::string JointClass() const {
-        return joints_.empty() ? "DmeJoint" : joints_.begin()->second->className;
-    }
-    void Add(dmx::Element* joint) {
-        if (!joints_.emplace(joint->name, joint).second)
-            throw runtime_error("duplicate bone " + joint->name);
-    }
-    // nullptr `parent` hangs the joint off the DmeModel
-    void Reparent(dmx::Element* joint, dmx::Element* parent) {
-        auto& from = ElementArray(Parent(joint) ? Parent(joint) : model_, "children");
-        from.erase(std::remove(from.begin(), from.end(), joint), from.end());
-        ElementArray(parent ? parent : model_, "children").push_back(joint);
-        parents_[joint] = parent;
+    pm::matrix3x4 ModelTransform() const {
+        const dmx::Element* transform = model_->GetElement("transform");
+        return transform ? pm::QuaternionMatrix(RotationOf(transform), PositionOf(transform))
+                         : pm::QuaternionMatrix(pm::Quaternion{}, pm::Vector3{});
     }
 
 private:
-    void Link(dmx::Element* parent) {
-        const auto* children = parent->GetElementArray("children");
-        if (!children)
-            return;
-        for (const dmx::Element* child : *children) {
-            if (!child)
-                continue;
-            dmx::Element* p = parent == model_ ? nullptr : parent;
-            const auto ins = parents_.emplace(child, p);
-            if (!ins.second && ins.first->second != p)
-                throw runtime_error("bone " + child->name + " has more than one parent");
-        }
-    }
-
     dmx::Element* model_ = nullptr;
     std::map<std::string, dmx::Element*, NoCase> joints_;
-    std::map<const dmx::Element*, dmx::Element*> parents_;
 };
 
 // The first key of each position channel. A held pose has one clip whose
@@ -273,222 +199,9 @@ std::vector<int> CompiledChildren(const std::vector<Bone>& bones, int lowLodCoun
     return order;
 }
 
-} // namespace
-
-// ModelDoc takes enabled Bone nodes first, then SkeletonFiles in order.
-// Files add new names under their own parents. Existing bones keep their
-// parents; overwrite_existing replaces their transforms.
-std::unique_ptr<dmx::Datamodel> BuildRig(const std::vector<Bone>& nodes, const std::vector<RigFile>& files,
-                                         std::vector<NodeOverride>* overrides) {
-    auto rig = std::make_unique<dmx::Datamodel>();
-    rig->encoding = "binary";
-    rig->encoding_version = 9;
-    rig->format = "model";
-    rig->format_version = 22;
-    rig->root = rig->CreateElement(StableId("root"), "DmElement");
-    rig->root->name = "root";
-    dmx::Element* model = rig->CreateElement(StableId("model"), "DmeModel");
-    model->name = "model";
-    Set(model, "jointList", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
-    Set(model, "children", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
-    Set(rig->root, "skeleton", dmx::AttrType::Element, model);
-
-    std::map<std::string, dmx::Element*, NoCase> joints;
-    std::map<const dmx::Element*, dmx::Element*> parentOf; // nullptr: under the DmeModel
-    std::map<const dmx::Element*, bool> isNode;
-    auto add = [&](const std::string& name, const pm::Vector3& position, const pm::Quaternion& rotation,
-                   dmx::Element* parent) {
-        if (joints.count(name))
-            throw runtime_error("two Bone nodes are named " + name);
-        dmx::Element* joint = rig->CreateElement(StableId("rig joint:" + name), "DmeJoint");
-        joint->name = name;
-        Set(joint, "transform", dmx::AttrType::Element,
-            NewTransform(*rig, "rig transform:" + name, name, position, rotation));
-        Set(joint, "children", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
-        ElementArray(model, "jointList").push_back(joint);
-        ElementArray(parent ? parent : model, "children").push_back(joint);
-        joints[name] = joint;
-        parentOf[joint] = parent;
-        return joint;
-    };
-    auto nameOf = [](const dmx::Element* e) { return e ? e->name : std::string(); };
-    std::function<pm::matrix3x4(const dmx::Element*)> world = [&](const dmx::Element* joint) {
-        if (!joint)
-            return pm::QuaternionMatrix(pm::Quaternion{}, pm::Vector3{});
-        const dmx::Element* transform = TransformOf(joint);
-        return pm::ConcatTransforms(world(parentOf.at(joint)),
-                                    pm::QuaternionMatrix(RotationOf(transform), PositionOf(transform)));
-    };
-
-    for (const Bone& node : nodes) {
-        dmx::Element* parent = node.parent >= 0 ? joints.at(nodes[node.parent].name) : nullptr;
-        isNode[add(node.name, node.position, node.rotation, parent)] = true;
-    }
-
-    for (const RigFile& file : files) {
-        const Rig source(*file.dm);
-        // parent-first walk of the file's hierarchy
-        std::function<void(const dmx::Element*)> visit = [&](const dmx::Element* from) {
-            const auto* children = from->GetElementArray("children");
-            if (!children)
-                return;
-            for (dmx::Element* child : *children) {
-                if (!child || source.Find(child->name) != child)
-                    continue;
-                const dmx::Element* transform = TransformOf(child);
-                const auto it = joints.find(child->name);
-                if (it == joints.end()) {
-                    const dmx::Element* fileParent = source.Parent(child);
-                    const auto parent = fileParent ? joints.find(fileParent->name) : joints.end();
-                    add(child->name, PositionOf(transform), RotationOf(transform),
-                        parent == joints.end() ? nullptr : parent->second);
-                } else {
-                    dmx::Element* existing = TransformOf(it->second);
-                    if (isNode[it->second] && overrides) {
-                        const pm::Vector3 a = PositionOf(existing), b = PositionOf(transform);
-                        NodeOverride o{it->second->name,
-                                       file.overwrite ? 0.0f
-                                                      : std::abs(a.x - b.x) + std::abs(a.y - b.y) + std::abs(a.z - b.z),
-                                       file.overwrite &&
-                                           _stricmp(nameOf(parentOf[it->second]).c_str(),
-                                                    nameOf(source.Parent(child)).c_str()) != 0};
-                        if (o.moved > 1e-3f || o.reparented)
-                            overrides->push_back(o);
-                    }
-                    if (file.overwrite) {
-                        pm::Vector3 position = PositionOf(transform);
-                        pm::Quaternion rotation = RotationOf(transform);
-                        if (_stricmp(nameOf(parentOf[it->second]).c_str(), nameOf(source.Parent(child)).c_str()) != 0) {
-                            // Keep the file's model-space pose when the merge retains another parent.
-                            const pm::matrix3x4 local = pm::ConcatTransforms(
-                                pm::MatrixInvert(world(parentOf[it->second])), source.WorldTransform(child));
-                            pm::MatrixAngles(local, rotation, position);
-                        }
-                        Set(existing, "position", dmx::AttrType::Vector3, dmx::Vector3{position.x, position.y, position.z});
-                        Set(existing, "orientation", dmx::AttrType::Quaternion,
-                            dmx::Quaternion{rotation.x, rotation.y, rotation.z, rotation.w});
-                    }
-                }
-                visit(child);
-            }
-        };
-        visit(source.Model());
-    }
-    return rig;
-}
-
-std::vector<std::string> BoneNames(dmx::Datamodel& dm) {
-    const Rig rig(dm);
-    std::vector<std::string> names;
-    for (const dmx::Element* e : *rig.Model()->GetElementArray("jointList"))
-        if (e && rig.Find(e->name) == e)
-            names.push_back(e->name);
-    return names;
-}
-
-size_t CountBones(dmx::Datamodel& dm) {
-    try {
-        const Rig rig(dm);
-        size_t n = 0;
-        for (const char* core : kCoreBones)
-            n += rig.Find(core) ? 1 : 0;
-        return n;
-    } catch (const std::exception&) {
-        return 0;
-    }
-}
-
-std::string BoneParent(dmx::Datamodel& dm, const std::string& name) {
-    const Rig rig(dm);
-    const dmx::Element* joint = rig.Find(name);
-    const dmx::Element* parent = joint ? rig.Parent(joint) : nullptr;
-    return parent ? parent->name : std::string();
-}
-
-std::vector<Bone> ModelBoneBindings(dmx::Datamodel& dm, const std::vector<Bone>& stock) {
-    const Rig rig(dm);
-    std::vector<Bone> bones;
-    for (const Bone& bone : stock) {
-        if (bone.name != "root_motion" && !IsModelHelper(bone.name))
-            continue;
-        const dmx::Element* joint = rig.Find(bone.name);
-        if (!joint)
-            throw runtime_error("missing model bone " + bone.name);
-        const dmx::Element* parent = rig.Parent(joint);
-        const std::string expected = bone.parent >= 0 ? stock[bone.parent].name : std::string();
-        if (_stricmp((parent ? parent->name : std::string()).c_str(), expected.c_str()) != 0)
-            throw runtime_error("model bone " + bone.name + " must be under " + expected);
-        Bone binding = bone;
-        const dmx::Element* transform = TransformOf(joint);
-        binding.position = PositionOf(transform);
-        binding.rotation = RotationOf(transform);
-        bones.push_back(binding);
-    }
-    return bones;
-}
-
-bool IsCoreBone(const std::string& name) {
-    for (const char* core : kCoreBones)
-        if (_stricmp(core, name.c_str()) == 0)
-            return true;
-    return false;
-}
-
-std::vector<Bone> TargetPose(dmx::Datamodel& pose, const std::vector<Bone>& stock,
-                             std::vector<std::string>& warnings, bool modelRig) {
-    const Rig rig(pose);
-    // root_motion always keeps its stock value, so only the model needs one
-    if (modelRig && !rig.Find("root_motion"))
-        throw runtime_error("the rig has no root_motion; add a root_motion Bone node to the VMDL Skeleton");
-    for (const char* core : kCoreBones)
-        if (std::string(core) != "root_motion" && !rig.Find(core))
-            throw runtime_error(std::string(modelRig ? "the rig" : "the proportions DMX") + " lacks CS2 core bone " + core);
-    const auto held = HeldPositions(pose);
-
-    std::vector<Bone> target = stock;
-    for (size_t i = 0; i < stock.size(); ++i) {
-        const Bone& bone = stock[i];
-        const dmx::Element* joint = rig.Find(bone.name);
-        if (!joint || bone.name == "root_motion" || IsGraphHelper(bone.name))
-            continue;
-        const dmx::Element* transform = TransformOf(joint);
-        const dmx::Element* parent = rig.Parent(joint);
-        const bool standalonePelvis = bone.name == "pelvis" && !parent;
-        if (bone.parent >= 0 && !standalonePelvis &&
-            (!parent || _stricmp(parent->name.c_str(), stock[bone.parent].name.c_str()) != 0))
-            throw runtime_error("the pose hierarchy differs from stock at " + bone.name);
-
-        const auto it = held.find(transform);
-        pm::Vector3 position = it != held.end() ? it->second : PositionOf(transform);
-        // A pelvis with no root_motion above it is in model space: keep the
-        // stock pelvis's horizontal origin and take only the custom height.
-        if (standalonePelvis) {
-            const Bone& root = stock[bone.parent];
-            const pm::matrix3x4 rootToModel = pm::QuaternionMatrix(root.rotation, root.position);
-            pm::Vector3 model = pm::VectorTransform(bone.position, rootToModel);
-            model.z = position.z;
-            position = pm::VectorITransform(model, rootToModel);
-            warnings.push_back("standalone pelvis: custom height, stock horizontal origin");
-        }
-        RequireFinite(position, bone.name);
-        // The clip moves translations along stock axes. A T/A-pose or body shape
-        // turns an offset by well under 75 degrees; swapped or flipped bone axes
-        // turn it by about 90 or 180.
-        if (!standalonePelvis) {
-            const float angle = OffsetAngle(position, bone.position);
-            if (angle > 75.0f)
-                warnings.push_back("bone axes differ on " + bone.name + ": its offset from " +
-                                   stock[bone.parent].name + " points " + std::to_string(static_cast<int>(angle)) +
-                                   " degrees from stock, so the clip may place it off");
-        }
-        target[i].position = position;
-    }
-    return target;
-}
-
 // Every shipped agent binds wpnPivot at its stock offset unrotated and wpn back at
 // root_motion's origin (pak01 agents/models/*.vmdl_c), not at the graph's pose.
-static Bone ModelHelperBind(const Bone& bone, const std::vector<Bone>& stock) {
+Bone ModelHelperBind(const Bone& bone, const std::vector<Bone>& stock) {
     Bone b = bone;
     b.rotation = pm::Quaternion{};
     if (b.name == "wpn") {
@@ -498,82 +211,11 @@ static Bone ModelHelperBind(const Bone& bone, const std::vector<Bone>& stock) {
     return b;
 }
 
-HelperPlan AddWeaponHelpers(dmx::Datamodel& model, const std::vector<Bone>& stock,
-                            const std::vector<std::string>& present, const std::vector<std::string>& nodeNames) {
-    auto named = [](const std::vector<std::string>& names, const std::string& name) {
-        for (const std::string& n : names)
-            if (_stricmp(n.c_str(), name.c_str()) == 0)
-                return true;
-        return false;
-    };
-    for (const char* helper : kModelHelpers)
-        if (std::none_of(stock.begin(), stock.end(), [&](const Bone& b) { return b.name == helper; }))
-            throw runtime_error(std::string("the stock skeleton lacks weapon helper ") + helper);
-
-    Rig rig(model);
-    dmx::Element* dmeModel = rig.Model();
-    std::vector<dmx::Element*>& jointList = ElementArray(dmeModel, "jointList");
-    const std::string jointClass = rig.JointClass();
-    HelperPlan plan;
-    std::vector<std::string> nodeHelpers;
-
-    // stock order is parent-first, so a helper's helper parent is placed before it
-    for (const Bone& stockBone : stock) {
-        if (!IsModelHelper(stockBone.name) || rig.Find(stockBone.name) || named(present, stockBone.name))
-            continue;
-        const Bone bone = ModelHelperBind(stockBone, stock);
-        const std::string parentName = bone.parent >= 0 ? stock[bone.parent].name : std::string();
-        dmx::Element* parent = parentName.empty() ? nullptr : rig.Find(parentName);
-        if (!parent) {
-            if (!named(nodeNames, parentName) && !named(nodeHelpers, parentName))
-                throw runtime_error("weapon helper " + bone.name + " needs parent " + parentName +
-                                    ", which is in neither the rig nor the VMDL Bone nodes");
-            plan.asNodes.push_back(bone);
-            nodeHelpers.push_back(bone.name);
-            continue;
-        }
-
-        dmx::Element* joint = model.CreateElement(StableId("joint:" + bone.name), jointClass);
-        joint->name = bone.name;
-        Set(joint, "transform", dmx::AttrType::Element,
-            NewTransform(model, "transform:" + bone.name, bone.name, bone.position, bone.rotation));
-        Set(joint, "children", dmx::AttrType::ElementArray, std::vector<dmx::Element*>{});
-        // Bind states parallel jointList. One shorter than jointList falls back
-        // on the live transforms for its tail, as the compiler's loader does.
-        if (const auto* states = dmeModel->GetElementArray("baseStates")) {
-            for (dmx::Element* state : *states) {
-                std::vector<dmx::Element*>& transforms = ElementArray(state, "transforms");
-                if (transforms.size() > jointList.size())
-                    throw runtime_error("bind state " + state->name + " has more transforms than jointList");
-                while (transforms.size() < jointList.size()) {
-                    const dmx::Element* live = TransformOf(jointList[transforms.size()]);
-                    const std::string key = "bind:" + dmx::GuidToString(state->id) + ":" + std::to_string(transforms.size());
-                    transforms.push_back(NewTransform(model, key, live->name, PositionOf(live), RotationOf(live)));
-                }
-                transforms.push_back(NewTransform(model, "bind:" + dmx::GuidToString(state->id) + ":" + bone.name,
-                                                  bone.name, bone.position, bone.rotation));
-            }
-        }
-        jointList.push_back(joint);
-        rig.Add(joint);
-        ElementArray(parent, "children").push_back(joint);
-        plan.inRig.push_back(bone);
-    }
-    return plan;
-}
-
-// A two-frame clip holding `bones` still, on a copy of the stock skeleton.
-void WriteHeldPose(const fs::path& path, const std::vector<Bone>& bones, int lowLodCount) {
+// A model DMX holding `bones`; `children[i]` orders bone i's children and
+// `children[n]` the roots. `held` adds a two-frame clip holding the pose still.
+void SaveModelDmx(const fs::path& path, const char* modelName, const std::vector<Bone>& bones,
+                  const std::vector<std::vector<int>>& children, bool held) {
     const int n = static_cast<int>(bones.size());
-    std::vector<int> minLow(n, INT_MAX), minHigh(n, INT_MAX);
-    for (int i = n - 1; i >= 0; --i) {
-        (i < lowLodCount ? minLow[i] : minHigh[i]) = i;
-        if (const int p = bones[i].parent; p >= 0) {
-            minLow[p] = std::min(minLow[p], minLow[i]);
-            minHigh[p] = std::min(minHigh[p], minHigh[i]);
-        }
-    }
-
     dmx::Builder q("model", 22, "binary", 9, 0x414732);
     const dmx::Guid idRoot = q.NewId(), idTags = q.NewId(), idModel = q.NewId(), idAxis = q.NewId(),
                     idModelXform = q.NewId(), idBind = q.NewId(), idList = q.NewId(),
@@ -594,27 +236,28 @@ void WriteHeldPose(const fs::path& path, const std::vector<Bone>& bones, int low
 
     q.Begin("DmElement", idRoot, "root");
     q.Ref("skeleton", idModel);
-    q.Ref("animationList", idList);
+    if (held)
+        q.Ref("animationList", idList);
     q.Ref("exportTags", idTags);
 
     q.Begin("DmeExportTags", idTags, "exportTags");
     q.Str("app", "sfm");
     q.Str("source", "ag2proportions");
 
-    q.Begin("DmeModel", idModel, "worldmodel");
+    q.Begin("DmeModel", idModel, modelName);
     q.Ref("transform", idModelXform);
     q.Ref("axisSystem", idAxis);
     q.Bool("visible", true);
     q.RefArray("jointList", idJoint);
     q.RefArray("baseStates", {idBind});
-    q.RefArray("children", jointIds(CompiledChildren(bones, lowLodCount, -1, minLow, minHigh)));
+    q.RefArray("children", jointIds(children[n]));
 
     q.Begin("DmeAxisSystem", idAxis, "axisSystem");
     q.Int("upAxis", 3);
     q.Int("forwardParity", 1);
     q.Int("coordSys", 0);
 
-    q.Begin("DmeTransform", idModelXform, "worldmodel");
+    q.Begin("DmeTransform", idModelXform, modelName);
     q.Vec3("position", pm::Vector3{});
     q.Quat("orientation", pm::Quaternion{});
 
@@ -624,51 +267,225 @@ void WriteHeldPose(const fs::path& path, const std::vector<Bone>& bones, int low
     for (int i = 0; i < n; ++i) {
         q.Begin("DmeJoint", idJoint[i], bones[i].name);
         q.Ref("transform", idXform[i]);
-        q.RefArray("children", jointIds(CompiledChildren(bones, lowLodCount, i, minLow, minHigh)));
+        q.RefArray("children", jointIds(children[i]));
         q.Begin("DmeTransform", idXform[i], bones[i].name);
         q.Vec3("position", bones[i].position);
         q.Quat("orientation", bones[i].rotation);
     }
 
-    const float frame = 1.0f / 30.0f;
-    q.Begin("DmeAnimationList", idList, "animationList");
-    q.RefArray("animations", {idClip});
+    if (held) {
+        const float frame = 1.0f / 30.0f;
+        q.Begin("DmeAnimationList", idList, "animationList");
+        q.RefArray("animations", {idClip});
 
-    q.Begin("DmeChannelsClip", idClip, "proportions");
-    q.Ref("timeFrame", idFrame);
-    q.Float("frameRate", 30.0f);
-    q.RefArray("channels", idChannel);
+        q.Begin("DmeChannelsClip", idClip, "proportions");
+        q.Ref("timeFrame", idFrame);
+        q.Float("frameRate", 30.0f);
+        q.RefArray("channels", idChannel);
 
-    q.Begin("DmeTimeFrame", idFrame, "timeFrame");
-    q.Time("start", 0.0f);
-    q.Time("duration", frame);
-    q.Time("offset", 0.0f);
-    q.Float("scale", 1.0f);
+        q.Begin("DmeTimeFrame", idFrame, "timeFrame");
+        q.Time("start", 0.0f);
+        q.Time("duration", frame);
+        q.Time("offset", 0.0f);
+        q.Float("scale", 1.0f);
 
-    for (int i = 0; i < n * 2; ++i) {
-        const Bone& bone = bones[i / 2];
-        const bool position = i % 2 == 0;
-        const dmx::Guid idLog = q.NewId(), idLayer = q.NewId();
-        q.Begin("DmeChannel", idChannel[i], bone.name + (position ? "_p" : "_o"));
-        q.Ref("toElement", idXform[i / 2]);
-        q.Str("toAttribute", position ? "position" : "orientation");
-        q.Int("mode", 3);
-        q.Ref("log", idLog);
+        for (int i = 0; i < n * 2; ++i) {
+            const Bone& bone = bones[i / 2];
+            const bool position = i % 2 == 0;
+            const dmx::Guid idLog = q.NewId(), idLayer = q.NewId();
+            q.Begin("DmeChannel", idChannel[i], bone.name + (position ? "_p" : "_o"));
+            q.Ref("toElement", idXform[i / 2]);
+            q.Str("toAttribute", position ? "position" : "orientation");
+            q.Int("mode", 3);
+            q.Ref("log", idLog);
 
-        q.Begin(position ? "DmeVector3Log" : "DmeQuaternionLog", idLog, bone.name);
-        q.RefArray("layers", {idLayer});
+            q.Begin(position ? "DmeVector3Log" : "DmeQuaternionLog", idLog, bone.name);
+            q.RefArray("layers", {idLayer});
 
-        q.Begin(position ? "DmeVector3LogLayer" : "DmeQuaternionLogLayer", idLayer, bone.name);
-        q.TimeArray("times", {0.0f, frame});
-        if (position)
-            q.V3Array("values", std::vector<pm::Vector3>{bone.position, bone.position});
-        else
-            q.QuatArray("values", std::vector<pm::Quaternion>{bone.rotation, bone.rotation});
+            q.Begin(position ? "DmeVector3LogLayer" : "DmeQuaternionLogLayer", idLayer, bone.name);
+            q.TimeArray("times", {0.0f, frame});
+            if (position)
+                q.V3Array("values", std::vector<pm::Vector3>{bone.position, bone.position});
+            else
+                q.QuatArray("values", std::vector<pm::Quaternion>{bone.rotation, bone.rotation});
+        }
     }
 
     std::string err;
     if (!q.Save(path.u8string(), &err))
         throw runtime_error(err);
+}
+
+} // namespace
+
+size_t CountBones(dmx::Datamodel& dm) {
+    try {
+        const Rig rig(dm);
+        size_t n = 0;
+        for (const char* core : kCoreBones)
+            n += rig.Find(core) ? 1 : 0;
+        return n;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+std::vector<Bone> ReadRig(dmx::Datamodel& dm, float scale, bool held) {
+    const Rig rig(dm);
+    const auto keys = held ? HeldPositions(dm) : std::map<const dmx::Element*, pm::Vector3>{};
+    const pm::matrix3x4 model = rig.ModelTransform();
+    std::vector<Bone> bones;
+    std::map<const dmx::Element*, int> index;
+    std::function<void(const dmx::Element*)> visit = [&](const dmx::Element* from) {
+        const auto* children = from->GetElementArray("children");
+        if (!children)
+            return;
+        for (const dmx::Element* child : *children) {
+            if (!child || rig.Find(child->name) != child)
+                continue;
+            if (index.count(child))
+                throw runtime_error("bone " + child->name + " has more than one parent");
+            const dmx::Element* transform = TransformOf(child);
+            const auto key = keys.find(transform);
+            Bone bone;
+            bone.name = child->name;
+            bone.parent = from == rig.Model() ? -1 : index.at(from);
+            bone.position = key != keys.end() ? key->second : PositionOf(transform);
+            bone.rotation = RotationOf(transform);
+            if (bone.parent < 0)
+                pm::MatrixAngles(pm::ConcatTransforms(model, Local(bone)), bone.rotation, bone.position);
+            bone.position = {bone.position.x * scale, bone.position.y * scale, bone.position.z * scale};
+            RequireFinite(bone.position, bone.name);
+            index[child] = static_cast<int>(bones.size());
+            bones.push_back(bone);
+            visit(child);
+        }
+    };
+    visit(rig.Model());
+    return bones;
+}
+
+SkeletonBuild BuildSkeleton(const std::vector<Bone>& rig, const std::vector<Bone>& stock,
+                            const std::vector<Bone>& nodes) {
+    std::map<std::string, int, NoCase> inRig, isStock, placed;
+    for (size_t i = 0; i < rig.size(); ++i)
+        if (!inRig.emplace(rig[i].name, static_cast<int>(i)).second)
+            throw runtime_error("two rig bones are named " + rig[i].name);
+    for (size_t i = 0; i < stock.size(); ++i)
+        isStock.emplace(stock[i].name, static_cast<int>(i));
+    for (const char* core : kCoreBones)
+        if (std::string(core) != "root_motion" && !inRig.count(core))
+            throw runtime_error(std::string("the rig lacks CS2 core bone ") + core);
+
+    const std::vector<pm::matrix3x4> rigWorld = WorldTransforms(rig);
+    SkeletonBuild out;
+    std::vector<pm::matrix3x4> world;
+    // `fixed`: keep this model-space transform under the new parent
+    auto place = [&](Bone bone, int parent, const pm::matrix3x4* fixed) {
+        bone.parent = parent;
+        if (fixed) {
+            const pm::matrix3x4 local =
+                parent >= 0 ? pm::ConcatTransforms(pm::MatrixInvert(world[parent]), *fixed) : *fixed;
+            pm::MatrixAngles(local, bone.rotation, bone.position);
+        }
+        world.push_back(fixed ? *fixed : parent >= 0 ? pm::ConcatTransforms(world[parent], Local(bone)) : Local(bone));
+        placed[bone.name] = static_cast<int>(out.bones.size());
+        out.bones.push_back(bone);
+    };
+    auto parentName = [](const std::vector<Bone>& bones, const Bone& bone) {
+        return bone.parent >= 0 ? bones[bone.parent].name : std::string();
+    };
+
+    // stock order is parent-first; graph-only helpers stay out of the model
+    for (const Bone& s : stock) {
+        const auto r = inRig.find(s.name);
+        if (r == inRig.end() && IsGraphHelper(s.name) && !IsModelHelper(s.name))
+            continue;
+        int parent = -1;
+        if (s.parent >= 0) {
+            const auto p = placed.find(stock[s.parent].name);
+            if (p == placed.end())
+                continue; // under a graph-only helper: a rig bone keeps its rig parent below
+            parent = p->second;
+        }
+        if (r == inRig.end()) {
+            place(IsModelHelper(s.name) ? ModelHelperBind(s, stock) : s, parent, nullptr);
+            out.added.push_back(s.name);
+            continue;
+        }
+        const Bone& bone = rig[r->second];
+        const std::string want = parent >= 0 ? out.bones[parent].name : std::string();
+        if (_stricmp(parentName(rig, bone).c_str(), want.c_str()) == 0) {
+            place(bone, parent, nullptr);
+        } else {
+            place(bone, parent, &rigWorld[r->second]);
+            out.reparented.push_back(bone.name + " -> " + (want.empty() ? "no parent" : want));
+        }
+    }
+    // rig order is parent-first, so a custom bone's parent is placed before it
+    for (const Bone& bone : rig)
+        if (!placed.count(bone.name))
+            place(bone, bone.parent >= 0 ? placed.at(rig[bone.parent].name) : -1, nullptr);
+    for (const Bone& node : nodes) {
+        if (placed.count(node.name) || isStock.count(node.name))
+            continue;
+        const auto p = node.parent >= 0 ? placed.find(nodes[node.parent].name) : placed.end();
+        place(node, p == placed.end() ? -1 : p->second, nullptr);
+        out.fromNodes.push_back(node.name);
+    }
+    return out;
+}
+
+std::vector<Bone> TargetPose(const std::vector<Bone>& skeleton, const std::vector<Bone>& stock,
+                             std::vector<std::string>& warnings) {
+    std::map<std::string, const Bone*, NoCase> byName;
+    for (const Bone& bone : skeleton)
+        byName.emplace(bone.name, &bone);
+    std::vector<Bone> target = stock;
+    for (size_t i = 0; i < stock.size(); ++i) {
+        const Bone& bone = stock[i];
+        const auto it = byName.find(bone.name);
+        if (it == byName.end() || bone.name == "root_motion" || IsGraphHelper(bone.name))
+            continue;
+        const Bone& mine = *it->second;
+        if (bone.parent >= 0 && (mine.parent < 0 || _stricmp(skeleton[mine.parent].name.c_str(),
+                                                             stock[bone.parent].name.c_str()) != 0))
+            throw runtime_error("the skeleton hierarchy differs from stock at " + bone.name);
+        // The clip moves translations along stock axes. A T/A-pose or body shape
+        // turns an offset by well under 75 degrees; swapped or flipped bone axes
+        // turn it by about 90 or 180.
+        const float angle = OffsetAngle(mine.position, bone.position);
+        if (angle > 75.0f)
+            warnings.push_back("bone axes differ on " + bone.name + ": its offset from " +
+                               stock[bone.parent].name + " points " + std::to_string(static_cast<int>(angle)) +
+                               " degrees from stock, so the clip may place it off");
+        target[i].position = mine.position;
+    }
+    return target;
+}
+
+void WriteSkeleton(const fs::path& path, const std::vector<Bone>& bones) {
+    std::vector<std::vector<int>> children(bones.size() + 1);
+    for (size_t i = 0; i < bones.size(); ++i)
+        children[bones[i].parent >= 0 ? bones[i].parent : bones.size()].push_back(static_cast<int>(i));
+    SaveModelDmx(path, "skeleton", bones, children, false);
+}
+
+// A two-frame clip holding `bones` still, on a copy of the stock skeleton.
+void WriteHeldPose(const fs::path& path, const std::vector<Bone>& bones, int lowLodCount) {
+    const int n = static_cast<int>(bones.size());
+    std::vector<int> minLow(n, INT_MAX), minHigh(n, INT_MAX);
+    for (int i = n - 1; i >= 0; --i) {
+        (i < lowLodCount ? minLow[i] : minHigh[i]) = i;
+        if (const int p = bones[i].parent; p >= 0) {
+            minLow[p] = std::min(minLow[p], minLow[i]);
+            minHigh[p] = std::min(minHigh[p], minHigh[i]);
+        }
+    }
+    std::vector<std::vector<int>> children(n + 1);
+    for (int i = -1; i < n; ++i)
+        children[i < 0 ? n : i] = CompiledChildren(bones, lowLodCount, i, minLow, minHigh);
+    SaveModelDmx(path, "worldmodel", bones, children, true);
 }
 
 } // namespace ag2

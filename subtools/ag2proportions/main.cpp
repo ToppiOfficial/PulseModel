@@ -32,7 +32,7 @@ const char* const kUsage =
     "  Paths are relative to the job file.\n\n"
     "  vmdl           Model to process (required).\n"
     "  model_dmx      Rig DMX.\n"
-    "                 Default: the VMDL's SkeletonFile import.\n"
+    "                 Default: the VMDL's body RenderMeshFile import.\n"
     "  proportions    Held-pose DMX.\n"
     "                 Default: the rig's bind pose.\n"
     "  vnmskel        Compiled worldmodel.vnmskel_c.\n"
