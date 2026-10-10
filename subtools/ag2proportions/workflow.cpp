@@ -93,7 +93,8 @@ struct RigSource {
 
 // model_dmx, else the render mesh carrying the most CS2 core bones (the body),
 // else the SkeletonFile that does. The generated skeleton is never a source.
-RigSource FindRig(kv::Value& vmdl, const Job& job, const Paths& paths) {
+RigSource FindRig(kv::Value& vmdl, const Job& job, const Paths& paths, const std::vector<Bone>& viewmodel,
+                  const std::vector<Bone>& worldmodel) {
     const fs::path generated = paths.output / kSkeletonFile;
     std::vector<RigSource> meshes, files;
     Walk(vmdl, [&](kv::Value& node) {
@@ -116,20 +117,38 @@ RigSource FindRig(kv::Value& vmdl, const Job& job, const Paths& paths) {
                     return {job.modelDmx, source.scale};
         return {job.modelDmx, 1.0f};
     }
+    // A mesh on stock bone lengths (first-person arms) is only used
+    // when every candidate is one.
     for (const auto* list : {&meshes, &files}) {
-        RigSource best;
-        size_t bestCount = 0;
+        RigSource best, bestStock;
+        size_t bestCount = 0, bestStockCount = 0;
         for (const RigSource& source : *list) {
             std::string err;
             auto dm = dmx::Datamodel::Load(source.path.u8string(), &err);
             const size_t count = dm ? CountBones(*dm) : 0;
-            if (count > bestCount) {
+            if (!count)
+                continue;
+            bool stockLengths = false;
+            try {
+                stockLengths = HasStockLengths(ReadRig(*dm, source.scale, false), {&viewmodel, &worldmodel});
+            } catch (const std::exception&) {
+            }
+            if (stockLengths) {
+                std::cout << "Skipping " << source.path.filename().u8string()
+                          << ": its bone lengths match the stock skeletons\n";
+                if (count > bestStockCount) {
+                    bestStock = source;
+                    bestStockCount = count;
+                }
+            } else if (count > bestCount) {
                 best = source;
                 bestCount = count;
             }
         }
         if (bestCount)
             return best;
+        if (bestStockCount)
+            return bestStock;
     }
     throw runtime_error("no DMX import carries the CS2 body bones; set model_dmx in the job");
 }
@@ -405,9 +424,6 @@ void Generate(const Job& job, const Options& options) {
     const Paths paths = Locate(job.vmdl);
     const std::string vmdlText = ReadText(job.vmdl);
     kv::Value vmdl = kv::ParseText(vmdlText);
-    const RigSource rigSource = FindRig(vmdl, job, paths);
-    const std::vector<Bone> nodes = BoneNodes(vmdl);
-
     const Vpk package(paths.cs2 / "game/csgo/pak01_dir.vpk");
     std::vector<uint8_t> skeletonBytes = package.Read(std::string(kStockSkeleton) + "_c");
     const StockSkeleton installed = ReadStockSkeleton(skeletonBytes);
@@ -415,6 +431,9 @@ void Generate(const Job& job, const Options& options) {
         skeletonBytes = kv::ReadFile(job.vnmskel.u8string());
         RequireSameSkeleton(installed, ReadStockSkeleton(skeletonBytes));
     }
+    const StockSkeleton viewmodel = ReadStockSkeleton(package.Read(std::string(kStockViewSkeleton) + "_c"));
+    const RigSource rigSource = FindRig(vmdl, job, paths, viewmodel.bones, installed.bones);
+    const std::vector<Bone> nodes = BoneNodes(vmdl);
     const std::string clip = paths.relative + "/" + kClipFile;
     const std::vector<uint8_t> graphBytes = package.Read(std::string(kStockGraph) + "_c");
     const std::vector<uint8_t> uiGraphBytes = package.Read(std::string(kStockUiGraph) + "_c");

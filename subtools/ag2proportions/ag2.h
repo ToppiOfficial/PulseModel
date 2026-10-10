@@ -21,6 +21,7 @@ namespace pm = pulse::math;
 inline constexpr const char* kStockGraph = "animation/graphs/worldmodel/worldmodel.vnmgraph";
 inline constexpr const char* kStockUiGraph = "animation/graphs/ui/uimodel.vnmgraph";
 inline constexpr const char* kStockSkeleton = "animation/skeletons/characters/worldmodel.vnmskel";
+inline constexpr const char* kStockViewSkeleton = "animation/skeletons/characters/viewmodel.vnmskel";
 
 // Generated assets, relative to the output folder.
 inline constexpr const char* kWorldGraphFile = "graphs/proportions_worldmodel.vnmgraph";
@@ -79,6 +80,9 @@ size_t CountBones(pulse::dmx::Datamodel& dm); // CS2 core bones in the rig, 0 if
 std::vector<Bone> ReadRig(pulse::dmx::Datamodel& dm, float scale, bool held);
 // Stock bones get stock parents at their rig model-space pose; missing ones take
 // their stock local offset. Other rig bones keep their parents.
+// True when every bone's distance to its parent matches each stock skeleton it
+// shares with the rig, whatever the posture; needs at least three such pairs.
+bool HasStockLengths(const std::vector<Bone>& rig, const std::vector<const std::vector<Bone>*>& skeletons);
 SkeletonBuild BuildSkeleton(const std::vector<Bone>& rig, const std::vector<Bone>& stock,
                             const std::vector<Bone>& nodes);
 std::vector<Bone> TargetPose(const std::vector<Bone>& skeleton, const std::vector<Bone>& stock,

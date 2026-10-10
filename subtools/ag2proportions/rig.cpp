@@ -47,6 +47,13 @@ bool IsGraphHelper(const std::string& name) {
     return false;
 }
 
+bool IsCoreBone(const std::string& name) {
+    for (const char* core : kCoreBones)
+        if (_stricmp(core, name.c_str()) == 0)
+            return true;
+    return false;
+}
+
 bool IsModelHelper(const std::string& name) {
     for (const char* helper : kModelHelpers)
         if (_stricmp(helper, name.c_str()) == 0)
@@ -363,6 +370,35 @@ std::vector<Bone> ReadRig(dmx::Datamodel& dm, float scale, bool held) {
     };
     visit(rig.Model());
     return bones;
+}
+
+bool HasStockLengths(const std::vector<Bone>& rig, const std::vector<const std::vector<Bone>*>& skeletons) {
+    std::map<std::string, int, NoCase> inRig;
+    for (size_t i = 0; i < rig.size(); ++i)
+        inRig.emplace(rig[i].name, static_cast<int>(i));
+    const std::vector<pm::matrix3x4> world = WorldTransforms(rig);
+    auto origin = [&](int i) { return pm::Vector3{world[i].m[0][3], world[i].m[1][3], world[i].m[2][3]}; };
+    int pairs = 0;
+    for (const std::vector<Bone>* skeleton : skeletons) {
+        const std::vector<Bone>& stock = *skeleton;
+        for (const Bone& s : stock) {
+            // root_motion children sit wherever the rig was exported, not at a bone length
+            if (s.parent < 0 || IsGraphHelper(s.name) || IsGraphHelper(stock[s.parent].name) ||
+                stock[s.parent].name == "root_motion")
+                continue;
+            const auto bone = inRig.find(s.name), parent = inRig.find(stock[s.parent].name);
+            if (bone == inRig.end() || parent == inRig.end())
+                continue;
+            const pm::Vector3 a = origin(bone->second), b = origin(parent->second);
+            const float mine = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+            const float theirs = std::sqrt(s.position.x * s.position.x + s.position.y * s.position.y +
+                                           s.position.z * s.position.z);
+            if (std::abs(mine - theirs) > 0.1f)
+                return false;
+            ++pairs;
+        }
+    }
+    return pairs >= 3;
 }
 
 SkeletonBuild BuildSkeleton(const std::vector<Bone>& rig, const std::vector<Bone>& stock,
