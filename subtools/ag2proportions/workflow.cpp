@@ -190,10 +190,47 @@ std::unique_ptr<dmx::Datamodel> LoadDmx(const fs::path& path) {
     return dm;
 }
 
+// The skeleton's stock bones as nested Bone nodes. ModelDoc takes a bone's parent
+// from the render mesh over any SkeletonFile; only a Bone node overrides it.
+kv::Value::Array StockBoneNodes(const std::vector<Bone>& bones, const std::vector<Bone>& stock) {
+    auto isStock = [&](const std::string& name) {
+        return std::any_of(stock.begin(), stock.end(),
+                           [&](const Bone& s) { return _stricmp(s.name.c_str(), name.c_str()) == 0; });
+    };
+    std::vector<kv::Value> nodes(bones.size());
+    std::vector<bool> emitted(bones.size(), false);
+    for (size_t i = 0; i < bones.size(); ++i) {
+        const Bone& bone = bones[i];
+        if (!isStock(bone.name) || (bone.parent >= 0 && !emitted[bone.parent]))
+            continue;
+        pm::RadianEuler e;
+        pm::QuaternionAngles(bone.rotation, e);
+        nodes[i] = kv::Value::Object{
+            {"_class", "Bone"},
+            {"name", bone.name},
+            {"origin", kv::Value::Array{double(bone.position.x), double(bone.position.y), double(bone.position.z)}},
+            {"angles", kv::Value::Array{double(e.y * pm::kRad2Deg), double(e.z * pm::kRad2Deg), double(e.x * pm::kRad2Deg)}},
+            {"do_not_discard", true},
+            {"children", kv::Value::Array{}},
+        };
+        emitted[i] = true;
+    }
+    // children before parents, so each finished subtree moves into its parent
+    kv::Value::Array roots;
+    for (size_t i = bones.size(); i-- > 0;) {
+        if (!emitted[i])
+            continue;
+        auto& siblings = bones[i].parent >= 0 ? nodes[bones[i].parent]["children"].Items() : roots;
+        siblings.insert(siblings.begin(), std::move(nodes[i]));
+    }
+    return roots;
+}
+
 // write_model: the VMDL is edited in place (the generated skeleton as its only
-// SkeletonFile, no Bone nodes, graph bindings). The first edit keeps the
-// untouched file as <name>.vmdl.bak, which ModelDoc never compiles.
-void EditModel(const std::string& originalText, kv::Value model, const Job& job, const Paths& paths) {
+// SkeletonFile, the stock hierarchy as Bone nodes, graph bindings). The first
+// edit keeps the untouched file as <name>.vmdl.bak, which ModelDoc never compiles.
+void EditModel(const std::string& originalText, kv::Value model, const Job& job, const Paths& paths,
+               const kv::Value::Array& boneNodes) {
     std::function<void(kv::Value&)> strip = [&](kv::Value& node) {
         if (!node.IsObject() || !node.Has("children") || !node.At("children").IsArray())
             return;
@@ -228,6 +265,7 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
         {"import_scale", 1.0},
         {"merge_behavior", "do_not_modify_existing"},
     });
+    skeletonChildren.insert(skeletonChildren.begin() + 1, boneNodes.begin(), boneNodes.end());
 
     const std::string graph = paths.relative + "/" + kWorldGraphFile;
     const std::string uiGraph = paths.relative + "/" + kUiGraphFile;
@@ -277,7 +315,8 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
 std::string SetupNotes(const Paths& paths, const SkeletonBuild& skeleton, const std::vector<std::string>& warnings,
                        bool wroteModel) {
     std::string note = "AG2 PROPORTIONS (experimental)\n\n"
-                       "Use this as the VMDL's only SkeletonFile, with no Bone nodes (write_model does this):\n  " +
+                       "Use this as the VMDL's only SkeletonFile, with its stock bones as nested Bone nodes\n"
+                       "(write_model does this):\n  " +
                        paths.relative + "/" + kSkeletonFile + "\n\n";
     auto list = [&](const char* title, const std::vector<std::string>& names) {
         if (names.empty())
@@ -336,7 +375,7 @@ void PrintSummary(const Paths& paths, const SkeletonBuild& skeleton, const std::
         std::cout << "Edited " << job.vmdl.filename().u8string() << " (original kept as "
                   << job.vmdl.filename().u8string() << ".bak)\n";
     else
-        std::cout << "Make it the VMDL's only SkeletonFile and remove the VMDL's Bone nodes\n"
+        std::cout << "Run with write_model to make it the VMDL's only SkeletonFile with its stock bones as Bone nodes\n"
                   << "Set the worldmodel AnimGraph2 to " << paths.relative << "/" << kWorldGraphFile << "\n"
                   << "Set the uimodel AnimGraph2 to " << paths.relative << "/" << kUiGraphFile << "\n";
     const auto axes = std::count_if(warnings.begin(), warnings.end(), IsAxisNote);
@@ -448,7 +487,7 @@ void Generate(const Job& job, const Options& options) {
     kv::WriteFile((paths.output / kWorldGraphFile).u8string(), kv::WriteText(graph));
     kv::WriteFile((paths.output / kUiGraphFile).u8string(), kv::WriteText(uiGraph));
     if (job.writeModel)
-        EditModel(vmdlText, vmdl, job, paths);
+        EditModel(vmdlText, vmdl, job, paths, StockBoneNodes(skeleton.bones, installed.bones));
     // what the clip was built from, for issue reports
     if (options.debug) {
         const std::string rigName = rigSource.path.generic_u8string();
