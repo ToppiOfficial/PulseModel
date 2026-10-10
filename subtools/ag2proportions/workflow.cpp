@@ -231,12 +231,20 @@ kv::Value::Array StockBoneNodes(const std::vector<Bone>& bones, const std::vecto
 // edit keeps the untouched file as <name>.vmdl.bak, which ModelDoc never compiles.
 void EditModel(const std::string& originalText, kv::Value model, const Job& job, const Paths& paths,
                const kv::Value::Array& boneNodes) {
+    const std::string skeletonFile = paths.relative + "/" + kSkeletonFile;
+    // the generated SkeletonFile starts disabled; a rerun keeps the user's choice
+    bool skeletonDisabled = true;
     std::function<void(kv::Value&)> strip = [&](kv::Value& node) {
         if (!node.IsObject() || !node.Has("children") || !node.At("children").IsArray())
             return;
         auto& children = node["children"].Items();
-        children.erase(std::remove_if(children.begin(), children.end(), [](const kv::Value& child) {
+        children.erase(std::remove_if(children.begin(), children.end(), [&](const kv::Value& child) {
             const std::string cls = ClassOf(child);
+            if (cls == "SkeletonFile" && child.Has("filename") &&
+                _stricmp(child.At("filename").String().c_str(), skeletonFile.c_str()) == 0) {
+                skeletonDisabled = Disabled(child);
+                return true;
+            }
             return (cls == "SkeletonFile" || cls == "Bone") && !Disabled(child);
         }), children.end());
         for (kv::Value& child : children)
@@ -261,7 +269,10 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
     skeletonChildren.insert(skeletonChildren.begin(), kv::Value::Object{
         {"_class", "SkeletonFile"},
         {"name", "ag2_skeleton"},
-        {"filename", paths.relative + "/" + kSkeletonFile},
+        {"note", "Enable to keep custom bones that ModelDoc culls from the render mesh (unweighted bones).\n"
+                 "The Bone nodes alone already set the stock hierarchy.\n"},
+        {"disabled", skeletonDisabled},
+        {"filename", skeletonFile},
         {"import_scale", 1.0},
         {"merge_behavior", "do_not_modify_existing"},
     });
