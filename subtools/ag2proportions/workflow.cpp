@@ -309,6 +309,13 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
         children.push_back(kv::Value::Object{{"_class", "AnimGraph2List"}, {"children", kv::Value::Array{}}});
         list = &children.back();
     }
+    // First-person arms are often added after this run, so the advice lives in the VMDL.
+    (*list)["note"] =
+        "First-person arms: hudmodel plays Valve's viewmodel graph, which cannot move bones outside "
+        "viewmodel.vnmskel (twist bones, helpers).\n"
+        "Rename any such bone in the arms DMX so it does not match the player model's (e.g. arm_lower_L_twist_1 -> "
+        "arm_lower_L_twist_1_fp), otherwise it takes the body's position and the arms tear at the wrist and elbow.\n"
+        "Give renamed bones their own constraints; the body's do not carry over.\n";
     // The game plays the entries named worldmodel and uimodel (the UI preview).
     bool haveWorld = false, haveUi = false;
     for (auto& node : (*list)["children"].Items()) {
