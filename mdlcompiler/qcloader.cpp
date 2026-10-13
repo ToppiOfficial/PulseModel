@@ -1890,7 +1890,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             if (!std::isfinite(importScale) || importScale <= 0.0f)
                 return c.Fail(option.line, where + ": scale must be finite and greater than 0");
         } else if (o == "subd") {
-            // no quad subdivision in this compiler (matches importqc); accepted
+            // no quad subdivision in this compiler; accepted
         } else if (o == "faces") {
             float a, b;
             if (!c.WantFloat("a faces arg", option, a) || !c.WantFloat("a faces arg", option, b))
@@ -2289,7 +2289,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             float x, y, z;
             if (!c.Want("a material name", t, mat) || !c.WantFloat("x", t, x) ||
                 !c.WantFloat("y", t, y) || !c.WantFloat("z", t, z))
-                return false; // consumed and ignored (matches importqc)
+                return false; // consumed and ignored
             continue;
         }
 
