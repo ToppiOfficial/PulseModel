@@ -1316,7 +1316,9 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
         pseqdesc->numikrules = seq.numikrules;
 
         // autolayers: frame values convert to cycle fractions
-        // of THIS sequence's first anim, unless STUDIO_AL_POSE (raw pose units)
+        // of THIS sequence's first anim, unless STUDIO_AL_POSE (raw pose units).
+        // A one-frame anim divides by 1; the reference writes NaN/inf, and a NaN
+        // layer cycle makes the engine sample a multi-frame layer out of bounds.
         pseqdesc->numautolayers = static_cast<int32_t>(seq.autolayers.size());
         pseqdesc->autolayerindex = static_cast<int32_t>(buf.p() - pSequenceStart);
         {
@@ -1332,7 +1334,7 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
                 pautolayer[j].iPose = static_cast<int16_t>(al.pose);
                 pautolayer[j].flags = al.flags;
                 if (!(al.flags & fmt::STUDIO_AL_POSE)) {
-                    float denom = static_cast<float>(panim00frames - 1);
+                    float denom = static_cast<float>(std::max(panim00frames - 1, 1));
                     pautolayer[j].start = al.start / denom;
                     pautolayer[j].peak = al.peak / denom;
                     pautolayer[j].tail = al.tail / denom;
