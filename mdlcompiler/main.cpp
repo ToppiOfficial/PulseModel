@@ -74,6 +74,7 @@ static int Usage() {
     std::printf("  -legacysequencebounds   calculate sequence bounds by skinning every vertex\n");
     std::printf("  -dumpmaterials print the names of materials used by the model\n");
     std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
+    std::printf("  -dumpstructure emit versioned read-only QC structure records and stop\n");
     std::printf("  -dumpprocedural\n");
     std::printf("                print the final bone names and the jiggle, driver and aim-at\n");
     std::printf("                bone rules as @proc lines on stdout, then stop; no files written\n");
@@ -210,6 +211,7 @@ static int RunCompile(int argc, char** argv) {
     bool dumpMaterials = false;
     bool dumpProcedural = false;
     bool scriptFromStdin = false;
+    bool dumpStructure = false;
     bool dumpDependencies = false;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
@@ -273,6 +275,8 @@ static int RunCompile(int argc, char** argv) {
             dumpProcedural = true;
         } else if (std::strcmp(argv[i], "-stdin") == 0) {
             scriptFromStdin = true;
+        } else if (std::strcmp(argv[i], "-dumpstructure") == 0) {
+            dumpStructure = true;
         } else if (std::strcmp(argv[i], "-dumpdependencies") == 0) {
             dumpDependencies = true;
             pulse::dependencies::g_enabled = true;
@@ -306,7 +310,7 @@ static int RunCompile(int argc, char** argv) {
 
     // .pulseqc (keyvalues1) is the only front end. The keyvalues2 .pulsemdl
     // loader is halted indefinitely - pulseloader.cpp is out of the build.
-    if (!pulse::loader::IsQcScriptPath(script))
+    if (!dumpStructure && !pulse::loader::IsQcScriptPath(script))
         return Fail("unsupported script",
                     std::string(script) + ": only .pulseqc/.qc compile scripts are supported");
 
@@ -317,6 +321,10 @@ static int RunCompile(int argc, char** argv) {
     input.stripLods = stripLods;
     g_stage = "script load";
     const std::string stdinText = scriptFromStdin ? ReadStdin() : std::string();
+    if (dumpStructure)
+        return pulse::loader::DumpStructure(script, defvars, includeDirs, fileDirs,
+            scriptFromStdin ? &stdinText : nullptr,
+            modelname, stripLods) ? 0 : 1;
     if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
                                      scriptFromStdin ? &stdinText : nullptr))
         return Fail("script error", err);
@@ -422,7 +430,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    PrintHeader();
+    bool structureOnly = false;
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "-dumpstructure") == 0) structureOnly = true;
+    if (!structureOnly) PrintHeader();
 
     // a leak past a stage's own error path still gets named in the footer
     int rc;
