@@ -415,24 +415,29 @@ static int RunCompile(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    bool commandsOnly = false, structureOnly = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "-dumpcommands") == 0) commandsOnly = true;
+        if (std::strcmp(argv[i], "-dumpstructure") == 0) structureOnly = true;
+    }
+
     // progress lines are useless if they sit in the CRT buffer until exit -
-    // MSVC has no line buffering (_IOLBF == _IOFBF), so go unbuffered
-    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // MSVC has no line buffering (_IOLBF == _IOFBF), so go unbuffered. Tool-read
+    // dumps are megabytes of records; unbuffered MSVC writes them a byte at a time.
+    if (commandsOnly || structureOnly)
+        std::setvbuf(stdout, nullptr, _IOFBF, 1 << 16);
+    else
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     pulse::fatal::Install();
 
     // -dumpcommands takes no script and runs before the banner: the output is
     // read by tools, so stdout carries the command list and nothing else.
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "-dumpcommands") == 0) {
-            pulse::loader::PrintCommandNames();
-            return 0;
-        }
+    if (commandsOnly) {
+        pulse::loader::PrintCommandNames();
+        return 0;
     }
 
-    bool structureOnly = false;
-    for (int i = 1; i < argc; ++i)
-        if (std::strcmp(argv[i], "-dumpstructure") == 0) structureOnly = true;
     if (!structureOnly) PrintHeader();
 
     // a leak past a stage's own error path still gets named in the footer
