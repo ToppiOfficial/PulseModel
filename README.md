@@ -88,27 +88,14 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
 | `-minlod <lod>` | Discard higher-detail LODs and promote the zero-based LOD index to root, overriding `$minlod` in the script. |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
 | `-verify` | Compile the model without writing output files. |
-| `-legacysequencebounds` | Use per-frame vertex skinning for sequence bounds. The default precomputes per-bone vertex boxes and transforms those boxes per frame, which is faster but can produce wider bounds. |
 | `-dumpmaterials` | Print the names of materials used by the compiled model. |
+| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
+| `-legacysequencebounds` | Use per-frame vertex skinning for sequence bounds. The default precomputes per-bone vertex boxes and transforms those boxes per frame, which is faster but can produce wider bounds. |
 | `-perfmetrics` | Print wall time in ms for each stage of the compile. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
 The QC command `$minlod <lod>` sets the same zero-based minimum LOD. A
 command-line `-minlod` value takes precedence.
-
-### For external tools
-
-These switches are for editors, previewers and other programs that run
-`mdlcompiler` themselves and read its output. They are not needed to compile a
-model by hand or from a compile GUI such as Crowbar. The output formats are
-described on the wiki's [Development](https://github.com/ToppiOfficial/PulseModel/wiki/development) page.
-
-| Option | Meaning |
-| --- | --- |
-| `-stdin` | Read the script's text from standard input; the script path is still given and paths resolve as if the text were saved there. |
-| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
-| `-dumpprocedural` | Print the final bone names and the jiggle, driver and aim-at bone rules as `@proc` lines, then stop - no files are written. |
-| `-dumpdependencies` | After a successful compile, print every file it read with a hash of its content as `@dep` lines, so a tool can tell when the model is out of date. |
 
 ## mdldecompiler
 
@@ -182,59 +169,6 @@ libs/           C++ libraries: DMX reader, math, binary format headers,
 mdlcompiler/    The app: script loader, compile stage, .mdl/.vtx/.phy writers.
 mdldecompiler/  The reverse tool: .mdl -> .pulseqc + .dmx meshes + .smd anims.
 ```
-
-## Editor structure dump
-
-`mdlcompiler <script> -dumpstructure` runs the QC loader and emits source
-structure without running the compile or writer stages. It accepts QCI as a
-standalone input as well as QC/PulseQC. Normal compilation is unchanged.
-`-defvar`, `-modelname`, include/source search paths and `-striplods` apply
-to the loader. Errors return exit code 1 with partial structure and diagnostics.
-
-`-dumpcommands` retains each bare `$command` line. Additional JSON records
-describe capabilities and optional command metadata:
-
-```text
-@capability {"dumpstructure":1,"buffers":1}
-$bodygroup
-@command {"name":"$bodygroup","section":"modelgroups","ordered":true,...}
-```
-
-Consumers must check the capability record before passing a script to a dump:
-older binaries ignore unknown options and can proceed to compile. Missing
-command metadata means Misc section, no ordering hint and a bare-command starter.
-
-Structure records are `@tag <JSON object>`, beginning with
-`@structure {"version":1}` and ending with `@end {"status":"ok"}` or
-`@end {"status":"error"}`. IDs are scoped to one dump. Record types:
-
-- `file`: ID, absolute UTF-8 path and hexadecimal original source bytes.
-- `node`: file ID, half-open byte span, line, command, label, closing-brace
-  offset, parent/call IDs, activity, evaluation, raw/generated/completeness flags
-  and whether the parser can verify movement state.
-- `state`: effective inherited settings and the latest state-changing directive.
-- `def`, `ref`: definitions and name references, with resolved/evaluated status.
-  Source-asset bones navigate to the script node that imported them. References
-  requiring a later compile stage remain unevaluated unless a definition is known.
-- `index`: available loader registry indices; modelgroup indices reflect final
-  loader sorting. LOD indices describe authored LOD slots.
-- `include`, `macro`: resolved include paths and macro definition links.
-- `cond`, `var`: compared literals, current variable values and defining nodes.
-- `error`: owning file, line, node when available and diagnostic text.
-
-Source spans include the original BOM offset and exclude surrounding trivia.
-Inactive source is retained without executing it. Semantics not evaluated after
-an error remain unknown. Generated macro nodes have source provenance but are
-read-only; edit the call or definition instead. Strings with invalid UTF-8 use
-replacement characters in display metadata; source bytes remain exact.
-
-Existing `-stdin` accepts plain root-script bytes. In dump mode it also accepts
-a multi-file request beginning with `PULSEQC 1\n`. Each record contains an ASCII
-`pathByteCount textByteCount\n` header, followed immediately by that many UTF-8
-path bytes and raw source bytes. Absolute paths identify buffers at their original
-locations; the root must be present. End with `0 0\n`. Includes resolve against
-these buffers before disk. This framing is only interpreted by `-dumpstructure`;
-ordinary compile `-stdin` remains plain source input. No extra CLI flag is needed.
 
 ## Third-party code and references
 

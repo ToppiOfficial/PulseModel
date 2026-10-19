@@ -1,41 +1,6 @@
 // Included beside the loader's tokens so structure uses the same lexer.
 
-std::string JsonString(const std::string& value) {
-    std::string out = "\"";
-    for (size_t i = 0; i < value.size(); ++i) {
-        const auto ch = static_cast<unsigned char>(value[i]);
-        if (ch >= 128) {
-            const size_t width = ch >= 0xC2 && ch <= 0xDF ? 2 : ch >= 0xE0 && ch <= 0xEF ? 3 :
-                ch >= 0xF0 && ch <= 0xF4 ? 4 : 0;
-            bool valid = width && width <= value.size() - i;
-            for (size_t j = 1; valid && j < width; ++j)
-                valid = (static_cast<unsigned char>(value[i + j]) & 0xC0) == 0x80;
-            if (valid && width > 2) {
-                const auto next = static_cast<unsigned char>(value[i + 1]);
-                valid = !(ch == 0xE0 && next < 0xA0) && !(ch == 0xED && next >= 0xA0) &&
-                    !(ch == 0xF0 && next < 0x90) && !(ch == 0xF4 && next >= 0x90);
-            }
-            if (valid) { out.append(value, i, width); i += width - 1; }
-            else out += "\\ufffd";
-            continue;
-        }
-        switch (ch) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (ch < 32) {
-                const char* hex = "0123456789abcdef";
-                out += "\\u00";
-                out += hex[ch >> 4];
-                out += hex[ch & 15];
-            } else out += static_cast<char>(ch);
-        }
-    }
-    return out + "\"";
-}
+std::string JsonString(const std::string& value) { return pulse::api::String(value); }
 
 std::string JsonObject(std::initializer_list<std::pair<std::string, std::string>> fields) {
     std::string out = "{";
@@ -47,7 +12,7 @@ std::string JsonObject(std::initializer_list<std::pair<std::string, std::string>
 }
 
 void StructureRecord(const char* tag, const std::string& json) {
-    std::printf("@%s %s\n", tag, json.c_str());
+    pulse::api::Record(tag, json);
 }
 
 std::string StructurePath(const std::string& value) {
@@ -337,7 +302,7 @@ struct StructureCapture {
                 {"evaluated", ref.evaluated || ref.resolved || definition >= 0 ? "true" : "false"},
                 {"resolved", ref.resolved || definition >= 0 ? "true" : "false"}}));
         }
-        for (const std::string& event : events) std::printf("%s\n", event.c_str());
+        for (const std::string& event : events) pulse::api::Line(event);
         for (const std::string& error : errors) StructureRecord("error", error);
         StructureRecord("end", success ? "{\"status\":\"ok\"}" : "{\"status\":\"error\"}");
     }

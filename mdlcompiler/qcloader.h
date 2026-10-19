@@ -43,7 +43,7 @@ bool IsQcScriptPath(const char* path);
 // the spec, so tools read the surface from the binary instead of a copy of it.
 void PrintCommandNames();
 
-// Read-only editor dump. stdin accepts source text or versioned buffer frames.
+// Read-only editor analysis accepts source text or versioned buffer frames.
 bool DumpStructure(const char* path, const ScriptVars& defvars,
                    const SearchDirs& includeDirs, const SearchDirs& fileDirs,
                    const std::string* scriptText,

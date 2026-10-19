@@ -1,12 +1,13 @@
 // dependencies.h - PulseModel
 //
-// -dumpdependencies: every file the compile read (the script, its includes and each
+// API dependencies: every file the compile read (the script, its includes and each
 // source) with a hash of its content, so a tool can tell when the model is out of date.
 
 #ifndef PULSEMDL_DEPENDENCIES_H
 #define PULSEMDL_DEPENDENCIES_H
 
 #include <cinttypes>
+#include "api.h"
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -49,7 +50,7 @@ inline uint64_t HashFile(const std::string& path) {
     return h;
 }
 
-// `text` stands in for the file's content (a -stdin script).
+// `text` supplies source bytes in place of the file content.
 inline void Note(const std::string& path, Kind kind = Kind::Source,
                  const std::string* text = nullptr) {
     if (!g_enabled || path.empty())
@@ -64,13 +65,16 @@ inline void Note(const std::string& path, Kind kind = Kind::Source,
     Files().emplace(key, Entry{kind, hash});
 }
 
-// "@dep <script|include|source> <16 hex digit hash> <absolute path>" per file, then "@dep end".
+// Emit content hashes and paths through the integration protocol.
 inline void Print() {
     for (const auto& [path, e] : Files()) {
         const char* name = e.kind == Kind::Script ? "script" : e.kind == Kind::Include ? "include" : "source";
-        std::printf("@dep %s %016" PRIx64 " %s\n", name, e.hash, path.c_str());
+        char hash[17];
+        std::snprintf(hash, sizeof(hash), "%016" PRIx64, e.hash);
+        pulse::api::Record("dependency", "{\"kind\":" + pulse::api::String(name) +
+            ",\"hash\":" + pulse::api::String(hash) + ",\"path\":" + pulse::api::String(path) + "}");
     }
-    std::printf("@dep end\n");
+    pulse::api::Record("dependencies", "{\"complete\":true}");
 }
 
 } // namespace pulse::dependencies

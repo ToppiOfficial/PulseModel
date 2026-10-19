@@ -5,6 +5,7 @@
 
 #include "perf.h"
 #include "qcloader.h"
+#include "api.h"
 
 #include <algorithm>
 #include <cctype>
@@ -9303,14 +9304,14 @@ std::string SupportedList() {
 } // namespace
 
 void PrintCommandNames() {
-    StructureRecord("capability", "{\"dumpstructure\":1,\"buffers\":1}");
+    if (pulse::api::Active()) StructureRecord("capability", "{\"api\":1,\"analyze\":1,\"compile\":1,\"procedural\":1,\"materials\":1,\"buffers\":1}");
     for (const Command& k : kCommands) {
-        std::printf("%s\n", k.name);
+        if (!pulse::api::Active()) { std::printf("%s\n", k.name); continue; }
         StructureRecord("command", JsonObject({{"name", JsonString(k.name)}, {"section", JsonString(k.section)},
             {"ordered", k.ordered ? "true" : "false"}, {"summary", JsonString(k.summary)},
             {"syntax", JsonString(k.syntax)}, {"template", JsonString(*k.starter ? k.starter : k.name)}}));
     }
-    std::printf("$include\n");
+    if (!pulse::api::Active()) { std::printf("$include\n"); return; }
     StructureRecord("command", JsonObject({{"name", JsonString("$include")}, {"section", JsonString("includes")},
         {"ordered", "false"}, {"summary", JsonString("Include a script in read order")},
         {"syntax", JsonString("$include <path> [localdir] [optional]")},
