@@ -98,17 +98,13 @@ command-line `-minlod` value takes precedence.
 
 ### For external tools
 
-These switches are for editors, previewers and other programs that run
-`mdlcompiler` themselves and read its output. They are not needed to compile a
-model by hand or from a compile GUI such as Crowbar. The output formats are
-described on the wiki's [Development](https://github.com/ToppiOfficial/PulseModel/wiki/development) page.
+Editors and other integrations use one versioned process interface. Requests
+arrive on stdin; structured JSON records go to stdout and compiler logs go to
+stderr.
 
 | Option | Meaning |
 | --- | --- |
-| `-stdin` | Read the script's text from standard input; the script path is still given and paths resolve as if the text were saved there. |
-| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
-| `-dumpprocedural` | Print the final bone names and the jiggle, driver and aim-at bone rules as `@proc` lines, then stop - no files are written. |
-| `-dumpdependencies` | After a successful compile, print every file it read with a hash of its content as `@dep` lines, so a tool can tell when the model is out of date. |
+| `-api` | Use the versioned integration interface for command catalog, QC analysis and compilation with dependency reporting. |
 
 ## mdldecompiler
 
