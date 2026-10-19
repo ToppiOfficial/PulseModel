@@ -88,14 +88,27 @@ mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <va
 | `-minlod <lod>` | Discard higher-detail LODs and promote the zero-based LOD index to root, overriding `$minlod` in the script. |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
 | `-verify` | Compile the model without writing output files. |
-| `-dumpmaterials` | Print the names of materials used by the compiled model. |
-| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
 | `-legacysequencebounds` | Use per-frame vertex skinning for sequence bounds. The default precomputes per-bone vertex boxes and transforms those boxes per frame, which is faster but can produce wider bounds. |
+| `-dumpmaterials` | Print the names of materials used by the compiled model. |
 | `-perfmetrics` | Print wall time in ms for each stage of the compile. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
 The QC command `$minlod <lod>` sets the same zero-based minimum LOD. A
 command-line `-minlod` value takes precedence.
+
+### For external tools
+
+These switches are for editors, previewers and other programs that run
+`mdlcompiler` themselves and read its output. They are not needed to compile a
+model by hand or from a compile GUI such as Crowbar. The output formats are
+described on the wiki's [Development](https://github.com/ToppiOfficial/PulseModel/wiki/development) page.
+
+| Option | Meaning |
+| --- | --- |
+| `-stdin` | Read the script's text from standard input; the script path is still given and paths resolve as if the text were saved there. |
+| `-dumpcommands` | Print every accepted `$command`, one per line, and exit. |
+| `-dumpprocedural` | Print the final bone names and the jiggle, driver and aim-at bone rules as `@proc` lines, then stop - no files are written. |
+| `-dumpdependencies` | After a successful compile, print every file it read with a hash of its content as `@dep` lines, so a tool can tell when the model is out of date. |
 
 ## mdldecompiler
 

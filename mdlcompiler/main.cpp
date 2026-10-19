@@ -5,18 +5,13 @@
 
 #include <cctype>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <initializer_list>
-#include <iomanip>
-#include <limits>
-#include <locale>
 #include <new>
 #include <stdexcept>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -29,11 +24,29 @@
 #include "qcloader.h"
 #include "writer.h"
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
 
-using pulse::fatal::Fail;
+static int Fail(const char* what, const std::string& detail) {
+    if (pulse::api::Active()) {
+        std::string path;
+        int line = 0;
+        const auto close = detail.find("):");
+        const auto open = close == std::string::npos ? std::string::npos : detail.rfind('(', close);
+        if (open != std::string::npos) {
+            try { line = std::stoi(detail.substr(open + 1, close - open - 1)); path = detail.substr(0, open); }
+            catch (const std::exception&) {}
+        }
+        pulse::api::Record("diagnostic", "{\"file\":" + pulse::api::String(path) +
+            ",\"line\":" + std::to_string(line) + ",\"text\":" + pulse::api::String(detail) + "}");
+    }
+    return pulse::fatal::Fail(what, detail);
+}
 static const char*& g_stage = pulse::fatal::g_stage;
 
 static void PrintHeader() {
@@ -47,6 +60,7 @@ static void PrintHeader() {
 static int Usage() {
     std::printf("usage: mdlcompiler <file.qc|file.pulseqc> [-game <dir>]\n");
     std::printf("\n");
+    std::printf("  -api          read a versioned integration request from stdin\n");
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
     std::printf("  -modelname <path>   overrides $modelname\n");
@@ -76,7 +90,14 @@ static int Usage() {
     std::printf("  -legacysequencebounds   calculate sequence bounds by skinning every vertex\n");
     std::printf("  -dumpmaterials print the names of materials used by the model\n");
     std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
-    std::printf("  -api          read one versioned integration request from stdin\n");
+    std::printf("  -dumpprocedural\n");
+    std::printf("                print the final bone names and the jiggle, driver and aim-at\n");
+    std::printf("                bone rules as @proc lines on stdout, then stop; no files written\n");
+    std::printf("  -stdin        read the script's text from stdin; the script path is still\n");
+    std::printf("                given and resolves relative paths as if the text were saved there\n");
+    std::printf("  -dumpdependencies\n");
+    std::printf("                after a successful compile, print every file it read as\n");
+    std::printf("                @dep <script|include|source> <fnv1a-64 hex> <absolute path>\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms for each stage of the compile\n");
     return 1;
@@ -103,64 +124,88 @@ static void DumpDefineBones(const pulse::compile::CompiledModel& model) {
     std::printf("\n------------------------------------------------------------\n");
 }
 
-static std::string ProcFloats(std::initializer_list<float> values)
-{
-    std::ostringstream out;
-    out.imbue(std::locale::classic());
-    out << std::setprecision(std::numeric_limits<float>::max_digits10) << '[';
-    bool first = true;
-    for (const float value : values) {
-        if (!std::isfinite(value)) throw std::runtime_error("Non-finite procedural value");
-        if (!first) out << ',';
-        first = false;
-        out << value;
+static void ProcString(const std::string& s) {
+    std::fputs(" \"", stdout);
+    for (const char c : s) {
+        if (c == '"' || c == '\\')
+            std::putchar('\\');
+        std::putchar(c);
     }
-    return out.str() + ']';
+    std::putchar('"');
 }
 
-static void DumpProcedural(const pulse::compile::CompiledModel& model)
-{
-    const auto boneName = [&](int index) {
-        return pulse::api::String(index >= 0 && index < static_cast<int>(model.bones.size()) ?
-            model.bones[index].name : std::string());
+static void ProcFloats(std::initializer_list<float> v) {
+    for (const float x : v)
+        std::printf(" %.9g", static_cast<double>(x));
+}
+
+// -dumpprocedural: the procedural bone rules with the values the .mdl stores, bones
+// named rather than indexed, one "@proc <kind>" line each; quoted names escape " and \.
+static void DumpProcedural(const pulse::compile::CompiledModel& m) {
+    auto boneName = [&](int i) -> std::string {
+        return i >= 0 && i < static_cast<int>(m.bones.size()) ? m.bones[i].name : std::string();
     };
-    for (const auto& bone : model.bones)
-        pulse::api::Record("bone", "{\"name\":" + pulse::api::String(bone.name) + "}");
-    for (const auto& j : model.jigglebones) {
-        pulse::api::Record("jiggle", "{\"bone\":" + boneName(j.bone) +
-            ",\"flags\":" + std::to_string(j.flags) + ",\"values\":" +
-            ProcFloats({j.length, j.tipMass, j.yawStiffness, j.yawDamping, j.pitchStiffness,
-                j.pitchDamping, j.alongStiffness, j.alongDamping, j.angleLimit, j.minYaw,
-                j.maxYaw, j.yawFriction, j.yawBounce, j.minPitch, j.maxPitch,
-                j.pitchFriction, j.pitchBounce, j.baseMass, j.baseStiffness, j.baseDamping,
-                j.baseMinLeft, j.baseMaxLeft, j.baseLeftFriction, j.baseMinUp, j.baseMaxUp,
-                j.baseUpFriction, j.baseMinForward, j.baseMaxForward, j.baseForwardFriction,
-                j.boingImpactSpeed, j.boingImpactAngle, j.boingDampingRate,
-                j.boingFrequency, j.boingAmplitude}) + "}");
+
+    for (const pulse::compile::Bone& b : m.bones) {
+        std::fputs("@proc bone", stdout);
+        ProcString(b.name);
+        std::putchar('\n');
     }
-    for (const auto& rule : model.proceduralbones) {
-        std::string triggers = "[";
-        for (const auto& trigger : rule.triggers) {
-            if (triggers.size() > 1) triggers += ',';
-            const float inverseTolerance = static_cast<float>(1.0 / static_cast<double>(trigger.tolerance));
-            triggers += ProcFloats({inverseTolerance, trigger.trigger.x, trigger.trigger.y,
-                trigger.trigger.z, trigger.trigger.w, trigger.pos.x, trigger.pos.y, trigger.pos.z,
-                trigger.quat.x, trigger.quat.y, trigger.quat.z, trigger.quat.w});
+
+    for (const pulse::compile::JiggleBone& j : m.jigglebones) {
+        std::fputs("@proc jiggle", stdout);
+        ProcString(boneName(j.bone));
+        std::printf(" %d", j.flags);
+        ProcFloats({j.length, j.tipMass, j.yawStiffness, j.yawDamping, j.pitchStiffness,
+                       j.pitchDamping, j.alongStiffness, j.alongDamping, j.angleLimit, j.minYaw,
+                       j.maxYaw, j.yawFriction, j.yawBounce, j.minPitch, j.maxPitch,
+                       j.pitchFriction, j.pitchBounce, j.baseMass, j.baseStiffness, j.baseDamping,
+                       j.baseMinLeft, j.baseMaxLeft, j.baseLeftFriction, j.baseMinUp, j.baseMaxUp,
+                       j.baseUpFriction, j.baseMinForward, j.baseMaxForward, j.baseForwardFriction,
+                       j.boingImpactSpeed, j.boingImpactAngle, j.boingDampingRate,
+                       j.boingFrequency, j.boingAmplitude});
+        std::putchar('\n');
+    }
+
+    // 12 floats per trigger, as many triggers as the line holds
+    for (const pulse::compile::ProceduralBone& p : m.proceduralbones) {
+        std::fputs("@proc driver", stdout);
+        ProcString(boneName(p.helper));
+        ProcString(boneName(p.driver));
+        for (const pulse::compile::ProceduralBoneTrigger& tr : p.triggers) {
+            // same double-then-narrow as the writer
+            const float invTolerance = static_cast<float>(1.0 / static_cast<double>(tr.tolerance));
+            ProcFloats({invTolerance, tr.trigger.x, tr.trigger.y, tr.trigger.z, tr.trigger.w,
+                        tr.pos.x, tr.pos.y, tr.pos.z,
+                        tr.quat.x, tr.quat.y, tr.quat.z, tr.quat.w});
         }
-        pulse::api::Record("driver", "{\"helper\":" + boneName(rule.helper) +
-            ",\"driver\":" + boneName(rule.driver) + ",\"triggers\":" + triggers + "]}");
+        std::putchar('\n');
     }
-    for (const auto& rule : model.aimatbones) {
-        pulse::api::Record("aimat", "{\"bone\":" + boneName(rule.bone) +
-            ",\"parent\":" + boneName(rule.parent) + ",\"targetKind\":" +
-            pulse::api::String(rule.aimAttach == -1 ? "bone" : "attachment") + ",\"target\":" +
-            (rule.aimAttach == -1 ? boneName(rule.aimBone) : pulse::api::String(rule.aimname)) +
-            ",\"values\":" + ProcFloats({rule.aimvector.x, rule.aimvector.y, rule.aimvector.z,
-                rule.upvector.x, rule.upvector.y, rule.upvector.z,
-                rule.basepos.x, rule.basepos.y, rule.basepos.z}) + "}");
+
+    for (const pulse::compile::AimAtBone& a : m.aimatbones) {
+        std::fputs("@proc aimat", stdout);
+        ProcString(boneName(a.bone));
+        ProcString(boneName(a.parent));
+        std::fputs(a.aimAttach == -1 ? " bone" : " attachment", stdout);
+        ProcString(a.aimAttach == -1 ? boneName(a.aimBone) : a.aimname);
+        ProcFloats({a.aimvector.x, a.aimvector.y, a.aimvector.z, a.upvector.x, a.upvector.y,
+                    a.upvector.z, a.basepos.x, a.basepos.y, a.basepos.z});
+        std::putchar('\n');
     }
+    std::fputs("@proc end\n", stdout);
 }
 
+static std::string ReadStdin() {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
+    std::string text;
+    char buf[65536];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0)
+        text.append(buf, n);
+    return text;
+}
 
 static int RunCompile(int argc, char** argv, const pulse::api::Request* request = nullptr) {
     if (argc < 2)
@@ -179,11 +224,10 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
     bool definebones = false;
     bool verify = false;
     bool dumpMaterials = false;
-    const bool materialsRequest = request && request->method == "materials";
-    const bool dumpProcedural = request && request->method == "procedural";
-    const bool dumpStructure = request && (request->method == "analyze" || request->method == "edit");
-    const bool dumpDependencies = request && request->method == "compile";
-    pulse::dependencies::g_enabled = dumpDependencies;
+    bool dumpProcedural = false;
+    bool scriptFromStdin = request && request->method == "analyze";
+    bool dumpDependencies = request && request->method == "compile";
+    if (dumpDependencies) pulse::dependencies::g_enabled = true;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
@@ -237,22 +281,32 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
         } else if (std::strcmp(argv[i], "-forcewritevertexdata") == 0) {
             forceWriteVertexData = true;
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
-            if (request) return Fail("bad API option", argv[i]);
+            if (request) return Fail("bad API option", "Standalone-only option");
             definebones = true;
         } else if (std::strcmp(argv[i], "-verify") == 0) {
+            if (request) return Fail("bad API option", "Standalone-only option");
             verify = true;
         } else if (std::strcmp(argv[i], "-legacysequencebounds") == 0) {
             legacySequenceBounds = true;
+        } else if (std::strcmp(argv[i], "-dumpprocedural") == 0) {
+            if (request) return Fail("bad API option", "Standalone-only option");
+            dumpProcedural = true;
+        } else if (std::strcmp(argv[i], "-stdin") == 0) {
+            if (request) return Fail("bad API option", "Standalone-only option");
+            scriptFromStdin = true;
+        } else if (std::strcmp(argv[i], "-dumpdependencies") == 0) {
+            if (request) return Fail("bad API option", "Standalone-only option");
+            dumpDependencies = true;
+            pulse::dependencies::g_enabled = true;
         } else if (std::strcmp(argv[i], "-dumpmaterials") == 0) {
-            if (request) return Fail("bad API option", "Use the materials API method");
+            if (request) return Fail("bad API option", "Standalone-only option");
             dumpMaterials = true;
         } else if (std::strcmp(argv[i], "-perfmetrics") == 0) {
             pulse::perf::g_enabled = true;
         } else if (std::strcmp(argv[i], "-pause") == 0) {
+            if (request) return Fail("bad API option", "Standalone-only option");
             pulse::fatal::g_pause = true;
         } else if (argv[i][0] == '-') {
-            if (std::strncmp(argv[i], "-dump", 5) == 0 || std::strcmp(argv[i], "-stdin") == 0)
-                return Fail("bad option", "Use -api for integration requests and source buffers.");
             if (request) return Fail("bad API option", argv[i]);
             // studiomdl GUI front ends pass switches we do not have (-nop4,
             // -verbose, ...). Warn and carry on rather than refusing to run.
@@ -277,7 +331,7 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
 
     // .pulseqc (keyvalues1) is the only front end. The keyvalues2 .pulsemdl
     // loader is halted indefinitely - pulseloader.cpp is out of the build.
-    if (!dumpStructure && !pulse::loader::IsQcScriptPath(script))
+    if (!pulse::loader::IsQcScriptPath(script))
         return Fail("unsupported script",
                     std::string(script) + ": only .pulseqc/.qc compile scripts are supported");
 
@@ -287,14 +341,11 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    const std::string sourceText = request ? request->buffers : std::string();
-    if (dumpStructure)
-        return pulse::loader::DumpStructure(script, defvars, includeDirs, fileDirs,
-            !sourceText.empty() ? &sourceText : nullptr,
-            modelname, stripLods) ? 0 : 1;
+    const std::string stdinText = request ? request->buffers : scriptFromStdin ? ReadStdin() : std::string();
     if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
-                                     nullptr))
+                                     scriptFromStdin ? &stdinText : nullptr))
         return Fail("script error", err);
+    if (request && request->method == "analyze") return 0;
     auto tLoad = Clock::now();
     input.legacySequenceBounds = legacySequenceBounds;
     if (forceWriteVertexData)
@@ -324,15 +375,8 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
     auto tCompile = Clock::now();
 
     if (dumpProcedural) {
-        g_stage = "procedural API";
+        g_stage = "dumpprocedural";
         DumpProcedural(model);
-        return 0;
-    }
-
-    if (materialsRequest) {
-        for (int texture : model.mats->materialToTexture)
-            pulse::api::Record("material", "{\"name\":" +
-                pulse::api::String(model.mats->textures[texture].name) + "}");
         return 0;
     }
 
@@ -390,15 +434,31 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
 
 int main(int argc, char** argv) {
     const bool api = argc == 2 && std::strcmp(argv[1], "-api") == 0;
-    const bool commandsOnly = argc == 2 && std::strcmp(argv[1], "-dumpcommands") == 0;
-    std::setvbuf(stdout, nullptr, commandsOnly ? _IOFBF : _IONBF, commandsOnly ? 1 << 16 : 0);
+    // progress lines are useless if they sit in the CRT buffer until exit -
+    // MSVC has no line buffering (_IOLBF == _IOFBF), so go unbuffered
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+
     pulse::fatal::Install();
-    int rc = 1;
+
+    // -dumpcommands takes no script and runs before the banner: the output is
+    // read by tools, so stdout carries the command list and nothing else.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "-dumpcommands") == 0) {
+            pulse::loader::PrintCommandNames();
+            return 0;
+        }
+    }
+
+    if (!api) PrintHeader();
+
+    // a leak past a stage's own error path still gets named in the footer
+    int rc;
     try {
         if (api) {
             pulse::api::Begin();
             auto request = pulse::api::ReadRequest();
             if (request.method == "catalog") {
+                pulse::api::Record("capability", "{\"api\":1,\"catalog\":1,\"analyze\":1,\"compile\":1,\"buffers\":1,\"diagnostics\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else {
@@ -406,13 +466,7 @@ int main(int argc, char** argv) {
                 for (auto& value : request.arguments) arguments.push_back(value.data());
                 rc = RunCompile(static_cast<int>(arguments.size()), arguments.data(), &request);
             }
-        } else if (commandsOnly) {
-            pulse::loader::PrintCommandNames();
-            rc = 0;
-        } else {
-            PrintHeader();
-            rc = RunCompile(argc, argv);
-        }
+        } else rc = RunCompile(argc, argv);
     } catch (const std::bad_alloc&) {
         rc = Fail("out of memory", "an allocation failed - the model may exceed available RAM");
     } catch (const std::exception& e) {
@@ -420,10 +474,7 @@ int main(int argc, char** argv) {
     } catch (...) {
         rc = Fail("internal error", "unknown C++ exception");
     }
-    if (api && pulse::api::Active()) {
-        try { pulse::api::Finish(rc); }
-        catch (const std::exception& e) { rc = Fail("API output error", e.what()); }
-    }
+    if (api && pulse::api::Active()) pulse::api::Finish(rc);
     pulse::fatal::PauseIfAsked();
     return rc;
 }

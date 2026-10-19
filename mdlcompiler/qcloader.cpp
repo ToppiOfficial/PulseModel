@@ -11,14 +11,11 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <initializer_list>
 #include <iterator>
-#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -85,13 +82,7 @@ struct Token {
     // parameter). Only conditions care: an expanded operand is a literal value,
     // never the name of another variable to look up.
     bool expanded = false;
-    size_t start = 0;
-    size_t end = 0;
-    int node = -1;
 };
-
-struct StructureCapture;
-thread_local StructureCapture* g_structure = nullptr;
 
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
 // line comments (the latter two only at a token start, and `;` also ends a word,
@@ -99,7 +90,7 @@ thread_local StructureCapture* g_structure = nullptr;
 bool Tokenize(const std::string& s, const std::string& file,
               std::vector<Token>& out, std::string* err) {
     int line = 1;
-    size_t i = s.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+    size_t i = 0;
     while (i < s.size()) {
         const char c = s[i];
         if (c == '\n') {
@@ -128,7 +119,6 @@ bool Tokenize(const std::string& s, const std::string& file,
         }
         if (c == '"') {
             Token t;
-            t.start = i;
             t.line = line;
             t.quoted = true;
             i++;
@@ -138,24 +128,20 @@ bool Tokenize(const std::string& s, const std::string& file,
                 t.text.push_back(s[i++]);
             }
             if (i >= s.size()) {
-                t.end = i;
-                out.push_back(t);
                 if (err) *err = file + "(" + std::to_string(t.line) +
                                 "): unterminated string";
                 return false;
             }
             i++; // closing quote
-            t.end = i;
             out.push_back(std::move(t));
             continue;
         }
         if (c == '{' || c == '}') {
-            out.push_back({std::string(1, c), line, false, false, i, i + 1});
+            out.push_back({std::string(1, c), line, false});
             i++;
             continue;
         }
         Token t;
-        t.start = i;
         t.line = line;
         while (i < s.size()) {
             const char d = s[i];
@@ -166,7 +152,6 @@ bool Tokenize(const std::string& s, const std::string& file,
             t.text.push_back(d);
             i++;
         }
-        t.end = i;
         out.push_back(std::move(t));
     }
     return true;
@@ -177,18 +162,6 @@ bool Tokenize(const std::string& s, const std::string& file,
 // ---------------------------------------------------------------------------
 
 struct Ctx;
-void StructureTouch(Ctx& c, const Token& token);
-void StructureRead(Ctx& c);
-struct EditorField {
-    std::string label, type, reference, evaluated;
-};
-std::string EditorParameters(const std::string& command, const std::vector<Token>& tokens,
-                             size_t start, size_t end, const std::map<size_t, EditorField>& fields,
-                             const std::map<size_t, std::pair<size_t, size_t>>& commands);
-std::string EditorCommandStarter(const std::string& command);
-std::string EditorCommandSection(const std::string& command);
-#include "qcstructure.inl"
-#include "qceditor-api.inl"
 // Resolves any $include or conditional ($if/$switch) at the read cursor in place,
 // so both are transparent at any nesting depth - a handler reading its own braced
 // body gets them resolved too. Defined under the helpers it needs.
@@ -201,7 +174,6 @@ struct Ctx {
     std::string rootFile; // `file` for the root script; an $include changes `file`, not this
     std::vector<Token> toks;
     size_t pos = 0;
-    size_t observedPos = 0;
     std::string* err = nullptr;
     fs::path curDir; // dir of the file currently being parsed ($include is relative to it)
     std::vector<std::string> includeStack; // cycle guard, LIFO with includeFrames
@@ -306,12 +278,8 @@ struct Ctx {
                 f.endPos += src.size();
     }
 
-    bool Eof() { if (g_structure) StructureRead(*this); ResolveDirectives(*this); return abortErr || pos >= toks.size(); }
-    const Token& Cur() {
-        if (g_structure) StructureRead(*this);
-        ResolveDirectives(*this);
-        return toks[pos];
-    }
+    bool Eof() { ResolveDirectives(*this); return abortErr || pos >= toks.size(); }
+    const Token& Cur() { ResolveDirectives(*this); return toks[pos]; }
 
     // True when -defvar owns this variable name (case-sensitive, like the
     // variable table itself).
@@ -324,9 +292,7 @@ struct Ctx {
 
     bool Fail(int line, const std::string& msg) {
         if (abortErr) return false; // keep the first $include error, not a cascade
-        if (g_structure) StructureRead(*this);
         if (err) *err = file + "(" + std::to_string(line) + "): " + msg;
-        if (g_structure) g_structure->Error((curDir / pulse::FilePath(file)).u8string(), line, msg);
         return false;
     }
 
@@ -340,36 +306,16 @@ struct Ctx {
     // A required value token. Rejects a following $command so a missing
     // argument reports itself instead of eating the next line.
     bool Want(const char* what, const Token& cmd, std::string& value) {
-        if (AtCommand()) {
-            if (g_structure && !rawCollect) EditorMissing(cmd, what, "value", "");
+        if (AtCommand())
             return Fail(cmd.line, cmd.text + " expects " + what);
-        }
-        const auto& token = toks[pos++];
-        value = token.text;
-        if (g_structure && !rawCollect) EditorRead(token, what, "value", "", value);
-        return true;
-    }
-
-    bool WantName(const char* kind, const char* what, const Token& cmd, std::string& value) {
-        if (!Want(what, cmd, value)) {
-            if (g_structure && !rawCollect) EditorMissing(cmd, what, "reference", kind);
-            return false;
-        }
-        if (g_structure && !value.empty()) {
-            EditorRead(toks[pos - 1], what, "reference", kind, value);
-            const int owner = pos > 0 ? toks[pos - 1].node : cmd.node;
-            g_structure->Reference(owner, kind, value, false);
-        }
+        value = toks[pos++].text;
         return true;
     }
 
     bool WantFloat(const char* what, const Token& cmd, float& value) {
         std::string s;
-        if (!Want(what, cmd, s)) {
-            if (g_structure && !rawCollect) EditorMissing(cmd, what, "number", "");
+        if (!Want(what, cmd, s))
             return false;
-        }
-        if (g_structure && !rawCollect) EditorRead(toks[pos - 1], what, "number", "", s);
         try {
             size_t used = 0;
             const float v = std::stof(s, &used);
@@ -384,11 +330,8 @@ struct Ctx {
 
     bool WantInt(const char* what, const Token& cmd, int& value) {
         std::string s;
-        if (!Want(what, cmd, s)) {
-            if (g_structure && !rawCollect) EditorMissing(cmd, what, "integer", "");
+        if (!Want(what, cmd, s))
             return false;
-        }
-        if (g_structure && !rawCollect) EditorRead(toks[pos - 1], what, "integer", "", s);
         try {
             size_t used = 0;
             const int v = std::stoi(s, &used);
@@ -405,12 +348,9 @@ struct Ctx {
     // unset placeholder -> -1 (the ikrule `range` frame markers).
     bool WantFrame(const char* what, const Token& cmd, int& value) {
         std::string s;
-        if (!Want(what, cmd, s)) {
-            if (g_structure && !rawCollect) EditorMissing(cmd, what, "frame", "");
+        if (!Want(what, cmd, s))
             return false;
-        }
         if (!s.empty() && s[0] == '.') { value = -1; return true; }
-        if (g_structure && !rawCollect) EditorRead(toks[pos - 1], what, "frame", "", s);
         try {
             size_t used = 0;
             const int v = std::stoi(s, &used);
@@ -437,8 +377,6 @@ struct Ctx {
         }
     }
 };
-
-#include "qcstructurecontext.inl"
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -480,7 +418,6 @@ fs::path FindSourceFile(const Ctx& c, const std::string& filename,
 
 // editors on Windows add one unasked
 void StripUtf8Bom(std::string& text) {
-    if (g_structure) return;
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
         static_cast<unsigned char>(text[1]) == 0xBB &&
         static_cast<unsigned char>(text[2]) == 0xBF)
@@ -1083,7 +1020,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 MeshEdit::BoneScale bs;
                 bs.line = t->line;
                 float f = 1.0f;
-                if (!c.WantName("bone", "a bone name", *t, bs.bone) || !c.WantFloat("a scale factor", *t, f))
+                if (!c.Want("a bone name", *t, bs.bone) || !c.WantFloat("a scale factor", *t, f))
                     return false;
                 if (!(f > 0.0f) || !std::isfinite(f))
                     return c.Fail(t->line, where + ": $scalebone factor must be > 0");
@@ -2078,7 +2015,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             e.kind = FaceMarkup::Kind::Eyeball;
             std::string iris;
             if (!c.Want("an eyeball name", t, e.eyeball.name) ||
-                !c.WantName("bone", "a bone name", t, e.eyeball.bonename) ||
+                !c.Want("a bone name", t, e.eyeball.bonename) ||
                 !c.WantFloat("an origin x", t, e.eyeball.origin.x) ||
                 !c.WantFloat("an origin y", t, e.eyeball.origin.y) ||
                 !c.WantFloat("an origin z", t, e.eyeball.origin.z) ||
@@ -2139,7 +2076,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             e.kind = FaceMarkup::Kind::Mouth;
             if (!c.WantInt("a mouth index", t, index) ||
                 !c.Want("a flex controller name", t, e.mouth.controller) ||
-                !c.WantName("bone", "a bone name", t, e.mouth.bonename) ||
+                !c.Want("a bone name", t, e.mouth.bonename) ||
                 !c.WantFloat("a forward x", t, e.mouth.forward.x) ||
                 !c.WantFloat("a forward y", t, e.mouth.forward.y) ||
                 !c.WantFloat("a forward z", t, e.mouth.forward.z))
@@ -2477,8 +2414,8 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "localhierarchy") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::LocalHierarchy;
-        if (!c.WantName("bone", "a bone name", t, cmd.alignBone) ||
-            !c.WantName("bone", "a parent bone name", t, cmd.name))
+        if (!c.Want("a bone name", t, cmd.alignBone) ||
+            !c.Want("a parent bone name", t, cmd.name))
             return -1;
         cmd.driverStart = cmd.driverPeak = cmd.driverTail = cmd.driverEnd = -1;
         if (!c.AtCommand() && !c.Cur().quoted &&
@@ -2549,7 +2486,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 !c.WantFloat("a roll", t, cmd.counterAngles.z))
                 return -1;
         }
-        if (!c.WantName("bone", "a bone name", t, cmd.alignBone))
+        if (!c.Want("a bone name", t, cmd.alignBone))
             return -1;
         a.cmds.push_back(std::move(cmd));
         return 1;
@@ -2560,7 +2497,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "forceboneposrot") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::ForceBonePosRot;
-        if (!c.WantName("bone", "a bone name", t, cmd.alignBone))
+        if (!c.Want("a bone name", t, cmd.alignBone))
             return -1;
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "pos") == 0) {
@@ -2737,7 +2674,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::Subtract;
         cmd.presubtract = (_stricmp(o.c_str(), "presubtract") == 0);
-        if (!c.WantName("animation", "an animation name", t, cmd.name) ||
+        if (!c.Want("an animation name", t, cmd.name) ||
             !c.WantInt("a frame", t, cmd.frame))
             return -1;
         a.cmds.push_back(std::move(cmd));
@@ -2771,7 +2708,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             return -1;
         cmd.srcframe = cmd.motionEndFrame;
         if (ref) {
-            if (!c.WantName("animation", "an animation name", t, cmd.name))
+            if (!c.Want("an animation name", t, cmd.name))
                 return -1;
         }
         for (;;) {
@@ -2816,7 +2753,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "match") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::Match;
-        if (!c.WantName("animation", "an animation name", t, cmd.name))
+        if (!c.Want("an animation name", t, cmd.name))
             return -1;
         a.cmds.push_back(std::move(cmd));
         return 1;
@@ -2827,7 +2764,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "matchblend") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::MatchBlend;
-        if (!c.WantName("animation", "an animation name", t, cmd.name) ||
+        if (!c.Want("an animation name", t, cmd.name) ||
             !c.WantInt("a source frame", t, cmd.srcframe) ||
             !c.WantInt("a destination frame", t, cmd.destframe) ||
             !c.WantInt("a pre-blend frame count", t, cmd.matchPre) ||
@@ -2846,7 +2783,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::TransformBone;
         cm::AnimBoneTransform& bt = cmd.xform;
-        if (!c.WantName("bone", "a bone name", t, bt.bone))
+        if (!c.Want("a bone name", t, bt.bone))
             return -1;
         for (;;) {
             if (c.AtCommand() || c.Eof() || c.Cur().quoted || c.Cur().line != t.line)
@@ -2892,7 +2829,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "matchposition") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::MatchPosition;
-        if (!c.WantName("bone", "a bone name", t, cmd.alignBone))
+        if (!c.Want("a bone name", t, cmd.alignBone))
             return -1;
         while (!c.AtCommand() && !c.Eof() && !c.Cur().quoted && c.Cur().line == t.line) {
             const std::string& n = c.Cur().text;
@@ -2939,8 +2876,6 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             cmd.copyBindPose = true;
             cmd.name.clear();
         }
-        if (g_structure && !cmd.copyBindPose)
-            g_structure->Reference(t.node, "animation-or-sequence", cmd.name, false);
         if (cmd.srcframe < 0) {
             c.Fail(t.line, "copypose: source frame must be >= 0");
             return -1;
@@ -3010,7 +2945,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::WorldspaceBlend;
         cmd.worldLoops = (_stricmp(o.c_str(), "worldspaceblendloop") == 0);
-        if (!c.WantName("animation", "an animation name", t, cmd.name))
+        if (!c.Want("an animation name", t, cmd.name))
             return -1;
         if (cmd.worldLoops && !c.WantInt("a start frame", t, cmd.srcframe))
             return -1;
@@ -3032,9 +2967,9 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                                 _stricmp(o.c_str(), "alignboneto") == 0);
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::Align;
-        if (named && !c.WantName("bone", "a bone name", t, cmd.alignBone))
+        if (named && !c.Want("a bone name", t, cmd.alignBone))
             return -1;
-        if (!c.WantName("animation", "an animation name", t, cmd.name))
+        if (!c.Want("an animation name", t, cmd.name))
             return -1;
         if (wholeClip) {
             cmd.motiontype = 0x0001 | 0x0002; // STUDIO_X | STUDIO_Y
@@ -3067,7 +3002,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "appendanim") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::AppendAnim;
-        if (!c.WantName("animation", "an animation name", t, cmd.name))
+        if (!c.Want("an animation name", t, cmd.name))
             return -1;
         a.cmds.push_back(std::move(cmd));
         return 1;
@@ -3079,7 +3014,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     if (_stricmp(o.c_str(), "bonedriver") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::BoneDriver;
-        if (!c.WantName("bone", "a bone name", t, cmd.alignBone))
+        if (!c.Want("a bone name", t, cmd.alignBone))
             return -1;
         // each clause is optional, and stock checks them in this fixed order
         if (!c.AtCommand() && !c.Cur().quoted &&
@@ -3322,7 +3257,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         return false;
     if (_stricmp(type.c_str(), "touch") == 0) {
         rule.type = "touch";
-        if (!c.WantName("bone", "a touch bone name", cmd, rule.touchBone))
+        if (!c.Want("a touch bone name", cmd, rule.touchBone))
             return false;
     } else if (_stricmp(type.c_str(), "footstep") == 0) {
         rule.type = "footstep";
@@ -3338,7 +3273,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         rule.type = "footstep";
         rule.autosteps = true;
         if (!c.WantInt("a step count", cmd, rule.autostepsCount) ||
-            !c.WantName("bone", "a foot bone name", cmd, rule.autostepsBone))
+            !c.Want("a foot bone name", cmd, rule.autostepsBone))
             return false;
     } else {
         return c.Fail(cmd.line, "ikrule type \"" + type + "\": not yet supported "
@@ -3555,7 +3490,7 @@ bool ParseKeyValues(Ctx& c, const Token& cmd, std::string& out,
 // the command for the same bone adds another control rather than replacing it.
 bool CmdBoneFlexDriver(Ctx& c, const Token& cmd) {
     std::string bone, component, controller;
-    if (!c.WantName("bone", "a bone name", cmd, bone) ||
+    if (!c.Want("a bone name", cmd, bone) ||
         !c.Want("a bone component (tx/ty/tz)", cmd, component) ||
         !c.Want("a flex controller name", cmd, controller))
         return false;
@@ -3727,7 +3662,7 @@ bool CmdEyeball(Ctx& c, const Token& cmd) {
         const Token& t = *c.Next();
         const std::string o = Lower(t.text);
         if (o == "bone") {
-            if (!c.WantName("bone", "a bone name", cmd, entry.eyeball.bonename)) return false;
+            if (!c.Want("a bone name", cmd, entry.eyeball.bonename)) return false;
             haveBone = true;
         } else if (o == "material") {
             if (!c.Want("a material name", cmd, entry.eyeball.material)) return false;
@@ -3770,7 +3705,7 @@ bool CmdMouth(Ctx& c, const Token& cmd) {
     FaceMarkup::Entry entry;
     entry.kind = FaceMarkup::Kind::Mouth;
     if (!c.Want("a flex controller name", cmd, entry.mouth.controller) ||
-        !c.WantName("bone", "a bone name", cmd, entry.mouth.bonename) ||
+        !c.Want("a bone name", cmd, entry.mouth.bonename) ||
         !c.WantFloat("a forward x", cmd, entry.mouth.forward.x) ||
         !c.WantFloat("a forward y", cmd, entry.mouth.forward.y) ||
         !c.WantFloat("a forward z", cmd, entry.mouth.forward.z))
@@ -4207,7 +4142,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
             // bone's motion (STUDIO_ROOTXFORM)
             if (_stricmp(o.c_str(), "rootdriver") == 0) {
                 seq.flags |= kStudioRootXform;
-                if (!c.WantName("bone", "a bone name", t, seq.rootdriverBone))
+                if (!c.Want("a bone name", t, seq.rootdriverBone))
                     return false;
                 continue;
             }
@@ -4220,7 +4155,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
             // auto-created) in the compile stage, like `blend`.
             if (_stricmp(o.c_str(), "posecycle") == 0) {
                 seq.flags |= kStudioCyclePose;
-                if (!c.WantName("poseparameter", "a pose parameter name", t, seq.posecycle))
+                if (!c.Want("a pose parameter name", t, seq.posecycle))
                     return false;
                 continue;
             }
@@ -4241,7 +4176,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     return c.Fail(t.line, cmd.text + " \"" + seq.name +
                                           "\": more than 2 blend parameters");
                 auto& bp = seq.blendparams[seq.numblendparams++];
-                if (!c.WantName("poseparameter", "a pose parameter name", t, bp.parameter) ||
+                if (!c.Want("a pose parameter name", t, bp.parameter) ||
                     !c.WantFloat("a start value", t, bp.min) ||
                     !c.WantFloat("an end value", t, bp.max))
                     return false;
@@ -4256,7 +4191,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                 const int slot = seq.numblendparams;
                 auto& bp = seq.blendparams[seq.numblendparams++];
                 std::string control;
-                if (!c.WantName("poseparameter", "a pose parameter name", t, bp.parameter) ||
+                if (!c.Want("a pose parameter name", t, bp.parameter) ||
                     !c.Want("an attachment name", t, seq.paramattachment[slot]) ||
                     !c.Want("a motion control", t, control))
                     return false;
@@ -4269,20 +4204,20 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                 continue;
             }
             if (_stricmp(o.c_str(), "blendref") == 0) {
-                if (!c.WantName("animation", "an animation name", t, seq.paramanim)) return false;
+                if (!c.Want("an animation name", t, seq.paramanim)) return false;
                 continue;
             }
             if (_stricmp(o.c_str(), "blendcomp") == 0) {
-                if (!c.WantName("animation", "an animation name", t, seq.paramcompanim)) return false;
+                if (!c.Want("an animation name", t, seq.paramcompanim)) return false;
                 continue;
             }
             if (_stricmp(o.c_str(), "blendcenter") == 0) {
-                if (!c.WantName("animation", "an animation name", t, seq.paramcenter)) return false;
+                if (!c.Want("an animation name", t, seq.paramcenter)) return false;
                 continue;
             }
             if (_stricmp(o.c_str(), "addlayer") == 0) {
                 cm::CompileInput::InAutoLayer al;
-                if (!c.WantName("sequence", "a sequence name", t, al.sequence))
+                if (!c.Want("a sequence name", t, al.sequence))
                     return false;
                 while (!c.AtCommand() && !c.Cur().quoted && c.Cur().text != "}" &&
                        _stricmp(c.Cur().text.c_str(), "local") == 0) {
@@ -4295,7 +4230,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
             }
             if (_stricmp(o.c_str(), "blendlayer") == 0) {
                 cm::CompileInput::InAutoLayer al;
-                if (!c.WantName("sequence", "a sequence name", t, al.sequence) ||
+                if (!c.Want("a sequence name", t, al.sequence) ||
                     !c.WantFloat("a start frame", t, al.start) ||
                     !c.WantFloat("a peak frame", t, al.peak) ||
                     !c.WantFloat("a tail frame", t, al.tail) ||
@@ -4315,7 +4250,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     } else if (_stricmp(f.c_str(), "poseparameter") == 0) {
                         c.pos++;
                         al.flags |= kStudioAlPose;
-                        if (!c.WantName("poseparameter", "a pose parameter name", t, al.poseparameter))
+                        if (!c.Want("a pose parameter name", t, al.poseparameter))
                             return false;
                     } else {
                         break;
@@ -4437,7 +4372,6 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
         //     filename loaded as an implied "@<seq>" animation ---
         auto named = c.namedAnims.find(o);
         if (named != c.namedAnims.end()) {
-            if (g_structure) g_structure->Reference(t.node, "animation", o, true);
             blends.push_back(named->second);
         } else {
             cm::CompileInput::InAnim a;
@@ -4554,7 +4488,6 @@ bool CmdAppendCommon(Ctx& c, const Token& cmd, AppendMode mode) {
     for (cm::CompileInput::InSequence& seq : c.in.sequences) {
         if (_stricmp(seq.name.c_str(), name.c_str()) != 0)
             continue;
-        if (g_structure) g_structure->Reference(cmd.node, "sequence", name, true);
         if (seq.isDeclare || seq.animIndex < 0)
             return c.Fail(cmd.line, cmd.text + " \"" + name +
                                     "\": a $declaresequence slot has no animation");
@@ -4571,7 +4504,6 @@ bool CmdAppendCommon(Ctx& c, const Token& cmd, AppendMode mode) {
     for (const auto& kv : c.namedAnims) {
         if (_stricmp(kv.first.c_str(), name.c_str()) == 0) { animIndex = kv.second; break; }
     }
-    if (g_structure) g_structure->Reference(cmd.node, "animation-or-sequence", name, animIndex >= 0, true);
     if (animIndex < 0)
         return c.Fail(cmd.line, cmd.text + ": no $sequence or $animation named \"" +
                                 name + "\"");
@@ -4796,7 +4728,7 @@ bool CmdContents(Ctx& c, const Token& cmd) {
 // same bone REPLACES the word (reference Cmd_JointContents).
 bool CmdJointContents(Ctx& c, const Token& cmd) {
     std::string bone;
-    if (!c.WantName("bone", "a bone name", cmd, bone))
+    if (!c.Want("a bone name", cmd, bone))
         return false;
     int add = 0, remove = 0;
     if (!ParseContentsTokens(c, cmd, add, remove))
@@ -4817,7 +4749,7 @@ bool CmdJointContents(Ctx& c, const Token& cmd) {
 // existing entry for the same bone.
 bool CmdJointSurfaceProp(Ctx& c, const Token& cmd) {
     std::string bone, prop;
-    if (!c.WantName("bone", "a bone name", cmd, bone))
+    if (!c.Want("a bone name", cmd, bone))
         return false;
     if (!c.Want("a surface property name", cmd, prop))
         return false;
@@ -4986,7 +4918,7 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
     // `origin`/`position` clause instead.
     if (!c.AtCommand() && !isClause(c.Cur())) {
         const Token sub{cmd.text + " \"" + a.name + "\"", c.Cur().line, false};
-        if (!c.WantName("bone", "a bone name", sub, a.bone))
+        if (!c.Want("a bone name", sub, a.bone))
             return false;
         if (!c.AtCommand() && !isClause(c.Cur())) {
             if (!c.WantFloat("an X offset", sub, a.origin.x) ||
@@ -5035,7 +4967,7 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
             }
             a.name = std::move(keep);
         } else if (!t.quoted && _stricmp(t.text.c_str(), "bone") == 0) {
-            if (!c.WantName("bone", "a bone name", sub, a.bone))
+            if (!c.Want("a bone name", sub, a.bone))
                 return false;
         } else if (!t.quoted && (_stricmp(t.text.c_str(), "origin") == 0 ||
                                  _stricmp(t.text.c_str(), "position") == 0)) {
@@ -5243,7 +5175,7 @@ bool CmdLockBoneLengths(Ctx& c, const Token&) {
 // sequence names but calculates the alignment from every eligible animation.
 bool CmdLimitRotation(Ctx& c, const Token& cmd) {
     std::string bone;
-    if (!c.WantName("bone", "a bone name", cmd, bone))
+    if (!c.Want("a bone name", cmd, bone))
         return false;
     c.in.limitRotationBones.push_back(std::move(bone));
     while (!c.Eof() && c.Cur().line == cmd.line)
@@ -5270,7 +5202,7 @@ bool CmdLimitRotation(Ctx& c, const Token& cmd) {
 bool CmdTransformBone(Ctx& c, const Token& cmd) {
     cm::BoneTransformEdit e;
     e.line = cmd.line;
-    if (!c.WantName("bone", "a bone name", cmd, e.name))
+    if (!c.Want("a bone name", cmd, e.name))
         return false;
 
     // an optional trailing number: consumed only when the token parses whole as
@@ -5312,7 +5244,7 @@ bool CmdTransformBone(Ctx& c, const Token& cmd) {
         } else if (!t.quoted && _stricmp(o, "worldposition") == 0) {
             e.worldPosition = true;
         } else if (!t.quoted && _stricmp(o, "transformweights") == 0) {
-            if (!c.WantName("bone", "a residual bone name", sub, e.residualbone))
+            if (!c.Want("a residual bone name", sub, e.residualbone))
                 return false;
             e.hasMoveWeight = true;
             optFloat(e.moveWeightFactor);    // ramp band width, default 1.0
@@ -5360,7 +5292,7 @@ bool CmdTransformBone(Ctx& c, const Token& cmd) {
 // $root <bone> (Cmd_Root): the bone motion extraction, $alignto and $angle
 // work from. Resolved after the bone table exists; unknown falls back to bone 0.
 bool CmdRoot(Ctx& c, const Token& cmd) {
-    return c.WantName("bone", "a bone name", cmd, c.in.primaryRootBone);
+    return c.Want("a bone name", cmd, c.in.primaryRootBone);
 }
 
 // $unlockdefinebones (Cmd_UnlockDefineBones): flips the default lock state for
@@ -5378,7 +5310,7 @@ bool CmdUnlockDefineBones(Ctx& c, const Token&) {
 bool CmdDefineBone(Ctx& c, const Token& cmd) {
     cm::ImportBone ib;
     if (!c.Want("a bone name", cmd, ib.name) ||
-        !c.WantName("bone", "a parent name (\"\" for a root bone)", cmd, ib.parent))
+        !c.Want("a parent name (\"\" for a root bone)", cmd, ib.parent))
         return false;
 
     ib.bUnlocked = c.unlockDefineBones;
@@ -5426,7 +5358,6 @@ bool CmdDefineBone(Ctx& c, const Token& cmd) {
 // The markup entries share one BoneMarkup per bone, so $bonemerge and
 // $donotcollapse can both name it.
 cm::BoneMarkup& FindOrAddMarkup(Ctx& c, const std::string& name) {
-    if (g_structure) g_structure->Reference(g_structure->current, "bone", name, false);
     for (auto& bm : c.in.bonemarkups)
         if (_stricmp(bm.name.c_str(), name.c_str()) == 0)
             return bm;
@@ -5438,7 +5369,7 @@ cm::BoneMarkup& FindOrAddMarkup(Ctx& c, const std::string& name) {
 // list so the same command need not be repeated per bone.
 bool WantBoneNames(Ctx& c, const Token& cmd, std::vector<std::string>& names) {
     std::string first;
-    if (!c.WantName("bone", "a bone name", cmd, first))
+    if (!c.Want("a bone name", cmd, first))
         return false;
     names.push_back(std::move(first));
     while (!c.AtCommand())
@@ -5472,8 +5403,8 @@ bool CmdDoNotCollapse(Ctx& c, const Token& cmd) {
 // after every other pass, so the rest of the script keeps naming the source bone.
 bool CmdRenameBone(Ctx& c, const Token& cmd) {
     std::string from, to;
-    if (!c.WantName("bone", "a bone name", cmd, from) ||
-        !c.WantName("bone", "a replacement bone name", cmd, to))
+    if (!c.Want("a bone name", cmd, from) ||
+        !c.Want("a replacement bone name", cmd, to))
         return false;
     c.in.boneRenames.emplace_back(std::move(from), std::move(to));
     return true;
@@ -5503,8 +5434,8 @@ bool CmdCullJiggleBones(Ctx& c, const Token&) {
 // A quoted empty parent makes the child a root bone.
 bool CmdHierarchy(Ctx& c, const Token& cmd) {
     cm::CompileInput::ForcedHierarchy fh;
-    if (!c.WantName("bone", "a bone name", cmd, fh.child) ||
-        !c.WantName("bone", "a parent bone name", cmd, fh.parent))
+    if (!c.Want("a bone name", cmd, fh.child) ||
+        !c.Want("a parent bone name", cmd, fh.parent))
         return false;
     c.in.forcedHierarchy.push_back(std::move(fh));
     return true;
@@ -5660,7 +5591,7 @@ bool ParseJiggleSection(Ctx& c, const Token& cmd, const std::string& sect, cm::J
 // (Cmd_JiggleBone). Re-declaring a bone overwrites its definition in place.
 bool CmdJiggleBone(Ctx& c, const Token& cmd) {
     cm::JiggleBone jb;
-    if (!c.WantName("bone", "a bone name", cmd, jb.bonename))
+    if (!c.Want("a bone name", cmd, jb.bonename))
         return false;
     if (!WantOpenBrace(c, cmd, "$jigglebone"))
         return false;
@@ -5763,8 +5694,8 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
 // block mode - one block can mix relative `trigger`s with sampled ones.
 bool CmdDriverBone(Ctx& c, const Token& cmd) {
     cm::ProceduralBone pb;
-    if (!c.WantName("bone", "a helper bone name", cmd, pb.helpername) ||
-        !c.WantName("bone", "a driver bone name", cmd, pb.drivername))
+    if (!c.Want("a helper bone name", cmd, pb.helpername) ||
+        !c.Want("a driver bone name", cmd, pb.drivername))
         return false;
 
     std::string poseFile;
@@ -5932,7 +5863,7 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
 bool CmdDriverAimAt(Ctx& c, const Token& cmd) {
     cm::AimAtBone ab;
     ab.autobasepos = true;
-    if (!c.WantName("bone", "a bone name", cmd, ab.bonename) ||
+    if (!c.Want("a bone name", cmd, ab.bonename) ||
         !c.Want("an aim target attachment or bone name", cmd, ab.aimname) ||
         !c.WantFloat("an up vector X", cmd, ab.upvector.x) ||
         !c.WantFloat("an up vector Y", cmd, ab.upvector.y) ||
@@ -6583,12 +6514,12 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             }
         } else if (opt == "replacebone") {
             cm::LodReplacement r;
-            if (!c.WantName("bone", "a bone name", t, r.src) || !c.Want("a replacement bone", t, r.dst))
+            if (!c.Want("a bone name", t, r.src) || !c.Want("a replacement bone", t, r.dst))
                 return false;
             lod.boneReplacements.push_back(std::move(r));
         } else if (opt == "bonetreecollapse") {
             cm::LodReplacement r;
-            if (!c.WantName("bone", "a bone name", t, r.src))
+            if (!c.Want("a bone name", t, r.src))
                 return false;
             lod.boneTreeCollapses.push_back(std::move(r));
         } else if (opt == "collapsejigglebones") {
@@ -6876,7 +6807,7 @@ bool CmdMeshSortOrder(Ctx& c, const Token& cmd) {
 bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
     cm::HitBox hb;
     if (!c.WantInt("a hit group", cmd, hb.group) ||
-        !c.WantName("bone", "a bone name", cmd, hb.bonename) ||
+        !c.Want("a bone name", cmd, hb.bonename) ||
         !c.WantFloat("a min X", cmd, hb.bmin.x) ||
         !c.WantFloat("a min Y", cmd, hb.bmin.y) ||
         !c.WantFloat("a min Z", cmd, hb.bmin.z) ||
@@ -6985,7 +6916,7 @@ bool CmdHGroup(Ctx& c, const Token& cmd) {
     int group;
     std::string bone;
     if (!c.WantInt("a hit group", cmd, group) ||
-        !c.WantName("bone", "a bone name", cmd, bone))
+        !c.Want("a bone name", cmd, bone))
         return false;
     c.in.hitgroups.emplace_back(std::move(bone), group);
     return true;
@@ -7080,7 +7011,7 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
         }
 
     std::string endbone;
-    if (!c.WantName("bone", "an end bone name", cmd, endbone))
+    if (!c.Want("an end bone name", cmd, endbone))
         return false;
 
     cm::IkChain chain;
@@ -7329,7 +7260,7 @@ bool CmdAnimBlockSize(Ctx& c, const Token& cmd) {
 // list all the bones it wants cached.
 bool CmdBoneSaveFrame(Ctx& c, const Token& cmd) {
     cm::BoneSaveFrame bsf;
-    if (!c.WantName("bone", "a bone name", cmd, bsf.name))
+    if (!c.Want("a bone name", cmd, bsf.name))
         return false;
     while (!c.AtCommand()) {
         const std::string o = c.Next()->text;
@@ -7407,7 +7338,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         } else if (o == "importscale") {
             if (!c.WantFloat("a scale", sub, sh.importScale)) return false;
         } else if (o == "parentbone") {
-            if (!c.WantName("bone", "a bone name", sub, sh.parentBone)) return false;
+            if (!c.Want("a bone name", sub, sh.parentBone)) return false;
         } else if (o == "maxconvex") {
             if (!c.WantInt("a piece count", sub, sh.maxConvex)) return false;
         } else if (!fromRender && o == "importtype") {
@@ -7432,7 +7363,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
                 return c.Fail(t.line, where + ": maxdepth must be between 0 and 10");
         } else if (fromRender && o == "extrabone") {
             std::string bone;
-            if (!c.WantName("bone", "a bone name", sub, bone)) return false;
+            if (!c.Want("a bone name", sub, bone)) return false;
             sh.extraSkinnedBones.push_back(std::move(bone));
         } else if (fromRender && !fromMesh && o == "excludemesh") {
             std::string mesh;
@@ -7530,7 +7461,7 @@ bool AtNumber(Ctx& c) {
 bool ParsePhysPrimitive(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
     std::string type;
     if (!c.Want("box, sphere or capsule", cmd, type) ||
-        !c.WantName("bone", "a bone name", cmd, sh.parentBone))
+        !c.Want("a bone name", cmd, sh.parentBone))
         return false;
     type = Lower(type);
     const std::string where = "$physicsshape primitive " + type;
@@ -7688,7 +7619,7 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
         } else if (o == "skip") {
             mk.skip = true;
         } else if (o == "mergeinto") {
-            if (!c.WantName("bone", "a bone name", sub, mk.mergeInto)) return false;
+            if (!c.Want("a bone name", sub, mk.mergeInto)) return false;
         } else {
             return c.Fail(t.line, where + ": invalid syntax \"" + t.text + "\"");
         }
@@ -7757,7 +7688,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
             // $physicsjoint lines name it, so the parser sees the axes already
             // written for it and rejects a second one
             std::string bone;
-            if (!c.WantName("bone", "a bone name", sub, bone))
+            if (!c.Want("a bone name", sub, bone))
                 return false;
             cm::PhysicsJoint* joint = nullptr;
             for (auto& e : c.in.physJoints)
@@ -7772,7 +7703,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
         } else if (o == "$physicsmarkup") {
             // find-or-create by bone, same as $physicsjoint above
             std::string bone;
-            if (!c.WantName("bone", "a bone name", sub, bone))
+            if (!c.Want("a bone name", sub, bone))
                 return false;
             cm::PhysicsMarkup* mk = nullptr;
             for (auto& e : c.in.physMarkups)
@@ -7789,7 +7720,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
             // exactly two bones - the pair is symmetric, so a trailing list
             // would make one of them look like the subject
             cm::PhysicsCollidePair pair;
-            if (!c.WantName("bone", "a bone name", sub, pair.a) ||
+            if (!c.Want("a bone name", sub, pair.a) ||
                 !c.Want("a second bone name", sub, pair.b))
                 return false;
             c.in.physCollidePairs.push_back(std::move(pair));
@@ -7801,13 +7732,13 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
             if (!WantVec3(c, sub, c.in.physMassCenter)) return false;
             c.in.physMassCenterSet = true;
         } else if (o == "$rootbone") {
-            if (!c.WantName("bone", "a bone name", sub, c.in.physRootBone)) return false;
+            if (!c.Want("a bone name", sub, c.in.physRootBone)) return false;
         } else if (o == "$physicsnocollide") {
             // Subtracts from the $physicscollide lines ABOVE it - the .phy has
             // an allowed-pair list and no deny key, so there is nothing to
             // cancel that has not been written yet.
             std::string a, b;
-            if (!c.WantName("bone", "a bone name", sub, a) || !c.Want("a second bone name", sub, b))
+            if (!c.Want("a bone name", sub, a) || !c.Want("a second bone name", sub, b))
                 return false;
             std::vector<cm::PhysicsCollidePair>& pairs = c.in.physCollidePairs;
             const size_t before = pairs.size();
@@ -7959,23 +7890,23 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
             c.in.physMassCenterSet = true;
         } else if (o == "$jointskip") {
             std::string bone;
-            if (!c.WantName("bone", "a bone name", sub, bone)) return false;
+            if (!c.Want("a bone name", sub, bone)) return false;
             cm::PhysicsMarkup& mk = LegacyMarkup(c, bone);
             mk.skip = true;
             mk.mergeInto.clear();
         } else if (o == "$jointmerge") {
             std::string parent, child;
-            if (!c.WantName("bone", "a parent bone name", sub, parent) ||
+            if (!c.Want("a parent bone name", sub, parent) ||
                 !c.Want("a child bone name", sub, child)) return false;
             cm::PhysicsMarkup& mk = LegacyMarkup(c, child);
             mk.skip = false;
             mk.mergeInto = parent;
         } else if (o == "$rootbone") {
-            if (!c.WantName("bone", "a bone name", sub, c.in.physRootBone)) return false;
+            if (!c.Want("a bone name", sub, c.in.physRootBone)) return false;
         } else if (o == "$jointconstrain") {
             std::string bone, axis, type;
             cm::PhysicsJointAxis a;
-            if (!c.WantName("bone", "a bone name", sub, bone) || !c.Want("an axis", sub, axis) ||
+            if (!c.Want("a bone name", sub, bone) || !c.Want("an axis", sub, axis) ||
                 !c.Want("free, fixed or limit", sub, type) ||
                 !c.WantFloat("a minimum angle", sub, a.min) ||
                 !c.WantFloat("a maximum angle", sub, a.max)) return false;
@@ -8001,7 +7932,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
                    o == "$jointrotdamping" || o == "$jointmassbias") {
             std::string bone;
             float value = 0.0f;
-            if (!c.WantName("bone", "a bone name", sub, bone) || !c.WantFloat("a value", sub, value))
+            if (!c.Want("a bone name", sub, bone) || !c.WantFloat("a value", sub, value))
                 return false;
             cm::PhysicsMarkup& mk = LegacyMarkup(c, bone);
             if (o == "$jointinertia") { mk.inertia = value; mk.inertiaSet = true; }
@@ -8012,7 +7943,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
             c.in.physNoSelfCollisions = true;
         } else if (o == "$jointcollide" || o == "$jointnocollide") {
             std::string a, b;
-            if (!c.WantName("bone", "a bone name", sub, a) || !c.Want("a second bone name", sub, b))
+            if (!c.Want("a bone name", sub, a) || !c.Want("a second bone name", sub, b))
                 return false;
             if (o == "$jointcollide") c.in.physCollidePairs.push_back({a, b});
             else RemovePhysicsPair(c, a, b);
@@ -8200,10 +8131,7 @@ bool CmdBreak(Ctx& c, const Token& cmd) {
 bool CmdPrint(Ctx& c, const Token& cmd) {
     if (c.AtCommand())
         return c.Fail(cmd.line, "$print needs a message");
-    const std::string& message = c.toks[c.pos++].text;
-    if (g_structure)
-        g_structure->events.push_back("@log " + JsonObject({{"text", JsonString(message)}}));
-    else std::printf("%s\n", message.c_str());
+    std::printf("%s\n", c.toks[c.pos++].text.c_str());
     return true;
 }
 
@@ -8219,7 +8147,7 @@ bool CmdAssert(Ctx& c, const Token& cmd) {
 bool CmdQcAssert(Ctx& c, const Token& cmd) {
     std::string type, bone;
     if (!c.Want("boneexists or importboneexists", cmd, type) ||
-        !c.WantName("bone", "a bone name", cmd, bone))
+        !c.Want("a bone name", cmd, bone))
         return false;
 
     bool actual = false;
@@ -8317,7 +8245,6 @@ bool ExpandVars(Ctx& c, Token& t) {
 // ROOT script's directory, matching how stock keeps cddir pinned to the top.
 bool SpliceInclude(Ctx& c) {
     const Token cmd = c.toks[c.pos]; // the $include token
-    StructureCommandScope observed(c, cmd);
     size_t p = c.pos + 1;
     if (p >= c.toks.size() || (!c.toks[p].quoted && c.toks[p].text[0] == '$'))
         return c.Fail(cmd.line, "$include expects a script path");
@@ -8369,7 +8296,7 @@ bool SpliceInclude(Ctx& c) {
     for (fs::path& t : tries) {
         t = t.lexically_normal().make_preferred();
         std::error_code fec;
-        if (fs::is_regular_file(t, fec) || (g_structure && g_structure->Overlay(t.u8string()))) {
+        if (fs::is_regular_file(t, fec)) {
             full = t;
             break;
         }
@@ -8394,41 +8321,20 @@ bool SpliceInclude(Ctx& c) {
                                     "\" is already open - circular include");
 
     pulse::dependencies::Note(full.string(), pulse::dependencies::Kind::Include);
-    std::string text;
-    if (const std::string* overlay = g_structure ? g_structure->Overlay(full.u8string()) : nullptr) {
-        text = *overlay;
-    } else {
-        std::ifstream f(full, std::ios::binary);
-        if (!f)
-            return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
-        std::ostringstream buf;
-        buf << f.rdbuf();
-        text = buf.str();
-    }
+    std::ifstream f(full, std::ios::binary);
+    if (!f)
+        return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
+    std::ostringstream buf;
+    buf << f.rdbuf();
+    std::string text = buf.str();
     StripUtf8Bom(text);
 
     std::printf("$include: Including %s...\n", full.string().c_str());
 
     const std::string name = full.filename().string();
     std::vector<Token> toks;
-    const bool lexed = Tokenize(text, name, toks, c.err);
-    if (g_structure) {
-        g_structure->Index(text, full.u8string(), toks, cmd.node);
-        g_structure->events.push_back("@include " + JsonObject({{"node", std::to_string(cmd.node)},
-            {"file", JsonString(StructurePath(full.u8string()))}}));
-    }
-    if (!lexed) {
-        if (g_structure) {
-            const std::string message = c.err ? *c.err : "Could not tokenize include";
-            const auto open = message.find('(');
-            int line = 0;
-            if (open != std::string::npos) {
-                try { line = std::stoi(message.substr(open + 1)); } catch (...) {}
-            }
-            g_structure->Error(full.u8string(), line, message);
-        }
+    if (!Tokenize(text, name, toks, c.err))
         return false;
-    }
 
     // drop the $include directive, splice the file in its place, and open a
     // frame so pos crossing its end restores file/curDir and the cycle guard.
@@ -8438,7 +8344,6 @@ bool SpliceInclude(Ctx& c) {
             fr.endPos -= (directiveEnd - c.pos);
     const size_t at = c.pos;
     c.SpliceAt(at, toks); // extends any enclosing frame over the new content
-    c.observedPos = c.pos;
     c.includeFrames.push_back({at + toks.size(), c.file, c.curDir});
     c.includeStack.push_back(key);
     c.file = name;
@@ -8464,7 +8369,6 @@ bool ResolveConditionalHere(Ctx& c) {
     if (!fn)
         return false;
     const Token cmd = c.toks[c.pos]; // copy; the handler consumes from c.pos
-    if (g_structure) StructureTouch(c, cmd);
     c.pos++;
     if (!fn(c, cmd))
         c.abortErr = true; // the handler's Fail already recorded the message
@@ -8710,19 +8614,6 @@ bool ExpandMacro(Ctx& c, const Token& cmd, const Ctx::Macro& m) {
     std::vector<Token> body = m.body;
     for (Token& t : body)
         SubstMacroParams(t, m.params, args);
-    if (g_structure) {
-        if (cmd.node >= 0) g_structure->nodes[cmd.node].raw = false;
-        g_structure->Reference(cmd.node, "macro", cmd.text.substr(1), true);
-        auto definition = g_structure->definitions.find({"macro", cmd.text.substr(1)});
-        if (definition == g_structure->definitions.end())
-            for (auto it = g_structure->definitions.begin(); it != g_structure->definitions.end(); ++it)
-                if (it->first.first == "macro" && _stricmp(it->first.second.c_str(), cmd.text.c_str() + 1) == 0) {
-                    definition = it; break;
-                }
-        g_structure->events.push_back("@macro " + JsonObject({{"node", std::to_string(cmd.node)},
-            {"definition", std::to_string(definition == g_structure->definitions.end() ? -1 : definition->second)}}));
-        g_structure->Expand(body, cmd.node);
-    }
     c.SpliceAt(c.pos, body);
     return true;
 }
@@ -8822,34 +8713,18 @@ bool CollectBlock(Ctx& c, const Token& cmd, std::vector<Token>& body) {
 // Read a condition up to the '{' that opens its block, expanding $name$ as it
 // goes. Operators are whitespace-separated tokens: "a == b", not "a==b".
 bool ReadCondition(Ctx& c, const Token& cmd, std::vector<CondTok>& out) {
-    std::vector<Token> original;
     for (;;) {
         if (c.Eof() || (!c.Cur().quoted && c.Cur().text == "}"))
             return c.Fail(cmd.line, cmd.text + " is missing the \"{\" that opens its block");
         Token t = c.toks[c.pos++];
         if (!t.quoted && t.text == "{")
             break;
-        original.push_back(t);
         if (!ExpandVars(c, t))
             return false;
         out.push_back({t.text, t.line, t.quoted || t.expanded});
     }
     if (out.empty())
         return c.Fail(cmd.line, cmd.text + " has an empty condition");
-    if (g_structure) {
-        for (size_t i = 0; i < original.size(); ++i) {
-            std::string variable;
-            const Token& token = original[i];
-            if (!token.quoted && token.text.size() > 2 && token.text.front() == '$' && token.text.back() == '$')
-                variable = token.text.substr(1, token.text.size() - 2);
-            else if (!token.quoted && c.variables.count(token.text)) variable = token.text;
-            if (variable.empty()) continue;
-            std::string value;
-            if (i + 2 < original.size() && IsCondOp(original[i + 1].text)) value = out[i + 2].text;
-            else if (i >= 2 && IsCondOp(original[i - 1].text)) value = out[i - 2].text;
-            g_structure->Condition(cmd.node, variable, value);
-        }
-    }
     return true;
 }
 
@@ -8948,7 +8823,6 @@ bool ReadDefName(Ctx& c, const Token& cmd, bool& result) {
     if (c.Eof() || c.Cur().quoted || c.Cur().text == "{" || c.Cur().text == "}")
         return c.Fail(cmd.line, cmd.text + " expects a variable name");
     const Token name = c.toks[c.pos++];
-    if (g_structure) g_structure->Condition(cmd.node, name.text, "");
     if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
         return c.Fail(name.line, cmd.text + " takes one bare variable name - a "
                                  "condition belongs under $if, not " + cmd.text);
@@ -8965,7 +8839,6 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
     std::vector<Token> chosen;
     bool taken = false;
     for (Token clause = cmd;;) {
-        if (g_structure) StructureTouch(c, clause);
         bool val = false;
         std::vector<Token> body;
         if (ifdef) {
@@ -8979,10 +8852,6 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
         }
         if (!CollectBlock(c, clause, body))
             return false;
-        if (g_structure) {
-            g_structure->Inactive(body);
-            if (clause.node >= 0) g_structure->nodes[clause.node].active = val && !taken;
-        }
         if (val && !taken) {
             taken = true;
             chosen = std::move(body);
@@ -8996,11 +8865,6 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
         std::vector<Token> body;
         if (!ExpectBrace(c, els) || !CollectBlock(c, els, body))
             return false;
-        if (g_structure) {
-            StructureTouch(c, els);
-            g_structure->Inactive(body);
-            if (els.node >= 0) g_structure->nodes[els.node].active = !taken;
-        }
         if (!taken)
             chosen = std::move(body);
     }
@@ -9056,12 +8920,6 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
         std::vector<Token> body;
         if (!ExpectBrace(c, t) || !CollectBlock(c, t, body))
             return false;
-        if (g_structure) {
-            g_structure->Condition(cmd.node, var.text, label.text);
-            g_structure->Inactive(body);
-            StructureTouch(c, t);
-            if (t.node >= 0) g_structure->nodes[t.node].active = !taken && label.text == value;
-        }
         if (!taken && label.text == value) {
             taken = true;
             chosen = std::move(body);
@@ -9098,11 +8956,6 @@ bool CmdForceCapsules(Ctx&, const Token&) { return true; }
 struct Command {
     const char* name;
     bool (*fn)(Ctx&, const Token&);
-    const char* section = "misc";
-    bool ordered = false;
-    const char* summary = "";
-    const char* syntax = "";
-    const char* starter = "";
 };
 
 constexpr Command kCommands[] = {
@@ -9110,157 +8963,157 @@ constexpr Command kCommands[] = {
     {"$assert", CmdAssert},
     {"$qcassert", CmdQcAssert},
     {"$print", CmdPrint},
-    {"$definevariable", CmdDefineVariable, "macros"},
-    {"$redefinevariable", CmdRedefineVariable, "macros"},
-    {"$definemacro", CmdDefineMacro, "macros", false, "Reusable script commands", "$definemacro <name> [parameters] ... $endmacro", "$definemacro new_macro\n\n$endmacro"},
-    {"$endmacro", CmdEndMacroOutside, "macros"},
-    {"$if", CmdIf, "branches", false, "Block read when a condition holds", "$if <condition> { ... } [$elif <condition> { ... }] [$else { ... }]", "$if 1\n{\n\n}"},
-    {"$ifdef", CmdIfdef, "branches", false, "Block read when a variable is defined", "$ifdef <variable> { ... } [$else { ... }]", "$ifdef variable\n{\n\n}"},
-    {"$ifndef", CmdIfndef, "branches", false, "Block read when a variable is not defined", "$ifndef <variable> { ... } [$else { ... }]", "$ifndef variable\n{\n\n}"},
-    {"$elif", CmdElifOutside, "branches", false, "Further condition of an $if chain", "$elif <condition> { ... }", "$elif 1\n{\n\n}"},
-    {"$else", CmdElifOutside, "branches", false, "Fallback arm of an $if chain", "$else { ... }", "$else\n{\n\n}"},
-    {"$switch", CmdSwitch, "branches", false, "Block chosen by a variable's value", "$switch <variable> { $case <value> { ... } $default { ... } }", "$switch variable\n{\n\t$case \"value\"\n\t{\n\n\t}\n\t$default\n\t{\n\n\t}\n}"},
-    {"$case", CmdCaseOutside, "branches", false, "Value arm of a $switch", "$case <value> { ... }", "$case \"value\"\n{\n\n}"},
-    {"$default", CmdCaseOutside, "branches", false, "Fallback arm of a $switch", "$default { ... }", "$default\n{\n\n}"},
-    {"$addincludesearchdir", CmdAddIncludeSearchDir, "includes"},
-    {"$pushd", CmdPushD, "includes"},
-    {"$popd", CmdPopD, "includes"},
-    {"$addsearchdir", CmdAddSearchDir, "includes"},
-    {"$modelname", CmdModelName, "output", false, "Output model path", "$modelname <path>", "$modelname \"new_model.mdl\""},
-    {"$rendermesh", CmdRenderMesh, "modelgroups", false, "Load a named render mesh", "$rendermesh <name> <file> [options]", "$rendermesh \"new_mesh\" \"\""},
-    {"$rendermeshcmdlist", CmdRenderMeshCmdList, "modelgroups"},
-    {"$modelgroup", CmdModelGroup, "modelgroups", true, "Indexed switchable group of meshes", "$modelgroup <name> { <mesh> | blank ... }", "$modelgroup \"new_group\" { blank }"},
-    {"$body", CmdLegacyBody, "modelgroups", true},
-    {"$bodygroup", CmdLegacyBody, "modelgroups", true, "Indexed switchable group of source meshes", "$bodygroup <name> { studio <file> | blank ... }", "$bodygroup \"new_bodygroup\" { blank }"},
-    {"$model", CmdModel, "modelgroups", true},
-    {"$modelgrouppreset", CmdModelGroupPreset, "modelgroups"},
-    {"$bodygrouppreset", CmdModelGroupPreset, "modelgroups"},
-    {"$datamodeljoints", CmdDataModelJoints, "skeleton"},
-    {"$datamodelflexes", CmdDataModelFlexes, "flex"},
-    {"$datamodelphysics", CmdDataModelPhysics, "physics"},
-    {"$wrinklescale", CmdWrinkleScale, "flex"},
-    {"$animation", CmdAnimation, "animation", true, "Named source animation", "$animation <name> <file> [options]", "$animation \"new_animation\" \"\""},
-    {"$bindposeanimation", CmdBindPoseAnimation, "animation", true},
-    {"$declareanimation", CmdDeclareAnimation, "animation", true},
-    {"$sequence", CmdSequence, "animation", true, "Indexed animation sequence", "$sequence <name> <animation-or-file> [options]", "$sequence \"new_sequence\" \"\""},
-    {"$bindposesequence", CmdBindPoseSequence, "animation", true},
-    {"$declaresequence", CmdDeclareSequence, "animation", true},
-    {"$append", CmdAppend, "animation"},
-    {"$prepend", CmdPrepend, "animation"},
-    {"$continue", CmdContinue, "animation"},
-    {"$includemodel", CmdIncludeModel, "includes"},
-    {"$cmdlist", CmdCmdList, "animation"},
-    {"$defaultfps", CmdDefaultFps, "animation"},
-    {"$motionrollback", CmdMotionRollback, "animation"},
-    {"$nosequence", CmdNoSequence, "animation"},
-    {"$defaultfadein", CmdDefaultFadeIn, "animation"},
-    {"$defaultfadeout", CmdDefaultFadeOut, "animation"},
-    {"$lcaseallsequences", CmdLCaseAllSequences, "animation"},
-    {"$allowactivityname", CmdAllowActivityName, "animation"},
-    {"$sectionframes", CmdSectionFrames, "animation"},
-    {"$animblocksize", CmdAnimBlockSize, "animation"},
-    {"$bonesaveframe", CmdBoneSaveFrame, "animation"},
-    {"$poseparameter", CmdPoseParameter, "poseparams", true, "Named sequence blend parameter", "$poseparameter <name> [min max] [loop value]", "$poseparameter \"new_pose\" -90 90"},
-    {"$ikchain", CmdIkChain, "ik"},
-    {"$ikautoplaylock", CmdIkAutoplayLock, "ik"},
-    {"$weightlist", CmdWeightList, "animation"},
-    {"$defaultweightlist", CmdDefaultWeightList, "animation"},
-    {"$modelarchetype", CmdModelArchetype, "output"},
-    {"$staticprop", CmdStaticProp, "output"},
-    {"$simpleprop", CmdSimpleProp, "output"},
-    {"$autocenter", CmdAutoCenter, "output"},
-    {"$forcewritevertexdata", CmdForceWriteVertexData, "output"},
-    {"$vtxformat", CmdVtxFormat, "output"},
-    {"$nodx80", CmdNoDx80, "output"},
-    {"$modelbudget", CmdModelBudget, "output"},
-    {"$setbindpose", CmdSetBindPose, "skeleton"},
-    {"$setflex", CmdSetFlex, "flex"},
-    {"$renderpass", CmdRenderPass, "materials"},
-    {"$opaque", CmdOpaque, "materials"},
-    {"$mostlyopaque", CmdMostlyOpaque, "materials"},
-    {"$surfaceprop", CmdSurfaceProp, "materials"},
-    {"$contents", CmdContents, "physics"},
-    {"$jointcontents", CmdJointContents, "physics"},
-    {"$jointsurfaceprop", CmdJointSurfaceProp, "physics"},
-    {"$keyvalues", CmdKeyValues, "output"},
-    {"$collisiontext", CmdCollisionText, "physics"},
-    {"$boneflexdriver", CmdBoneFlexDriver, "flex"},
-    {"$flexcontroller", CmdFlexController, "flex"},
-    {"$flexlocalvar", CmdFlexLocalVar, "flex"},
-    {"$flexrule", CmdFlexRule, "flex"},
-    {"$flexcorrective", CmdFlexCorrective, "flex"},
-    {"$flexdominate", CmdFlexDominate, "flex"},
-    {"$morphsplitstereo", CmdMorphSplitStereo, "flex"},
-    {"$renamemorph", CmdRenameMorph, "flex"},
-    {"$flexcullmethod", CmdFlexCullMethod, "flex"},
-    {"$animationcullmethod", CmdAnimationCullMethod, "animation"},
-    {"$eyeball", CmdEyeball, "flex"},
-    {"$mouth", CmdMouth, "flex"},
-    {"$eyelid", CmdEyelid, "flex"},
-    {"$skiptransition", CmdSkipTransition, "animation"},
-    {"$calctransitions", CmdCalcTransitions, "animation"},
-    {"$transformmodel", CmdTransformModel, "output"},
-    {"$origin", CmdOrigin, "output"},
-    {"$scale", CmdScale, "output"},
-    {"$upaxis", CmdUpAxis, "output"},
-    {"$attachment", CmdAttachment, "attachments", false, "Named attachment on a bone or model", "$attachment <name> <bone> [options]", "$attachment \"new_attachment\" \"\""},
-    {"$declareattachment", CmdDeclareAttachment, "attachments"},
-    {"$hitboxset", CmdHitboxSet, "hitboxes"},
-    {"$hboxset", CmdHitboxSet, "hitboxes"}, // stock's spelling, same command
-    {"$hbox", CmdHboxOutsideSet, "hitboxes"},
-    {"$hgroup", CmdHGroup, "hitboxes"},
-    {"$renamehboxset", CmdRenameHboxSet, "hitboxes"},
-    {"$bonecullmethod", CmdBoneCullMethod, "skeleton"},
-    {"$physicsmodel", CmdPhysicsModel, "physics", false, "Generated collision shapes and joints", "$physicsmodel { ... }", "$physicsmodel {\n\n}"},
-    {"$collisionmodel", CmdCollisionModel, "physics"},
-    {"$collisionjoints", CmdCollisionJoints, "physics"},
-    {"$physicsshape", CmdPhysicsOutsideModel, "physics"},
-    {"$physicsjoint", CmdPhysicsOutsideModel, "physics"},
-    {"$physicsmarkup", CmdPhysicsOutsideModel, "physics"},
-    {"$physicscollide", CmdPhysicsOutsideModel, "physics"},
-    {"$physicsnocollide", CmdPhysicsOutsideModel, "physics"},
-    {"$assumeworldspace", CmdPhysicsOutsideModel, "physics"},
-    {"$jigglebone", CmdJiggleBone, "skeleton"},
-    {"$culljigglebones", CmdCullJiggleBones, "skeleton"},
-    {"$driverbone", CmdDriverBone, "skeleton"},
-    {"$driveraimat", CmdDriverAimAt, "skeleton"},
-    {"$proceduralbones", CmdProceduralBones, "skeleton"},
-    {"$realignbones", CmdRealignBones, "skeleton"},
-    {"$lockbonelengths", CmdLockBoneLengths, "skeleton"},
-    {"$limitrotation", CmdLimitRotation, "skeleton"},
-    {"$transformbone", CmdTransformBone, "skeleton"},
-    {"$root", CmdRoot, "skeleton"},
-    {"$definebone", CmdDefineBone, "skeleton"},
-    {"$unlockdefinebones", CmdUnlockDefineBones, "skeleton"},
-    {"$bonemerge", CmdBoneMerge, "skeleton"},
-    {"$donotcollapse", CmdDoNotCollapse, "skeleton"},
-    {"$alwayscollapse", CmdAlwaysCollapse, "skeleton"},
-    {"$hierarchy", CmdHierarchy, "skeleton"},
-    {"$heirarchy", CmdHierarchy, "skeleton"}, // stock's misspelling, same command
-    {"$ambientboost", CmdAmbientBoost, "rendering"},
-    {"$forcecapsules", CmdForceCapsules, "physics"},
-    {"$donotcastshadows", CmdDoNotCastShadows, "rendering"},
-    {"$forcephonemecrossfade", CmdForcePhonemeCrossfade, "flex"},
-    {"$noforcedfade", CmdNoForcedFade, "rendering"},
-    {"$casttextureshadows", CmdCastTextureShadows, "rendering"},
-    {"$constantdirectionallight", CmdConstantDirectionalLight, "rendering"},
-    {"$skipboneinbbox", CmdSkipBoneInBBox, "hitboxes"},
-    {"$bbox", CmdBBox, "output"},
-    {"$cbox", CmdCBox, "output"},
-    {"$illumposition", CmdIllumPosition, "rendering"},
-    {"$eyeposition", CmdEyePosition, "output"},
-    {"$maxeyedeflection", CmdMaxEyeDeflection, "flex"},
-    {"$cdmaterials", CmdCdMaterials, "materials", false, "Material search paths", "$cdmaterials <path> [path ...]", "$cdmaterials \"\""},
-    {"$renamebone", CmdRenameBone, "skeleton"},
-    {"$renamematerial", CmdRenameMaterial, "materials"},
-    {"$overridematerial", CmdOverrideMaterial, "materials"},
-    {"$texturegroup", CmdTextureGroup, "skins", true, "Ordered material replacement families", "$texturegroup <name> { { material ... } ... }", "$texturegroup \"skinfamilies\" {\n    { \"\" }\n}"},
-    {"$meshsortorder", CmdMeshSortOrder, "rendering"},
-    {"$minlod", CmdMinLod, "modelgroups"},
-    {"$allowrootlods", CmdAllowRootLods, "modelgroups"},
-    {"$lod", CmdLod, "modelgroups", true},
-    {"$shadowlod", CmdLod, "modelgroups", true},
-    {"$lodcmdlist", CmdLodCmdList, "modelgroups"},
+    {"$definevariable", CmdDefineVariable},
+    {"$redefinevariable", CmdRedefineVariable},
+    {"$definemacro", CmdDefineMacro},
+    {"$endmacro", CmdEndMacroOutside},
+    {"$if", CmdIf},
+    {"$ifdef", CmdIfdef},
+    {"$ifndef", CmdIfndef},
+    {"$elif", CmdElifOutside},
+    {"$else", CmdElifOutside},
+    {"$switch", CmdSwitch},
+    {"$case", CmdCaseOutside},
+    {"$default", CmdCaseOutside},
+    {"$addincludesearchdir", CmdAddIncludeSearchDir},
+    {"$pushd", CmdPushD},
+    {"$popd", CmdPopD},
+    {"$addsearchdir", CmdAddSearchDir},
+    {"$modelname", CmdModelName},
+    {"$rendermesh", CmdRenderMesh},
+    {"$rendermeshcmdlist", CmdRenderMeshCmdList},
+    {"$modelgroup", CmdModelGroup},
+    {"$body", CmdLegacyBody},
+    {"$bodygroup", CmdLegacyBody},
+    {"$model", CmdModel},
+    {"$modelgrouppreset", CmdModelGroupPreset},
+    {"$bodygrouppreset", CmdModelGroupPreset},
+    {"$datamodeljoints", CmdDataModelJoints},
+    {"$datamodelflexes", CmdDataModelFlexes},
+    {"$datamodelphysics", CmdDataModelPhysics},
+    {"$wrinklescale", CmdWrinkleScale},
+    {"$animation", CmdAnimation},
+    {"$bindposeanimation", CmdBindPoseAnimation},
+    {"$declareanimation", CmdDeclareAnimation},
+    {"$sequence", CmdSequence},
+    {"$bindposesequence", CmdBindPoseSequence},
+    {"$declaresequence", CmdDeclareSequence},
+    {"$append", CmdAppend},
+    {"$prepend", CmdPrepend},
+    {"$continue", CmdContinue},
+    {"$includemodel", CmdIncludeModel},
+    {"$cmdlist", CmdCmdList},
+    {"$defaultfps", CmdDefaultFps},
+    {"$motionrollback", CmdMotionRollback},
+    {"$nosequence", CmdNoSequence},
+    {"$defaultfadein", CmdDefaultFadeIn},
+    {"$defaultfadeout", CmdDefaultFadeOut},
+    {"$lcaseallsequences", CmdLCaseAllSequences},
+    {"$allowactivityname", CmdAllowActivityName},
+    {"$sectionframes", CmdSectionFrames},
+    {"$animblocksize", CmdAnimBlockSize},
+    {"$bonesaveframe", CmdBoneSaveFrame},
+    {"$poseparameter", CmdPoseParameter},
+    {"$ikchain", CmdIkChain},
+    {"$ikautoplaylock", CmdIkAutoplayLock},
+    {"$weightlist", CmdWeightList},
+    {"$defaultweightlist", CmdDefaultWeightList},
+    {"$modelarchetype", CmdModelArchetype},
+    {"$staticprop", CmdStaticProp},
+    {"$simpleprop", CmdSimpleProp},
+    {"$autocenter", CmdAutoCenter},
+    {"$forcewritevertexdata", CmdForceWriteVertexData},
+    {"$vtxformat", CmdVtxFormat},
+    {"$nodx80", CmdNoDx80},
+    {"$modelbudget", CmdModelBudget},
+    {"$setbindpose", CmdSetBindPose},
+    {"$setflex", CmdSetFlex},
+    {"$renderpass", CmdRenderPass},
+    {"$opaque", CmdOpaque},
+    {"$mostlyopaque", CmdMostlyOpaque},
+    {"$surfaceprop", CmdSurfaceProp},
+    {"$contents", CmdContents},
+    {"$jointcontents", CmdJointContents},
+    {"$jointsurfaceprop", CmdJointSurfaceProp},
+    {"$keyvalues", CmdKeyValues},
+    {"$collisiontext", CmdCollisionText},
+    {"$boneflexdriver", CmdBoneFlexDriver},
+    {"$flexcontroller", CmdFlexController},
+    {"$flexlocalvar", CmdFlexLocalVar},
+    {"$flexrule", CmdFlexRule},
+    {"$flexcorrective", CmdFlexCorrective},
+    {"$flexdominate", CmdFlexDominate},
+    {"$morphsplitstereo", CmdMorphSplitStereo},
+    {"$renamemorph", CmdRenameMorph},
+    {"$flexcullmethod", CmdFlexCullMethod},
+    {"$animationcullmethod", CmdAnimationCullMethod},
+    {"$eyeball", CmdEyeball},
+    {"$mouth", CmdMouth},
+    {"$eyelid", CmdEyelid},
+    {"$skiptransition", CmdSkipTransition},
+    {"$calctransitions", CmdCalcTransitions},
+    {"$transformmodel", CmdTransformModel},
+    {"$origin", CmdOrigin},
+    {"$scale", CmdScale},
+    {"$upaxis", CmdUpAxis},
+    {"$attachment", CmdAttachment},
+    {"$declareattachment", CmdDeclareAttachment},
+    {"$hitboxset", CmdHitboxSet},
+    {"$hboxset", CmdHitboxSet}, // stock's spelling, same command
+    {"$hbox", CmdHboxOutsideSet},
+    {"$hgroup", CmdHGroup},
+    {"$renamehboxset", CmdRenameHboxSet},
+    {"$bonecullmethod", CmdBoneCullMethod},
+    {"$physicsmodel", CmdPhysicsModel},
+    {"$collisionmodel", CmdCollisionModel},
+    {"$collisionjoints", CmdCollisionJoints},
+    {"$physicsshape", CmdPhysicsOutsideModel},
+    {"$physicsjoint", CmdPhysicsOutsideModel},
+    {"$physicsmarkup", CmdPhysicsOutsideModel},
+    {"$physicscollide", CmdPhysicsOutsideModel},
+    {"$physicsnocollide", CmdPhysicsOutsideModel},
+    {"$assumeworldspace", CmdPhysicsOutsideModel},
+    {"$jigglebone", CmdJiggleBone},
+    {"$culljigglebones", CmdCullJiggleBones},
+    {"$driverbone", CmdDriverBone},
+    {"$driveraimat", CmdDriverAimAt},
+    {"$proceduralbones", CmdProceduralBones},
+    {"$realignbones", CmdRealignBones},
+    {"$lockbonelengths", CmdLockBoneLengths},
+    {"$limitrotation", CmdLimitRotation},
+    {"$transformbone", CmdTransformBone},
+    {"$root", CmdRoot},
+    {"$definebone", CmdDefineBone},
+    {"$unlockdefinebones", CmdUnlockDefineBones},
+    {"$bonemerge", CmdBoneMerge},
+    {"$donotcollapse", CmdDoNotCollapse},
+    {"$alwayscollapse", CmdAlwaysCollapse},
+    {"$hierarchy", CmdHierarchy},
+    {"$heirarchy", CmdHierarchy}, // stock's misspelling, same command
+    {"$ambientboost", CmdAmbientBoost},
+    {"$forcecapsules", CmdForceCapsules},
+    {"$donotcastshadows", CmdDoNotCastShadows},
+    {"$forcephonemecrossfade", CmdForcePhonemeCrossfade},
+    {"$noforcedfade", CmdNoForcedFade},
+    {"$casttextureshadows", CmdCastTextureShadows},
+    {"$constantdirectionallight", CmdConstantDirectionalLight},
+    {"$skipboneinbbox", CmdSkipBoneInBBox},
+    {"$bbox", CmdBBox},
+    {"$cbox", CmdCBox},
+    {"$illumposition", CmdIllumPosition},
+    {"$eyeposition", CmdEyePosition},
+    {"$maxeyedeflection", CmdMaxEyeDeflection},
+    {"$cdmaterials", CmdCdMaterials},
+    {"$renamebone", CmdRenameBone},
+    {"$renamematerial", CmdRenameMaterial},
+    {"$overridematerial", CmdOverrideMaterial},
+    {"$texturegroup", CmdTextureGroup},
+    {"$meshsortorder", CmdMeshSortOrder},
+    {"$minlod", CmdMinLod},
+    {"$allowrootlods", CmdAllowRootLods},
+    {"$lod", CmdLod},
+    {"$shadowlod", CmdLod},
+    {"$lodcmdlist", CmdLodCmdList},
 };
 
 std::string SupportedList();
@@ -9288,7 +9141,6 @@ bool RunCommands(Ctx& c) {
         const Token cmd = c.toks[c.pos];
         if (cmd.quoted || cmd.text[0] != '$')
             return c.Fail(cmd.line, "expected a $command, got \"" + cmd.text + "\"");
-        StructureCommandScope observed(c, cmd);
         c.pos++;
 
         const Command* found = nullptr;
@@ -9330,44 +9182,11 @@ std::string SupportedList() {
 
 } // namespace
 
-namespace {
-std::string EditorCommandSection(const std::string& command) {
-    if (EditorNested(command)) return "modelgroups";
-    if (command == "$include") return "includes";
-    for (const auto& entry : kCommands) if (command == entry.name) return entry.section;
-    return "misc";
-}
-std::string EditorCommandStarter(const std::string& command) {
-    if (const auto* entry = EditorNested(command)) return entry->starter;
-    if (command == "$include") return "$include \"\"";
-    for (const auto& entry : kCommands)
-        if (command == entry.name) return *entry.starter ? entry.starter : entry.name;
-    return {};
-}
-}
-
 void PrintCommandNames() {
-    if (pulse::api::Active()) StructureRecord("capability", "{\"api\":1,\"analyze\":1,\"compile\":1,\"procedural\":1,\"materials\":1,\"buffers\":1,\"editor\":1,\"parameters\":1}");
     for (const Command& k : kCommands) {
-        if (!pulse::api::Active()) { std::printf("%s\n", k.name); continue; }
-        StructureRecord("command", JsonObject({{"name", JsonString(k.name)}, {"section", JsonString(k.section)},
-            {"ordered", k.ordered ? "true" : "false"}, {"summary", JsonString(k.summary)},
-            {"syntax", JsonString(k.syntax)}, {"template", JsonString(*k.starter ? k.starter : k.name)},
-            {"parameters", EditorParameterSchema(k.name)}, {"parameterModel", JsonString("authored-tokens")}}));
+        if (pulse::api::Active()) pulse::api::Record("command", "{\"name\":" + pulse::api::String(k.name) + "}");
+        else std::printf("%s\n", k.name);
     }
-    if (!pulse::api::Active()) { std::printf("$include\n"); return; }
-    for (const auto& entry : editorMeshCommands)
-        StructureRecord("command", JsonObject({{"name", JsonString(entry.name)},
-            {"section", JsonString("modelgroups")}, {"ordered", "true"},
-            {"summary", JsonString("Render mesh option. Select a render mesh or a compatible command list to insert.")},
-            {"syntax", JsonString(entry.syntax)}, {"template", JsonString(entry.starter)},
-            {"parents", std::string(entry.name) == "$exceptionlist" ? "[\"$rendermesh\"]" : "[\"$rendermesh\",\"$rendermeshcmdlist\"]"},
-            {"parameters", EditorParameterSchema(entry.name)}, {"parameterModel", JsonString("authored-tokens")}}));
-    StructureRecord("command", JsonObject({{"name", JsonString("$include")}, {"section", JsonString("includes")},
-        {"ordered", "false"}, {"summary", JsonString("Include a script in read order")},
-        {"syntax", JsonString("$include <path> [localdir] [optional]")},
-        {"template", JsonString("$include \"\"")}, {"parameters", EditorParameterSchema("$include")},
-        {"parameterModel", JsonString("authored-tokens")}}));
 }
 
 bool IsQcScriptPath(const char* path) {
@@ -9422,9 +9241,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     seedDirs(includeDirs, c.launchIncludeDirs);
     seedDirs(fileDirs, c.launchSearchDirs);
 
-    const bool lexed = Tokenize(text, c.file, c.toks, err);
-    if (g_structure) g_structure->Index(text, normalizedPath, c.toks);
-    if (!lexed)
+    if (!Tokenize(text, c.file, c.toks, err))
         return false;
 
     // the root of the $include cycle check
@@ -9487,140 +9304,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
 
     // needs the final rotation/scale, so it runs after everything above
     FinishAttachments(c);
-    if (g_structure) {
-        for (const auto& entry : c.variables) {
-            auto definition = g_structure->variableNodes.find(entry.first);
-            g_structure->events.push_back("@var " + JsonObject({{"name", JsonString(entry.first)},
-                {"value", JsonString(entry.second)}, {"definition", std::to_string(
-                    c.IsLockedVar(entry.first) || definition == g_structure->variableNodes.end() ? -1 : definition->second)},
-                {"pinned", c.IsLockedVar(entry.first) ? "true" : "false"}}));
-        }
-        for (size_t i = 0; i < out.bodyparts.size(); ++i) {
-            auto definition = g_structure->definitions.find({"modelgroup", out.bodyparts[i].name});
-            if (definition != g_structure->definitions.end())
-                g_structure->events.push_back("@index " + JsonObject({{"node", std::to_string(definition->second)},
-                    {"kind", JsonString("modelgroup")}, {"name", JsonString(out.bodyparts[i].name)},
-                    {"index", std::to_string(i)}}));
-        }
-    }
     return true;
-}
-
-bool DumpStructure(const char* path, const ScriptVars& defvars,
-                   const SearchDirs& includeDirs, const SearchDirs& fileDirs,
-                   const std::string* scriptText,
-                   const std::string& modelname, bool stripLods) {
-    StructureCapture capture;
-    struct Guard {
-        StructureCapture* previous;
-        Guard(StructureCapture& value) : previous(g_structure) { g_structure = &value; }
-        ~Guard() { g_structure = previous; }
-    } guard(capture);
-    bool success = false;
-    std::string error;
-    std::unique_ptr<EditorRequest> edit;
-    std::unique_ptr<StructureCapture> baseline;
-    std::vector<EditorPatch> patches;
-    try {
-        std::string buffers;
-        if (scriptText && scriptText->compare(0, 12, "PULSEEDIT 1\n") == 0) {
-            buffers = *scriptText;
-            edit = std::make_unique<EditorRequest>(ReadEditorRequest(buffers));
-            scriptText = &buffers;
-        }
-        if (scriptText && scriptText->compare(0, 10, "PULSEQC 1\n") == 0) {
-            const std::string& bytes = *scriptText;
-            size_t cursor = 10;
-            for (;;) {
-                const size_t newline = bytes.find('\n', cursor);
-                if (newline == std::string::npos) throw std::runtime_error("truncated structure buffer record");
-                std::istringstream header(bytes.substr(cursor, newline - cursor));
-                size_t pathSize, textSize;
-                std::string extra;
-                if (!(header >> pathSize >> textSize) || (header >> extra))
-                    throw std::runtime_error("invalid structure buffer lengths");
-                cursor = newline + 1;
-                if (pathSize == 0 && textSize == 0) {
-                    if (cursor != bytes.size()) throw std::runtime_error("trailing structure buffer bytes");
-                    break;
-                }
-                if (pathSize == 0 || pathSize > bytes.size() - cursor)
-                    throw std::runtime_error("invalid structure buffer path length");
-                const std::string key = StructureKey(bytes.substr(cursor, pathSize));
-                cursor += pathSize;
-                if (textSize > bytes.size() - cursor) throw std::runtime_error("truncated structure buffer text");
-                if (!capture.overlays.emplace(key, bytes.substr(cursor, textSize)).second)
-                    throw std::runtime_error("duplicate structure buffer path");
-                cursor += textSize;
-            }
-            scriptText = capture.Overlay(path);
-            if (!scriptText) throw std::runtime_error("structure buffers do not contain the root script");
-        }
-        if (edit) {
-            auto target = capture.overlays.find(StructureKey(edit->path));
-            if (target == capture.overlays.end()) throw std::runtime_error("Editor target is not in the supplied buffers");
-            if (edit->operation == "reorder-before" || edit->operation == "reorder-after" || edit->operation == "gather") {
-                baseline = std::make_unique<StructureCapture>();
-                baseline->overlays = capture.overlays;
-                Guard before(*baseline);
-                cm::CompileInput original;
-                original.outname = modelname; original.stripLods = stripLods;
-                if (!LoadQcScript(path, original, &error, defvars, includeDirs, fileDirs, baseline->Overlay(path)))
-                    throw std::runtime_error("Validate the QC successfully before reordering commands");
-            }
-            patches = ApplyEditorRequest(*edit, target->second, baseline.get());
-            scriptText = capture.Overlay(path);
-        }
-        if (baseline) source::ResetDmxUpAxis();
-        cm::CompileInput input;
-        input.outname = modelname;
-        input.stripLods = stripLods;
-        success = LoadQcScript(path, input, &error, defvars, includeDirs, fileDirs, scriptText);
-        if (!success && capture.errors.empty()) {
-            int line = 0;
-            const size_t open = error.find('('), close = error.find("):", open);
-            if (open != std::string::npos && close != std::string::npos) {
-                try { line = std::stoi(error.substr(open + 1, close - open - 1)); } catch (...) {}
-            }
-            capture.Error(path, line, error);
-        }
-    } catch (const std::exception& e) {
-        capture.Error(path, 0, e.what());
-    }
-    if (baseline && (!success || EditorStateSignature(*baseline) != EditorStateSignature(capture))) {
-        baseline->Error(path, 0, "Move rejected: the compiler could not confirm unchanged effective state");
-        baseline->Print(false);
-        return false;
-    }
-    if (edit) for (const auto& patch : patches)
-        StructureRecord("edit", JsonObject({{"revision", JsonString(edit->revision)},
-            {"path", JsonString(StructurePath(edit->path))}, {"start", std::to_string(patch.start)},
-            {"before", JsonString(EditorHex(patch.before))}, {"after", JsonString(EditorHex(patch.after))}}));
-    const bool changed = std::any_of(patches.begin(), patches.end(), [](const EditorPatch& patch) {
-        return patch.before != patch.after;
-    });
-    int editedFile = -1;
-    std::string editedPath;
-    if (edit && baseline && changed) {
-        editedPath = StructurePath(edit->path);
-        const auto key = StructureKey(edit->path);
-        for (size_t i = 0; i < baseline->files.size(); ++i)
-            if (StructureKey(baseline->files[i].path) == key) { editedFile = static_cast<int>(i); break; }
-    }
-    if (edit && baseline && changed) for (const auto& patch : patches) {
-        auto destination = static_cast<std::ptrdiff_t>(patch.start);
-        for (const auto& other : patches) if (other.start < patch.start)
-            destination += static_cast<std::ptrdiff_t>(other.after.size()) - static_cast<std::ptrdiff_t>(other.before.size());
-        for (const auto& origin : patch.origins) for (const auto& node : baseline->nodes) {
-            if (node.generated || node.file != editedFile ||
-                node.start < origin.start || node.end > origin.end) continue;
-            StructureRecord("node-map", JsonObject({{"path", JsonString(editedPath)},
-                {"command", JsonString(node.command)}, {"from", std::to_string(node.start)},
-                {"to", std::to_string(static_cast<size_t>(destination) + origin.offset + node.start - origin.start)}}));
-        }
-    }
-    capture.Print(success);
-    return success;
 }
 
 } // namespace pulse::loader
