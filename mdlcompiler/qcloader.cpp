@@ -82,6 +82,7 @@ struct Token {
     // parameter). Only conditions care: an expanded operand is a literal value,
     // never the name of another variable to look up.
     bool expanded = false;
+    bool apiRootSource = false;
 };
 
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
@@ -171,6 +172,7 @@ struct Ctx {
     cm::CompileInput& in;
     fs::path scriptDir; // root script's directory
     std::string file;
+    std::string apiRootPath;
     std::string rootFile; // `file` for the root script; an $include changes `file`, not this
     std::vector<Token> toks;
     size_t pos = 0;
@@ -8612,8 +8614,10 @@ bool ExpandMacro(Ctx& c, const Token& cmd, const Ctx::Macro& m) {
         args.push_back(std::move(a));
     }
     std::vector<Token> body = m.body;
-    for (Token& t : body)
+    for (Token& t : body) {
+        t.apiRootSource = false;
         SubstMacroParams(t, m.params, args);
+    }
     c.SpliceAt(c.pos, body);
     return true;
 }
@@ -8831,6 +8835,15 @@ bool ReadDefName(Ctx& c, const Token& cmd, bool& result) {
     return true;
 }
 
+void ReportBranch(const Ctx& c, const Token& first, const Token& last, bool active) {
+    if (!pulse::api::Active() || !first.apiRootSource || !last.apiRootSource ||
+        first.line <= 0 || last.line < first.line)
+        return;
+    pulse::api::Record("branch", "{\"file\":" + pulse::api::String(c.apiRootPath) +
+        ",\"firstLine\":" + std::to_string(first.line) + ",\"lastLine\":" +
+        std::to_string(last.line) + ",\"active\":" + (active ? "true" : "false") + "}");
+}
+
 // $if <cond> { ... } [$elif <cond> { ... }]... [$else { ... }], and $ifdef /
 // $ifndef with the same shape but a name check in every clause. Every clause's
 // condition is evaluated even once one has won, so a typo in a later $elif is
@@ -8852,6 +8865,7 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
         }
         if (!CollectBlock(c, clause, body))
             return false;
+        ReportBranch(c, clause, c.toks[c.pos - 1], val && !taken);
         if (val && !taken) {
             taken = true;
             chosen = std::move(body);
@@ -8865,6 +8879,7 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
         std::vector<Token> body;
         if (!ExpectBrace(c, els) || !CollectBlock(c, els, body))
             return false;
+        ReportBranch(c, els, c.toks[c.pos - 1], !taken);
         if (!taken)
             chosen = std::move(body);
     }
@@ -8895,6 +8910,7 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
 
     std::vector<Token> chosen, fallback;
     bool taken = false, hasDefault = false;
+    Token defaultFirst, defaultLast;
     for (;;) {
         if (c.Eof())
             return c.Fail(cmd.line, "$switch is missing its closing \"}\"");
@@ -8908,8 +8924,10 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
             if (hasDefault)
                 return c.Fail(t.line, "$switch has more than one $default");
             hasDefault = true;
+            defaultFirst = t;
             if (!ExpectBrace(c, t) || !CollectBlock(c, t, fallback))
                 return false;
+            defaultLast = c.toks[c.pos - 1];
             continue;
         }
         if (c.Eof() || (!c.Cur().quoted && (c.Cur().text == "{" || c.Cur().text == "}")))
@@ -8920,6 +8938,7 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
         std::vector<Token> body;
         if (!ExpectBrace(c, t) || !CollectBlock(c, t, body))
             return false;
+        ReportBranch(c, t, c.toks[c.pos - 1], !taken && label.text == value);
         if (!taken && label.text == value) {
             taken = true;
             chosen = std::move(body);
@@ -8928,6 +8947,7 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
     if (!hasDefault)
         return c.Fail(cmd.line, "$switch requires a $default - say what happens "
                                 "when no $case matches, even if it is nothing");
+    ReportBranch(c, defaultFirst, defaultLast, !taken);
     if (!taken)
         chosen = std::move(fallback);
     c.SpliceAt(c.pos, chosen);
@@ -9243,6 +9263,10 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
 
     if (!Tokenize(text, c.file, c.toks, err))
         return false;
+    if (pulse::api::Active()) {
+        c.apiRootPath = fs::absolute(pulse::FilePath(path)).lexically_normal().u8string();
+        for (auto& token : c.toks) token.apiRootSource = true;
+    }
 
     // the root of the $include cycle check
     std::error_code ec;

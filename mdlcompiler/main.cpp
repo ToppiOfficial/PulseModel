@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
             pulse::api::Begin();
             auto request = pulse::api::ReadRequest();
             if (request.method == "catalog") {
-                pulse::api::Record("capability", "{\"api\":1,\"catalog\":1,\"analyze\":1,\"compile\":1,\"buffers\":1,\"diagnostics\":1}");
+                pulse::api::Record("capability", "{\"api\":1,\"catalog\":1,\"analyze\":1,\"compile\":1,\"buffers\":1,\"diagnostics\":1,\"branches\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else {
