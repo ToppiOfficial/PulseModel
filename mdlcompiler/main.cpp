@@ -181,7 +181,7 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
     bool dumpMaterials = false;
     const bool materialsRequest = request && request->method == "materials";
     const bool dumpProcedural = request && request->method == "procedural";
-    const bool dumpStructure = request && request->method == "analyze";
+    const bool dumpStructure = request && (request->method == "analyze" || request->method == "edit");
     const bool dumpDependencies = request && request->method == "compile";
     pulse::dependencies::g_enabled = dumpDependencies;
     pulse::loader::ScriptVars defvars;

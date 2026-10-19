@@ -79,7 +79,7 @@ Request ReadRequest() {
     Request request;
     request.method = line();
     if (request.method != "catalog" && request.method != "analyze" && request.method != "compile" &&
-        request.method != "procedural" && request.method != "materials")
+        request.method != "procedural" && request.method != "materials" && request.method != "edit")
         throw std::runtime_error("Unknown API method");
     const size_t arguments = number();
     if (arguments > 4096) throw std::runtime_error("Too many API arguments");
@@ -92,8 +92,12 @@ Request ReadRequest() {
     if (cursor != bytes.size()) throw std::runtime_error("Trailing API request bytes");
     if (request.method == "catalog" && (!request.arguments.empty() || !request.buffers.empty()))
         throw std::runtime_error("Catalog takes no arguments or buffers");
-    if (request.method != "analyze" && !request.buffers.empty())
+    if (request.method != "analyze" && request.method != "edit" && !request.buffers.empty())
         throw std::runtime_error("This API method reads saved files");
+    if (request.method == "edit" && request.buffers.compare(0, 12, "PULSEEDIT 1\n") != 0)
+        throw std::runtime_error("The edit method requires versioned editor buffers");
+    if (request.method == "analyze" && request.buffers.compare(0, 12, "PULSEEDIT 1\n") == 0)
+        throw std::runtime_error("Use the edit method for editor buffers");
     return request;
 }
 

@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -178,7 +179,16 @@ bool Tokenize(const std::string& s, const std::string& file,
 struct Ctx;
 void StructureTouch(Ctx& c, const Token& token);
 void StructureRead(Ctx& c);
+struct EditorField {
+    std::string label, type, reference, evaluated;
+};
+std::string EditorParameters(const std::string& command, const std::vector<Token>& tokens,
+                             size_t start, size_t end, const std::map<size_t, EditorField>& fields,
+                             const std::map<size_t, std::pair<size_t, size_t>>& commands);
+std::string EditorCommandStarter(const std::string& command);
+std::string EditorCommandSection(const std::string& command);
 #include "qcstructure.inl"
+#include "qceditor-api.inl"
 // Resolves any $include or conditional ($if/$switch) at the read cursor in place,
 // so both are transparent at any nesting depth - a handler reading its own braced
 // body gets them resolved too. Defined under the helpers it needs.
@@ -330,15 +340,23 @@ struct Ctx {
     // A required value token. Rejects a following $command so a missing
     // argument reports itself instead of eating the next line.
     bool Want(const char* what, const Token& cmd, std::string& value) {
-        if (AtCommand())
+        if (AtCommand()) {
+            if (g_structure && !rawCollect) EditorMissing(cmd, what, "value", "");
             return Fail(cmd.line, cmd.text + " expects " + what);
-        value = toks[pos++].text;
+        }
+        const auto& token = toks[pos++];
+        value = token.text;
+        if (g_structure && !rawCollect) EditorRead(token, what, "value", "", value);
         return true;
     }
 
     bool WantName(const char* kind, const char* what, const Token& cmd, std::string& value) {
-        if (!Want(what, cmd, value)) return false;
+        if (!Want(what, cmd, value)) {
+            if (g_structure && !rawCollect) EditorMissing(cmd, what, "reference", kind);
+            return false;
+        }
         if (g_structure && !value.empty()) {
+            EditorRead(toks[pos - 1], what, "reference", kind, value);
             const int owner = pos > 0 ? toks[pos - 1].node : cmd.node;
             g_structure->Reference(owner, kind, value, false);
         }
@@ -347,8 +365,11 @@ struct Ctx {
 
     bool WantFloat(const char* what, const Token& cmd, float& value) {
         std::string s;
-        if (!Want(what, cmd, s))
+        if (!Want(what, cmd, s)) {
+            if (g_structure && !rawCollect) EditorMissing(cmd, what, "number", "");
             return false;
+        }
+        if (g_structure && !rawCollect) EditorRead(toks[pos - 1], what, "number", "", s);
         try {
             size_t used = 0;
             const float v = std::stof(s, &used);
@@ -363,8 +384,11 @@ struct Ctx {
 
     bool WantInt(const char* what, const Token& cmd, int& value) {
         std::string s;
-        if (!Want(what, cmd, s))
+        if (!Want(what, cmd, s)) {
+            if (g_structure && !rawCollect) EditorMissing(cmd, what, "integer", "");
             return false;
+        }
+        if (g_structure && !rawCollect) EditorRead(toks[pos - 1], what, "integer", "", s);
         try {
             size_t used = 0;
             const int v = std::stoi(s, &used);
@@ -381,9 +405,12 @@ struct Ctx {
     // unset placeholder -> -1 (the ikrule `range` frame markers).
     bool WantFrame(const char* what, const Token& cmd, int& value) {
         std::string s;
-        if (!Want(what, cmd, s))
+        if (!Want(what, cmd, s)) {
+            if (g_structure && !rawCollect) EditorMissing(cmd, what, "frame", "");
             return false;
+        }
         if (!s.empty() && s[0] == '.') { value = -1; return true; }
+        if (g_structure && !rawCollect) EditorRead(toks[pos - 1], what, "frame", "", s);
         try {
             size_t used = 0;
             const int v = std::stoi(s, &used);
@@ -9303,19 +9330,35 @@ std::string SupportedList() {
 
 } // namespace
 
+namespace {
+std::string EditorCommandSection(const std::string& command) {
+    if (command == "$include") return "includes";
+    for (const auto& entry : kCommands) if (command == entry.name) return entry.section;
+    return "misc";
+}
+std::string EditorCommandStarter(const std::string& command) {
+    if (command == "$include") return "$include \"\"";
+    for (const auto& entry : kCommands)
+        if (command == entry.name) return *entry.starter ? entry.starter : entry.name;
+    return {};
+}
+}
+
 void PrintCommandNames() {
-    if (pulse::api::Active()) StructureRecord("capability", "{\"api\":1,\"analyze\":1,\"compile\":1,\"procedural\":1,\"materials\":1,\"buffers\":1}");
+    if (pulse::api::Active()) StructureRecord("capability", "{\"api\":1,\"analyze\":1,\"compile\":1,\"procedural\":1,\"materials\":1,\"buffers\":1,\"editor\":1,\"parameters\":1}");
     for (const Command& k : kCommands) {
         if (!pulse::api::Active()) { std::printf("%s\n", k.name); continue; }
         StructureRecord("command", JsonObject({{"name", JsonString(k.name)}, {"section", JsonString(k.section)},
             {"ordered", k.ordered ? "true" : "false"}, {"summary", JsonString(k.summary)},
-            {"syntax", JsonString(k.syntax)}, {"template", JsonString(*k.starter ? k.starter : k.name)}}));
+            {"syntax", JsonString(k.syntax)}, {"template", JsonString(*k.starter ? k.starter : k.name)},
+            {"parameters", EditorParameterSchema(k.name)}, {"parameterModel", JsonString("authored-tokens")}}));
     }
     if (!pulse::api::Active()) { std::printf("$include\n"); return; }
     StructureRecord("command", JsonObject({{"name", JsonString("$include")}, {"section", JsonString("includes")},
         {"ordered", "false"}, {"summary", JsonString("Include a script in read order")},
         {"syntax", JsonString("$include <path> [localdir] [optional]")},
-        {"template", JsonString("$include \"\"")}}));
+        {"template", JsonString("$include \"\"")}, {"parameters", EditorParameterSchema("$include")},
+        {"parameterModel", JsonString("authored-tokens")}}));
 }
 
 bool IsQcScriptPath(const char* path) {
@@ -9466,7 +9509,16 @@ bool DumpStructure(const char* path, const ScriptVars& defvars,
     } guard(capture);
     bool success = false;
     std::string error;
+    std::unique_ptr<EditorRequest> edit;
+    std::unique_ptr<StructureCapture> baseline;
+    std::vector<EditorPatch> patches;
     try {
+        std::string buffers;
+        if (scriptText && scriptText->compare(0, 12, "PULSEEDIT 1\n") == 0) {
+            buffers = *scriptText;
+            edit = std::make_unique<EditorRequest>(ReadEditorRequest(buffers));
+            scriptText = &buffers;
+        }
         if (scriptText && scriptText->compare(0, 10, "PULSEQC 1\n") == 0) {
             const std::string& bytes = *scriptText;
             size_t cursor = 10;
@@ -9495,6 +9547,22 @@ bool DumpStructure(const char* path, const ScriptVars& defvars,
             scriptText = capture.Overlay(path);
             if (!scriptText) throw std::runtime_error("structure buffers do not contain the root script");
         }
+        if (edit) {
+            auto target = capture.overlays.find(StructureKey(edit->path));
+            if (target == capture.overlays.end()) throw std::runtime_error("Editor target is not in the supplied buffers");
+            if (edit->operation == "reorder-before" || edit->operation == "reorder-after" || edit->operation == "gather") {
+                baseline = std::make_unique<StructureCapture>();
+                baseline->overlays = capture.overlays;
+                Guard before(*baseline);
+                cm::CompileInput original;
+                original.outname = modelname; original.stripLods = stripLods;
+                if (!LoadQcScript(path, original, &error, defvars, includeDirs, fileDirs, baseline->Overlay(path)))
+                    throw std::runtime_error("Validate the QC successfully before reordering commands");
+            }
+            patches = ApplyEditorRequest(*edit, target->second, baseline.get());
+            scriptText = capture.Overlay(path);
+        }
+        if (baseline) source::ResetDmxUpAxis();
         cm::CompileInput input;
         input.outname = modelname;
         input.stripLods = stripLods;
@@ -9509,6 +9577,38 @@ bool DumpStructure(const char* path, const ScriptVars& defvars,
         }
     } catch (const std::exception& e) {
         capture.Error(path, 0, e.what());
+    }
+    if (baseline && (!success || EditorStateSignature(*baseline) != EditorStateSignature(capture))) {
+        baseline->Error(path, 0, "Move rejected: the compiler could not confirm unchanged effective state");
+        baseline->Print(false);
+        return false;
+    }
+    if (edit) for (const auto& patch : patches)
+        StructureRecord("edit", JsonObject({{"revision", JsonString(edit->revision)},
+            {"path", JsonString(StructurePath(edit->path))}, {"start", std::to_string(patch.start)},
+            {"before", JsonString(EditorHex(patch.before))}, {"after", JsonString(EditorHex(patch.after))}}));
+    const bool changed = std::any_of(patches.begin(), patches.end(), [](const EditorPatch& patch) {
+        return patch.before != patch.after;
+    });
+    int editedFile = -1;
+    std::string editedPath;
+    if (edit && baseline && changed) {
+        editedPath = StructurePath(edit->path);
+        const auto key = StructureKey(edit->path);
+        for (size_t i = 0; i < baseline->files.size(); ++i)
+            if (StructureKey(baseline->files[i].path) == key) { editedFile = static_cast<int>(i); break; }
+    }
+    if (edit && baseline && changed) for (const auto& patch : patches) {
+        auto destination = static_cast<std::ptrdiff_t>(patch.start);
+        for (const auto& other : patches) if (other.start < patch.start)
+            destination += static_cast<std::ptrdiff_t>(other.after.size()) - static_cast<std::ptrdiff_t>(other.before.size());
+        for (const auto& origin : patch.origins) for (const auto& node : baseline->nodes) {
+            if (node.generated || node.file != editedFile ||
+                node.start < origin.start || node.end > origin.end) continue;
+            StructureRecord("node-map", JsonObject({{"path", JsonString(editedPath)},
+                {"command", JsonString(node.command)}, {"from", std::to_string(node.start)},
+                {"to", std::to_string(static_cast<size_t>(destination) + origin.offset + node.start - origin.start)}}));
+        }
     }
     capture.Print(success);
     return success;

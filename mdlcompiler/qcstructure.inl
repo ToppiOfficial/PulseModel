@@ -51,6 +51,8 @@ struct StructureCapture {
     struct Ref { int node; std::string kind, name; int definition; bool resolved, evaluated; };
     std::vector<File> files;
     std::vector<StructureNode> nodes;
+    std::map<int, std::map<size_t, EditorField>> parameterFields;
+    std::map<int, EditorField> missingParameters;
     std::vector<Ref> refs;
     std::vector<std::string> errors, events;
     std::map<std::string, std::string> overlays;
@@ -272,7 +274,37 @@ struct StructureCapture {
             StructureRecord("file", JsonObject({{"id", std::to_string(i)},
                 {"path", JsonString(files[i].path)}, {"bytes", JsonString(hex)}}));
         }
+        std::vector<std::vector<Token>> authored(files.size());
+        for (size_t i = 0; i < files.size(); ++i) {
+            std::string error;
+            Tokenize(files[i].text, files[i].path, authored[i], &error);
+        }
+        std::set<std::string> macros;
+        for (const auto& node : nodes) if (node.command == "$definemacro") {
+            auto name = "$" + node.label;
+            for (auto& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            macros.insert(std::move(name));
+        }
+        std::map<int, std::map<size_t, std::pair<size_t, size_t>>> commandRanges;
+        for (const auto& node : nodes) if (!node.generated)
+            commandRanges[node.file][node.start] = {node.end, node.close};
+        const std::map<size_t, EditorField> emptyFields;
         for (const StructureNode& n : nodes) {
+            const bool editable = !n.generated && n.complete && (IsCommandName(n.command) ||
+                n.command == "$include" || macros.count(n.command));
+            auto parameters = editable ? EditorParameters(n.command, authored.at(n.file), n.start, n.end,
+                parameterFields.count(n.file) ? parameterFields.at(n.file) : emptyFields, commandRanges[n.file]) : "[]";
+            const auto missing = missingParameters.find(n.id);
+            if (editable && missing != missingParameters.end()) {
+                parameters.pop_back();
+                if (parameters.size() > 1) parameters += ',';
+                const auto& field = missing->second;
+                const auto position = n.close ? n.close : n.end;
+                parameters += JsonObject({{"kind", JsonString("missing")}, {"label", JsonString(field.label)},
+                    {"type", JsonString(field.type)}, {"referenceKind", JsonString(field.reference)},
+                    {"value", JsonString("")}, {"start", std::to_string(position)}, {"end", std::to_string(position)},
+                    {"line", std::to_string(n.line)}, {"quoted", field.type == "number" || field.type == "integer" || field.type == "frame" ? "false" : "true"}}) + ']';
+            }
             StructureRecord("node", JsonObject({{"id", std::to_string(n.id)}, {"file", std::to_string(n.file)},
                 {"parent", std::to_string(n.parent)}, {"call", std::to_string(n.call)},
                 {"start", std::to_string(n.start)}, {"end", std::to_string(n.end)}, {"close", std::to_string(n.close)},
@@ -280,7 +312,8 @@ struct StructureCapture {
                 {"active", n.active ? "true" : "false"}, {"evaluated", n.evaluated || success ? "true" : "false"},
                 {"generated", n.generated ? "true" : "false"}, {"raw", n.raw ? "true" : "false"},
                 {"complete", n.complete ? "true" : "false"}, {"movable", n.movable ? "true" : "false"},
-                {"preview", JsonString(n.preview)}}));
+                {"preview", JsonString(n.preview)}, {"parameterEditable", editable ? "true" : "false"},
+                {"parameters", parameters}}));
             if (!n.state.empty()) StructureRecord("state", JsonObject({{"node", std::to_string(n.id)},
                 {"value", n.state}, {"boundary", JsonString(n.boundary)}}));
         }
