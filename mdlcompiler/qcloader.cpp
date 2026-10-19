@@ -9332,11 +9332,13 @@ std::string SupportedList() {
 
 namespace {
 std::string EditorCommandSection(const std::string& command) {
+    if (EditorNested(command)) return "modelgroups";
     if (command == "$include") return "includes";
     for (const auto& entry : kCommands) if (command == entry.name) return entry.section;
     return "misc";
 }
 std::string EditorCommandStarter(const std::string& command) {
+    if (const auto* entry = EditorNested(command)) return entry->starter;
     if (command == "$include") return "$include \"\"";
     for (const auto& entry : kCommands)
         if (command == entry.name) return *entry.starter ? entry.starter : entry.name;
@@ -9354,6 +9356,13 @@ void PrintCommandNames() {
             {"parameters", EditorParameterSchema(k.name)}, {"parameterModel", JsonString("authored-tokens")}}));
     }
     if (!pulse::api::Active()) { std::printf("$include\n"); return; }
+    for (const auto& entry : editorMeshCommands)
+        StructureRecord("command", JsonObject({{"name", JsonString(entry.name)},
+            {"section", JsonString("modelgroups")}, {"ordered", "true"},
+            {"summary", JsonString("Render mesh option. Select a render mesh or a compatible command list to insert.")},
+            {"syntax", JsonString(entry.syntax)}, {"template", JsonString(entry.starter)},
+            {"parents", std::string(entry.name) == "$exceptionlist" ? "[\"$rendermesh\"]" : "[\"$rendermesh\",\"$rendermeshcmdlist\"]"},
+            {"parameters", EditorParameterSchema(entry.name)}, {"parameterModel", JsonString("authored-tokens")}}));
     StructureRecord("command", JsonObject({{"name", JsonString("$include")}, {"section", JsonString("includes")},
         {"ordered", "false"}, {"summary", JsonString("Include a script in read order")},
         {"syntax", JsonString("$include <path> [localdir] [optional]")},

@@ -1,3 +1,39 @@
+struct EditorNestedCommand {
+    const char* name;
+    const char* syntax;
+    const char* starter;
+};
+
+const EditorNestedCommand editorMeshCommands[] = {
+    {"$toonoutline", "$toonoutline <stream> <thickness> [<min> <max>] [noweld] [permaterial] [forceuseoutline] [thicknessclamp <factor>] [materialname <name>] [cdmaterial <dir>]", "$toonoutline \"\" 0.5"},
+    {"$cullvertex", "$cullvertex <stream> <threshold>", "$cullvertex \"\" 0.5"},
+    {"$exceptionlist", "$exceptionlist [exclusive|inclusive] { <names> }", "$exceptionlist {\n    \"\"\n}"},
+    {"$skinnedbonecull", "$skinnedbonecull aggressive|tree", "$skinnedbonecull tree"},
+    {"$removemesh", "$removemesh <material>", "$removemesh \"\""},
+    {"$removemeshword", "$removemeshword <keyword>", "$removemeshword \"\""},
+    {"$inflate", "$inflate <amount> [material <names> | mesh <names>]", "$inflate 0"},
+    {"$use_skeletalaware_decimation", "$use_skeletalaware_decimation", "$use_skeletalaware_decimation"},
+    {"$flipnormals", "$flipnormals", "$flipnormals"},
+    {"$weld", "$weld [seams] [sharp <degrees>]", "$weld"},
+    {"$decimate", "$decimate <factor>", "$decimate 1"},
+    {"$decimatemesh", "$decimatemesh <factor> <meshes>", "$decimatemesh 1 \"\""},
+    {"$scalebone", "$scalebone <bone> <factor> [x] [y] [z]", "$scalebone \"\" 1"},
+    {"$nomorph", "$nomorph", "$nomorph"},
+    {"$nofacial", "$nofacial", "$nofacial"},
+    {"$vta", "$vta <file> { flex <name> frame <index> [position <value>] [decay <value>] }", "$vta \"\" {\n    flex \"\" frame 0\n}"},
+    {"$vca", "$vca <file> [<controller>]", "$vca \"\""}
+};
+
+const EditorNestedCommand* EditorNested(const std::string& command) {
+    for (const auto& entry : editorMeshCommands) if (command == entry.name) return &entry;
+    return nullptr;
+}
+
+bool EditorAcceptsNested(const std::string& parent, const std::string& command) {
+    return parent == "$rendermesh" ||
+        (parent == "$rendermeshcmdlist" && command != "$exceptionlist");
+}
+
 // Authored parameters use the loader's tokens, before variable expansion.
 std::string EditorLabels(const std::string& command) {
     static const std::map<std::string, std::string> labels = {
@@ -12,6 +48,11 @@ std::string EditorLabels(const std::string& command) {
         {"$addincludesearchdir", "Directory"}, {"$surfaceprop", "Surface"},
         {"$renamebone", "From|To"}, {"$renamematerial", "From|To"},
         {"$jigglebone", "Bone"}, {"$if", "Condition"}, {"$elif", "Condition"},
+        {"$toonoutline", "Stream|Thickness|Minimum weight|Maximum weight"},
+        {"$cullvertex", "Stream|Threshold"}, {"$skinnedbonecull", "Mode"},
+        {"$removemesh", "Material"}, {"$removemeshword", "Keyword"},
+        {"$inflate", "Amount"}, {"$decimate", "Factor"}, {"$decimatemesh", "Factor|Mesh"},
+        {"$scalebone", "Bone|Factor"}, {"$vta", "Path"}, {"$vca", "Path|Controller"},
         {"$ifdef", "Variable"}, {"$ifndef", "Variable"}, {"$switch", "Variable"}, {"$case", "Value"}
     };
     const auto found = labels.find(command);
@@ -306,7 +347,27 @@ bool EditorBranch(const std::string& command) {
         command == "$else" || command == "$switch" || command == "$case" || command == "$default";
 }
 
+const StructureNode* EditorNestedParent(const EditorRequest& request, const StructureCapture& syntax) {
+    if (!EditorNested(request.value)) return nullptr;
+    const StructureNode* target = nullptr;
+    const bool gap = request.kind == "gap-before" || request.kind == "gap-after";
+    for (const auto& node : syntax.nodes) {
+        if ((gap && node.start == request.start) || (!gap && node.start == request.selected)) {
+            target = &node;
+            break;
+        }
+    }
+    if (!gap && request.kind != "automatic")
+        for (const auto& node : syntax.nodes)
+            if (node.start < request.start && request.start <= node.end &&
+                (!target || node.start > target->start)) target = &node;
+    for (; target; target = target->parent >= 0 ? &syntax.nodes.at(target->parent) : nullptr)
+        if (EditorAcceptsNested(target->command, request.value) && target->complete) return target;
+    throw std::runtime_error("Select a render mesh or a compatible render mesh command list to add " + request.value);
+}
+
 size_t EditorInsertion(const EditorRequest& request, const StructureCapture& syntax, const std::string& source) {
+    const auto* nestedParent = EditorNestedParent(request, syntax);
     const auto nodeAt = [&](size_t start) -> const StructureNode* {
         for (const auto& node : syntax.nodes) if (node.start == start) return &node;
         return nullptr;
@@ -321,8 +382,11 @@ size_t EditorInsertion(const EditorRequest& request, const StructureCapture& syn
     if (request.kind == "gap-before" || request.kind == "gap-after") {
         const auto* target = nodeAt(request.start);
         if (!target || !target->complete) throw std::runtime_error("Select a complete command insertion target");
+        if (nestedParent && target->id == nestedParent->id)
+            throw std::runtime_error("Drop this option inside a render mesh");
         return request.kind == "gap-before" ? target->start : target->end;
     }
+    if (nestedParent) return nestedParent->close ? nestedParent->close : nestedParent->end;
     if (request.kind != "automatic") return request.start;
     const auto& command = request.value;
     const bool arm = command == "$elif" || command == "$else" || command == "$case" || command == "$default";
@@ -421,11 +485,13 @@ std::vector<EditorPatch> ApplyEditorRequest(const EditorRequest& request, std::s
         StructureCapture syntax;
         syntax.Index(source, request.path, tokens);
         patchStart = EditorInsertion(request, syntax, source);
+        const auto* nestedParent = EditorNestedParent(request, syntax);
         after = EditorCommandStarter(request.value);
         if (after.empty()) throw std::runtime_error("Unsupported command template");
         std::string formatted;
         for (const char ch : after) formatted += ch == '\n' ? newline : std::string(1, ch);
         after = newline + formatted + newline;
+        if (nestedParent && !nestedParent->close) after = newline + "{" + after + "}" + newline;
     } else if (request.operation == "erase" && token != tokens.end() && !token->quoted && token->text == "{") {
         int depth = 0;
         auto close = token;

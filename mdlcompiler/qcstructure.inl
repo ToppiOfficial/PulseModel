@@ -279,19 +279,12 @@ struct StructureCapture {
             std::string error;
             Tokenize(files[i].text, files[i].path, authored[i], &error);
         }
-        std::set<std::string> macros;
-        for (const auto& node : nodes) if (node.command == "$definemacro") {
-            auto name = "$" + node.label;
-            for (auto& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            macros.insert(std::move(name));
-        }
         std::map<int, std::map<size_t, std::pair<size_t, size_t>>> commandRanges;
         for (const auto& node : nodes) if (!node.generated)
             commandRanges[node.file][node.start] = {node.end, node.close};
         const std::map<size_t, EditorField> emptyFields;
         for (const StructureNode& n : nodes) {
-            const bool editable = !n.generated && n.complete && (IsCommandName(n.command) ||
-                n.command == "$include" || macros.count(n.command));
+            const bool editable = !n.generated && n.complete && n.command.size() > 1 && n.command.front() == '$';
             auto parameters = editable ? EditorParameters(n.command, authored.at(n.file), n.start, n.end,
                 parameterFields.count(n.file) ? parameterFields.at(n.file) : emptyFields, commandRanges[n.file]) : "[]";
             const auto missing = missingParameters.find(n.id);
