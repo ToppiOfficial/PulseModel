@@ -1856,12 +1856,14 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
 int main(int argc, char** argv)
 {
     if (argc != 2 || std::strcmp(argv[1], "-api") != 0) return RunConversion(argc, argv);
+
     int result = 1;
     try
     {
         pulse::api::Begin("vmd2valvebiped");
         const auto request = pulse::api::ReadRequest(false);
         if (!request.buffers.empty()) throw std::runtime_error("Conversion reads saved input files");
+
         ApiCapabilities();
         if (request.method == "capabilities")
         {
@@ -1871,10 +1873,12 @@ int main(int argc, char** argv)
         else
         {
             if (request.method != "motion" && request.method != "camera") throw std::runtime_error("Unknown conversion method");
+
             ApiOptions options;
             options.method = request.method;
             std::string motion, model;
             if (request.arguments.size() % 2) throw std::runtime_error("Conversion arguments must be pairs");
+
             std::set<std::string> seen;
             for (size_t i = 0; i < request.arguments.size(); i += 2)
             {
@@ -1903,13 +1907,17 @@ int main(int argc, char** argv)
                 }
                 else throw std::runtime_error("Unknown conversion argument");
             }
+
             if (options.method == "camera" && !options.face.empty()) throw std::runtime_error("Camera conversion does not accept a facial motion");
+
             if (options.method == "motion" && (seen.count("transform") || seen.count("orientation") || seen.count("distanceTransform")))
                 throw std::runtime_error("Body conversion does not accept camera transforms");
             if (motion.empty() || model.empty()) throw std::runtime_error("Motion and target model are required");
+
             std::array<std::string, 5> arguments{"vmd2valvebiped", "-vmd", motion, "-mdl", model};
             std::array<char*, 5> argv2;
             for (size_t i = 0; i < argv2.size(); ++i) argv2[i] = arguments[i].data();
+
             result = RunConversion(int(argv2.size()), argv2.data(), &options);
         }
     }
@@ -1918,6 +1926,7 @@ int main(int argc, char** argv)
         if (pulse::api::Active()) pulse::api::Record("diagnostic", "{\"text\":" + pulse::api::String(error.what()) + "}");
         else std::fprintf(stderr, "%s\n", error.what());
     }
+
     if (pulse::api::Active()) pulse::api::Finish(result);
     return result;
 }

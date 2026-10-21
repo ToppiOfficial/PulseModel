@@ -26,18 +26,23 @@ void Begin(const char* tool) {
     _setmode(_fileno(stdout), _O_BINARY);
     const int descriptor = _dup(_fileno(stdout));
     if (descriptor < 0) throw std::runtime_error("Cannot open API output");
+
     output = _fdopen(descriptor, "wb");
     if (!output) { _close(descriptor); throw std::runtime_error("Cannot open API stream"); }
+
     if (_dup2(_fileno(stderr), _fileno(stdout)) != 0)
         throw std::runtime_error("Cannot redirect compiler log");
 #else
     const int descriptor = dup(fileno(stdout));
     if (descriptor < 0) throw std::runtime_error("Cannot open API output");
+
     output = fdopen(descriptor, "wb");
     if (!output) { close(descriptor); throw std::runtime_error("Cannot open API stream"); }
+
     if (dup2(fileno(stderr), fileno(stdout)) < 0)
         throw std::runtime_error("Cannot redirect compiler log");
 #endif
+
     std::setvbuf(output, nullptr, _IOFBF, 1 << 16);
     Record("api", tool ? "{\"version\":1,\"tool\":" + String(tool) + "}" : "{\"version\":1}");
 }
@@ -51,6 +56,7 @@ Request ReadRequest(bool compilerMethods) {
         bytes.append(chunk, count);
     }
     if (std::ferror(stdin)) throw std::runtime_error("Cannot read API request");
+
     size_t cursor = 0;
     const auto line = [&]() {
         const auto end = bytes.find('\n', cursor);
@@ -59,6 +65,7 @@ Request ReadRequest(bool compilerMethods) {
         cursor = end + 1;
         return value;
     };
+
     const auto number = [&]() {
         const auto value = line();
         if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
@@ -68,6 +75,7 @@ Request ReadRequest(bool compilerMethods) {
         if (used != value.size() || length > maxRequest) throw std::runtime_error("Invalid API length");
         return static_cast<size_t>(length);
     };
+
     const auto field = [&]() {
         const size_t length = number();
         if (length > bytes.size() - cursor) throw std::runtime_error("Truncated API field");
@@ -75,11 +83,14 @@ Request ReadRequest(bool compilerMethods) {
         cursor += length;
         return value;
     };
+
     if (line() != "PULSEMODEL 1") throw std::runtime_error("Unsupported API version");
+
     Request request;
     request.method = line();
     if (compilerMethods && request.method != "catalog" && request.method != "analyze" && request.method != "compile")
         throw std::runtime_error("Unknown API method");
+
     const size_t arguments = number();
     if (arguments > 4096) throw std::runtime_error("Too many API arguments");
     for (size_t i = 0; i < arguments; ++i) {
@@ -87,12 +98,14 @@ Request ReadRequest(bool compilerMethods) {
         if (value.find('\0') != std::string::npos) throw std::runtime_error("NUL in API argument");
         request.arguments.push_back(std::move(value));
     }
+
     request.buffers = field();
     if (cursor != bytes.size()) throw std::runtime_error("Trailing API request bytes");
     if (compilerMethods && request.method == "catalog" && (!request.arguments.empty() || !request.buffers.empty()))
         throw std::runtime_error("Catalog takes no arguments or buffers");
     if (compilerMethods && request.method != "analyze" && !request.buffers.empty())
         throw std::runtime_error("This API method reads saved files");
+
     return request;
 }
 
@@ -111,10 +124,12 @@ std::string String(const std::string& value) {
                 valid = !(ch == 0xE0 && next < 0xA0) && !(ch == 0xED && next >= 0xA0) &&
                     !(ch == 0xF0 && next < 0x90) && !(ch == 0xF4 && next >= 0x90);
             }
+
             if (valid) { out.append(value, i, width); i += width - 1; }
             else out += "\\ufffd";
             continue;
         }
+
         switch (ch) {
         case '"': out += "\\\""; break;
         case '\\': out += "\\\\"; break;
@@ -130,6 +145,7 @@ std::string String(const std::string& value) {
             } else out += static_cast<char>(ch);
         }
     }
+
     return out + "\"";
 }
 

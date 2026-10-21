@@ -332,6 +332,7 @@ int main(int argc, char** argv) {
         if (api) {
             pulse::api::Begin();
             auto request = pulse::api::ReadRequest();
+
             if (request.method == "catalog") {
                 pulse::api::Record("capability", "{\"api\":1,\"catalog\":1,\"analyze\":1,\"compile\":1,\"buffers\":1,\"diagnostics\":1,\"branches\":1}");
                 pulse::loader::PrintCommandNames();
@@ -349,7 +350,9 @@ int main(int argc, char** argv) {
     } catch (...) {
         rc = Fail("internal error", "unknown C++ exception");
     }
+
     if (api && pulse::api::Active()) pulse::api::Finish(rc);
+
     pulse::fatal::PauseIfAsked();
     return rc;
 }
