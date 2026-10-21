@@ -145,6 +145,8 @@ void SolveTwoBoneIK(int iThigh, int iKnee, int iFoot, const Vector3& target, Vec
 
     SwingAbout(w, thigh, Sub(knee, thigh), Sub(newKnee, thigh), {iThigh, iKnee, iFoot});
     SwingAbout(w, newKnee, Sub(Origin(w[iFoot]), newKnee), Sub(newFoot, newKnee), {iKnee, iFoot});
+
+    assert(Len(Sub(Origin(w[iFoot]), newFoot)) < (l1 + l2) * 1e-4f);
 }
 
 // --------------------------------------------------------------- byte reading
@@ -469,8 +471,10 @@ const MmdDef kMmd[] = {
     {"leg", "\x91\xab", "\xe8\xb6\xb3", true, "lower", {0.9f, 10.9f, 0.1f}},
     {"knee", "\x82\xd0\x82\xb4", "\xe3\x81\xb2\xe3\x81\x96", true, "leg", {0.9f, 6.0f, -0.1f}},
     {"ankle", "\x91\xab\x8e\xf1", "\xe8\xb6\xb3\xe9\xa6\x96", true, "knee", {0.9f, 1.1f, 0.4f}},
+    {"toe", "\x82\xc2\x82\xdc\x90\xe6", "\xe3\x81\xa4\xe3\x81\xbe\xe5\x85\x88", true, "ankle", {0.9f, 0.2f, -1.0f}},
     {"ikparent", "\x91\xab\x49\x4b\x90\x65", "\xe8\xb6\xb3\x49\x4b\xe8\xa6\xaa", true, "all", {0.9f, 0, 0.4f}},
     {"legik", "\x91\xab\x82\x68\x82\x6a", "\xe8\xb6\xb3\xef\xbc\xa9\xef\xbc\xab", true, "ikparent", {0.9f, 1.1f, 0.4f}},
+    {"toeik", "\x82\xc2\x82\xdc\x90\xe6\x82\x68\x82\x6a", "\xe3\x81\xa4\xe3\x81\xbe\xe5\x85\x88\xef\xbc\xa9\xef\xbc\xab", true, "legik", {0.9f, 0.2f, -1.0f}},
 };
 const char* const kSideSj[2] = {"\x8d\xb6", "\x89\x45"}; // left, right
 const char* const kSideU8[2] = {"\xe5\xb7\xa6", "\xe5\x8f\xb3"};
@@ -1413,10 +1417,9 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         return Fail("\"" + mdlPath + "\" has no $ikchain ending at ValveBiped.Bip01_L_Foot and "
                     "_R_Foot - leg IK needs both");
 
-    // MMD -> target basis from each rig's own left/up/forward. MMD is left-handed
-    // Y-up facing -Z, so this is a reflection and M*R*Mt stays a proper rotation.
-    Vector3 up = Sub(Origin(t.world[top]), Origin(t.world[pelvis]));
-    pm::VectorNormalize(up);
+    // Keep the motion's floor horizontal even when the bind torso leans.
+    // MMD is left-handed Y-up facing -Z; M*R*Mt stays a proper rotation.
+    const Vector3 up{0, 0, 1};
     Vector3 left = Sub(Origin(t.world[lThigh]), Origin(t.world[rThigh]));
     left = Sub(left, Mul(up, Dot(left, up)));
     pm::VectorNormalize(left);
@@ -1449,6 +1452,18 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     if (mmdLeg < 1e-4f || tgtLeg < 1e-4f)
         return Fail("zero-length leg, cannot derive the motion scale");
     const float scale = tgtLeg / mmdLeg;
+
+    if (pmxPath.empty()) {
+        for (int side = 0; side < 2; ++side) {
+            const int toe = t.Find(side ? "R_Toe0" : "L_Toe0");
+            if (toe < 0) continue;
+
+            const auto offset = Mul(pm::VectorRotate(
+                Sub(Origin(t.world[toe]), Origin(t.world[legs[side].foot])), Mt), 1.0f / scale);
+            mmd.bones[mmd.Find("toe", side)].rest = Add(restOf("ankle", side), offset);
+            mmd.bones[mmd.Find("toeik", side)].rest = Add(restOf("legik", side), offset);
+        }
+    }
 
     // Per target bone: its MMD source and the rest alignment O that poses the
     // target's arms into the MMD rest pose. Fingers take the hand's O.
@@ -1497,6 +1512,33 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                 if (src[i] >= 0 && t.names[i].find(std::string("Bip01_") + s + "Finger") != std::string::npos)
                     align[i] = align[hand];
     }
+
+    struct Arm {
+        int upper, elbow, hand;
+    };
+    const Arm arms[2] = {
+        {t.Find("L_UpperArm"), t.Find("L_Forearm"), t.Find("L_Hand")},
+        {t.Find("R_UpperArm"), t.Find("R_Forearm"), t.Find("R_Hand")}
+    };
+    float sourceArms = 0.0f, targetArms = 0.0f;
+    bool reachArms = true;
+    for (int side = 0; side < 2; ++side) {
+        const Arm& arm = arms[side];
+        if (arm.upper < 0 || arm.elbow < 0 || arm.hand < 0 ||
+            t.parent[arm.elbow] != arm.upper || t.parent[arm.hand] != arm.elbow) {
+            reachArms = false;
+            break;
+        }
+
+        const float sourceLength = Len(Sub(restOf("elbow", side), restOf("arm", side))) +
+                                   Len(Sub(restOf("wrist", side), restOf("elbow", side)));
+        const float targetLength = Len(Sub(Origin(t.world[arm.elbow]), Origin(t.world[arm.upper]))) +
+                                   Len(Sub(Origin(t.world[arm.hand]), Origin(t.world[arm.elbow])));
+        reachArms &= sourceLength > 1e-4f && targetLength > 1e-4f;
+        sourceArms += sourceLength;
+        targetArms += targetLength;
+    }
+    const float armScale = reachArms ? targetArms / sourceArms : 0.0f;
 
     const auto toTarget = [&](const matrix3x4& g) {
         return pm::ConcatTransforms(M, pm::ConcatTransforms(RotOnly(g), Mt));
@@ -1606,6 +1648,24 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                 G[b] = mb.parent >= 0 ? pm::ConcatTransforms(G[mb.parent], lm) : lm;
             }
 
+            // Toe IK aims the ankle without replacing its authored twist.
+            for (int side = 0; side < 2; ++side) {
+                const int thigh = mmd.Find("leg", side), knee = mmd.Find("knee", side);
+                const int ankle = mmd.Find("ankle", side), toe = mmd.Find("toe", side);
+                const int toeIk = mmd.Find("toeik", side);
+                const auto toeLocal = pm::ConcatTransforms(pm::MatrixInvert(G[ankle]), G[toe]);
+                const auto hint = Sub(Origin(G[knee]), Origin(G[thigh]));
+                SolveTwoBoneIK(thigh, knee, ankle, Origin(G[legs[side].ik]), hint, G);
+                G[toe] = pm::ConcatTransforms(G[ankle], toeLocal);
+
+                const auto pivot = Origin(G[ankle]);
+                const auto direction = Sub(Origin(G[toeIk]), pivot);
+                SwingAbout(G, pivot, Sub(Origin(G[toe]), pivot), direction, {ankle, toe});
+                assert(Len(Sub(Origin(G[toe]), pivot)) < 1e-6f || Len(direction) < 1e-6f ||
+                       Dot(Sub(Origin(G[toe]), pivot), direction) >
+                           0.999f * Len(Sub(Origin(G[toe]), pivot)) * Len(direction));
+            }
+
             for (int i = 0; i < t.n; ++i) {
                 const int p = t.parent[i];
                 if (src[i] < 0) {
@@ -1621,6 +1681,35 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                                             pm::ConcatTransforms(align[i], RotOnly(t.world[i])));
                 SetOrigin(W[i], pos);
                 L[i] = p >= 0 ? pm::ConcatTransforms(pm::MatrixInvert(W[p]), W[i]) : W[i];
+            }
+
+            // A shared anchor and scale keep the wrists together across different proportions.
+            if (reachArms) {
+                const Vector3 sourceCenter = Mul(Add(Origin(G[mmd.Find("arm", 0)]),
+                                                    Origin(G[mmd.Find("arm", 1)])), 0.5f);
+                const Vector3 targetCenter = Mul(Add(Origin(W[arms[0].upper]),
+                                                    Origin(W[arms[1].upper])), 0.5f);
+                for (int side = 0; side < 2; ++side) {
+                    const Arm& arm = arms[side];
+                    const Vector3 wristOffset = Sub(Origin(G[mmd.Find("wrist", side)]), sourceCenter);
+                    const Vector3 elbowOffset = Sub(Origin(G[mmd.Find("elbow", side)]),
+                                                    Origin(G[mmd.Find("arm", side)]));
+                    const Vector3 goal = Add(targetCenter, Mul(pm::VectorRotate(wristOffset, M), armScale));
+                    const Vector3 hint = pm::VectorRotate(elbowOffset, M);
+                    const matrix3x4 handRotation = RotOnly(W[arm.hand]);
+                    SolveTwoBoneIK(arm.upper, arm.elbow, arm.hand, goal, hint, W);
+                    const Vector3 handPosition = Origin(W[arm.hand]);
+                    W[arm.hand] = handRotation;
+                    SetOrigin(W[arm.hand], handPosition);
+
+                    for (int bone : {arm.upper, arm.elbow, arm.hand}) {
+                        const int parent = t.parent[bone];
+                        L[bone] = parent >= 0 ? pm::ConcatTransforms(pm::MatrixInvert(W[parent]), W[bone]) : W[bone];
+                    }
+                }
+
+                for (int bone = 0; bone < t.n; ++bone)
+                    W[bone] = t.parent[bone] >= 0 ? pm::ConcatTransforms(W[t.parent[bone]], L[bone]) : L[bone];
             }
 
             for (int side = 0; side < 2; ++side) {
@@ -1639,7 +1728,8 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                 lastBend[side] = bend;
                 SolveTwoBoneIK(g.thigh, g.knee, g.foot, goal, bend, W);
                 const Vector3 footPos = Origin(W[g.foot]);
-                W[g.foot] = pm::ConcatTransforms(toTarget(G[g.ik]), RotOnly(t.world[g.foot]));
+                W[g.foot] = pm::ConcatTransforms(toTarget(G[mmd.Find("ankle", side)]),
+                                                RotOnly(t.world[g.foot]));
                 SetOrigin(W[g.foot], footPos);
                 for (int b : {g.thigh, g.knee, g.foot}) {
                     const int p = t.parent[b];
