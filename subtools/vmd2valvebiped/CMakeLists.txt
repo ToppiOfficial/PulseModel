@@ -11,7 +11,7 @@ set_target_properties(vmd2valvebiped PROPERTIES
                       RUNTIME_OUTPUT_DIRECTORY_RELEASE "${SUBTOOLS_DIR}"
                       RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${SUBTOOLS_DIR}"
                       RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${SUBTOOLS_DIR}")
-set(TOOL_VERSION 0.2.0)
+set(TOOL_VERSION 0.3.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(vmd2valvebiped PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 
@@ -20,4 +20,4 @@ if(WIN32)
     target_sources(vmd2valvebiped PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
                                           "${CMAKE_SOURCE_DIR}/utf8.manifest")
 endif()
-target_link_libraries(vmd2valvebiped PRIVATE pulse_libs pulse_math pulse_drlibs pulse_dmx)
+target_link_libraries(vmd2valvebiped PRIVATE pulse_api pulse_libs pulse_math pulse_drlibs pulse_dmx)

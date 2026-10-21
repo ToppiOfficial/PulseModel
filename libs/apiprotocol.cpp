@@ -1,4 +1,4 @@
-#include "api.h"
+#include "apiprotocol.h"
 
 #include <cstdio>
 #include <stdexcept>
@@ -19,7 +19,7 @@ constexpr size_t maxRequest = 64 * 1024 * 1024;
 
 bool Active() { return output != nullptr; }
 
-void Begin() {
+void Begin(const char* tool) {
     std::fflush(stdout);
 #ifdef _WIN32
     _setmode(_fileno(stdin), _O_BINARY);
@@ -39,10 +39,10 @@ void Begin() {
         throw std::runtime_error("Cannot redirect compiler log");
 #endif
     std::setvbuf(output, nullptr, _IOFBF, 1 << 16);
-    Record("api", "{\"version\":1}");
+    Record("api", tool ? "{\"version\":1,\"tool\":" + String(tool) + "}" : "{\"version\":1}");
 }
 
-Request ReadRequest() {
+Request ReadRequest(bool compilerMethods) {
     std::string bytes;
     char chunk[65536];
     size_t count;
@@ -78,7 +78,7 @@ Request ReadRequest() {
     if (line() != "PULSEMODEL 1") throw std::runtime_error("Unsupported API version");
     Request request;
     request.method = line();
-    if (request.method != "catalog" && request.method != "analyze" && request.method != "compile")
+    if (compilerMethods && request.method != "catalog" && request.method != "analyze" && request.method != "compile")
         throw std::runtime_error("Unknown API method");
     const size_t arguments = number();
     if (arguments > 4096) throw std::runtime_error("Too many API arguments");
@@ -89,9 +89,9 @@ Request ReadRequest() {
     }
     request.buffers = field();
     if (cursor != bytes.size()) throw std::runtime_error("Trailing API request bytes");
-    if (request.method == "catalog" && (!request.arguments.empty() || !request.buffers.empty()))
+    if (compilerMethods && request.method == "catalog" && (!request.arguments.empty() || !request.buffers.empty()))
         throw std::runtime_error("Catalog takes no arguments or buffers");
-    if (request.method != "analyze" && !request.buffers.empty())
+    if (compilerMethods && request.method != "analyze" && !request.buffers.empty())
         throw std::runtime_error("This API method reads saved files");
     return request;
 }

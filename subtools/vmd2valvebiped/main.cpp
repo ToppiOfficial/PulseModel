@@ -5,6 +5,12 @@
 // follow the MMD foot IK through the target model's own $ikchain data.
 
 #include <algorithm>
+#include <apiprotocol.h>
+#include <array>
+#include <cassert>
+#include <iomanip>
+#include <limits>
+#include <stdexcept>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -36,6 +42,16 @@ using pm::Vector3;
 
 namespace {
 
+bool ReadInput(const std::string& path, std::vector<char>& bytes)
+{
+    std::ifstream file(fs::u8path(path), std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    const auto length = file.tellg();
+    if (length < 0 || length > 128 * 1024 * 1024) return false;
+    bytes.resize(static_cast<size_t>(length));
+    file.seekg(0);
+    return bool(file.read(bytes.data(), static_cast<std::streamsize>(bytes.size())));
+}
 // ------------------------------------------------------------------ vector ops
 
 Vector3 Add(const Vector3& a, const Vector3& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
@@ -197,6 +213,7 @@ struct CamKey {
     Vector3 at, rot;
     uint8_t interp[24] = {};
     uint32_t fov = 30;
+    bool orthographic = false;
 };
 
 float Curve(float x1, float y1, float x2, float y2, float x) {
@@ -232,7 +249,7 @@ matrix3x4 AxisRot(int axis, float a) {
 // Camera eye, view axes and vertical fov (degrees) at MMD frame f, in MMD space. Keys
 // one frame apart are a cut and hold the earlier key. Orbit is yaw, then roll, then pitch.
 void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector3& fwd, Vector3& up,
-                  float& fov) {
+                  float& fov, float* distance = nullptr) {
     const CamKey* a = &keys.front();
     const CamKey* b = a;
     float x = 0.0f;
@@ -256,6 +273,7 @@ void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector
     const float wr = w(3);
     const Vector3 rot{lerp(a->rot.x, b->rot.x, wr), lerp(a->rot.y, b->rot.y, wr), lerp(a->rot.z, b->rot.z, wr)};
     const float dist = std::fabs(lerp(a->dist, b->dist, w(4)));
+    if (distance) *distance = dist;
     fov = lerp(static_cast<float>(a->fov), static_cast<float>(b->fov), w(5));
 
     // MMD is left-handed, so every angle turns the opposite way to the RH formulas
@@ -327,7 +345,7 @@ void Sample(const std::vector<Key>& keys, float f, Vector3& pos, pm::Quaternion&
 bool LoadVmd(const std::string& path, std::map<std::string, std::vector<Key>>& out,
              Morphs& morphs, std::vector<CamKey>& cams, uint32_t& lastFrame, std::string& err) {
     std::vector<char> buf;
-    if (!mdldecompiler::ReadWhole(path, buf)) {
+    if (!ReadInput(path, buf)) {
         err = "cannot read \"" + path + "\"";
         return false;
     }
@@ -390,7 +408,7 @@ bool LoadVmd(const std::string& path, std::map<std::string, std::vector<Key>>& o
             std::memcpy(c.interp, buf.data() + r.at, 24);
         r.Skip(24);
         c.fov = r.Get<uint32_t>();
-        r.Skip(1); // perspective flag
+        c.orthographic = r.Get<uint8_t>() != 0;
         if (r.ok)
             cams.push_back(c);
     }
@@ -537,7 +555,7 @@ std::string Utf16ToUtf8(const char* p, size_t bytes) {
 // lacks sits on its parent, which keeps it inert for rotation.
 bool LoadPmxRest(const std::string& path, MmdSkel& s, std::string& err) {
     std::vector<char> buf;
-    if (!mdldecompiler::ReadWhole(path, buf)) {
+    if (!ReadInput(path, buf)) {
         err = "cannot read \"" + path + "\"";
         return false;
     }
@@ -657,13 +675,20 @@ struct Target {
 };
 
 bool LoadMdl(const std::string& path, Mdl& m, std::string& err) {
-    if (!mdldecompiler::ReadWhole(path, m.buf) || m.buf.size() < sizeof(fm::studiohdr_t)) {
+    if (!ReadInput(path, m.buf) || m.buf.size() < sizeof(fm::studiohdr_t)) {
         err = "cannot read \"" + path + "\"";
         return false;
     }
     m.hdr = reinterpret_cast<const fm::studiohdr_t*>(m.buf.data());
     if (m.hdr->id != fm::kIdStudioHeader) {
         err = "\"" + path + "\" is not a studio model (bad id)";
+        return false;
+    }
+    if (m.hdr->length < int(sizeof(fm::studiohdr_t)) || size_t(m.hdr->length) > m.buf.size()
+        || m.hdr->numbones <= 0 || m.hdr->numbones > 16384 || m.hdr->numikchains < 0 || m.hdr->numikchains > 1024
+        || m.hdr->numflexcontrollers < 0 || m.hdr->numflexcontrollers > 65536)
+    {
+        err = "Invalid target model header";
         return false;
     }
     return true;
@@ -765,7 +790,7 @@ FaceMap BuiltinFaceMap(bool visemes) {
 // One "<morph> <controller>=<weight>..." per line, # comments. <morph> is a kFace
 // id, its UTF-8 name, or the raw VMD bytes (a Shift-JIS file names any morph).
 bool LoadFaceMap(const std::string& path, FaceMap& map, std::string& err) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(fs::u8path(path), std::ios::binary);
     if (!f) {
         err = "cannot read \"" + path + "\"";
         return false;
@@ -892,7 +917,7 @@ void PrintHeader() {
     std::printf("-------------------------------\n");
     std::printf("PulseModel [VMD to ValveBiped]\n");
     std::printf("version:   %s\n", PULSEMODEL_VERSION);
-    std::printf("developer: Toppi\n");
+    std::printf("developer: ToppiOfficial\n");
     std::printf("-------------------------------\n");
 }
 
@@ -962,6 +987,7 @@ int Usage() {
 }
 
 int Fail(const std::string& err) {
+    if (pulse::api::Active()) pulse::api::Record("diagnostic", "{\"text\":" + pulse::api::String(err) + "}");
     std::fprintf(stderr, "error: %s\n", err.c_str());
     return 1;
 }
@@ -1214,10 +1240,12 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
     return true;
 }
 
+#include "curveapi.h"
+
 } // namespace
 
-int main(int argc, char** argv) {
-    PrintHeader();
+int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
+    if (!api) PrintHeader();
     std::vector<std::string> vmdPaths;
     std::string mdlPath, pmxPath, outPath, compileName, gameDir, srcArg, faceMapPath;
     std::string faceSet = "facs", cameraFov;
@@ -1494,6 +1522,7 @@ int main(int argc, char** argv) {
     const long limit = pulse::limits::kMaxAnimFrames;
     // MMD space -> target: the MMD lower-body rest lands on the bind Pelvis
     const Vector3 camAnchor = Sub(Origin(t.world[pelvis]), Mul(pm::VectorRotate(lowerRest, M), scale));
+    if (api && api->method == "camera") return EmitCameraApi(*api, vmdPaths.front(), M, camAnchor, scale);
     std::vector<Clip> clips;
     std::vector<matrix3x4> G(mmd.bones.size()), W(t.n), L(t.n);
 
@@ -1504,6 +1533,23 @@ int main(int argc, char** argv) {
         uint32_t lastFrame = 0;
         if (!LoadVmd(vmdPath, keys, morphs, cams, lastFrame, err))
             return Fail(err);
+        if (api)
+        {
+            lastFrame = 0;
+            for (const auto& track : keys) if (!track.second.empty()) lastFrame = std::max(lastFrame, track.second.back().frame);
+            if (!api->face.empty())
+            {
+                std::map<std::string, std::vector<Key>> facialBones;
+                Morphs facialMorphs;
+                std::vector<CamKey> ignoredCameras;
+                uint32_t ignoredLast = 0;
+                if (!LoadVmd(api->face, facialBones, facialMorphs, ignoredCameras, ignoredLast, err)) return Fail(err);
+                for (auto& track : facialMorphs) morphs[track.first] = std::move(track.second);
+                for (const char* eye : kEyeBones) if (facialBones.count(eye)) keys[eye] = std::move(facialBones[eye]);
+            }
+            for (const auto& track : morphs) if (!track.second.empty()) lastFrame = std::max(lastFrame, track.second.back().frame);
+            for (const char* eye : kEyeBones) if (keys.count(eye) && !keys[eye].empty()) lastFrame = std::max(lastFrame, keys[eye].back().frame);
+        }
         std::vector<const std::vector<Key>*> mmdKeys(mmd.bones.size(), nullptr);
         int keyed = 0;
         for (size_t b = 0; b < mmd.bones.size(); ++b) {
@@ -1514,7 +1560,7 @@ int main(int argc, char** argv) {
             }
         }
         // camera/light/morph-only motions carry no body keys
-        if (!keyed) {
+        if (!keyed && !api) {
             std::printf("skipped %s - no standard MMD bone is keyed\n", vmdPath.c_str());
             continue;
         }
@@ -1528,19 +1574,26 @@ int main(int argc, char** argv) {
         const long span = last - first;
         int fps = 30;
         long count = span + 1;
-        if (count > limit && !uncompress) {
+        if (!api && count > limit && !uncompress) {
             fps = std::max(1, static_cast<int>(30 * (limit - 1) / span));
             count = span * fps / 30 + 1;
         }
 
         std::vector<float> times;
-        for (long k = 0; k < count; ++k)
+        if (!api) for (long k = 0; k < count; ++k)
             times.push_back(static_cast<float>(first) + static_cast<float>(k) * 30.0f / fps);
 
+        if (api)
+        {
+            times = ApiTimes(lastFrame, api->fps);
+            count = long(times.size());
+            if (size_t(count) * size_t(t.n) > 4000000) return Fail("Motion exceeds the conversion pose budget");
+        }
         std::vector<std::vector<AnimPose>> frames;
         frames.reserve(static_cast<size_t>(count));
         Vector3 lastBend[2];
         for (long k = 0; k < count; ++k) {
+            if (api && k % 100 == 0) pulse::api::Record("progress", "{\"value\":" + Number(double(k)/double(count)) + "}");
             const float f = times[static_cast<size_t>(k)];
             for (size_t b = 0; b < mmd.bones.size(); ++b) {
                 Vector3 pos;
@@ -1618,7 +1671,7 @@ int main(int argc, char** argv) {
 
         // face: the motion's own morphs, each one <vmd name>_face.vmd also keys taken from there
         const std::string faceVmd = mdldecompiler::StripExt(vmdPath) + "_face.vmd";
-        const bool faceFile = fs::exists(faceVmd, ec);
+        const bool faceFile = !api && fs::exists(faceVmd, ec);
         if (faceFile) {
             std::map<std::string, std::vector<Key>> unusedKeys;
             std::vector<CamKey> unusedCams;
@@ -1639,6 +1692,15 @@ int main(int argc, char** argv) {
         AddEyeTracks(keys, ctrls, times, eyeRange, face);
         const std::vector<mdldecompiler::FlexTrack>* flex = face.empty() ? nullptr : &face;
 
+        if (api)
+        {
+            EmitMotionApi(m, t, times, frames, face, keyed != 0);
+            for (const auto& missing : faceMissing)
+                pulse::api::Record("diagnostic", "{\"warning\":true,\"text\":" + pulse::api::String("Missing facial controller: " + missing) + "}");
+            if (unmapped) pulse::api::Record("diagnostic", "{\"warning\":true,\"text\":\"Some VMD facial morphs have no built-in mapping\"}");
+            if (!keyed && face.empty()) return Fail("The VMD has no supported body or facial animation");
+            return 0;
+        }
         if (!mdldecompiler::WriteAnimationDmx(m, path, clip, fps, frames,
                                               dmxModel == 22 && srcDir.empty() ? flex : nullptr))
             return Fail("cannot write \"" + path + "\"");
@@ -1789,4 +1851,73 @@ int main(int argc, char** argv) {
     if (std::system(cmd.c_str()) != 0)
         return Fail("mdlcompiler failed on \"" + qc + "\" - the .qc and clips are kept for a rerun");
     return 0;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc != 2 || std::strcmp(argv[1], "-api") != 0) return RunConversion(argc, argv);
+    int result = 1;
+    try
+    {
+        pulse::api::Begin("vmd2valvebiped");
+        const auto request = pulse::api::ReadRequest(false);
+        if (!request.buffers.empty()) throw std::runtime_error("Conversion reads saved input files");
+        ApiCapabilities();
+        if (request.method == "capabilities")
+        {
+            if (!request.arguments.empty()) throw std::runtime_error("Capabilities takes no arguments");
+            result = 0;
+        }
+        else
+        {
+            if (request.method != "motion" && request.method != "camera") throw std::runtime_error("Unknown conversion method");
+            ApiOptions options;
+            options.method = request.method;
+            std::string motion, model;
+            if (request.arguments.size() % 2) throw std::runtime_error("Conversion arguments must be pairs");
+            std::set<std::string> seen;
+            for (size_t i = 0; i < request.arguments.size(); i += 2)
+            {
+                const auto& name = request.arguments[i];
+                const auto& value = request.arguments[i+1];
+                if (!seen.insert(name).second) throw std::runtime_error("Duplicate conversion argument");
+                if (name == "motion") motion = value;
+                else if (name == "model") model = value;
+                else if (name == "face") options.face = value;
+                else if (name == "fps")
+                {
+                    size_t used = 0;
+                    options.fps = std::stod(value, &used);
+                    if (used != value.size() || !std::isfinite(options.fps) || options.fps < 1 || options.fps > 1000)
+                        throw std::runtime_error("Conversion FPS must be between 1 and 1000");
+                }
+                else if (name == "transform" || name == "orientation" || name == "distanceTransform")
+                {
+                    auto& matrix = name == "transform" ? options.transform : name == "orientation" ? options.orientation : options.distanceTransform;
+                    std::istringstream input(value);
+                    for (int row = 0; row < 3; ++row) for (int column = 0; column < 4; ++column)
+                        if (!(input >> matrix.m[row][column]) || !std::isfinite(matrix.m[row][column]))
+                            throw std::runtime_error("Invalid camera transform");
+                    std::string extra;
+                    if (input >> extra) throw std::runtime_error("Invalid camera transform");
+                }
+                else throw std::runtime_error("Unknown conversion argument");
+            }
+            if (options.method == "camera" && !options.face.empty()) throw std::runtime_error("Camera conversion does not accept a facial motion");
+            if (options.method == "motion" && (seen.count("transform") || seen.count("orientation") || seen.count("distanceTransform")))
+                throw std::runtime_error("Body conversion does not accept camera transforms");
+            if (motion.empty() || model.empty()) throw std::runtime_error("Motion and target model are required");
+            std::array<std::string, 5> arguments{"vmd2valvebiped", "-vmd", motion, "-mdl", model};
+            std::array<char*, 5> argv2;
+            for (size_t i = 0; i < argv2.size(); ++i) argv2[i] = arguments[i].data();
+            result = RunConversion(int(argv2.size()), argv2.data(), &options);
+        }
+    }
+    catch (const std::exception& error)
+    {
+        if (pulse::api::Active()) pulse::api::Record("diagnostic", "{\"text\":" + pulse::api::String(error.what()) + "}");
+        else std::fprintf(stderr, "%s\n", error.what());
+    }
+    if (pulse::api::Active()) pulse::api::Finish(result);
+    return result;
 }

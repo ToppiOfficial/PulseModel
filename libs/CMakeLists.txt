@@ -77,3 +77,6 @@ target_include_directories(pulse_zstd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/zstd)
 add_library(pulse_keyvalues3 STATIC keyvalues3/kv3.cpp keyvalues3/kv3_binary.cpp)
 target_include_directories(pulse_keyvalues3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pulse_keyvalues3 PRIVATE pulse_zstd PUBLIC pulse_libs)
+
+add_library(pulse_api STATIC apiprotocol.cpp apiprotocol.h)
+target_link_libraries(pulse_api PUBLIC pulse_libs)
