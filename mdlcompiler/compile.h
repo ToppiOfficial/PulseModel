@@ -1115,9 +1115,6 @@ struct CompileInput {
     bool autoCenter = false; // $autocenter
     bool forceWriteVertexData = false; // $forcewritevertexdata
     bool legacySequenceBounds = false; // -legacysequencebounds: skin vertices per frame
-    // -dumpprocedural: Compile() returns once the procedural bones are final,
-    // before any geometry, animation or physics work
-    bool stopAfterProcedural = false;
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.
     int vtxArchetype = 0;

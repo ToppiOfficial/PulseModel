@@ -1,4 +1,3 @@
-#include "api.h"
 // writemdl.cpp - .mdl + .vvd writers and the post-write fixup pass.
 //
 // (WriteModelFiles/WriteBoneInfo/WriteAnimations/WriteSequenceInfo/WriteModel/
@@ -10,6 +9,8 @@
 #include "pathcompat.h"
 
 #include "writer.h"
+#include "api.h"
+#include "diagnostic.h"
 #include "perf.h"
 
 #include <algorithm>
@@ -914,7 +915,7 @@ void WriteAnimationData(cm::CompiledModel& m, cm::Anim& srcanim,
 
         const size_t sectionBytes = pBuf->pos - startSection;
         if (animblocksize > 0 && sectionBytes > static_cast<size_t>(animblocksize))
-            std::printf("WARNING: animation \"%s\" section %d is %zu bytes, over the %d-byte "
+            pulse::diag::Warnf("animation \"%s\" section %d is %zu bytes, over the %d-byte "
                         "block size - use shorter animations or a larger $animblocksize\n",
                         srcanim.name.c_str(), w, sectionBytes, animblocksize);
 
@@ -1107,7 +1108,7 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
             if (j == -1) {
                 // the bone was collapsed or never existed - the reference errors
                 // out here; a warning keeps the model compiling
-                std::printf("WARNING: unknown $bonesaveframe \"%s\"\n", bsf.name.c_str());
+                pulse::diag::Warnf("unknown $bonesaveframe \"%s\"\n", bsf.name.c_str());
                 continue;
             }
             if (bsf.savePos)
@@ -1768,7 +1769,7 @@ void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
         flVertAnimFixedPointScale = 1.0f / 4096.0f;
         if (flVertAnimRange > 0.0f) {
             if (flVertAnimRange > 32767) {
-                std::fprintf(stderr, "warning: flex value too large: %.2f, max: 32767\n",
+                pulse::diag::Warnf("flex value too large: %.2f, max: 32767\n",
                              flVertAnimRange);
                 flVertAnimFixedPointScale = 1.0f;
             } else {

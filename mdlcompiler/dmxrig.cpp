@@ -1,6 +1,7 @@
 // dmxrig.cpp - $datamodeljoints DME bone markup reader. See dmxrig.h.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "dmxrig.h"
 
@@ -35,7 +36,7 @@ void AddJiggleBone(const dmx::Element* dag, cm::CompileInput& in) {
         if (_stricmp(prev.bonename.c_str(), dag->name.c_str()) == 0)
             return; // first definition wins
     if (in.jigglebones.size() >= static_cast<size_t>(lim::kMaxJiggleBones)) {
-        std::fprintf(stderr, "warning: too many jigglebones, ignoring \"%s\"\n",
+        pulse::diag::Warnf("too many jigglebones, ignoring \"%s\"\n",
                      dag->name.c_str());
         return;
     }
@@ -67,7 +68,7 @@ void AddJiggleBone(const dmx::Element* dag, cm::CompileInput& in) {
     const bool rigid = dag->GetBool("rigid", false);
     if (flexible) {
         if (rigid)
-            std::fprintf(stderr, "warning: jigglebone %s: both flexible and rigid set, "
+            pulse::diag::Warnf("jigglebone %s: both flexible and rigid set, "
                                  "ignoring rigid\n", jb.bonename.c_str());
         jb.flags |= cm::kJiggleIsFlexible;
         if (dag->GetBool("pitchConstrained", false))
@@ -132,7 +133,7 @@ void AddQuatInterpBone(const dmx::Element* dag, float scale, cm::CompileInput& i
 
     const std::string* control = dag->GetString("controlBone");
     if (!control || control->empty()) {
-        std::fprintf(stderr, "warning: DmeQuatInterpBone \"%s\" has no controlBone, skipping\n",
+        pulse::diag::Warnf("DmeQuatInterpBone \"%s\" has no controlBone, skipping\n",
                      name.c_str());
         return;
     }
@@ -143,18 +144,18 @@ void AddQuatInterpBone(const dmx::Element* dag, float scale, cm::CompileInput& i
     const std::vector<dmx::Quaternion>* rotations = dag->GetQuaternionArray("targetRotations");
     const size_t count = triggers ? triggers->size() : 0;
     if (count == 0) {
-        std::fprintf(stderr, "warning: DmeQuatInterpBone \"%s\" has no triggers, skipping\n",
+        pulse::diag::Warnf("DmeQuatInterpBone \"%s\" has no triggers, skipping\n",
                      name.c_str());
         return;
     }
     if (!tolerances || tolerances->size() != count || !positions || positions->size() != count ||
         !rotations || rotations->size() != count) {
-        std::fprintf(stderr, "warning: DmeQuatInterpBone \"%s\" trigger arrays are mismatched, "
+        pulse::diag::Warnf("DmeQuatInterpBone \"%s\" trigger arrays are mismatched, "
                              "skipping\n", name.c_str());
         return;
     }
     if (in.proceduralbones.size() >= static_cast<size_t>(lim::kMaxProceduralBones)) {
-        std::fprintf(stderr, "warning: too many procedural bones, ignoring \"%s\"\n",
+        pulse::diag::Warnf("too many procedural bones, ignoring \"%s\"\n",
                      name.c_str());
         return;
     }
@@ -174,7 +175,7 @@ void AddQuatInterpBone(const dmx::Element* dag, float scale, cm::CompileInput& i
         float tolDeg = (*tolerances)[t];
         if (tolDeg <= 0.0f) {
             // the writer stores 1/tolerance, so zero would put an inf on disk
-            std::fprintf(stderr, "warning: DmeQuatInterpBone \"%s\" trigger %zu has a "
+            pulse::diag::Warnf("DmeQuatInterpBone \"%s\" trigger %zu has a "
                                  "non-positive tolerance, using 1.0\n", name.c_str(), t);
             tolDeg = 1.0f;
         }
@@ -206,12 +207,12 @@ void AddAimAtBone(const dmx::Element* dag, float scale, cm::CompileInput& in) {
 
     const std::string* target = dag->GetString("aimTarget");
     if (!target || target->empty()) {
-        std::fprintf(stderr, "warning: DmeAimAtBone \"%s\" has no aimTarget, skipping\n",
+        pulse::diag::Warnf("DmeAimAtBone \"%s\" has no aimTarget, skipping\n",
                      name.c_str());
         return;
     }
     if (in.aimatbones.size() >= static_cast<size_t>(lim::kMaxProceduralBones)) {
-        std::fprintf(stderr, "warning: too many procedural bones, ignoring \"%s\"\n",
+        pulse::diag::Warnf("too many procedural bones, ignoring \"%s\"\n",
                      name.c_str());
         return;
     }
@@ -306,7 +307,7 @@ void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
     if (!sets || sets->empty())
         return;
     if (!in.hitboxsets.empty()) {
-        std::fprintf(stderr, "warning: DMX hitboxSetList ignored - hitbox sets are already "
+        pulse::diag::Warnf("DMX hitboxSetList ignored - hitbox sets are already "
                              "defined ($hitboxset or an earlier $datamodeljoints)\n");
         return;
     }
@@ -317,7 +318,7 @@ void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
         if (!boxes || boxes->empty())
             continue;
         if (in.hitboxsets.size() >= static_cast<size_t>(lim::kMaxHitboxSets)) {
-            std::fprintf(stderr, "warning: too many hitbox sets, ignoring \"%s\"\n",
+            pulse::diag::Warnf("too many hitbox sets, ignoring \"%s\"\n",
                          set->name.c_str());
             break;
         }
@@ -327,7 +328,7 @@ void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
         for (const dmx::Element* box : *boxes) {
             if (!box) continue;
             if (hs.hitboxes.size() >= static_cast<size_t>(lim::kMaxHitboxesPerSet)) {
-                std::fprintf(stderr, "warning: too many hitboxes for hitbox set \"%s\", max %d\n",
+                pulse::diag::Warnf("too many hitboxes for hitbox set \"%s\", max %d\n",
                              hs.name.c_str(), lim::kMaxHitboxesPerSet);
                 break;
             }

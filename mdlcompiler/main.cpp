@@ -18,6 +18,7 @@
 #include "api.h"
 #include "fatalerror.h"
 #include "dependencies.h"
+#include "diagnostic.h"
 #include "pathcompat.h"
 #include "perf.h"
 #include "pulselimits.h"
@@ -30,18 +31,7 @@
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
 
 static int Fail(const char* what, const std::string& detail) {
-    if (pulse::api::Active()) {
-        std::string path;
-        int line = 0;
-        const auto close = detail.find("):");
-        const auto open = close == std::string::npos ? std::string::npos : detail.rfind('(', close);
-        if (open != std::string::npos) {
-            try { line = std::stoi(detail.substr(open + 1, close - open - 1)); path = detail.substr(0, open); }
-            catch (const std::exception&) {}
-        }
-        pulse::api::Record("diagnostic", "{\"file\":" + pulse::api::String(path) +
-            ",\"line\":" + std::to_string(line) + ",\"text\":" + pulse::api::String(detail) + "}");
-    }
+    pulse::diag::RecordFatal(detail);
     return pulse::fatal::Fail(what, detail);
 }
 static const char*& g_stage = pulse::fatal::g_stage;
@@ -219,26 +209,26 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         } else if (std::strcmp(argv[i], "-forcewritevertexdata") == 0) {
             forceWriteVertexData = true;
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
-            if (api) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             definebones = true;
         } else if (std::strcmp(argv[i], "-verify") == 0) {
-            if (api) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             verify = true;
         } else if (std::strcmp(argv[i], "-legacysequencebounds") == 0) {
             legacySequenceBounds = true;
         } else if (std::strcmp(argv[i], "-dumpmaterials") == 0) {
-            if (api) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             dumpMaterials = true;
         } else if (std::strcmp(argv[i], "-perfmetrics") == 0) {
             pulse::perf::g_enabled = true;
         } else if (std::strcmp(argv[i], "-pause") == 0) {
-            if (api) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             pulse::fatal::g_pause = true;
         } else if (argv[i][0] == '-') {
             if (api) return Fail("bad API option", argv[i]);
             // studiomdl GUI front ends pass switches we do not have (-nop4,
             // -verbose, ...). Warn and carry on rather than refusing to run.
-            std::printf("warning: ignoring unknown option: %s\n", argv[i]);
+            pulse::diag::Warnf("ignoring unknown option: %s\n", argv[i]);
         } else if (!script || pulse::loader::IsQcScriptPath(argv[i])) {
             // an ignored option may have eaten a value we now see as
             // positional, so a real script extension always wins
@@ -372,7 +362,7 @@ int main(int argc, char** argv) {
             if (request.at("method") == "catalog") {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
-                                                 "\"files\":1,\"diagnostics\":1,\"branches\":1}");
+                                                 "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else {

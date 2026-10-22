@@ -5,6 +5,7 @@
 // Studied for behavior, re-typed clean.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "smdloader.h"
 #include "dependencies.h"
@@ -992,7 +993,7 @@ bool LoadVtaMorphs(const std::string& path, Source& out, float scale,
         // the reference leaves the empty flexkey to be pruned later
         const VtaFrame* frame = bind.Frame(opt.frame);
         if (!frame) {
-            std::fprintf(stderr, "warning: flex \"%s\": no frame %d in %s - skipped\n",
+            pulse::diag::Warnf("flex \"%s\": no frame %d in %s - skipped\n",
                          opt.name.c_str(), opt.frame, path.c_str());
             continue;
         }

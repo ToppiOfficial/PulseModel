@@ -1,6 +1,7 @@
 // compile.cpp - the SimplifyModel pipeline. See compile.h.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "compile.h"
 #include "perf.h"
@@ -494,7 +495,7 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
         }
         poseFrame = in.bindPoseFrame;
         if (poseFrame < 0 || poseFrame > poseClip->numframes - 1) {
-            std::printf("WARNING: $setbindpose: frame %d out of range [0, %d], clamped\n",
+            pulse::diag::Warnf("$setbindpose: frame %d out of range [0, %d], clamped\n",
                         poseFrame, poseClip->numframes - 1);
             poseFrame = poseFrame < 0 ? 0 : poseClip->numframes - 1;
         }
@@ -612,7 +613,7 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
 
     for (size_t f = 0; f < in.fixedFlexes.size(); f++)
         if (!flexFound[f])
-            std::printf("WARNING: $setflex: no source has a morph named \"%s\" (line %d)\n",
+            pulse::diag::Warnf("$setflex: no source has a morph named \"%s\" (line %d)\n",
                         in.fixedFlexes[f].name.c_str(), in.fixedFlexes[f].line);
     return true;
 }
@@ -1410,7 +1411,7 @@ void InsertPredefinedBones(Ctx& ctx, bool bUnlocked) {
                 // later import bone is not found yet
                 b.parent = FindGlobalBone(m, ib.parent);
                 if (b.parent == -1) {
-                    fprintf(stderr, "WARNING: Imported bone %s tried to access parent bone %s and failed!\n",
+                    pulse::diag::Warnf("Imported bone %s tried to access parent bone %s and failed!\n",
                             ib.name.c_str(), ib.parent.c_str());
                 }
             }
@@ -1953,7 +1954,7 @@ bool ApplyBoneTransformEdits(Ctx& ctx, std::string* err) {
     for (const BoneTransformEdit& ed : ctx.in->boneTransformEdits) {
         const int t = FindGlobalBone(m, ed.name);
         if (t == -1) {
-            std::printf("WARNING: $transformbone: unknown bone \"%s\" (line %d) - skipped\n",
+            pulse::diag::Warnf("$transformbone: unknown bone \"%s\" (line %d) - skipped\n",
                         ed.name.c_str(), ed.line);
             continue;
         }
@@ -2006,7 +2007,7 @@ bool ApplyBoneTransformEdits(Ctx& ctx, std::string* err) {
             const Vector3 span{postEditPos.x - preEditPos.x, postEditPos.y - preEditPos.y,
                                postEditPos.z - preEditPos.z};
             if (DotProduct(span, span) < 1.0e-8f) {
-                std::printf("WARNING: $transformbone transformweights: bone \"%s\" (line %d) "
+                pulse::diag::Warnf("$transformbone transformweights: bone \"%s\" (line %d) "
                             "ramp start and end coincide (position change plus offset is "
                             "zero) - skipped\n", ed.name.c_str(), ed.line);
             } else {
@@ -4003,7 +4004,7 @@ bool BuildConvexesForGroups(const std::vector<std::vector<int>>& groups,
         if (IsApproximatelyPlanar(pieceVerts, kPlanarEpsilon)) {
             if (remove2d)
                 continue;
-            std::printf("WARNING: physics shape \"%s\" has 2-dimensional geometry "
+            pulse::diag::Warnf("physics shape \"%s\" has 2-dimensional geometry "
                         "(less than %.3f inches thick)\n",
                         shapeName, kPlanarEpsilon);
         }
@@ -4100,7 +4101,7 @@ void ApplyMarkupsToSolid(const CompiledModel& m, const CompileInput& in, Physics
 void WarnUnknownMarkupBones(const CompiledModel& m, const CompileInput& in) {
     for (const PhysicsMarkup& mk : in.physMarkups) {
         if (FindGlobalBone(m, mk.bonename) < 0) {
-            std::printf("WARNING: physics markup \"%s\" names unknown bone \"%s\" - ignored\n",
+            pulse::diag::Warnf("physics markup \"%s\" names unknown bone \"%s\" - ignored\n",
                         mk.name.c_str(), mk.bonename.c_str());
         }
     }
@@ -4191,7 +4192,7 @@ void SortRagdollBodies(std::vector<RagdollBody>& bodies) {
     int passes = 0;
     while (swapped) {
         if (++passes > count * count + 10) {
-            std::printf("WARNING: physics body hierarchy has a cycle - stopping sort "
+            pulse::diag::Warnf("physics body hierarchy has a cycle - stopping sort "
                         "after %d passes\n", passes);
             break;
         }
@@ -4431,7 +4432,7 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
                 break;
             int gb = FindGlobalBone(m, extra);
             if (gb < 0) {
-                std::printf("WARNING: PhysicsShapeFromRender \"%s\" lists unknown "
+                pulse::diag::Warnf("PhysicsShapeFromRender \"%s\" lists unknown "
                             "extrabone \"%s\" - ignored\n",
                             shape.name.c_str(), extra.c_str());
                 continue;
@@ -4649,7 +4650,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             }
             int parent = FindLocalBoneNamed(ps, mk.mergeInto.c_str());
             if (parent < 0) {
-                std::printf("WARNING: physics markup \"%s\" merges into unknown bone "
+                pulse::diag::Warnf("physics markup \"%s\" merges into unknown bone "
                             "\"%s\" - ignored\n", mk.name.c_str(), mk.mergeInto.c_str());
                 continue;
             }
@@ -4773,7 +4774,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             int node = b;
             int globalBone = ResolveLocalBoneToGlobal(ps, b, &node);
             if (globalBone < 0) {
-                std::printf("WARNING: physics geometry on bone \"%s\" resolves to no "
+                pulse::diag::Warnf("physics geometry on bone \"%s\" resolves to no "
                             "compiled bone - ignored\n", ps->localBone[b].name.c_str());
                 continue;
             }
@@ -4827,7 +4828,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             }
             if (in.physBuildMode == PhysicsBuildMode::Ragdoll &&
                 static_cast<int>(convexes.size()) > shape.maxConvex) {
-                std::printf("WARNING: costly collision body \"%s\" (%zu convex pieces, "
+                pulse::diag::Warnf("costly collision body \"%s\" (%zu convex pieces, "
                             "%d allowed); building one hull\n",
                             m.bones[globalBone].name.c_str(), convexes.size(), shape.maxConvex);
                 for (phys::Convex* convex : convexes)
@@ -4902,7 +4903,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             solid.surfaceArea += phys::ConvexSurfaceArea(c);
         }
         if (static_cast<int>(body.convexes.size()) > maxConvexPieces) {
-            std::printf("WARNING: costly collision body \"%s\" (%zu convex pieces, "
+            pulse::diag::Warnf("costly collision body \"%s\" (%zu convex pieces, "
                         "%d allowed)\n", solid.name.c_str(), body.convexes.size(),
                         maxConvexPieces);
         }
@@ -4958,13 +4959,13 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
     // ---- constraints (BuildRagdollConstraint) -------------------------
     m.physRootName = in.physRootBone.empty() ? m.physSolids[0].name : in.physRootBone;
     if (!in.physRootBone.empty() && FindSolidByName(m.physSolids, in.physRootBone) < 0) {
-        std::printf("WARNING: $rootbone \"%s\" has no collision body - the hull meant for it "
+        pulse::diag::Warnf("$rootbone \"%s\" has no collision body - the hull meant for it "
                     "is weighted to some other bone\n", in.physRootBone.c_str());
     }
     for (const PhysicsJoint& j : in.physJoints) {
         int gb = FindGlobalBone(m, j.bonename);
         if (gb < 0) {
-            std::printf("WARNING: physicsjointlist names unknown bone \"%s\" - ignored\n",
+            pulse::diag::Warnf("physicsjointlist names unknown bone \"%s\" - ignored\n",
                         j.bonename.c_str());
             continue;
         }
@@ -4976,7 +4977,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             std::string fixed = FixParentSolid(m, name);
             idx = fixed.empty() ? -1 : FindSolidByName(m.physSolids, fixed);
             if (idx >= 0) {
-                std::printf("WARNING: constraint on bone \"%s\" moved to \"%s\" - that bone "
+                pulse::diag::Warnf("constraint on bone \"%s\" moved to \"%s\" - that bone "
                             "has no collision body of its own\n",
                             j.bonename.c_str(), fixed.c_str());
             }
@@ -5221,11 +5222,11 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     if (static_cast<int>(convexes.size()) > maxConvexPieces) {
         if (in.physBuildMode == PhysicsBuildMode::Single &&
             !in.physConvexHullCountOverride) {
-            std::printf("WARNING: costly collision model (%zu convex pieces, %d allowed); "
+            pulse::diag::Warnf("costly collision model (%zu convex pieces, %d allowed); "
                         "building one hull\n", convexes.size(), maxConvexPieces);
             freeConvexes();
         } else {
-            std::printf("WARNING: costly collision model (%zu convex pieces, %d allowed)\n",
+            pulse::diag::Warnf("costly collision model (%zu convex pieces, %d allowed)\n",
                         convexes.size(), maxConvexPieces);
         }
     }
@@ -5506,7 +5507,7 @@ void BuildAnimationWeights(Ctx& ctx, std::vector<WeightList>& lists) {
         for (const WeightList::Entry& e : lists[i].entries) {
             int k = FindGlobalBone(m, e.bone);
             if (k == -1) {
-                fprintf(stderr, "WARNING: unknown bone reference '%s' in weightlist '%s'\n",
+                pulse::diag::Warnf("unknown bone reference '%s' in weightlist '%s'\n",
                         e.bone.c_str(), lists[i].name.c_str());
             } else {
                 lists[i].weight[k] = e.weight;
@@ -5613,7 +5614,7 @@ bool ExtractLinearMotion(Ctx& ctx, Anim& panim, int motiontype, int iStartFrame,
     if (iEndFrame > panim.numframes - 1) iEndFrame = panim.numframes - 1;
     if (iSrcFrame > panim.numframes - 1) iSrcFrame = panim.numframes - 1;
     if (iStartFrame >= iEndFrame) {
-        std::fprintf(stderr, "warning: motion extraction ignored, no frames "
+        pulse::diag::Warnf("motion extraction ignored, no frames "
                              "remaining in %s\n", panim.name.c_str());
         return true;
     }
@@ -6036,7 +6037,7 @@ void FixupIkErrors(Ctx& ctx, Anim& panim, IkRule rule) {
 
     // a miss under a few units is the normal edge-of-stride reach limit
     if (worstMiss > 4.0f)
-        std::printf("WARNING: ikfixup \"%s\" chain \"%s\": target out of reach by %.1f units "
+        pulse::diag::Warnf("ikfixup \"%s\" chain \"%s\": target out of reach by %.1f units "
                     "at frame %d - the range is longer than the chain can hold\n",
                     panim.name.c_str(), chain.name.c_str(), worstMiss, worstFrame);
 }
@@ -6062,7 +6063,7 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
     if (!ctx.in->primaryRootBone.empty()) {
         ctx.rootIndex = FindGlobalBone(m, ctx.in->primaryRootBone);
         if (ctx.rootIndex == -1) {
-            std::fprintf(stderr, "warning: $root bone \"%s\" not found, using bone 0\n",
+            pulse::diag::Warnf("$root bone \"%s\" not found, using bone 0\n",
                          ctx.in->primaryRootBone.c_str());
             ctx.rootIndex = 0;
         }
@@ -7488,7 +7489,7 @@ bool SetupHitBoxes(Ctx& ctx, std::string* err) {
                     }
                     if (hb.bmin.x == hb.bmax.x || hb.bmin.y == hb.bmax.y ||
                         hb.bmin.z == hb.bmax.z)
-                        std::fprintf(stderr, "WARNING: %s has zero thickness: %s\n",
+                        pulse::diag::Warnf("%s has zero thickness: %s\n",
                                      where.c_str(), bounds);
                 }
             }
@@ -7826,7 +7827,7 @@ void LimitIKChainLength(Ctx& ctx) {
         if (!needsFixup)
             continue;
         if (!hasKnees) {
-            fprintf(stderr, "WARNING: ik rules for %s but no clear knee direction\n",
+            pulse::diag::Warnf("ik rules for %s but no clear knee direction\n",
                     chain.name.c_str());
             continue;
         }
@@ -8554,7 +8555,7 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
             if (a < 0) continue;
             Anim& panim2 = m.anims[a];
             if (panim1.ikrules.size() != panim2.ikrules.size()) {
-                fprintf(stderr, "WARNING: %s - mismatched number of IK rules: \"%s\" \"%s\"\n",
+                pulse::diag::Warnf("%s - mismatched number of IK rules: \"%s\" \"%s\"\n",
                         seq.name.c_str(), panim1.name.c_str(), panim2.name.c_str());
                 Anim& from = (panim1.ikrules.size() > panim2.ikrules.size()) ? panim1 : panim2;
                 Anim& to = (panim1.ikrules.size() > panim2.ikrules.size()) ? panim2 : panim1;
@@ -9091,7 +9092,7 @@ void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
     }
 
     if (nError) {
-        std::fprintf(stderr, "warning: unmatched vertex anims %d (%.2f)\n", nError,
+        pulse::diag::Warnf("unmatched vertex anims %d (%.2f)\n", nError,
                      flErrorDist / nError);
     }
 }
@@ -9424,7 +9425,7 @@ void CullDuplicateFlex(Ctx& ctx) {
                 break;
             }
         if (!ok) {
-            std::fprintf(stderr, "warning: $flexcullmethod: unexpected flexrule op layout; "
+            pulse::diag::Warnf("$flexcullmethod: unexpected flexrule op layout; "
                                  "keeping duplicate flex controllers\n");
         } else {
             for (FlexRule& rule : m.flexrules) {
@@ -9591,7 +9592,7 @@ void CullOrphanRulesAndControllers(Ctx& ctx, bool keepControllers) {
                     ctrlLive[c] = 1;
                 return c;
             })) {
-            std::fprintf(stderr, "warning: $flexcullmethod: unexpected flexrule op layout; "
+            pulse::diag::Warnf("$flexcullmethod: unexpected flexrule op layout; "
                                  "skipping the orphan flex cull\n");
             return;
         }
@@ -10708,7 +10709,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 // source declared later is copied before its own commands ran.
                 // A bindpose clip is filled before any of that, so it is exempt.
                 if (ref > static_cast<int>(i) && !out.anims[ref].isBindPose)
-                    std::printf("WARNING: copypose \"%s\" in %s: source is declared after "
+                    pulse::diag::Warnf("copypose \"%s\" in %s: source is declared after "
                                 "this animation, so its own commands have not run yet - "
                                 "move it above to copy the finished clip\n",
                                 ic.name.c_str(), a.name.c_str());
@@ -11202,8 +11203,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // straight after the realign that produced them.
     if (!RemapProceduralBones(ctx, err))
         return false;
-    if (input.stopAfterProcedural)
-        return true;
 
     // per-bone contents, now that the bone table is final
     ApplyJointContents(ctx);
@@ -11433,7 +11432,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                out.eyeposition.y == 0.0f && out.eyeposition.z == 0.0f) {
         // an unset $eyeposition is indistinguishable from "0 0 0" on disk, and
         // on a face model that puts the engine's eye point at the origin
-        std::printf("WARNING: model has eyeballs but $eyeposition is 0 0 0 - the "
+        pulse::diag::Warnf("model has eyeballs but $eyeposition is 0 0 0 - the "
                     "engine eye point sits at the model origin. Use "
                     "\"$eyeposition 0 0 0 autoheight\" to derive it.\n");
     }
@@ -11643,7 +11642,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     for (const auto& rename : input.boneRenames) {
         const int b = out.FindBone(rename.first.c_str());
         if (b == -1) {
-            std::printf("WARNING: $renamebone \"%s\" - no such bone (collapsed?)\n",
+            pulse::diag::Warnf("$renamebone \"%s\" - no such bone (collapsed?)\n",
                         rename.first.c_str());
             continue;
         }

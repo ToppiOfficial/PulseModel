@@ -6,6 +6,7 @@
 #include "perf.h"
 #include "qcloader.h"
 #include "api.h"
+#include "diagnostic.h"
 
 #include <algorithm>
 #include <cctype>
@@ -88,7 +89,8 @@ struct Token {
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
 // line comments (the latter two only at a token start, and `;` also ends a word,
 // as stock does), `/* */` blocks, and braces as standalone tokens.
-bool Tokenize(const std::string& s, const std::string& file,
+// `path` is the file's absolute path for diagnostics; `file` names it in err.
+bool Tokenize(const std::string& s, const std::string& file, const std::string& path,
               std::vector<Token>& out, std::string* err) {
     int line = 1;
     size_t i = 0;
@@ -129,8 +131,9 @@ bool Tokenize(const std::string& s, const std::string& file,
                 t.text.push_back(s[i++]);
             }
             if (i >= s.size()) {
-                if (err) *err = file + "(" + std::to_string(t.line) +
-                                "): unterminated string";
+                if (!err) return false;
+                *err = file + "(" + std::to_string(t.line) + "): unterminated string";
+                pulse::diag::NoteFailure(*err, {path, t.line}, "unterminated string");
                 return false;
             }
             i++; // closing quote
@@ -295,9 +298,15 @@ struct Ctx {
 
     bool Fail(int line, const std::string& msg) {
         if (abortErr) return false; // keep the first $include error, not a cascade
-        if (err) *err = file + "(" + std::to_string(line) + "): " + msg;
+        if (!err) return false;
+
+        *err = file + "(" + std::to_string(line) + "): " + msg;
+        pulse::diag::NoteFailure(*err, {Path(), line}, msg);
         return false;
     }
+
+    // Absolute path of the file being parsed.
+    std::string Path() const { return fs::absolute(curDir / file).lexically_normal().u8string(); }
 
     // Next token, or null at end of file.
     const Token* Next() { return Eof() ? nullptr : &toks[pos++]; }
@@ -1537,10 +1546,9 @@ bool ParseDataModelJointsBody(Ctx& c, const Token& cmd, std::vector<TriggerAoiEd
                     return c.Fail(s->line, kw + " expects frame or framerange, got \"" + m + "\"");
                 }
                 if (have) {
-                    std::fprintf(stderr, "warning: %s line %d: %s \"%s\": extra %s "
-                                         "ignored, using the first frame selection\n",
-                                 c.file.c_str(), s->line, kw.c_str(), e.bone.c_str(),
-                                 mode.c_str());
+                    pulse::diag::WarnAtf({c.Path(), s->line}, "%s \"%s\": extra %s "
+                                         "ignored, using the first frame selection",
+                                         kw.c_str(), e.bone.c_str(), mode.c_str());
                     continue;
                 }
                 e.first = first;
@@ -1623,9 +1631,8 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
                 continue;
             }
             if (!taken.insert({pb, f}).second) {
-                std::fprintf(stderr, "warning: %s line %d: settriggeraoi \"%s\": frame %d "
-                                     "already set by an earlier line, skipped\n",
-                             c.file.c_str(), e.line, e.bone.c_str(), f);
+                pulse::diag::WarnAtf({c.Path(), e.line}, "settriggeraoi \"%s\": frame %d "
+                                     "already set by an earlier line, skipped", e.bone.c_str(), f);
                 continue;
             }
             pb->triggers[f].tolerance = DegToRad(e.aoiDeg);
@@ -4687,8 +4694,8 @@ bool CmdSetFlex(Ctx& c, const Token& cmd) {
     if (!c.WantFloat("a strength", cmd, fx.value))
         return false;
     if (fx.value < 0.0f || fx.value > 1.0f)
-        std::printf("WARNING: %s(%d): $setflex \"%s\" strength %g outside [0,1] - clamped\n",
-                    c.file.c_str(), cmd.line, fx.name.c_str(), fx.value);
+        pulse::diag::WarnAtf({c.Path(), cmd.line}, "$setflex \"%s\" strength %g outside [0,1] - clamped",
+                             fx.name.c_str(), fx.value);
     fx.line = cmd.line;
     c.in.fixedFlexes.push_back(std::move(fx));
     return true;
@@ -6794,7 +6801,7 @@ void CheckMeshSortOrder(Ctx& c) {
                                                   c.in, im.source->meshindex[mi]).c_str(),
                                               StripExtension(want).c_str()) == 0;
         if (!found)
-            std::printf("WARNING: $meshsortorder \"%s\" matches no material on any mesh; "
+            pulse::diag::Warnf("$meshsortorder \"%s\" matches no material on any mesh; "
                         "it orders nothing.\n",
                         want.c_str());
     }
@@ -6926,8 +6933,7 @@ bool CmdHitboxSet(Ctx& c, const Token& cmd) {
 
 bool CmdHboxOutsideSet(Ctx& c, const Token& cmd) {
     if (c.activeHitboxSet < 0) {
-        std::printf("WARNING: %s(%d): $hbox has no preceding $hboxset; using set \"default\"\n",
-                    c.file.c_str(), cmd.line);
+        pulse::diag::WarnAt({c.Path(), cmd.line}, "$hbox has no preceding $hboxset; using set \"default\"");
         c.in.hitboxsets.push_back({"default", {}});
         if (c.in.hitboxsets.size() > static_cast<size_t>(pulse::limits::kMaxHitboxSets))
             return c.Fail(cmd.line, "too many hitbox sets");
@@ -7030,7 +7036,7 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
         if (_stricmp(e.name.c_str(), name.c_str()) == 0) {
             while (!c.AtCommand())
                 c.pos++;
-            fprintf(stderr, "WARNING: duplicate ikchain \"%s\" ignored\n", name.c_str());
+            pulse::diag::Warnf("duplicate ikchain \"%s\" ignored\n", name.c_str());
             return true;
         }
 
@@ -7424,7 +7430,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         if (sh.maxHulls <= 0) {
             sh.maxHulls = pulse::limits::kMaxGeneratedHulls;
         } else if (sh.maxHulls > pulse::limits::kMaxGeneratedHulls) {
-            std::printf("WARNING: PhysicsShapeFromRender \"%s\" asks for %d hulls, "
+            pulse::diag::Warnf("PhysicsShapeFromRender \"%s\" asks for %d hulls, "
                         "clamped to %d\n",
                         sh.name.c_str(), sh.maxHulls, pulse::limits::kMaxGeneratedHulls);
             sh.maxHulls = pulse::limits::kMaxGeneratedHulls;
@@ -7775,7 +7781,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
                                        }),
                         pairs.end());
             if (pairs.size() == before)
-                std::printf("WARNING: $physicsnocollide \"%s\" \"%s\" matches no "
+                pulse::diag::Warnf("$physicsnocollide \"%s\" \"%s\" matches no "
                             "$physicscollide above it - ignored\n", a.c_str(), b.c_str());
         } else if (o == "$noselfcollisions") {
             c.in.physNoSelfCollisions = true;
@@ -8363,7 +8369,7 @@ bool SpliceInclude(Ctx& c) {
 
     const std::string name = full.filename().string();
     std::vector<Token> toks;
-    if (!Tokenize(text, name, toks, c.err))
+    if (!Tokenize(text, name, fs::absolute(full).lexically_normal().u8string(), toks, c.err))
         return false;
 
     // drop the $include directive, splice the file in its place, and open a
@@ -9213,6 +9219,7 @@ bool RunCommands(Ctx& c) {
             return c.Fail(cmd.line, "unknown command \"" + cmd.text +
                                     "\" - supported: " + SupportedList());
         }
+        pulse::diag::Current() = {c.Path(), cmd.line};
         if (!found->fn(c, cmd))
             return false;
     }
@@ -9292,7 +9299,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     seedDirs(includeDirs, c.launchIncludeDirs);
     seedDirs(fileDirs, c.launchSearchDirs);
 
-    if (!Tokenize(text, c.file, c.toks, err))
+    if (!Tokenize(text, c.file, c.Path(), c.toks, err))
         return false;
     if (pulse::api::Active()) {
         c.apiRootPath = fs::absolute(pulse::FilePath(path)).lexically_normal().u8string();
@@ -9306,7 +9313,9 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
 
     out.mdlPath = path;
 
-    if (!RunCommands(c))
+    const bool ran = RunCommands(c);
+    pulse::diag::Current() = {};
+    if (!ran)
         return false;
 
     if (out.outname.empty()) {
@@ -9316,10 +9325,9 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     // animation-only models (.mdl + .ani, no geometry) are legal; a script with
     // geometry that never groups it is not - the meshes would not ship.
     if (out.bodyparts.empty() && !c.rendermeshes.empty())
-        printf("WARNING: %s: $rendermesh but no $modelgroup\n", c.file.c_str());
+        pulse::diag::WarnAt({c.Path(), 0}, "$rendermesh but no $modelgroup");
     if (c.shapelessPhysicsModelLine && !c.dataModelPhysics)
-        std::fprintf(stderr, "warning: %s line %d: $physicsmodel has no $physicsshape\n",
-                     c.file.c_str(), c.shapelessPhysicsModelLine);
+        pulse::diag::WarnAt({c.Path(), c.shapelessPhysicsModelLine}, "$physicsmodel has no $physicsshape");
 
     // set once every source has been read (the DMX loader latches it on the
     // first model carrying an upAxis attribute)

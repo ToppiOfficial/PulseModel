@@ -1,6 +1,7 @@
 // dmxloader.cpp - DMX document -> per-file Source. See dmxloader.h.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "perf.h"
 #include "dmxloader.h"
@@ -936,7 +937,7 @@ void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::
     int nJointCount = bindState->GetInt("jointCount", 0);
     if (!(jw && ji) || nJointCount <= 0) nJointCount = 0;
     if (nJointCount > lim::kMaxSrcBoneWeights) {
-        std::fprintf(stderr, "warning: mesh \"%s\" has %d bone influences per vertex (max %d)\n",
+        pulse::diag::Warnf("mesh \"%s\" has %d bone influences per vertex (max %d)\n",
                      dag->name.c_str(), nJointCount, lim::kMaxSrcBoneWeights);
     }
 
@@ -2189,7 +2190,7 @@ void CaptureFlexRig(const dmx::Element* comboOp, const ComboTemp& combo, FlexRig
                 } else if (rule->className == "DmeFlexRuleLocalVar") {
                     fr.isLocalVar = true;
                 } else {
-                    std::fprintf(stderr, "warning: unknown DmeDeltaRule: %s of type %s\n",
+                    pulse::diag::Warnf("unknown DmeDeltaRule: %s of type %s\n",
                                  rule->name.c_str(), rule->className.c_str());
                     continue;
                 }
@@ -2350,7 +2351,7 @@ bool SphereFromElement(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
     const float r = e->GetFloat("radius");
     if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) ||
         !std::isfinite(r) || r <= 0.0f) {
-        std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid position or "
+        pulse::diag::Warnf("DmePhysicsSphere on bone \"%s\" has invalid position or "
                              "nonpositive/non-finite radius, skipped\n",
                      e->GetString("boneName") ? e->GetString("boneName")->c_str() : "");
         return false;
@@ -2400,7 +2401,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
                 break;
             }
         if (bone < 0) {
-            std::fprintf(stderr, "warning: %s on unknown bone \"%s\", skipped\n",
+            pulse::diag::Warnf("%s on unknown bone \"%s\", skipped\n",
                          e->className.c_str(), boneName ? boneName->c_str() : "");
             continue;
         }
@@ -2416,7 +2417,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
                     return std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z);
                 });
             if (!std::isfinite(radius) || radius <= 0.0f || !finitePoints) {
-                std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid "
+                pulse::diag::Warnf("DmePhysicsSphere on bone \"%s\" has invalid "
                                      "converted position or radius, skipped\n", boneName->c_str());
                 continue;
             }
@@ -2449,7 +2450,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
         phys::ConvexHullResult hull =
             phys::BuildConvexHull(xyz.data(), static_cast<int>(g.pts.size()));
         if (hull.degenerate || hull.indices.empty()) {
-            std::fprintf(stderr, "warning: flat physics primitive on bone \"%s\", skipped\n",
+            pulse::diag::Warnf("flat physics primitive on bone \"%s\", skipped\n",
                          out.localBone[g.bone].name.c_str());
             continue;
         }
