@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -44,10 +46,11 @@ void Begin(const char* tool) {
 #endif
 
     std::setvbuf(output, nullptr, _IOFBF, 1 << 16);
-    Record("api", tool ? "{\"version\":1,\"tool\":" + String(tool) + "}" : "{\"version\":1}");
+    Record("api", tool ? "{\"version\":" + std::to_string(kVersion) + ",\"tool\":" + String(tool) + "}"
+                : "{\"version\":" + std::to_string(kVersion) + "}");
 }
 
-Request ReadRequest(bool compilerMethods) {
+nlohmann::json ReadRequest() {
     std::string bytes;
     char chunk[65536];
     size_t count;
@@ -57,56 +60,48 @@ Request ReadRequest(bool compilerMethods) {
     }
     if (std::ferror(stdin)) throw std::runtime_error("Cannot read API request");
 
-    size_t cursor = 0;
-    const auto line = [&]() {
-        const auto end = bytes.find('\n', cursor);
-        if (end == std::string::npos) throw std::runtime_error("Truncated API header");
-        auto value = bytes.substr(cursor, end - cursor);
-        cursor = end + 1;
-        return value;
-    };
-
-    const auto number = [&]() {
-        const auto value = line();
-        if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos)
-            throw std::runtime_error("Invalid API length");
-        size_t used = 0;
-        const auto length = std::stoull(value, &used);
-        if (used != value.size() || length > maxRequest) throw std::runtime_error("Invalid API length");
-        return static_cast<size_t>(length);
-    };
-
-    const auto field = [&]() {
-        const size_t length = number();
-        if (length > bytes.size() - cursor) throw std::runtime_error("Truncated API field");
-        auto value = bytes.substr(cursor, length);
-        cursor += length;
-        return value;
-    };
-
-    if (line() != "PULSEMODEL 1") throw std::runtime_error("Unsupported API version");
-
-    Request request;
-    request.method = line();
-    if (compilerMethods && request.method != "catalog" && request.method != "analyze" && request.method != "compile")
-        throw std::runtime_error("Unknown API method");
-
-    const size_t arguments = number();
-    if (arguments > 4096) throw std::runtime_error("Too many API arguments");
-    for (size_t i = 0; i < arguments; ++i) {
-        auto value = field();
-        if (value.find('\0') != std::string::npos) throw std::runtime_error("NUL in API argument");
-        request.arguments.push_back(std::move(value));
+    nlohmann::json request;
+    try { request = nlohmann::json::parse(bytes); }
+    catch (const nlohmann::json::parse_error& error) {
+        throw std::runtime_error(std::string("Invalid API request JSON: ") + error.what());
     }
 
-    request.buffers = field();
-    if (cursor != bytes.size()) throw std::runtime_error("Trailing API request bytes");
-    if (compilerMethods && request.method == "catalog" && (!request.arguments.empty() || !request.buffers.empty()))
-        throw std::runtime_error("Catalog takes no arguments or buffers");
-    if (compilerMethods && request.method != "analyze" && !request.buffers.empty())
-        throw std::runtime_error("This API method reads saved files");
-
+    if (!request.is_object()) throw std::runtime_error("API request must be a JSON object");
+    const auto version = request.find("version");
+    if (version == request.end() || !version->is_number_integer() || version->get<int>() != kVersion)
+        throw std::runtime_error("Unsupported API version, expected " + std::to_string(kVersion));
+    GetString(request, "method");
     return request;
+}
+
+void CheckMembers(const nlohmann::json& request, std::initializer_list<const char*> allowed) {
+    for (const auto& member : request.items()) {
+        if (member.key() == "version" || member.key() == "method") continue;
+        bool known = false;
+        for (const char* name : allowed) known |= member.key() == name;
+        if (!known) throw std::runtime_error("Unknown API member \"" + member.key() + "\"");
+    }
+}
+
+std::string GetString(const nlohmann::json& request, const char* name) {
+    const auto value = request.find(name);
+    if (value == request.end()) return {};
+    if (!value->is_string()) throw std::runtime_error(std::string("API member \"") + name + "\" must be a string");
+    return value->get<std::string>();
+}
+
+std::vector<std::string> GetStrings(const nlohmann::json& request, const char* name) {
+    const auto value = request.find(name);
+    if (value == request.end()) return {};
+
+    const auto invalid = std::string("API member \"") + name + "\" must be an array of strings";
+    if (!value->is_array()) throw std::runtime_error(invalid);
+    std::vector<std::string> strings;
+    for (const auto& item : *value) {
+        if (!item.is_string()) throw std::runtime_error(invalid);
+        strings.push_back(item.get<std::string>());
+    }
+    return strings;
 }
 
 std::string String(const std::string& value) {

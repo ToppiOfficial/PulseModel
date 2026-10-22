@@ -173,6 +173,7 @@ struct Ctx {
     fs::path scriptDir; // root script's directory
     std::string file;
     std::string apiRootPath;
+    const ScriptFiles* unsaved = nullptr;
     std::string rootFile; // `file` for the root script; an $include changes `file`, not this
     std::vector<Token> toks;
     size_t pos = 0;
@@ -430,6 +431,27 @@ std::string Lower(std::string s) {
     for (char& ch : s)
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     return s;
+}
+
+std::string UnsavedKey(const fs::path& path) {
+    std::error_code ec;
+    const fs::path full = fs::absolute(path, ec);
+    const std::string key = (ec ? path : full).lexically_normal().make_preferred().string();
+#ifdef _WIN32
+    return Lower(key);
+#else
+    return key;
+#endif
+}
+
+// The caller's unsaved text for `path`, or null to read the saved file.
+const std::string* UnsavedText(const Ctx& c, const fs::path& path) {
+    if (!c.unsaved) return nullptr;
+
+    const std::string key = UnsavedKey(path);
+    for (const auto& [file, text] : *c.unsaved)
+        if (UnsavedKey(pulse::FilePath(file)) == key) return &text;
+    return nullptr;
 }
 
 std::string StripExtension(const std::string& s) {
@@ -8298,7 +8320,7 @@ bool SpliceInclude(Ctx& c) {
     for (fs::path& t : tries) {
         t = t.lexically_normal().make_preferred();
         std::error_code fec;
-        if (fs::is_regular_file(t, fec)) {
+        if (fs::is_regular_file(t, fec) || UnsavedText(c, t)) {
             full = t;
             break;
         }
@@ -8322,13 +8344,19 @@ bool SpliceInclude(Ctx& c) {
             return c.Fail(cmd.line, "$include: \"" + rel +
                                     "\" is already open - circular include");
 
-    pulse::dependencies::Note(full.string(), pulse::dependencies::Kind::Include);
-    std::ifstream f(full, std::ios::binary);
-    if (!f)
-        return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
-    std::ostringstream buf;
-    buf << f.rdbuf();
-    std::string text = buf.str();
+    const std::string* unsavedText = UnsavedText(c, full);
+    pulse::dependencies::Note(full.string(), pulse::dependencies::Kind::Include, unsavedText);
+    std::string text;
+    if (unsavedText) {
+        text = *unsavedText;
+    } else {
+        std::ifstream f(full, std::ios::binary);
+        if (!f)
+            return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        text = buf.str();
+    }
     StripUtf8Bom(text);
 
     std::printf("$include: Including %s...\n", full.string().c_str());
@@ -9216,13 +9244,17 @@ bool IsQcScriptPath(const char* path) {
 
 bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
                   const ScriptVars& defvars, const SearchDirs& includeDirs,
-                  const SearchDirs& fileDirs, const std::string* scriptText) {
+                  const SearchDirs& fileDirs, const ScriptFiles* unsaved) {
     const std::string normalizedPath = pulse::FilePath(rawPath).string();
     const char* path = normalizedPath.c_str();
-    pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script, scriptText);
+    Ctx c{out};
+    c.unsaved = unsaved;
+
+    const std::string* unsavedText = UnsavedText(c, normalizedPath);
+    pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script, unsavedText);
     std::string text;
-    if (scriptText) {
-        text = *scriptText;
+    if (unsavedText) {
+        text = *unsavedText;
     } else {
         std::ifstream f(path, std::ios::binary);
         if (!f) {
@@ -9235,7 +9267,6 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     }
     StripUtf8Bom(text);
 
-    Ctx c{out};
     c.scriptDir = fs::path(path).parent_path();
     c.curDir = c.scriptDir;
     c.sourceDirStack.push_back(c.scriptDir);

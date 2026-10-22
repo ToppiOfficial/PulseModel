@@ -188,6 +188,7 @@ Vendored under `libs/`:
 - [V-HACD](https://github.com/kmammou/v-hacd) - convex decomposition, used to
   generate collision from a render mesh. BSD-3-Clause.
 - [ufbx](https://github.com/ufbx/ufbx) - FBX reader. MIT.
+- [nlohmann/json](https://github.com/nlohmann/json) - parses `-api` requests. MIT.
 - [dr_wav / dr_mp3](https://github.com/mackron/dr_libs) - `.wav` and `.mp3`
   decoding for `vmd2valvebiped -sound`. Public domain or MIT-0.
 

@@ -1,6 +1,6 @@
 // dependencies.h - PulseModel
 //
-// -dumpdependencies: every file the compile read (the script, its includes and each
+// API compile: every file the compile read (the script, its includes and each
 // source) with a hash of its content, so a tool can tell when the model is out of date.
 
 #ifndef PULSEMDL_DEPENDENCIES_H
@@ -50,7 +50,7 @@ inline uint64_t HashFile(const std::string& path) {
     return h;
 }
 
-// `text` stands in for the file's content (a -stdin script).
+// `text` stands in for the file's content (an unsaved API buffer).
 inline void Note(const std::string& path, Kind kind = Kind::Source,
                  const std::string* text = nullptr) {
     if (!g_enabled || path.empty())

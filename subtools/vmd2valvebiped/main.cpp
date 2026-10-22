@@ -32,6 +32,8 @@
 #include "pulselimits.h"
 #include "strcompat.h"
 
+#include <nlohmann/json.hpp>
+
 namespace fm = pulse::format;
 namespace fs = std::filesystem;
 namespace pm = pulse::math;
@@ -1951,58 +1953,55 @@ int main(int argc, char** argv)
     try
     {
         pulse::api::Begin("vmd2valvebiped");
-        const auto request = pulse::api::ReadRequest(false);
-        if (!request.buffers.empty()) throw std::runtime_error("Conversion reads saved input files");
+        const nlohmann::json request = pulse::api::ReadRequest();
+        const std::string method = request.at("method").get<std::string>();
 
         ApiCapabilities();
-        if (request.method == "capabilities")
+        if (method == "capabilities")
         {
-            if (!request.arguments.empty()) throw std::runtime_error("Capabilities takes no arguments");
+            pulse::api::CheckMembers(request, {});
             result = 0;
         }
         else
         {
-            if (request.method != "motion" && request.method != "camera") throw std::runtime_error("Unknown conversion method");
+            if (method == "motion") pulse::api::CheckMembers(request, {"motion", "model", "face", "fps"});
+            else if (method == "camera")
+                pulse::api::CheckMembers(request, {"motion", "model", "fps", "transform", "orientation", "distanceTransform"});
+            else throw std::runtime_error("Unknown conversion method \"" + method + "\"");
 
             ApiOptions options;
-            options.method = request.method;
-            std::string motion, model;
-            if (request.arguments.size() % 2) throw std::runtime_error("Conversion arguments must be pairs");
+            options.method = method;
+            options.face = pulse::api::GetString(request, "face");
+            const std::string motion = pulse::api::GetString(request, "motion");
+            const std::string model = pulse::api::GetString(request, "model");
+            if (motion.empty() || model.empty()) throw std::runtime_error("Motion and target model are required");
 
-            std::set<std::string> seen;
-            for (size_t i = 0; i < request.arguments.size(); i += 2)
+            if (const auto fps = request.find("fps"); fps != request.end())
             {
-                const auto& name = request.arguments[i];
-                const auto& value = request.arguments[i+1];
-                if (!seen.insert(name).second) throw std::runtime_error("Duplicate conversion argument");
-                if (name == "motion") motion = value;
-                else if (name == "model") model = value;
-                else if (name == "face") options.face = value;
-                else if (name == "fps")
-                {
-                    size_t used = 0;
-                    options.fps = std::stod(value, &used);
-                    if (used != value.size() || !std::isfinite(options.fps) || options.fps < 1 || options.fps > 1000)
-                        throw std::runtime_error("Conversion FPS must be between 1 and 1000");
-                }
-                else if (name == "transform" || name == "orientation" || name == "distanceTransform")
-                {
-                    auto& matrix = name == "transform" ? options.transform : name == "orientation" ? options.orientation : options.distanceTransform;
-                    std::istringstream input(value);
-                    for (int row = 0; row < 3; ++row) for (int column = 0; column < 4; ++column)
-                        if (!(input >> matrix.m[row][column]) || !std::isfinite(matrix.m[row][column]))
-                            throw std::runtime_error("Invalid camera transform");
-                    std::string extra;
-                    if (input >> extra) throw std::runtime_error("Invalid camera transform");
-                }
-                else throw std::runtime_error("Unknown conversion argument");
+                if (!fps->is_number()) throw std::runtime_error("API member \"fps\" must be a number");
+                options.fps = fps->get<double>();
+                if (!std::isfinite(options.fps) || options.fps < 1 || options.fps > 1000)
+                    throw std::runtime_error("Conversion FPS must be between 1 and 1000");
             }
 
-            if (options.method == "camera" && !options.face.empty()) throw std::runtime_error("Camera conversion does not accept a facial motion");
-
-            if (options.method == "motion" && (seen.count("transform") || seen.count("orientation") || seen.count("distanceTransform")))
-                throw std::runtime_error("Body conversion does not accept camera transforms");
-            if (motion.empty() || model.empty()) throw std::runtime_error("Motion and target model are required");
+            // 3x4 matrices are 12 numbers, row-major
+            const auto readMatrix = [&](const char* name, matrix3x4& matrix)
+            {
+                const auto value = request.find(name);
+                if (value == request.end()) return;
+                if (!value->is_array() || value->size() != 12)
+                    throw std::runtime_error(std::string("API member \"") + name + "\" must be 12 numbers");
+                for (int i = 0; i < 12; ++i)
+                {
+                    const auto& number = (*value)[size_t(i)];
+                    if (!number.is_number() || !std::isfinite(number.get<double>()))
+                        throw std::runtime_error(std::string("API member \"") + name + "\" must be 12 numbers");
+                    matrix.m[i / 4][i % 4] = number.get<float>();
+                }
+            };
+            readMatrix("transform", options.transform);
+            readMatrix("orientation", options.orientation);
+            readMatrix("distanceTransform", options.distanceTransform);
 
             std::array<std::string, 5> arguments{"vmd2valvebiped", "-vmd", motion, "-mdl", model};
             std::array<char*, 5> argv2;

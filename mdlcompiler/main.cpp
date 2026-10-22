@@ -18,10 +18,13 @@
 #include "api.h"
 #include "fatalerror.h"
 #include "dependencies.h"
+#include "pathcompat.h"
 #include "perf.h"
 #include "pulselimits.h"
 #include "qcloader.h"
 #include "writer.h"
+
+#include <nlohmann/json.hpp>
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
@@ -109,7 +112,42 @@ static void DumpDefineBones(const pulse::compile::CompiledModel& model) {
     std::printf("\n------------------------------------------------------------\n");
 }
 
-static int RunCompile(int argc, char** argv, const pulse::api::Request* request = nullptr) {
+// An -api analyze or compile request as a command line plus unsaved buffers.
+struct ApiCall {
+    std::string method;
+    std::vector<std::string> arguments;
+    pulse::loader::ScriptFiles unsaved;
+};
+
+static ApiCall ParseApiCall(const nlohmann::json& request) {
+    ApiCall call;
+    call.method = request.at("method").get<std::string>();
+    if (call.method == "analyze") pulse::api::CheckMembers(request, {"script", "arguments", "files"});
+    else if (call.method == "compile") pulse::api::CheckMembers(request, {"script", "arguments"});
+    else throw std::runtime_error("Unknown API method \"" + call.method + "\"");
+
+    const std::string script = pulse::api::GetString(request, "script");
+    if (script.empty()) throw std::runtime_error("API member \"script\" is required");
+    call.arguments.push_back(script);
+    for (std::string& argument : pulse::api::GetStrings(request, "arguments")) {
+        if (argument.empty() || argument.find('\0') != std::string::npos)
+            throw std::runtime_error("API arguments must be non-empty and contain no NUL");
+        call.arguments.push_back(std::move(argument));
+    }
+
+    const auto files = request.find("files");
+    if (files == request.end()) return call;
+    if (!files->is_object()) throw std::runtime_error("API member \"files\" must be an object");
+    for (const auto& file : files->items()) {
+        if (!file.value().is_string()) throw std::runtime_error("API file text must be a string");
+        if (!pulse::FilePath(file.key()).is_absolute())
+            throw std::runtime_error("API file path \"" + file.key() + "\" must be absolute");
+        call.unsaved.emplace_back(file.key(), file.value().get<std::string>());
+    }
+    return call;
+}
+
+static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     if (argc < 2)
         return Usage();
 
@@ -126,8 +164,7 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
     bool definebones = false;
     bool verify = false;
     bool dumpMaterials = false;
-    const bool scriptFromStdin = request && request->method == "analyze";
-    const bool dumpDependencies = request && request->method == "compile";
+    const bool dumpDependencies = api && api->method == "compile";
     if (dumpDependencies) pulse::dependencies::g_enabled = true;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
@@ -182,23 +219,23 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
         } else if (std::strcmp(argv[i], "-forcewritevertexdata") == 0) {
             forceWriteVertexData = true;
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
-            if (request) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", "Standalone-only option");
             definebones = true;
         } else if (std::strcmp(argv[i], "-verify") == 0) {
-            if (request) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", "Standalone-only option");
             verify = true;
         } else if (std::strcmp(argv[i], "-legacysequencebounds") == 0) {
             legacySequenceBounds = true;
         } else if (std::strcmp(argv[i], "-dumpmaterials") == 0) {
-            if (request) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", "Standalone-only option");
             dumpMaterials = true;
         } else if (std::strcmp(argv[i], "-perfmetrics") == 0) {
             pulse::perf::g_enabled = true;
         } else if (std::strcmp(argv[i], "-pause") == 0) {
-            if (request) return Fail("bad API option", "Standalone-only option");
+            if (api) return Fail("bad API option", "Standalone-only option");
             pulse::fatal::g_pause = true;
         } else if (argv[i][0] == '-') {
-            if (request) return Fail("bad API option", argv[i]);
+            if (api) return Fail("bad API option", argv[i]);
             // studiomdl GUI front ends pass switches we do not have (-nop4,
             // -verbose, ...). Warn and carry on rather than refusing to run.
             std::printf("warning: ignoring unknown option: %s\n", argv[i]);
@@ -232,11 +269,10 @@ static int RunCompile(int argc, char** argv, const pulse::api::Request* request 
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    const std::string stdinText = request ? request->buffers : std::string();
     if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
-                                     scriptFromStdin ? &stdinText : nullptr))
+                                     api ? &api->unsaved : nullptr))
         return Fail("script error", err);
-    if (request && request->method == "analyze") return 0;
+    if (api && api->method == "analyze") return 0;
     auto tLoad = Clock::now();
     input.legacySequenceBounds = legacySequenceBounds;
     if (forceWriteVertexData)
@@ -331,16 +367,19 @@ int main(int argc, char** argv) {
     try {
         if (api) {
             pulse::api::Begin();
-            auto request = pulse::api::ReadRequest();
+            const nlohmann::json request = pulse::api::ReadRequest();
 
-            if (request.method == "catalog") {
-                pulse::api::Record("capability", "{\"api\":1,\"catalog\":1,\"analyze\":1,\"compile\":1,\"buffers\":1,\"diagnostics\":1,\"branches\":1}");
+            if (request.at("method") == "catalog") {
+                pulse::api::CheckMembers(request, {});
+                pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
+                                                 "\"files\":1,\"diagnostics\":1,\"branches\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else {
+                ApiCall call = ParseApiCall(request);
                 std::vector<char*> arguments{argv[0]};
-                for (auto& value : request.arguments) arguments.push_back(value.data());
-                rc = RunCompile(static_cast<int>(arguments.size()), arguments.data(), &request);
+                for (std::string& value : call.arguments) arguments.push_back(value.data());
+                rc = RunCompile(static_cast<int>(arguments.size()), arguments.data(), &call);
             }
         } else rc = RunCompile(argc, argv);
     } catch (const std::bad_alloc&) {

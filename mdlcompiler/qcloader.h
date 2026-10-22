@@ -30,11 +30,13 @@ using ScriptVars = std::vector<std::pair<std::string, std::string>>;
 // relative dir resolves against the working directory.
 using SearchDirs = std::vector<std::string>;
 
-// scriptText replaces reading path from disk; path still drives relative lookups
-// and error messages, as if the text were saved there.
+// Unsaved editor buffers as (path, text) pairs. The root script or an $include
+// whose path matches one is read from its text instead of disk.
+using ScriptFiles = std::vector<std::pair<std::string, std::string>>;
+
 bool LoadQcScript(const char* path, compile::CompileInput& out, std::string* err,
                   const ScriptVars& defvars = {}, const SearchDirs& includeDirs = {},
-                  const SearchDirs& fileDirs = {}, const std::string* scriptText = nullptr);
+                  const SearchDirs& fileDirs = {}, const ScriptFiles* unsaved = nullptr);
 
 // True when the path's extension selects this front end (.pulseqc / .qc).
 bool IsQcScriptPath(const char* path);
