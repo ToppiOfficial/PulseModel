@@ -1993,7 +1993,8 @@ int main(int argc, char** argv)
             if (method == "motion") pulse::api::CheckMembers(request, {"motion", "model", "modelData", "face", "fps"});
             else if (method == "camera")
                 pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
-                                                   "transform", "orientation", "distanceTransform"});
+                                                   "transform", "orientation", "distanceTransform",
+                                                   "boundaryMin", "boundaryMax", "boundaryTransform"});
             else throw std::runtime_error("Unknown conversion method \"" + method + "\"");
 
             ApiOptions options;
@@ -2040,6 +2041,30 @@ int main(int argc, char** argv)
             readMatrix("transform", options.transform);
             readMatrix("orientation", options.orientation);
             readMatrix("distanceTransform", options.distanceTransform);
+            readMatrix("boundaryTransform", options.boundaryTransform);
+
+            const auto readPoint = [&](const char* name, Vector3& point)
+            {
+                const auto value = request.find(name);
+                if (value == request.end()) return false;
+                if (!value->is_array() || value->size() != 3)
+                    throw std::runtime_error(std::string("API member \"") + name + "\" must be 3 numbers");
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const auto& number = (*value)[size_t(axis)];
+                    if (!number.is_number() || !std::isfinite(number.get<double>()))
+                        throw std::runtime_error(std::string("API member \"") + name + "\" must be 3 numbers");
+                    (&point.x)[axis] = number.get<float>();
+                }
+                return true;
+            };
+            const bool boundaryMin = readPoint("boundaryMin", options.boundaryMin);
+            const bool boundaryMax = readPoint("boundaryMax", options.boundaryMax);
+            if (boundaryMin != boundaryMax) throw std::runtime_error("Give both \"boundaryMin\" and \"boundaryMax\"");
+            options.boundary = boundaryMin;
+            for (int axis = 0; options.boundary && axis < 3; ++axis)
+                if ((&options.boundaryMax.x)[axis] - (&options.boundaryMin.x)[axis] < 1)
+                    throw std::runtime_error("The camera boundary must be at least 1 unit on every axis");
 
             std::array<std::string, 5> arguments{"vmd2valvebiped", "-vmd", motion, "-mdl", model};
             std::array<char*, 5> argv2;

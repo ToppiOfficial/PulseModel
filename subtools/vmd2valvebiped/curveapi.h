@@ -12,6 +12,10 @@ struct ApiOptions
     std::vector<char> modelData; // the target .mdl sent in the request, instead of a path
     double fps = 30;
     matrix3x4 transform, orientation, distanceTransform;
+    // Camera eyes stay inside [boundaryMin, boundaryMax] once mapped by boundaryTransform.
+    bool boundary = false;
+    Vector3 boundaryMin, boundaryMax;
+    matrix3x4 boundaryTransform;
 };
 
 std::string Number(double value)
@@ -25,7 +29,7 @@ std::string Number(double value)
 
 void ApiCapabilities()
 {
-    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1}");
+    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1}");
 }
 
 std::vector<float> ApiTimes(uint32_t last, double fps)
@@ -157,6 +161,70 @@ void EmitCurve(const char* property, const std::string& control, int component,
     pulse::api::Record("channel", json + "]}");
 }
 
+// Moves each camera cut by one offset so its eye stays in the boundary, keeping the cut's motion
+// and aim as authored. An axis the cut outgrows is centred and eased in near the walls instead.
+void FitBoundary(std::vector<matrix3x4>& frames, const std::set<size_t>& cuts, const ApiOptions& api)
+{
+    const auto& m = api.boundaryTransform.m;
+    const Vector3 rows[3] = {{m[0][0], m[0][1], m[0][2]}, {m[1][0], m[1][1], m[1][2]}, {m[2][0], m[2][1], m[2][2]}};
+    const float determinant = Dot(rows[0], Cross(rows[1], rows[2]));
+    if (!std::isfinite(determinant) || std::fabs(determinant) < 1e-12f)
+        throw std::runtime_error("The camera boundary transform has a zero scale");
+
+    // Columns of the inverse linear part, taking a boundary-space offset back to frame space
+    const Vector3 columns[3] = {Mul(Cross(rows[1], rows[2]), 1 / determinant), Mul(Cross(rows[2], rows[0]), 1 / determinant),
+                                Mul(Cross(rows[0], rows[1]), 1 / determinant)};
+
+    std::vector<size_t> bounds{0};
+    for (auto cut : cuts) if (cut > bounds.back() && cut < frames.size()) bounds.push_back(cut);
+    bounds.push_back(frames.size());
+
+    for (size_t s = 0; s + 1 < bounds.size(); ++s)
+    {
+        std::vector<Vector3> points;
+        Vector3 low{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+        Vector3 high = Mul(low, -1);
+        for (size_t i = bounds[s]; i < bounds[s + 1]; ++i)
+        {
+            points.push_back(pm::VectorTransform(Origin(frames[i]), api.boundaryTransform));
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                (&low.x)[axis] = std::min((&low.x)[axis], (&points.back().x)[axis]);
+                (&high.x)[axis] = std::max((&high.x)[axis], (&points.back().x)[axis]);
+            }
+        }
+
+        Vector3 shift;
+        std::array<bool, 3> eased{};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const float minimum = (&api.boundaryMin.x)[axis], maximum = (&api.boundaryMax.x)[axis];
+            const float lo = (&low.x)[axis], hi = (&high.x)[axis];
+            eased[axis] = hi - lo > maximum - minimum;
+            (&shift.x)[axis] = eased[axis] ? (minimum + maximum - lo - hi) / 2 : std::clamp(0.0f, minimum - lo, maximum - hi);
+        }
+
+        for (size_t k = 0; k < points.size(); ++k)
+        {
+            Vector3 fitted = Add(points[k], shift);
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                if (!eased[axis]) continue;
+                // Unchanged in the middle half of the box, then a tanh knee that never reaches the wall
+                const float minimum = (&api.boundaryMin.x)[axis], maximum = (&api.boundaryMax.x)[axis];
+                const float knee = (maximum - minimum) / 4;
+                float& value = (&fitted.x)[axis];
+                if (value > maximum - knee) value = maximum - knee + knee * std::tanh((value - maximum + knee) / knee);
+                else if (value < minimum + knee) value = minimum + knee - knee * std::tanh((minimum + knee - value) / knee);
+            }
+
+            const Vector3 offset = Sub(fitted, points[k]);
+            const Vector3 moved = Add(Add(Mul(columns[0], offset.x), Mul(columns[1], offset.y)), Mul(columns[2], offset.z));
+            SetOrigin(frames[bounds[s] + k], Add(Origin(frames[bounds[s] + k]), moved));
+        }
+    }
+}
+
 int EmitCameraApi(const ApiOptions& api, const std::string& path, const matrix3x4& basis, Vector3 anchor, float scale)
 {
     std::map<std::string, std::vector<Key>> bones;
@@ -217,6 +285,7 @@ int EmitCameraApi(const ApiOptions& api, const std::string& path, const matrix3x
         distance.push_back(std::max(0.001, double(Len(Sub(worldEye, at)))));
     }
 
+    if (api.boundary) FitBoundary(frames, cuts, api);
     pulse::api::Record("clip", "{\"duration\":" + Number(double(cameras.back().frame)/30) + ",\"sourceFps\":30}");
 
     const auto angles = ContinuousAngles(frames);
