@@ -161,9 +161,14 @@ void EmitCurve(const char* property, const std::string& control, int component,
     pulse::api::Record("channel", json + "]}");
 }
 
-// Moves each camera cut by one offset so its eye stays in the boundary, keeping the cut's motion
-// and aim as authored. An axis the cut outgrows is centred and eased in near the walls instead.
-void FitBoundary(std::vector<matrix3x4>& frames, const std::set<size_t>& cuts, const ApiOptions& api)
+// MMD frames over which a boundary correction eases in and out, on each side of the overshoot.
+constexpr float kBoundaryEase = 30;
+
+// Keeps camera eyes in the boundary with an offset that eases in around the frames outside it and
+// back out within the cut, so the aim and the rest of the path stay as authored. An axis the cut
+// outgrows is centred and eased in near the walls instead.
+void FitBoundary(std::vector<matrix3x4>& frames, const std::vector<float>& times, const std::set<size_t>& cuts,
+                 const ApiOptions& api)
 {
     const auto& m = api.boundaryTransform.m;
     const Vector3 rows[3] = {{m[0][0], m[0][1], m[0][2]}, {m[1][0], m[1][1], m[1][2]}, {m[2][0], m[2][1], m[2][2]}};
@@ -194,31 +199,55 @@ void FitBoundary(std::vector<matrix3x4>& frames, const std::set<size_t>& cuts, c
             }
         }
 
-        Vector3 shift;
-        std::array<bool, 3> eased{};
+        const size_t first = bounds[s], count = points.size();
+        std::vector<Vector3> offsets(count);
         for (int axis = 0; axis < 3; ++axis)
         {
             const float minimum = (&api.boundaryMin.x)[axis], maximum = (&api.boundaryMax.x)[axis];
             const float lo = (&low.x)[axis], hi = (&high.x)[axis];
-            eased[axis] = hi - lo > maximum - minimum;
-            (&shift.x)[axis] = eased[axis] ? (minimum + maximum - lo - hi) / 2 : std::clamp(0.0f, minimum - lo, maximum - hi);
-        }
+            const auto at = [&](size_t k) { return (&points[k].x)[axis]; };
 
-        for (size_t k = 0; k < points.size(); ++k)
-        {
-            Vector3 fitted = Add(points[k], shift);
-            for (int axis = 0; axis < 3; ++axis)
+            if (hi - lo > maximum - minimum)
             {
-                if (!eased[axis]) continue;
-                // Unchanged in the middle half of the box, then a tanh knee that never reaches the wall
-                const float minimum = (&api.boundaryMin.x)[axis], maximum = (&api.boundaryMax.x)[axis];
-                const float knee = (maximum - minimum) / 4;
-                float& value = (&fitted.x)[axis];
-                if (value > maximum - knee) value = maximum - knee + knee * std::tanh((value - maximum + knee) / knee);
-                else if (value < minimum + knee) value = minimum + knee - knee * std::tanh((minimum + knee - value) / knee);
+                // Centred, unchanged in the middle half of the box, then a tanh knee that never reaches the wall
+                const float knee = (maximum - minimum) / 4, shift = (minimum + maximum - lo - hi) / 2;
+                for (size_t k = 0; k < count; ++k)
+                {
+                    float value = at(k) + shift;
+                    if (value > maximum - knee) value = maximum - knee + knee * std::tanh((value - maximum + knee) / knee);
+                    else if (value < minimum + knee) value = minimum + knee - knee * std::tanh((minimum + knee - value) / knee);
+                    (&offsets[k].x)[axis] = value - at(k);
+                }
+                continue;
             }
 
-            const Vector3 offset = Sub(fitted, points[k]);
+            // Each outside frame's correction spreads to its neighbours with a cosine falloff, and every
+            // frame takes the largest that reaches it, so the offset eases in and out around the overshoot
+            std::vector<float> raise(count), lower(count);
+            for (size_t j = 0; j < count; ++j)
+            {
+                const float need = std::clamp(0.0f, minimum - at(j), maximum - at(j));
+                if (need == 0) continue;
+
+                const auto spread = [&](size_t k)
+                {
+                    const float distance = std::fabs(times[first + k] - times[first + j]);
+                    if (distance >= kBoundaryEase) return false;
+                    const float weighted = need * 0.5f * (1 + std::cos(pm::kPiF * distance / kBoundaryEase));
+                    if (need > 0) raise[k] = std::max(raise[k], weighted);
+                    else lower[k] = std::min(lower[k], weighted);
+                    return true;
+                };
+                for (size_t k = j; spread(k) && k > 0; --k) {}
+                for (size_t k = j + 1; k < count && spread(k); ++k) {}
+            }
+            for (size_t k = 0; k < count; ++k)
+                (&offsets[k].x)[axis] = std::clamp(raise[k] + lower[k], minimum - at(k), maximum - at(k));
+        }
+
+        for (size_t k = 0; k < count; ++k)
+        {
+            const Vector3 offset = offsets[k];
             const Vector3 moved = Add(Add(Mul(columns[0], offset.x), Mul(columns[1], offset.y)), Mul(columns[2], offset.z));
             SetOrigin(frames[bounds[s] + k], Add(Origin(frames[bounds[s] + k]), moved));
         }
@@ -285,7 +314,7 @@ int EmitCameraApi(const ApiOptions& api, const std::string& path, const matrix3x
         distance.push_back(std::max(0.001, double(Len(Sub(worldEye, at)))));
     }
 
-    if (api.boundary) FitBoundary(frames, cuts, api);
+    if (api.boundary) FitBoundary(frames, times, cuts, api);
     pulse::api::Record("clip", "{\"duration\":" + Number(double(cameras.back().frame)/30) + ",\"sourceFps\":30}");
 
     const auto angles = ContinuousAngles(frames);
