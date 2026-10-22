@@ -155,7 +155,9 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     bool verify = false;
     bool dumpMaterials = false;
     const bool dumpDependencies = api && api->method == "compile";
-    if (dumpDependencies) pulse::dependencies::g_enabled = true;
+    const bool analyze = api && api->method == "analyze";
+    pulse::dependencies::g_enabled = dumpDependencies || analyze;
+    pulse::dependencies::g_hashes = !analyze;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
@@ -259,10 +261,12 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
-                                     api ? &api->unsaved : nullptr))
+    const bool loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
+                                                    api ? &api->unsaved : nullptr);
+    if (analyze) pulse::dependencies::Print(loaded);
+    if (!loaded)
         return Fail("script error", err);
-    if (api && api->method == "analyze") return 0;
+    if (analyze) return 0;
     auto tLoad = Clock::now();
     input.legacySequenceBounds = legacySequenceBounds;
     if (forceWriteVertexData)
@@ -362,7 +366,7 @@ int main(int argc, char** argv) {
             if (request.at("method") == "catalog") {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
-                                                 "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1}");
+                                                 "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else {

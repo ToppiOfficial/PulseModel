@@ -567,6 +567,16 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& ful
     std::shared_ptr<pulse::dmx::Datamodel> dm;
     { PULSE_PERF("load", "dmx parse");
       dm = pulse::dmx::Datamodel::Load(full.string().c_str(), err); }
+    if (dm && pulse::dependencies::g_enabled) {
+        pulse::dependencies::Markup markup;
+        for (const auto& element : dm->elements) {
+            const std::string& name = element->className;
+            markup.jiggleBones += name == "DmeJiggleBone";
+            markup.proceduralBones += name == "DmeQuatInterpBone" || name == "DmeAimAtBone";
+            markup.physicsShapes += name == "DmePhysicsShape";
+        }
+        pulse::dependencies::NoteMarkup(full.string(), markup);
+    }
     if (dm && !source::ValidateDmxModel(*dm, full.string(), err))
         return nullptr;
     if (dm)
