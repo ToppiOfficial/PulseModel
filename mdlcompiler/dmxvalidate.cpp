@@ -200,19 +200,27 @@ bool ValidateVertexData(const Check& check, const dmx::Element& e) {
     if (jointCount && (jointCount->type != dmx::AttrType::Int || !influenceCount || *influenceCount < 0))
         return check.Fail(e, jointCount->name, "must be a nonnegative int");
 
-    const Registered weights = Resolve(e, version, *FindStream("jointWeights"));
-    const Registered joints = Resolve(e, version, *FindStream("jointIndices"));
     const int influences = influenceCount ? *influenceCount : 0;
-    if (!weights.values || !joints.values || influences <= 0) return true;
+    if (influences <= 0) return true;
 
+    // resolved the way the loader asks, so a skinned mesh can never load unweighted
     const size_t vertices = ArraySize(*positions.values);
     if (vertices > std::numeric_limits<size_t>::max() / static_cast<size_t>(influences))
         return check.Fail(e, jointCount->name, "is too large for the vertex count");
     const size_t expected = vertices * static_cast<size_t>(influences);
-    for (const Registered* r : {&weights, &joints})
-        if (ArraySize(*r->values) != expected)
-            return check.Fail(e, r->values->name, "needs " + std::to_string(expected) +
-                                                  " values (jointCount x vertices)");
+    for (const char* legacy : {"jointWeights", "jointIndices"}) {
+        const std::string name = DmxStreamName(e, version, legacy);
+        const dmx::Attribute* values = name.empty() ? nullptr : FindAttribute(e, name);
+        if (!values) {
+            const Stream& stream = *FindStream(legacy);
+            return check.Fail(e, version == 22 ? stream.indexed : stream.legacy,
+                              "is missing - jointCount is " + std::to_string(influences) +
+                              " but the mesh has no readable skinning");
+        }
+        if (ArraySize(*values) != expected)
+            return check.Fail(e, values->name, "needs " + std::to_string(expected) +
+                                               " values (jointCount x vertices)");
+    }
     return true;
 }
 
@@ -247,12 +255,16 @@ bool ValidateDeltaTargets(const Check& check, const dmx::Element& mesh, const dm
 } // namespace
 
 std::string DmxStreamName(const dmx::Element& e, int modelVersion, const char* legacyName) {
+    // "jointIndices" is a stream of its own, so an exact name wins over the Indices suffix
     constexpr size_t suffix = sizeof("Indices") - 1;
     std::string name = legacyName;
-    const bool indices = name.size() > suffix && name.compare(name.size() - suffix, suffix, "Indices") == 0;
-    if (indices) name.resize(name.size() - suffix);
-
-    const Stream* stream = FindStream(name.c_str());
+    const Stream* stream = FindStream(legacyName);
+    const bool indices = !stream && name.size() > suffix &&
+                         name.compare(name.size() - suffix, suffix, "Indices") == 0;
+    if (indices) {
+        name.resize(name.size() - suffix);
+        stream = FindStream(name.c_str());
+    }
     if (!stream) return {};
     const Registered r = Resolve(e, modelVersion, *stream);
     const dmx::Attribute* a = indices ? r.indices : r.values;
