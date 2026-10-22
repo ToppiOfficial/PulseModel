@@ -9,6 +9,7 @@
 struct ApiOptions
 {
     std::string method, face;
+    std::vector<char> modelData; // the target .mdl sent in the request, instead of a path
     double fps = 30;
     matrix3x4 transform, orientation, distanceTransform;
 };

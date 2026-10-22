@@ -54,6 +54,30 @@ bool ReadInput(const std::string& path, std::vector<char>& bytes)
     file.seekg(0);
     return bool(file.read(bytes.data(), static_cast<std::streamsize>(bytes.size())));
 }
+
+// Standard base64 with optional "=" padding.
+bool DecodeBase64(const std::string& text, std::vector<char>& bytes)
+{
+    if (text.size() % 4) return false;
+
+    bytes.clear();
+    bytes.reserve(text.size() / 4 * 3);
+    uint32_t bits = 0;
+    int count = 0;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        const char ch = text[i];
+        if (ch == '=') { if (i + 2 < text.size() || (i + 1 < text.size() && text[i + 1] != '=')) return false; break; }
+
+        const char* digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const char* at = ch ? std::strchr(digits, ch) : nullptr;
+        if (!at) return false;
+        bits = (bits << 6) | uint32_t(at - digits);
+        if ((count += 6) >= 8) { count -= 8; bytes.push_back(char((bits >> count) & 0xFF)); }
+    }
+    return true;
+}
+
 // ------------------------------------------------------------------ vector ops
 
 Vector3 Add(const Vector3& a, const Vector3& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
@@ -680,8 +704,10 @@ struct Target {
     }
 };
 
-bool LoadMdl(const std::string& path, Mdl& m, std::string& err) {
-    if (!ReadInput(path, m.buf) || m.buf.size() < sizeof(fm::studiohdr_t)) {
+// `bytes` stands in for the file's content; `path` then only names it in errors.
+bool LoadMdl(const std::string& path, Mdl& m, std::string& err, const std::vector<char>* bytes = nullptr) {
+    if (bytes) m.buf = *bytes;
+    if ((!bytes && !ReadInput(path, m.buf)) || m.buf.size() < sizeof(fm::studiohdr_t)) {
         err = "cannot read \"" + path + "\"";
         return false;
     }
@@ -1319,7 +1345,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         return Fail(err);
 
     Mdl m;
-    if (!LoadMdl(mdlPath, m, err))
+    if (!LoadMdl(mdlPath, m, err, api && !api->modelData.empty() ? &api->modelData : nullptr))
         return Fail(err);
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudiobone_t* bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
@@ -1953,7 +1979,7 @@ int main(int argc, char** argv)
     try
     {
         pulse::api::Begin("vmd2valvebiped");
-        const nlohmann::json request = pulse::api::ReadRequest();
+        const nlohmann::json request = pulse::api::ReadRequest(256u << 20); // room for a base64 .mdl
         const std::string method = request.at("method").get<std::string>();
 
         ApiCapabilities();
@@ -1964,17 +1990,29 @@ int main(int argc, char** argv)
         }
         else
         {
-            if (method == "motion") pulse::api::CheckMembers(request, {"motion", "model", "face", "fps"});
+            if (method == "motion") pulse::api::CheckMembers(request, {"motion", "model", "modelData", "face", "fps"});
             else if (method == "camera")
-                pulse::api::CheckMembers(request, {"motion", "model", "fps", "transform", "orientation", "distanceTransform"});
+                pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
+                                                   "transform", "orientation", "distanceTransform"});
             else throw std::runtime_error("Unknown conversion method \"" + method + "\"");
 
             ApiOptions options;
             options.method = method;
             options.face = pulse::api::GetString(request, "face");
             const std::string motion = pulse::api::GetString(request, "motion");
-            const std::string model = pulse::api::GetString(request, "model");
-            if (motion.empty() || model.empty()) throw std::runtime_error("Motion and target model are required");
+            std::string model = pulse::api::GetString(request, "model");
+            const std::string modelData = pulse::api::GetString(request, "modelData");
+            if (motion.empty()) throw std::runtime_error("API member \"motion\" is required");
+            if (model.empty() == modelData.empty())
+                throw std::runtime_error("Give the target as exactly one of \"model\" or \"modelData\"");
+
+            // base64 .mdl bytes, for a model that only exists in a mounted archive
+            if (!modelData.empty())
+            {
+                if (!DecodeBase64(modelData, options.modelData) || options.modelData.empty())
+                    throw std::runtime_error("API member \"modelData\" is not valid base64");
+                model = "target model";
+            }
 
             if (const auto fps = request.find("fps"); fps != request.end())
             {

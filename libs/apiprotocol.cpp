@@ -16,7 +16,6 @@
 namespace pulse::api {
 namespace {
 std::FILE* output = nullptr;
-constexpr size_t maxRequest = 64 * 1024 * 1024;
 }
 
 bool Active() { return output != nullptr; }
@@ -50,12 +49,13 @@ void Begin(const char* tool) {
                 : "{\"version\":" + std::to_string(kVersion) + "}");
 }
 
-nlohmann::json ReadRequest() {
+nlohmann::json ReadRequest(size_t maxBytes) {
     std::string bytes;
     char chunk[65536];
     size_t count;
     while ((count = std::fread(chunk, 1, sizeof(chunk), stdin)) != 0) {
-        if (count > maxRequest - bytes.size()) throw std::runtime_error("API request exceeds 64 MiB");
+        if (count > maxBytes - bytes.size())
+            throw std::runtime_error("API request exceeds " + std::to_string(maxBytes >> 20) + " MiB");
         bytes.append(chunk, count);
     }
     if (std::ferror(stdin)) throw std::runtime_error("Cannot read API request");
