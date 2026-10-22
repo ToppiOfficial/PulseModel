@@ -17,6 +17,14 @@
 
 namespace pulse::source {
 
+// Data the loader would crash on is an error; a stream the reference would skip
+// is a warning. `file` names the DMX in messages.
+bool ValidateDmxModel(const pulse::dmx::Datamodel& dm, const std::string& file, std::string* err);
+// The attribute in `e` holding standard stream `legacyName` ("positions", or
+// "positionsIndices" for its indices), or "" when `e` does not register it.
+std::string DmxStreamName(const pulse::dmx::Element& e, int modelVersion, const char* legacyName);
+const pulse::dmx::Element* DmxMeshBindState(const pulse::dmx::Element* mesh);
+
 // `mats` = compile-wide material registry (face materials index it).
 // `scale` = per-source import scale (reference g_currentscale).
 // `morphSource` = delta states become morphs/flexkeys (reference LoadingModelBody

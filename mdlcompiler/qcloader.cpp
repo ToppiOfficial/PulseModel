@@ -567,6 +567,8 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& ful
     std::shared_ptr<pulse::dmx::Datamodel> dm;
     { PULSE_PERF("load", "dmx parse");
       dm = pulse::dmx::Datamodel::Load(full.string().c_str(), err); }
+    if (dm && !source::ValidateDmxModel(*dm, full.string(), err))
+        return nullptr;
     if (dm)
         c.dmxCache[key] = dm;
     return dm;

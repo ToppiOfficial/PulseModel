@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -44,20 +45,6 @@ const std::vector<dmx::Quaternion>* DmxQuatArray(const dmx::Element* e, const ch
     if (!e) return nullptr;
     const dmx::Attribute* a = e->Get(n);
     return a ? std::get_if<std::vector<dmx::Quaternion>>(&a->value) : nullptr;
-}
-
-// model-version field-name split (model 22 uses position$0 etc.)
-const std::vector<dmx::Vector3>* PickV3Array(const dmx::Element* e, const char* a, const char* b) {
-    auto v = e->GetVector3Array(a);
-    return v ? v : e->GetVector3Array(b);
-}
-const std::vector<int32_t>* PickIntArray(const dmx::Element* e, const char* a, const char* b) {
-    auto v = e->GetIntArray(a);
-    return v ? v : e->GetIntArray(b);
-}
-const std::vector<float>* PickFloatArray(const dmx::Element* e, const char* a, const char* b) {
-    auto v = e->GetFloatArray(a);
-    return v ? v : e->GetFloatArray(b);
 }
 
 // DmeTransform -> matrix (reference CDmeTransform::GetTransform =
@@ -839,6 +826,7 @@ void ComputeTriangulatedIndices(const std::vector<dmx::Vector3>& positions,
 }
 
 struct LoadMeshInfo {
+    int modelVersion = 0;
     Source* source = nullptr;
     const dmx::Element* model = nullptr;
     const std::vector<dmx::ElementPtr>* jointList = nullptr;
@@ -850,6 +838,10 @@ struct LoadMeshInfo {
     MeshFilter* filter = nullptr; // $exceptionlist, null when unfiltered
     std::vector<pm::matrix3x4> bindPose; // per jointList entry
     bool physics = false; // read DmePhysicsShape dags, not DmeMesh
+
+    std::string Stream(const dmx::Element& e, const char* legacyName) const {
+        return DmxStreamName(e, modelVersion, legacyName);
+    }
 };
 
 // reference DefineUniqueVertices: register this mesh's
@@ -924,16 +916,17 @@ void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::
 
     pm::matrix3x4 normalMat = pm::MatrixInverseTranspose(mat);
 
-    const std::vector<dmx::Vector3>* positions = PickV3Array(bindState, "position$0", "positions");
-    const std::vector<dmx::Vector2>* texcoords = bindState->GetVector2Array("texcoord$0");
-    if (!texcoords) texcoords = bindState->GetVector2Array("textureCoordinates");
+    const std::vector<dmx::Vector3>* positions = 
+        bindState->GetVector3Array(info.Stream(*bindState, "positions"));
+    const std::vector<dmx::Vector2>* texcoords = 
+        bindState->GetVector2Array(info.Stream(*bindState, "textureCoordinates"));
     if (!positions) return;
 
     int nCount = static_cast<int>(positions->size());
 
     // skinning
-    const std::vector<float>* jw = PickFloatArray(bindState, "jointWeights", "blendweights$0");
-    const std::vector<int32_t>* ji = PickIntArray(bindState, "jointIndices", "blendindices$0");
+    const std::vector<float>* jw = bindState->GetFloatArray(info.Stream(*bindState, "jointWeights"));
+    const std::vector<int32_t>* ji = bindState->GetIntArray(info.Stream(*bindState, "jointIndices"));
     int nJointCount = bindState->GetInt("jointCount", 0);
     if (!(jw && ji) || nJointCount <= 0) nJointCount = 0;
     if (nJointCount > lim::kMaxSrcBoneWeights) {
@@ -1004,17 +997,6 @@ void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::
             tmp.texcoord.push_back(uv);
         }
     }
-}
-
-// find the vertex-data bind state of a mesh
-const dmx::Element* MeshBindState(const dmx::Element* mesh) {
-    if (const dmx::Element* bs = mesh->GetElement("bindState")) return bs;
-    if (auto states = mesh->GetElementArray("baseStates")) {
-        for (const dmx::Element* s : *states)
-            if (s && s->name == "bind") return s;
-        if (!states->empty()) return (*states)[0];
-    }
-    return mesh->GetElement("currentState");
 }
 
 // Valve Vector::Length (float accumulate + sqrtf)
@@ -1148,24 +1130,22 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     int nStartingNormal = static_cast<int>(tmp.normal.size());
     int nStartingTexCoord = static_cast<int>(tmp.texcoord.size());
 
-    const std::vector<dmx::Vector3>* positions = PickV3Array(bindState, "position$0", "positions");
+    const std::vector<dmx::Vector3>* positions = 
+        bindState->GetVector3Array(info.Stream(*bindState, "positions"));
     const std::vector<int32_t>* positionIndices =
-        PickIntArray(bindState, "position$0Indices", "positionsIndices");
+        bindState->GetIntArray(info.Stream(*bindState, "positionsIndices"));
     const std::vector<int32_t>* texcoordIndices =
-        PickIntArray(bindState, "texcoord$0Indices", "textureCoordinatesIndices");
+        bindState->GetIntArray(info.Stream(*bindState, "textureCoordinatesIndices"));
 
     // CollapseRedundantNormals mutates the (copied) normal stream + indices.
     // Meshes with delta states take the per-position variant that yields a
     // normalMap for remapping the delta states' normal entries.
     std::vector<dmx::Vector3> normals;
     std::vector<int32_t> normalIndices;
-    {
-    if (auto n = PickV3Array(bindState, "normal$0", "normals"))
+    if (auto n = bindState->GetVector3Array(info.Stream(*bindState, "normals")))
         normals = *n;
-    if (auto ni = PickIntArray(bindState, "normal$0Indices", "normalsIndices"))
+    if (auto ni = bindState->GetIntArray(info.Stream(*bindState, "normalsIndices")))
         normalIndices = *ni;
-    }
-
 
     const std::vector<dmx::ElementPtr>* deltaStates = mesh->GetElementArray("deltaStates");
     bool hasDeltas = deltaStates && !deltaStates->empty();
@@ -1195,9 +1175,9 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     int nStartingUniqueVertexMap = flex ? static_cast<int>(flex->uniqueVerticesMap.size()) : 0;
     if (flex && positionIndices) {
         const std::vector<int32_t>* balanceIndices =
-            PickIntArray(bindState, "balance$0Indices", "balanceIndices");
+            bindState->GetIntArray(info.Stream(*bindState, "balanceIndices"));
         const std::vector<int32_t>* speedIndices =
-            PickIntArray(bindState, "speed$0Indices", "speedIndices");
+            bindState->GetIntArray(info.Stream(*bindState, "speedIndices"));
         PULSE_PERF("mesh", "DefineUniqueVertices");
         DefineUniqueVertices(*flex, *positionIndices, normalIndices, texcoordIndices,
                              balanceIndices, speedIndices, nStartingVertex, nStartingNormal,
@@ -1258,8 +1238,9 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     // balance/speed data follows the mesh's vertices (reference LoadVertices
     // tail: whole array, or a single 1.0f so the 0-index default hits it)
     if (flex) {
-        const std::vector<float>* balances = PickFloatArray(bindState, "balance$0", "balance");
-        const std::vector<float>* speeds = PickFloatArray(bindState, "speed$0", "speed");
+        const std::vector<float>* balances = 
+            bindState->GetFloatArray(info.Stream(*bindState, "balance"));
+        const std::vector<float>* speeds = bindState->GetFloatArray(info.Stream(*bindState, "speed"));
         if (balances && !balances->empty())
             flex->balance.insert(flex->balance.end(), balances->begin(), balances->end());
         else
@@ -1278,8 +1259,8 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             BuildInverseMap(normalIndices, static_cast<int>(normals.size()));
         int nTexcoordDataCount = 0;
         {
-            const std::vector<dmx::Vector2>* tex = bindState->GetVector2Array("texcoord$0");
-            if (!tex) tex = bindState->GetVector2Array("textureCoordinates");
+            const std::vector<dmx::Vector2>* tex = 
+                bindState->GetVector2Array(info.Stream(*bindState, "textureCoordinates"));
             if (tex) nTexcoordDataCount = static_cast<int>(tex->size());
         }
         std::vector<std::vector<int>> texcoordInverse;
@@ -1290,17 +1271,17 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             if (!delta) continue;
 
             std::vector<dmx::Vector3> dPos;
-            if (auto p = PickV3Array(delta, "position$0", "positions"))
+            if (auto p = delta->GetVector3Array(info.Stream(*delta, "positions")))
                 dPos = *p;
             std::vector<int32_t> dPosIdx;
-            if (auto pi = PickIntArray(delta, "position$0Indices", "positionsIndices"))
+            if (auto pi = delta->GetIntArray(info.Stream(*delta, "positionsIndices")))
                 dPosIdx = *pi;
 
             std::vector<dmx::Vector3> dNormals;
-            if (auto n = PickV3Array(delta, "normal$0", "normals"))
+            if (auto n = delta->GetVector3Array(info.Stream(*delta, "normals")))
                 dNormals = *n;
             std::vector<int32_t> dNormalIdx;
-            if (auto ni = PickIntArray(delta, "normal$0Indices", "normalsIndices"))
+            if (auto ni = delta->GetIntArray(info.Stream(*delta, "normalsIndices")))
                 dNormalIdx = *ni;
             if (bNormalsCollapsed)
                 CollapseDeltaNormals(normalMap, dNormals, dNormalIdx);
@@ -1317,10 +1298,10 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                     break;
                 }
             }
-            const std::vector<float>* aw = PickFloatArray(delta, "wrinkle$0", "wrinkle");
+            const std::vector<float>* aw = delta->GetFloatArray(info.Stream(*delta, "wrinkle"));
             if (aw) {
                 dWrinkle = *aw;
-                if (auto wi = PickIntArray(delta, "wrinkle$0Indices", "wrinkleIndices"))
+                if (auto wi = delta->GetIntArray(info.Stream(*delta, "wrinkleIndices")))
                     dWrinkleIdx = *wi;
             } else if (ws) {
                 GenerateWrinkleDelta(dPos, dPosIdx, ws->scale, posInverse,
@@ -1499,7 +1480,7 @@ bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
     // localBone, exactly as it would for a dag carrying no mesh at all
     if (shape && shape->className == (info.physics ? "DmePhysicsShape" : "DmeMesh") &&
         (!info.filter || info.filter->Keep(shape->name, dag->name))) {
-        const dmx::Element* bindState = MeshBindState(shape);
+        const dmx::Element* bindState = DmxMeshBindState(shape);
         if (!bindState)
             return false;
         const size_t firstVertex = info.tmp->bone.size();
@@ -1517,10 +1498,11 @@ bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
     return true;
 }
 
-bool LoadMeshes(const dmx::Element* model, float flScale, const BoneMap& boneMap,
+bool LoadMeshes(const dmx::Element* model, int modelVersion, float flScale, const BoneMap& boneMap,
                 MaterialTable& mats, MeshTemp& tmp, FlexTemp* flex, MeshFilter* filter,
                 bool physics, Source& out) {
     LoadMeshInfo info;
+    info.modelVersion = modelVersion;
     info.physics = physics;
     info.filter = filter;
     info.source = &out;
@@ -2549,8 +2531,8 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
     MeshTemp tmp;
     if (!animOnly) {
         PULSE_PERF("load", "LoadMeshes");
-        if (!LoadMeshes(model, scale, boneMap, mats, tmp, flexTemp.enabled ? &flexTemp : nullptr,
-                        filter, physicsShapes, out)) {
+        if (!LoadMeshes(model, dm.format_version, scale, boneMap, mats, tmp,
+                        flexTemp.enabled ? &flexTemp : nullptr, filter, physicsShapes, out)) {
             if (err) *err = "failed to load meshes";
             return false;
         }

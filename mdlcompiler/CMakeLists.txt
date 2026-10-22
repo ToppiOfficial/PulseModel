@@ -1,10 +1,10 @@
 # mdlcompiler - the single portable executable.
 
-add_executable(mdlcompiler main.cpp api.h dmxloader.cpp dmxrig.cpp smdloader.cpp
+add_executable(mdlcompiler main.cpp api.h dmxloader.cpp dmxvalidate.cpp dmxrig.cpp smdloader.cpp
                fbxloader.cpp meshedit.cpp compile.cpp facemarkup.cpp
                flexreg.cpp qcloader.cpp writemdl.cpp writevtx.cpp writephy.cpp)
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 2.1.0)
+set(TOOL_VERSION 2.1.1)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(mdlcompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 
