@@ -2204,7 +2204,13 @@ int MaterialTable::LookupTexture(const char* name, bool relative) {
         if (dot != std::string::npos) b.resize(dot);
         return b;
     };
-    const std::string base = fileBase(name);
+    std::string base = fileBase(name);
+    for (const auto& [from, to] : collapse) {
+        if (_stricmp(from.c_str(), noExt.c_str()) == 0 || _stricmp(from.c_str(), base.c_str()) == 0) {
+            noExt = to;
+            base = fileBase(to);
+        }
+    }
 
     for (size_t i = 0; i < textures.size(); ++i) {
         const Texture& tex = textures[i];

@@ -172,6 +172,8 @@ struct MaterialTable {
     };
     std::vector<Texture> textures;
     std::vector<int> materialToTexture;
+    // $collapsematerial from -> to, in script order; LookupTexture applies them
+    std::vector<std::pair<std::string, std::string>> collapse;
 
     // Find-or-add; a query matches an entry of the other `relative` class only
     // on its base name.

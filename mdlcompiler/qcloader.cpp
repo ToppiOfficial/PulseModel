@@ -6333,6 +6333,31 @@ bool CmdOverrideMaterial(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $collapsematerial <from> <to> - faces that load with <from> take <to> instead,
+// merging both into one material and mesh. Resolved at load time, so it must
+// come before the $body/$model that loads <from>.
+bool CmdCollapseMaterial(Ctx& c, const Token& cmd) {
+    std::string from, to;
+    if (!c.Want("a material name", cmd, from) ||
+        !c.Want("a material to collapse to", cmd, to))
+        return false;
+
+    from = StripExtension(from);
+    to = StripExtension(to);
+    if (_stricmp(from.c_str(), to.c_str()) == 0)
+        return c.Fail(cmd.line, "$collapsematerial: \"" + from + "\" collapses to itself");
+    for (const auto& tex : c.in.mats.textures) {
+        const size_t slash = tex.name.find_last_of("/\\");
+        const std::string base = slash == std::string::npos ? tex.name : tex.name.substr(slash + 1);
+        if (tex.material >= 0 && (_stricmp(tex.name.c_str(), from.c_str()) == 0 ||
+                                  _stricmp(base.c_str(), from.c_str()) == 0))
+            return c.Fail(cmd.line, "$collapsematerial: \"" + from +
+                                    "\" is already loaded; place it before the $body/$model that uses it");
+    }
+    c.in.mats.collapse.emplace_back(from, to);
+    return true;
+}
+
 // One $set body: `material <replaced> <replacement>` lines until '}'.
 bool ParseTextureSet(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::SkinReplace>& fam) {
     if (!WantOpenBrace(c, cmd, "$texturegroup $set"))
@@ -9163,6 +9188,7 @@ constexpr Command kCommands[] = {
     {"$renamebone", CmdRenameBone},
     {"$renamematerial", CmdRenameMaterial},
     {"$overridematerial", CmdOverrideMaterial},
+    {"$collapsematerial", CmdCollapseMaterial},
     {"$texturegroup", CmdTextureGroup},
     {"$meshsortorder", CmdMeshSortOrder},
     {"$minlod", CmdMinLod},
