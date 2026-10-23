@@ -23,6 +23,7 @@
 #include "perf.h"
 #include "pulselimits.h"
 #include "qcloader.h"
+#include "rename.h"
 #include "writer.h"
 
 #include <nlohmann/json.hpp>
@@ -366,9 +367,15 @@ int main(int argc, char** argv) {
             if (request.at("method") == "catalog") {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
-                                                 "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1}");
+                                                 "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
+                                                 "\"rename\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
+            } else if (request.at("method") == "rename") {
+                pulse::api::CheckMembers(request, {"arguments"});
+                std::string err;
+                rc = pulse::rename::Run(pulse::api::GetStrings(request, "arguments"), &err)
+                         ? 0 : Fail("rename error", err);
             } else {
                 ApiCall call = ParseApiCall(request);
                 std::vector<char*> arguments{argv[0]};

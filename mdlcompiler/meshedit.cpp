@@ -889,27 +889,62 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
         return outMat[m] = mats.UseTextureAsMaterial(mats.LookupTexture(name.c_str()));
     };
 
-    // weld: one push direction per position, so split normals cannot crack the hull
-    std::vector<Vector3> push(n);
-    std::map<std::tuple<float, float, float>, Vector3> byPos;
-    for (int i = 0; i < n; ++i) {
-        push[i] = src.vertex[i].normal;
-        pm::VectorNormalize(push[i]);
-        if (o.weld) {
-            const Vector3& p = src.vertex[i].position;
-            Vector3& s = byPos[{p.x, p.y, p.z}];
-            s.x += push[i].x;
-            s.y += push[i].y;
-            s.z += push[i].z;
+    // Push along Blender solidify's high quality normal, built from face geometry
+    // per position so authored normals cannot bend the hull: each edge takes the
+    // sum of its (at most two) face normals, each position the sum of its edges.
+    using PosKey = std::tuple<float, float, float>;
+    auto posKey = [&](uint32_t v) {
+        const Vector3& p = src.vertex[v].position;
+        return std::make_tuple(p.x, p.y, p.z);
+    };
+    struct EdgeFaces {
+        Vector3 sum{0.0f, 0.0f, 0.0f};
+        int count = 0;
+    };
+    std::map<std::pair<PosKey, PosKey>, EdgeFaces> edges;
+    for (int mi = 0; mi < src.nummeshes; ++mi) {
+        const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
+        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+            const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
+                                   mesh.vertexoffset + src.face[f].c};
+            const Vector3 &p0 = src.vertex[c[0]].position, &p1 = src.vertex[c[1]].position,
+                          &p2 = src.vertex[c[2]].position;
+            const Vector3 e1{p1.x - p0.x, p1.y - p0.y, p1.z - p0.z}, e2{p2.x - p0.x, p2.y - p0.y, p2.z - p0.z};
+            // e2 x e1: faces are stored in the reference's (v1, v3, v2) winding
+            Vector3 fn{e2.y * e1.z - e2.z * e1.y, e2.z * e1.x - e2.x * e1.z, e2.x * e1.y - e2.y * e1.x};
+            if (pm::VectorNormalize(fn) <= 0.0f)
+                continue;
+            for (int k = 0; k < 3; ++k) {
+                PosKey a = posKey(c[k]), b = posKey(c[(k + 1) % 3]);
+                if (a == b)
+                    continue;
+                if (b < a)
+                    std::swap(a, b);
+                EdgeFaces& e = edges[{a, b}];
+                e.sum = {e.sum.x + fn.x, e.sum.y + fn.y, e.sum.z + fn.z};
+                ++e.count;
+            }
         }
     }
-    if (o.weld)
-        for (int i = 0; i < n; ++i) {
-            const Vector3& p = src.vertex[i].position;
-            Vector3 s = byPos[{p.x, p.y, p.z}];
-            if (pm::VectorNormalize(s) > 0.0f)
-                push[i] = s;
+    std::map<PosKey, Vector3> byPos;
+    for (auto& [ends, e] : edges) {
+        if (e.count > 2 || pm::VectorNormalize(e.sum) <= 0.0f)
+            continue; // non-manifold edges add nothing
+        for (const PosKey& p : {ends.first, ends.second}) {
+            Vector3& s = byPos[p];
+            s = {s.x + e.sum.x, s.y + e.sum.y, s.z + e.sum.z};
         }
+    }
+    std::vector<Vector3> push(n);
+    for (int i = 0; i < n; ++i) {
+        auto it = byPos.find(posKey(i));
+        Vector3 s = it != byPos.end() ? it->second : Vector3{0.0f, 0.0f, 0.0f};
+        if (pm::VectorNormalize(s) <= 0.0f) {
+            s = src.vertex[i].normal;
+            pm::VectorNormalize(s);
+        }
+        push[i] = s;
+    }
 
     // thicknessclamp: Blender solidify's Clamp. A vertex whose shortest edge is
     // under |thickness| * clamp scales by edge / that; the weight stream then
@@ -917,11 +952,8 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
     std::vector<float> clampScale(n, 1.0f);
     const float clampOffset = std::fabs(o.thickness) * o.thicknessClamp;
     if (clampOffset > FLT_EPSILON) {
-        std::map<std::tuple<float, float, float>, float> lenSq;
-        auto key = [&](uint32_t v) {
-            const Vector3& p = src.vertex[v].position;
-            return std::make_tuple(p.x, p.y, p.z);
-        };
+        std::map<PosKey, float> lenSq;
+        auto key = posKey;
         for (int mi = 0; mi < src.nummeshes; ++mi) {
             const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
             for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
@@ -991,8 +1023,8 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
     };
     for (size_t f = 0; f < numOrig; ++f) {
         const MFace face = faces[f];
-        if (!inRange(face.a) || !inRange(face.b) || !inRange(face.c))
-            continue;
+        if (!inRange(face.a) && !inRange(face.b) && !inRange(face.c))
+            continue; // a face with any corner in range keeps its tapered hull
         const int om = outlineMaterial(face.material);
         if (om >= lim::kMaxSkins)
             return fail("too many materials (max " + std::to_string(lim::kMaxSkins) + ")");

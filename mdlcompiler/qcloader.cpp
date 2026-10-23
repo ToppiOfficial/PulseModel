@@ -976,8 +976,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                     } else if (kw == "thicknessclamp") {
                         if (!c.WantFloat("a thickness clamp factor", *t, ol.thicknessClamp))
                             return false;
-                        if (!std::isfinite(ol.thicknessClamp) || ol.thicknessClamp <= 0.0f)
-                            return c.Fail(k->line, where + ": $toonoutline thicknessclamp must be above 0");
+                        if (!std::isfinite(ol.thicknessClamp) || ol.thicknessClamp < 0.0f)
+                            return c.Fail(k->line, where + ": $toonoutline thicknessclamp must be 0 or above");
                     } else if (kw == "materialname") {
                         if (!c.Want("a material name", *t, ol.material))
                             return false;

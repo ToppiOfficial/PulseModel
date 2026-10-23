@@ -18,12 +18,16 @@
 #include <vector>
 
 #include "animwrite.h"
+#include "apioutput.h"
 #include "dmxwrite.h"
 #include "format/mdl.h"
 #include "mdlfile.h"
 
 namespace fm = pulse::format;
 namespace dc = mdldecompiler;
+
+// The shared clip and DMX writers report decompile outputs; this tool has no API.
+void mdldecompiler::RecordOutput(const std::string&) {}
 
 namespace {
 
