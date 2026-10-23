@@ -843,6 +843,36 @@ const FaceDef kFace[] = {
     {"browdown", "\x89\xba", "\xe4\xb8\x8b", "right_lowerer=0.6 left_lowerer=0.6"},
 };
 
+// Girls' Frontline 2 rigs, one controller per shape, by kFace id. `gf2` names the
+// current rig (Asteria, Koleda), `legacy` the older one (Mityl).
+struct Gf2FaceDef {
+    const char* id;
+    const char* gf2;
+    const char* legacy;
+};
+const Gf2FaceDef kFaceGf2[] = {
+    {"a", "mouth_a=1", "mouth_a=1"},
+    {"i", "mouth_ch_1=1", "mouth_i=1"},
+    {"u", "mouth_u=1", "mouth_kiss=1"},
+    {"e", "mouth_e=1", "mouth_e=1"},
+    {"o", "mouth_o=1", "mouth_o=1"},
+    {"blink", "blink=1", "blink=1"},
+    {"wink", "eye_blink_happy_left=1", "eye_wink_left=1"},
+    {"winkright", "eye_blink_happy_right=1", "eye_wink_right=1"},
+    {"wink2", "eye_blink_left=1", "eye_blink_left=1"},
+    {"wink2right", "eye_blink_right=1", "eye_blink_right=1"},
+    {"laugh", "eye_blink_happy=1", "eye_wink_left=1 eye_wink_right=1"},
+    {"jitome", "blink=0.4", "blink=0.4"},
+    {"surprised", "eyes_suprised=1", "eyes_surprised=1"},
+    {"smile", "mouth_smile=1", "mouth_smile=1"},
+    {"frown", "mouth_sad=1", "mouth_sad=1"},
+    {"troubled", "brows_worry=1", "brows_worry=1"},
+    {"angry", "brows_angry=1", "brows_serious=1"},
+    {"serious", "brows_lower=0.5", "brows_down=0.5"},
+    {"browup", "brows_up=1", "brows_up=1"},
+    {"browdown", "brows_lower=1", "brows_down=1"},
+};
+
 using FaceOps = std::vector<std::pair<std::string, float>>;
 using FaceMap = std::map<std::string, FaceOps>; // by raw VMD morph name
 
@@ -861,11 +891,34 @@ bool ParseFaceOps(const std::string& text, FaceOps& ops) {
     return true;
 }
 
-FaceMap BuiltinFaceMap(bool visemes) {
+FaceMap BuiltinFaceMap(const std::string& set) {
     FaceMap map;
+    if (set == "gf2" || set == "gf2legacy") {
+        for (const Gf2FaceDef& g : kFaceGf2)
+            for (const FaceDef& d : kFace)
+                if (!std::strcmp(d.id, g.id))
+                    ParseFaceOps(set == "gf2" ? g.gf2 : g.legacy, map[d.sj]);
+        return map;
+    }
+    const bool visemes = set == "visemes";
     for (const FaceDef& d : kFace)
         ParseFaceOps(visemes && d.visemes ? d.visemes : d.ops, map[d.sj]);
     return map;
+}
+
+// "auto": a GF2 rig by its signature mouth controller, else facs.
+std::string ResolveFaceSet(const std::string& set, const std::vector<mdldecompiler::FlexTrack>& ctrls) {
+    if (set != "auto")
+        return set;
+    const auto has = [&](const char* n) {
+        return std::any_of(ctrls.begin(), ctrls.end(),
+                           [&](const mdldecompiler::FlexTrack& c) { return !_stricmp(c.name.c_str(), n); });
+    };
+    if (has("mouth_ch_1"))
+        return "gf2";
+    if (has("mouth_kiss") && has("mouth_i"))
+        return "gf2legacy";
+    return "facs";
 }
 
 // One "<morph> <controller>=<weight>..." per line, # comments. <morph> is a kFace
@@ -1040,10 +1093,13 @@ int Usage() {
         "                   binary (default) or keyvalues2 text\n"
         "  -dmxmodel <n>    the `format model` version: 15 (default), 1, 18, or 22\n"
         "                   for Source 2 modeldoc\n"
-        "  -faceset <name>  built-in face map on Valve controller names: facs (default;\n"
-        "                   survivors, HL2 citizens - vowels as Valve phonemes) or\n"
-        "                   visemes (one controller per vowel, for rigs whose mouth\n"
-        "                   shapes each normalise by the sum of all mouth controls)\n"
+        "  -faceset <name>  built-in face map: auto (default; gf2/gf2legacy when the\n"
+        "                   model has their controllers, else facs), facs (survivors,\n"
+        "                   HL2 citizens - vowels as Valve phonemes), visemes (one\n"
+        "                   controller per vowel, for rigs whose mouth shapes each\n"
+        "                   normalise by the sum of all mouth controls), gf2 (Girls'\n"
+        "                   Frontline 2 rigs: Asteria, Koleda) or gf2legacy (older\n"
+        "                   GF2 rigs: Mityl)\n"
         "  -eyerange <deg>  MMD eye-bone angle written as full gaze deflection\n"
         "                   (default 30), mapped onto the model's gaze range\n"
         "  -facemap <file>  MMD morph -> flex controller map replacing the built-in\n"
@@ -1329,7 +1385,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     if (!api) PrintHeader();
     std::vector<std::string> vmdPaths;
     std::string mdlPath, pmxPath, outPath, compileName, gameDir, srcArg, faceMapPath;
-    std::string faceSet = "facs", cameraFov;
+    std::string faceSet = "auto", cameraFov;
     float armAngle = 35.0f, eyeRange = 30.0f;
     long startArg = -1, endArg = -1;
     long walkEvery = -1;
@@ -1385,13 +1441,11 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     BuiltinArms(mmd, armAngle);
     if (!pmxPath.empty() && !LoadPmxRest(pmxPath, mmd, err))
         return Fail(err);
-    if (faceSet != "facs" && faceSet != "visemes")
-        return Fail("unknown -faceset \"" + faceSet + "\" (facs or visemes)");
+    if (faceSet != "auto" && faceSet != "facs" && faceSet != "visemes" && faceSet != "gf2"
+        && faceSet != "gf2legacy")
+        return Fail("unknown -faceset \"" + faceSet + "\" (auto, facs, visemes, gf2 or gf2legacy)");
     if (eyeRange <= 0.0f)
         return Fail("-eyerange must be above 0 degrees");
-    FaceMap faceMap = BuiltinFaceMap(faceSet == "visemes");
-    if (!faceMapPath.empty() && !LoadFaceMap(faceMapPath, faceMap, err))
-        return Fail(err);
 
     Mdl m;
     if (!LoadMdl(mdlPath, m, err, api && !api->modelData.empty() ? &api->modelData : nullptr))
@@ -1405,6 +1459,11 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         m.At<fm::mstudioflexcontroller_t>(m.buf.data(), h.flexcontrollerindex, h.numflexcontrollers);
     for (int i = 0; fcs && i < h.numflexcontrollers; ++i)
         ctrls.push_back({m.Str(&fcs[i], fcs[i].sznameindex), fcs[i].min, fcs[i].max, {}});
+
+    faceSet = ResolveFaceSet(faceSet, ctrls);
+    FaceMap faceMap = BuiltinFaceMap(faceSet);
+    if (!faceMapPath.empty() && !LoadFaceMap(faceMapPath, faceMap, err))
+        return Fail(err);
 
     Target t;
     t.n = h.numbones;
@@ -1912,9 +1971,9 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
             std::printf(" (resampled from %ld MMD frames to fit the %ld-frame limit)", span + 1, limit);
         std::printf("\n  %d MMD bones keyed, %d target bones mapped, legs by $ikchain\n", keyed, mapped);
         if (!morphs.empty())
-            std::printf("  %zu MMD morphs from %s -> %zu flex controllers, %d morphs unmapped\n",
+            std::printf("  %zu MMD morphs from %s -> %zu flex controllers (%s), %d morphs unmapped\n",
                         morphs.size(), faceFile ? "the motion + _face.vmd" : "the motion", face.size(),
-                        unmapped);
+                        faceMapPath.empty() ? faceSet.c_str() : "-facemap", unmapped);
         if (face.size() > faceCount)
             std::printf("  eye bones -> %zu gaze controllers (-1..1 of %g degrees)\n",
                         face.size() - faceCount, eyeRange);
