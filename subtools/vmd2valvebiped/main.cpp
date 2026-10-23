@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "apioutput.h"
 #include "dmxwrite.h"
 #include "dr_mp3.h"
 #include "dr_wav.h"
@@ -41,6 +42,9 @@ using mdldecompiler::AnimPose;
 using mdldecompiler::Mdl;
 using pm::matrix3x4;
 using pm::Vector3;
+
+// The shared DMX writer reports decompile outputs; this tool's API sends curves, not files.
+void mdldecompiler::RecordOutput(const std::string&) {}
 
 namespace {
 
@@ -319,6 +323,26 @@ struct MorphKey {
 };
 using Morphs = std::map<std::string, std::vector<MorphKey>>;
 
+// IK on/off key: the state holds until the next key; bones with no key keep IK on.
+struct IkKey {
+    uint32_t frame = 0;
+    bool on = true;
+};
+using IkSwitches = std::map<std::string, std::vector<IkKey>>;
+
+bool IkOn(const IkSwitches& switches, const std::string& name, float f) {
+    const auto it = switches.find(name);
+    if (it == switches.end())
+        return true;
+    bool on = true;
+    for (const IkKey& k : it->second) {
+        if (static_cast<float>(k.frame) > f)
+            break;
+        on = k.on;
+    }
+    return on;
+}
+
 float SampleMorph(const std::vector<MorphKey>& keys, float f) {
     if (f <= keys.front().frame)
         return keys.front().weight;
@@ -369,9 +393,11 @@ void Sample(const std::vector<Key>& keys, float f, Vector3& pos, pm::Quaternion&
     pm::QuaternionSlerp(a.rot, b.rot, Bezier(b.interp, 3, x), rot);
 }
 
-// Bone and morph keys by raw Shift-JIS name, and the camera keys if the file has any.
+// Bone and morph keys by raw Shift-JIS name, the camera keys if the file has any,
+// and the IK switches when `ik` is given.
 bool LoadVmd(const std::string& path, std::map<std::string, std::vector<Key>>& out,
-             Morphs& morphs, std::vector<CamKey>& cams, uint32_t& lastFrame, std::string& err) {
+             Morphs& morphs, std::vector<CamKey>& cams, uint32_t& lastFrame, std::string& err,
+             IkSwitches* ik = nullptr) {
     std::vector<char> buf;
     if (!ReadInput(path, buf)) {
         err = "cannot read \"" + path + "\"";
@@ -447,6 +473,29 @@ bool LoadVmd(const std::string& path, std::map<std::string, std::vector<Key>>& o
     SortKeys(cams);
     for (auto& [name, keys] : morphs)
         SortKeys(keys);
+
+    // light, self shadow, then IK switch sections; a missing or cut tail leaves IK on
+    if (ik && r.at < buf.size()) {
+        r.Skip(static_cast<size_t>(r.Get<uint32_t>()) * 28);
+        if (r.ok && r.at < buf.size())
+            r.Skip(static_cast<size_t>(r.Get<uint32_t>()) * 9);
+        const uint32_t nik = r.ok && r.at < buf.size() ? r.Get<uint32_t>() : 0;
+        for (uint32_t i = 0; i < nik && r.ok; ++i) {
+            const uint32_t frame = r.Get<uint32_t>();
+            r.Skip(1);
+            const uint32_t n = r.Get<uint32_t>();
+            for (uint32_t j = 0; j < n && r.ok; ++j) {
+                const std::string name = r.Fixed(20);
+                const bool on = r.Get<uint8_t>() != 0;
+                if (r.ok)
+                    (*ik)[name].push_back({frame, on});
+            }
+        }
+        if (!r.ok)
+            ik->clear();
+        for (auto& [name, keys] : *ik)
+            SortKeys(keys);
+    }
     return true;
 }
 
@@ -1601,7 +1650,8 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         Morphs morphs;
         std::vector<CamKey> cams;
         uint32_t lastFrame = 0;
-        if (!LoadVmd(vmdPath, keys, morphs, cams, lastFrame, err))
+        IkSwitches ikSwitches;
+        if (!LoadVmd(vmdPath, keys, morphs, cams, lastFrame, err, &ikSwitches))
             return Fail(err);
         if (api)
         {
@@ -1676,15 +1726,22 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                 G[b] = mb.parent >= 0 ? pm::ConcatTransforms(G[mb.parent], lm) : lm;
             }
 
-            // Toe IK aims the ankle without replacing its authored twist.
+            // Toe IK aims the ankle without replacing its authored twist. A switched-off
+            // IK keeps the authored FK leg, as baked motions expect.
+            bool legIkOn[2];
             for (int side = 0; side < 2; ++side) {
                 const int thigh = mmd.Find("leg", side), knee = mmd.Find("knee", side);
                 const int ankle = mmd.Find("ankle", side), toe = mmd.Find("toe", side);
                 const int toeIk = mmd.Find("toeik", side);
-                const auto toeLocal = pm::ConcatTransforms(pm::MatrixInvert(G[ankle]), G[toe]);
-                const auto hint = Sub(Origin(G[knee]), Origin(G[thigh]));
-                SolveTwoBoneIK(thigh, knee, ankle, Origin(G[legs[side].ik]), hint, G);
-                G[toe] = pm::ConcatTransforms(G[ankle], toeLocal);
+                legIkOn[side] = IkOn(ikSwitches, mmd.bones[legs[side].ik].sj, f);
+                if (legIkOn[side]) {
+                    const auto toeLocal = pm::ConcatTransforms(pm::MatrixInvert(G[ankle]), G[toe]);
+                    const auto hint = Sub(Origin(G[knee]), Origin(G[thigh]));
+                    SolveTwoBoneIK(thigh, knee, ankle, Origin(G[legs[side].ik]), hint, G);
+                    G[toe] = pm::ConcatTransforms(G[ankle], toeLocal);
+                }
+                if (!IkOn(ikSwitches, mmd.bones[toeIk].sj, f))
+                    continue;
 
                 const auto pivot = Origin(G[ankle]);
                 const auto direction = Sub(Origin(G[toeIk]), pivot);
@@ -1742,14 +1799,28 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
 
             for (int side = 0; side < 2; ++side) {
                 const Leg& g = legs[side];
-                const Vector3 ikRest = mmd.bones[g.ik].rest;
+                const int mmdLegBone = mmd.Find("leg", side), mmdAnkle = mmd.Find("ankle", side);
+                const int effector = legIkOn[side] ? g.ik : mmdAnkle;
                 const Vector3 goal = Add(Origin(t.world[g.foot]),
-                                         Mul(pm::VectorRotate(Sub(Origin(G[g.ik]), ikRest), M), scale));
+                                         Mul(pm::VectorRotate(Sub(Origin(G[effector]), mmd.bones[effector].rest), M), scale));
                 // The knee hinges on the hip's side axis, as MMD's leg IK does - foot
                 // yaw never swings it. A leg lying along that axis keeps last frame's.
                 Vector3 dir = Sub(goal, Origin(W[g.thigh]));
                 pm::VectorNormalize(dir);
                 Vector3 bend = Mul(Cross(dir, pm::VectorRotate(left, toTarget(G[lower]))), g.bendSign);
+
+                // FK legs keep the authored knee direction while the knee is bent
+                if (!legIkOn[side]) {
+                    const Vector3 hip = Origin(G[mmdLegBone]);
+                    Vector3 line = Sub(Origin(G[mmdAnkle]), hip);
+                    pm::VectorNormalize(line);
+                    const Vector3 knee = Sub(Origin(G[mmd.Find("knee", side)]), hip);
+                    Vector3 offset = Sub(knee, Mul(line, Dot(knee, line)));
+                    if (Len(offset) > 0.05f * Len(knee)) {
+                        pm::VectorNormalize(offset);
+                        bend = pm::VectorRotate(offset, M);
+                    }
+                }
                 if (Len(bend) < 0.3f && Len(lastBend[side]) > 0.0f)
                     bend = lastBend[side];
                 pm::VectorNormalize(bend);
