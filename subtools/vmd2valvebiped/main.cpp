@@ -343,6 +343,21 @@ bool IkOn(const IkSwitches& switches, const std::string& name, float f) {
     return on;
 }
 
+// Rest-only layer tracks never replace the track below: face VMDs often key every
+// bone, morph and IK switch at rest on frame 0, which would flatten the motion.
+bool AtRest(const std::vector<Key>& keys) {
+    return std::all_of(keys.begin(), keys.end(), [](const Key& k) {
+        return std::fabs(k.pos.x) < 1e-4f && std::fabs(k.pos.y) < 1e-4f && std::fabs(k.pos.z) < 1e-4f
+            && std::fabs(k.rot.x) < 1e-5f && std::fabs(k.rot.y) < 1e-5f && std::fabs(k.rot.z) < 1e-5f;
+    });
+}
+bool AtRest(const std::vector<MorphKey>& keys) {
+    return std::all_of(keys.begin(), keys.end(), [](const MorphKey& k) { return k.weight == 0.0f; });
+}
+bool AtRest(const std::vector<IkKey>& keys) {
+    return std::all_of(keys.begin(), keys.end(), [](const IkKey& k) { return k.on; });
+}
+
 float SampleMorph(const std::vector<MorphKey>& keys, float f) {
     if (f <= keys.front().frame)
         return keys.front().weight;
@@ -844,18 +859,19 @@ const FaceDef kFace[] = {
 };
 
 // Girls' Frontline 2 rigs, one controller per shape, by kFace id. `gf2` names the
-// current rig (Asteria, Koleda), `legacy` the older one (Mityl).
+// current rig (Asteria, Koleda), `legacy` the older one (Mityl), whose vowels are
+// scaled down since its mouth shapes are stronger at full weight.
 struct Gf2FaceDef {
     const char* id;
     const char* gf2;
     const char* legacy;
 };
 const Gf2FaceDef kFaceGf2[] = {
-    {"a", "mouth_a=1", "mouth_a=1"},
-    {"i", "mouth_ch_1=1", "mouth_i=1"},
-    {"u", "mouth_u=1", "mouth_kiss=1"},
-    {"e", "mouth_e=1", "mouth_e=1"},
-    {"o", "mouth_o=1", "mouth_o=1"},
+    {"a", "mouth_a=1", "mouth_a=0.6"},
+    {"i", "mouth_ch_1=1", "mouth_i=0.7"},
+    {"u", "mouth_u=1", "mouth_kiss=0.7"},
+    {"e", "mouth_e=1", "mouth_e=0.7"},
+    {"o", "mouth_o=1", "mouth_o=0.7"},
     {"blink", "blink=1", "blink=1"},
     {"wink", "eye_blink_happy_left=1", "eye_wink_left=1"},
     {"winkright", "eye_blink_happy_right=1", "eye_wink_right=1"},
@@ -1715,19 +1731,20 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         if (api)
         {
             lastFrame = 0;
-            for (const auto& track : keys) if (!track.second.empty()) lastFrame = std::max(lastFrame, track.second.back().frame);
-            if (!api->face.empty())
+            for (const std::string& layer : api->layers)
             {
-                std::map<std::string, std::vector<Key>> facialBones;
-                Morphs facialMorphs;
+                std::map<std::string, std::vector<Key>> layerBones;
+                Morphs layerMorphs;
+                IkSwitches layerSwitches;
                 std::vector<CamKey> ignoredCameras;
                 uint32_t ignoredLast = 0;
-                if (!LoadVmd(api->face, facialBones, facialMorphs, ignoredCameras, ignoredLast, err)) return Fail(err);
-                for (auto& track : facialMorphs) morphs[track.first] = std::move(track.second);
-                for (const char* eye : kEyeBones) if (facialBones.count(eye)) keys[eye] = std::move(facialBones[eye]);
+                if (!LoadVmd(layer, layerBones, layerMorphs, ignoredCameras, ignoredLast, err, &layerSwitches)) return Fail(err);
+                for (auto& track : layerBones) if (!AtRest(track.second)) keys[track.first] = std::move(track.second);
+                for (auto& track : layerMorphs) if (!AtRest(track.second)) morphs[track.first] = std::move(track.second);
+                for (auto& track : layerSwitches) if (!AtRest(track.second)) ikSwitches[track.first] = std::move(track.second);
             }
+            for (const auto& track : keys) if (!track.second.empty()) lastFrame = std::max(lastFrame, track.second.back().frame);
             for (const auto& track : morphs) if (!track.second.empty()) lastFrame = std::max(lastFrame, track.second.back().frame);
-            for (const char* eye : kEyeBones) if (keys.count(eye) && !keys[eye].empty()) lastFrame = std::max(lastFrame, keys[eye].back().frame);
         }
         std::vector<const std::vector<Key>*> mmdKeys(mmd.bones.size(), nullptr);
         int keyed = 0;
@@ -2127,7 +2144,7 @@ int main(int argc, char** argv)
         }
         else
         {
-            if (method == "motion") pulse::api::CheckMembers(request, {"motion", "model", "modelData", "face", "fps", "rotation"});
+            if (method == "motion") pulse::api::CheckMembers(request, {"motions", "model", "modelData", "fps", "rotation"});
             else if (method == "camera")
                 pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
                                                    "transform", "orientation", "distanceTransform",
@@ -2136,8 +2153,20 @@ int main(int argc, char** argv)
 
             ApiOptions options;
             options.method = method;
-            options.face = pulse::api::GetString(request, "face");
-            const std::string motion = pulse::api::GetString(request, "motion");
+            // "motions" lists the top layer first; the last one is the base the others stack over
+            std::string motion;
+            if (method == "motion")
+            {
+                const auto motions = request.find("motions");
+                if (motions == request.end() || !motions->is_array() || motions->empty() || motions->size() > 32)
+                    throw std::runtime_error("API member \"motions\" must list 1 to 32 VMD paths");
+                for (const auto& path : *motions)
+                    if (!path.is_string() || path.get<std::string>().empty())
+                        throw std::runtime_error("API member \"motions\" must list VMD paths");
+                motion = motions->back().get<std::string>();
+                for (size_t i = motions->size() - 1; i-- > 0;) options.layers.push_back((*motions)[i].get<std::string>());
+            }
+            else motion = pulse::api::GetString(request, "motion");
             std::string model = pulse::api::GetString(request, "model");
             const std::string modelData = pulse::api::GetString(request, "modelData");
             if (motion.empty()) throw std::runtime_error("API member \"motion\" is required");

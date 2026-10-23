@@ -8,7 +8,9 @@
 
 struct ApiOptions
 {
-    std::string method, face;
+    std::string method;
+    // VMDs stacked over the motion, lowest priority first; each keyed track replaces the one below.
+    std::vector<std::string> layers;
     std::vector<char> modelData; // the target .mdl sent in the request, instead of a path
     double fps = 30;
     // Degrees about the target model's Z axis, turning the whole converted motion.
@@ -31,7 +33,7 @@ std::string Number(double value)
 
 void ApiCapabilities()
 {
-    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1}");
+    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1,\"layers\":1}");
 }
 
 std::vector<float> ApiTimes(uint32_t last, double fps)
