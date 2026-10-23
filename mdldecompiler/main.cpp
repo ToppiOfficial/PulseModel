@@ -24,11 +24,16 @@
 #include <map>
 #include <new>
 #include <set>
+#include <stdexcept>
 #include <system_error>
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "animwrite.h"
+#include "apioutput.h"
+#include "apiprotocol.h"
 #include "dmxwrite.h"
 #include "fatalerror.h"
 #include "flexrig.h"
@@ -90,7 +95,12 @@ int Usage() {
     std::printf("                <name>_joints.dmx the script imports with $datamodeljoints\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms per process once the run ends\n");
+    std::printf("  -api          read a versioned integration request from stdin\n");
     return 1;
+}
+
+std::string AbsolutePath(const std::string& path) {
+    return std::filesystem::absolute(std::filesystem::path(path)).lexically_normal().u8string();
 }
 
 bool ReadFile(const char* path, Mdl& m, int forceVersion, std::string& err) {
@@ -951,6 +961,7 @@ void WriteProceduralBones(Qc& q, const Mdl& m, const std::string& dir) {
             std::fprintf(f, "%s\n", l.c_str());
         std::fclose(f);
         std::printf("\nprocedural bones:\n  wrote %s\n", name.c_str());
+        RecordOutput((std::filesystem::path(dir) / name).string());
     }
 
     q.Blank();
@@ -2522,6 +2533,7 @@ void WriteDeclareSequenceFile(const Mdl& m, const std::string& dir) {
         std::fprintf(f, "$declaresequence \"%s\"\n", l.c_str());
     std::fclose(f);
     std::printf("\nwrote %s (%zu sequences)\n", name.c_str(), labels.size());
+    RecordOutput((std::filesystem::path(dir) / name).string());
 }
 
 // $sequence / $declaresequence, in file order: the two interleave, and that
@@ -3062,6 +3074,7 @@ int DecompileOne(const std::string& in, const std::string& root, const char* out
 
     pulse::fatal::g_stage = "done";
     std::printf("\nwrote %s\n", outPath.c_str());
+    RecordOutput(outPath);
 
     if (pulse::perf::g_enabled) {
         pulse::perf::Record("total", "read", ms(t0, tRead));
@@ -3146,6 +3159,16 @@ int RunDecompile(int argc, char** argv) {
             rc = FailCaught();
         }
         failed += rc != 0;
+
+        if (pulse::api::Active()) {
+            std::string record = "{\"path\":" + pulse::api::String(AbsolutePath(files[i].first)) +
+                                 ",\"success\":" + (rc == 0 ? "true" : "false");
+            if (rc == 0) {
+                const std::string script = OutScript(OutFolder(files[i].first, files[i].second, outDir));
+                record += ",\"script\":" + pulse::api::String(AbsolutePath(script));
+            }
+            pulse::api::Record("model", record + "}");
+        }
     }
     if (files.size() > 1)
         std::printf("\n%zu of %zu decompiled, %d failed\n", files.size() - failed, files.size(),
@@ -3154,22 +3177,57 @@ int RunDecompile(int argc, char** argv) {
     return failed ? 1 : 0;
 }
 
+void mdldecompiler::RecordOutput(const std::string& path) {
+    if (pulse::api::Active())
+        pulse::api::Record("output", "{\"path\":" + pulse::api::String(AbsolutePath(path)) + "}");
+}
+
+// An -api decompile request carries the ordinary command line: inputs and switches.
+static int RunApi(char* program) {
+    pulse::api::Begin("mdldecompiler");
+    const nlohmann::json request = pulse::api::ReadRequest();
+    const std::string method = request.at("method").get<std::string>();
+    pulse::api::Record("capability", "{\"api\":2,\"decompile\":1,\"outputs\":1}");
+
+    if (method == "capabilities") {
+        pulse::api::CheckMembers(request, {});
+        return 0;
+    }
+    if (method != "decompile")
+        throw std::runtime_error("Unknown API method \"" + method + "\"");
+
+    pulse::api::CheckMembers(request, {"arguments"});
+    std::vector<std::string> values = pulse::api::GetStrings(request, "arguments");
+    std::vector<char*> arguments{program};
+    for (std::string& value : values) {
+        if (value.empty() || value.find('\0') != std::string::npos)
+            throw std::runtime_error("API arguments must be non-empty and contain no NUL");
+        if (value == "-pause")
+            throw std::runtime_error("-pause is not available through the API");
+        arguments.push_back(value.data());
+    }
+    return RunDecompile(static_cast<int>(arguments.size()), arguments.data());
+}
+
 int main(int argc, char** argv) {
+    const bool api = argc == 2 && std::strcmp(argv[1], "-api") == 0;
     // progress lines are useless if they sit in the CRT buffer until exit -
     // MSVC has no line buffering (_IOLBF == _IOFBF), so go unbuffered
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     pulse::fatal::Install();
-    PrintHeader();
+    if (!api) PrintHeader();
 
     // a malformed .mdl walks the writers off the end of an array as often as it
     // trips a check, so the footer names the writer that died
     int rc;
     try {
-        rc = RunDecompile(argc, argv);
+        rc = api ? RunApi(argv[0]) : RunDecompile(argc, argv);
     } catch (...) {
         rc = FailCaught();
     }
+
+    if (api && pulse::api::Active()) pulse::api::Finish(rc);
     pulse::fatal::PauseIfAsked();
     return rc;
 }

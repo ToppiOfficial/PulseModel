@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "apioutput.h"
 #include "mdlfile.h"
 
 namespace fs = std::filesystem;
@@ -403,6 +404,7 @@ void WriteMeshSmd(const Model& m, const model_t& mo, const std::string& path,
     }
     std::fprintf(f, "end\n");
     std::fclose(f);
+    RecordOutput(path);
 }
 
 // One channel of one bone at one frame. The RLE runs hold `total` frames of
@@ -469,6 +471,7 @@ void WriteAnimSmd(const Model& m, const seqdesc_t& s, int blend, const std::stri
     }
     std::fprintf(f, "end\n");
     std::fclose(f);
+    RecordOutput(path);
 }
 
 // --- textures ----------------------------------------------------------------
@@ -526,6 +529,7 @@ void WriteBmp(const Model& m, const texture_t& t, const std::string& path) {
             std::fputc(0, f);
     }
     std::fclose(f);
+    RecordOutput(path);
 }
 
 // --- the script --------------------------------------------------------------
@@ -798,6 +802,7 @@ int Decompile(const std::string& in, const std::string& dir, const std::string& 
     }
 
     std::printf("\nwrote %s\n", outPath.c_str());
+    RecordOutput(outPath);
     return 0;
 }
 

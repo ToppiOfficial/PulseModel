@@ -26,6 +26,7 @@
 #include <system_error>
 #include <vector>
 
+#include "apioutput.h"
 #include "dmxwrite.h"
 #include "math/compressed.h"
 
@@ -683,6 +684,7 @@ void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::st
         std::fclose(f);
         std::printf("  wrote %s (%d frame%s, %d bones)\n", path.c_str(),
                     static_cast<int>(frames.size()), frames.size() == 1 ? "" : "s", h.numbones);
+        RecordOutput(path);
         return true;
     };
 

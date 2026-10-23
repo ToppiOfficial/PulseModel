@@ -14,6 +14,7 @@
 // same skeleton - see WritePhysicsMesh.
 
 #include "dmxwrite.h"
+#include "apioutput.h"
 #include "dmx/dmx.h"
 
 #include <algorithm>
@@ -487,8 +488,10 @@ struct Dmx : pulse::dmx::Builder {
     void Quat(const char* key, const pm::Quaternion& value) { Builder::Quat(key, value); }
     bool Save(const std::string& path) {
         std::string err;
-        if (Builder::Save(path, &err))
+        if (Builder::Save(path, &err)) {
+            RecordOutput(path);
             return true;
+        }
         std::printf("  cannot write \"%s\": %s\n", path.c_str(), err.c_str());
         return false;
     }
