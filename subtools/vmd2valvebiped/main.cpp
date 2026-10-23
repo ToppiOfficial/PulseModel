@@ -1800,7 +1800,9 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
             for (int side = 0; side < 2; ++side) {
                 const Leg& g = legs[side];
                 const int mmdLegBone = mmd.Find("leg", side), mmdAnkle = mmd.Find("ankle", side);
-                const int effector = legIkOn[side] ? g.ik : mmdAnkle;
+                // Baked motions still key the leg IK bone where the source foot touched down
+                const bool ikKeyed = mmdKeys[g.ik] && mmdKeys[g.ik]->size() > 1;
+                const int effector = legIkOn[side] || ikKeyed ? g.ik : mmdAnkle;
                 const Vector3 goal = Add(Origin(t.world[g.foot]),
                                          Mul(pm::VectorRotate(Sub(Origin(G[effector]), mmd.bones[effector].rest), M), scale));
                 // The knee hinges on the hip's side axis, as MMD's leg IK does - foot
