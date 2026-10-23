@@ -1712,6 +1712,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         std::vector<std::vector<AnimPose>> frames;
         frames.reserve(static_cast<size_t>(count));
         Vector3 lastBend[2];
+        const matrix3x4 spin = AxisRot(2, api ? static_cast<float>(api->rotation) * pm::kDeg2Rad : 0.0f);
         for (long k = 0; k < count; ++k) {
             if (api && k % 100 == 0) pulse::api::Record("progress", "{\"value\":" + Number(double(k)/double(count)) + "}");
             const float f = times[static_cast<size_t>(k)];
@@ -1840,6 +1841,10 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
 
             // Roots stay in the stored bind space, the frame the model's own
             // decompiled clips use - no inverse compile yaw.
+            if (api && api->rotation != 0)
+                for (int i = 0; i < t.n; ++i)
+                    if (t.parent[i] < 0)
+                        L[i] = pm::ConcatTransforms(spin, L[i]);
             std::vector<AnimPose> fr(static_cast<size_t>(t.n));
             for (int i = 0; i < t.n; ++i)
                 pm::MatrixAngles(L[i], fr[i].rot, fr[i].pos);
@@ -2063,7 +2068,7 @@ int main(int argc, char** argv)
         }
         else
         {
-            if (method == "motion") pulse::api::CheckMembers(request, {"motion", "model", "modelData", "face", "fps"});
+            if (method == "motion") pulse::api::CheckMembers(request, {"motion", "model", "modelData", "face", "fps", "rotation"});
             else if (method == "camera")
                 pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
                                                    "transform", "orientation", "distanceTransform",
@@ -2094,6 +2099,13 @@ int main(int argc, char** argv)
                 options.fps = fps->get<double>();
                 if (!std::isfinite(options.fps) || options.fps < 1 || options.fps > 1000)
                     throw std::runtime_error("Conversion FPS must be between 1 and 1000");
+            }
+
+            if (const auto rotation = request.find("rotation"); rotation != request.end())
+            {
+                if (!rotation->is_number() || !std::isfinite(rotation->get<double>()) || std::fabs(rotation->get<double>()) > 360)
+                    throw std::runtime_error("API member \"rotation\" must be degrees from -360 to 360");
+                options.rotation = rotation->get<double>();
             }
 
             // 3x4 matrices are 12 numbers, row-major
