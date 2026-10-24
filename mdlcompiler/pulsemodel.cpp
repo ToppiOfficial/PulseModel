@@ -344,6 +344,103 @@ const Field kTransformBone[] = {
 };
 const Item kTransformBoneItem = MakeItem("transformBone", kTransformBone);
 
+// --- procedural bones ---
+
+const Field kRange[] = {
+    F("min", Type::Number, "Minimum.").Required(),
+    F("max", Type::Number, "Maximum.").Required(),
+};
+const Item kRangeItem = MakeItem("range", kRange);
+
+// options every jiggle section but boing takes
+const Field kJiggleCommon[] = {
+    F("tipMass", Type::Number, "Tip mass."),
+    F("length", Type::Number, "Length."),
+    F("yawFriction", Type::Number, "Yaw friction."),
+    F("yawBounce", Type::Number, "Yaw bounce."),
+    F("pitchFriction", Type::Number, "Pitch friction."),
+    F("pitchBounce", Type::Number, "Pitch bounce."),
+    F("angleConstraint", Type::Number, "Angle limit in degrees."),
+    F("yawConstraint", Type::Object, "Yaw limits in degrees.").Of(&kRangeItem),
+    F("pitchConstraint", Type::Object, "Pitch limits in degrees.").Of(&kRangeItem),
+};
+const Item kJiggleCommonItem = MakeItem("jiggleCommon", kJiggleCommon);
+
+const Field kJiggleFlexible[] = {
+    F("yawStiffness", Type::Number, "Yaw stiffness (0-1000)."),
+    F("yawDamping", Type::Number, "Yaw damping (0-1000)."),
+    F("pitchStiffness", Type::Number, "Pitch stiffness (0-1000)."),
+    F("pitchDamping", Type::Number, "Pitch damping (0-1000)."),
+    F("alongStiffness", Type::Number, "Along stiffness (0-1000)."),
+    F("alongDamping", Type::Number, "Along damping (0-1000)."),
+    F("allowLengthFlex", Type::Bool, "Let the length stretch."),
+};
+const Item kJiggleFlexibleItem = MakeItem("jiggleFlexible", kJiggleFlexible, &kJiggleCommonItem);
+
+const Field kJiggleBaseSpring[] = {
+    F("stiffness", Type::Number, "Stiffness (0-1000)."),
+    F("damping", Type::Number, "Damping (0-1000)."),
+    F("baseMass", Type::Number, "Base mass."),
+    F("leftConstraint", Type::Object, "Left limits.").Of(&kRangeItem),
+    F("leftFriction", Type::Number, "Left friction."),
+    F("upConstraint", Type::Object, "Up limits.").Of(&kRangeItem),
+    F("upFriction", Type::Number, "Up friction."),
+    F("forwardConstraint", Type::Object, "Forward limits.").Of(&kRangeItem),
+    F("forwardFriction", Type::Number, "Forward friction."),
+};
+const Item kJiggleBaseSpringItem = MakeItem("jiggleBaseSpring", kJiggleBaseSpring, &kJiggleCommonItem);
+
+const Field kJiggleBoing[] = {
+    F("impactSpeed", Type::Number, "Impact speed (100 when omitted)."),
+    F("impactAngle", Type::Number, "Impact angle in degrees."),
+    F("dampingRate", Type::Number, "Damping rate."),
+    F("frequency", Type::Number, "Frequency."),
+    F("amplitude", Type::Number, "Amplitude."),
+};
+const Item kJiggleBoingItem = MakeItem("jiggleBoing", kJiggleBoing);
+
+const Field kJiggleBone[] = {
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("flexible", Type::Object, "Flexible behavior.").Of(&kJiggleFlexibleItem),
+    F("rigid", Type::Object, "Rigid behavior.").Of(&kJiggleCommonItem),
+    F("baseSpring", Type::Object, "Base spring behavior.").Of(&kJiggleBaseSpringItem),
+    F("boing", Type::Object, "Boing behavior.").Of(&kJiggleBoingItem),
+};
+const Item kJiggleBoneItem = MakeItem("jiggleBone", kJiggleBone);
+
+const Field kDriverTrigger[] = {
+    F("tolerance", Type::Number, "Tolerance in degrees.").Required(),
+    F("driverAngles", Type::Vec3, "Driver rotation (roll pitch yaw degrees)."),
+    F("helperAngles", Type::Vec3, "Helper rotation (roll pitch yaw degrees)."),
+    F("position", Type::Vec3, "Helper position."),
+    F("frame", Type::Integer, "Sample both poses from this frame of poseAnimation instead."),
+};
+const Item kDriverTriggerItem = MakeItem("driverTrigger", kDriverTrigger);
+
+const Field kDriverBone[] = {
+    F("bone", Type::String, "Helper bone the engine drives.").Ref("bone").Required(),
+    F("driver", Type::String, "Bone it follows.").Ref("bone").Required(),
+    F("relative", Type::Bool, "Trigger poses are deltas from the bind pose."),
+    F("poseAnimation", Type::File, "Animation the frame triggers sample."),
+    F("basePos", Type::Vec3, "Offset added to every trigger position."),
+    F("triggers", Type::List, "Triggers.").Of(&kDriverTriggerItem).Required(),
+};
+const Item kDriverBoneItem = MakeItem("driverBone", kDriverBone);
+
+const Field kAimAt[] = {
+    F("bone", Type::String, "Bone that aims.").Ref("bone").Required(),
+    F("target", Type::String, "Attachment, else bone, it aims at.").Required(),
+    F("up", Type::Vec3, "Up vector.").Required(),
+    F("aim", Type::Vec3, "Aim vector.").Required(),
+};
+const Item kAimAtItem = MakeItem("aimAtBone", kAimAt);
+
+const Field kHierarchy[] = {
+    F("bone", Type::String, "Bone to reparent.").Ref("bone").Required(),
+    F("parent", Type::String, "New parent; omitted = root bone.").Ref("bone"),
+};
+const Item kHierarchyItem = MakeItem("hierarchy", kHierarchy);
+
 const Field kBones[] = {
     F("define", Type::List, "Bind-pose bones.").Of(&kDefineBoneItem),
     F("boneMerge", Type::Strings, "Bones kept for bonemerge.").Ref("bone"),
@@ -351,12 +448,37 @@ const Field kBones[] = {
     F("alwaysCollapse", Type::Strings, "Bones always collapsed.").Ref("bone"),
     F("renames", Type::List, "Rename bones in the output.").Of(&kRenameItem),
     F("transforms", Type::List, "Bind-pose edits.").Of(&kTransformBoneItem),
+    F("hierarchy", Type::List, "Reparented bones.").Of(&kHierarchyItem),
     F("root", Type::String, "Motion root bone.").Ref("bone"),
     F("cullMethod", Type::Enum, "Bone cull method.").Values(kBoneCulls),
     F("realign", Type::Bool, "Realign single-child chains."),
     F("lockLengths", Type::Bool, "Pin bone lengths to the bind pose."),
+    F("jiggle", Type::List, "Jiggle bones.").Of(&kJiggleBoneItem),
+    F("cullJiggle", Type::Bool, "Drop jiggle bones nothing is weighted to."),
+    F("drivers", Type::List, "Driver (quaternion interpolation) bones.").Of(&kDriverBoneItem),
+    F("aimAt", Type::List, "Aim-at bones.").Of(&kAimAtItem),
+    F("vrdFiles", Type::Files, "Procedural bones from .vrd files."),
 };
 const Item kBonesItem = MakeItem("bones", kBones);
+
+const Field kTriggerEdit[] = {
+    F("bone", Type::String, "Procedural bone from this file.").Ref("bone").Required(),
+    F("angle", Type::Number, "New angle of influence in degrees; omit with remove."),
+    F("remove", Type::Bool, "Remove the triggers instead."),
+    F("frame", Type::Integer, "Trigger index."),
+    F("frames", Type::Object, "Trigger index range.").Of(&kRangeItem),
+};
+const Item kTriggerEditItem = MakeItem("triggerEdit", kTriggerEdit);
+
+const Field kDataModelJoints[] = {
+    F("file", Type::File, "DMX holding the bone markup.").Required(),
+    F("jiggleBones", Type::Bool, "Import its jiggle bones."),
+    F("proceduralBones", Type::Bool, "Import its procedural bones."),
+    F("hitboxes", Type::Bool, "Import its hitboxes."),
+    F("attachments", Type::Bool, "Import its attachments."),
+    F("triggerEdits", Type::List, "Changes to imported procedural bone triggers.").Of(&kTriggerEditItem),
+};
+const Item kDataModelJointsItem = MakeItem("dataModelJoints", kDataModelJoints);
 
 // --- attachments, hitboxes, pose parameters, IK ---
 
@@ -803,6 +925,7 @@ const Field kContent[] = {
     F("flex", Type::Object, "Flex controllers, rules and morph edits.").Of(&kFlexItem),
     F("face", Type::Object, "Eyeballs, mouths and eyelids.").Of(&kFaceItem),
     F("bones", Type::Object, "Skeleton edits.").Of(&kBonesItem),
+    F("dataModelJoints", Type::List, "Bone markup imported from DMX files.").Of(&kDataModelJointsItem),
     F("attachments", Type::List, "Attachments.").Of(&kAttachmentItem),
     F("hitboxSets", Type::List, "Hitbox sets.").Of(&kHitboxSetItem),
     F("physics", Type::Object, "Collision model and ragdoll.").Of(&kPhysicsItem),
@@ -842,7 +965,10 @@ const Item* const kAllItems[] = {
     &kMorphValueItem, &kBoneFlexDriverItem, &kFaceItem, &kEyeballItem, &kMouthItem,
     &kLidPoseItem, &kEyelidItem, &kKeyValueItem, &kPhysicsItem, &kPrimitiveItem,
     &kPhysicsShapeItem, &kJointAxisItem, &kPhysicsJointItem, &kPhysicsMarkupItem, &kBonePairItem,
-    &kAnimatedFrictionItem, &kJointContentsItem, &kJointSurfacePropItem,
+    &kAnimatedFrictionItem, &kJointContentsItem, &kJointSurfacePropItem, &kRangeItem,
+    &kJiggleCommonItem, &kJiggleFlexibleItem, &kJiggleBaseSpringItem, &kJiggleBoingItem,
+    &kJiggleBoneItem, &kDriverTriggerItem, &kDriverBoneItem, &kAimAtItem, &kHierarchyItem,
+    &kTriggerEditItem, &kDataModelJointsItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -2119,7 +2245,106 @@ bool LowerFace(Emitter& e, const Json& face) {
     return true;
 }
 
-void LowerBones(Emitter& e, const Json& b) {
+void EmitRange(Emitter& e, const Json& obj, const char* key, const char* word) {
+    const Json* range = Get(obj, key);
+    if (!range) return;
+    e.Word(word);
+    e.Num(range->at("min"));
+    e.Num(range->at("max"));
+}
+
+void LowerJiggle(Emitter& e, const Json& jb) {
+    static const struct { const char* key; const char* word; } kCommon[] = {
+        {"tipMass", "tip_mass"}, {"length", "length"}, {"yawFriction", "yaw_friction"},
+        {"yawBounce", "yaw_bounce"}, {"pitchFriction", "pitch_friction"},
+        {"pitchBounce", "pitch_bounce"}, {"angleConstraint", "angle_constraint"},
+    };
+    static const struct { const char* key; const char* word; } kFlexible[] = {
+        {"yawStiffness", "yaw_stiffness"}, {"yawDamping", "yaw_damping"},
+        {"pitchStiffness", "pitch_stiffness"}, {"pitchDamping", "pitch_damping"},
+        {"alongStiffness", "along_stiffness"}, {"alongDamping", "along_damping"},
+    };
+    static const struct { const char* key; const char* word; } kBase[] = {
+        {"stiffness", "stiffness"}, {"damping", "damping"}, {"baseMass", "base_mass"},
+        {"leftFriction", "left_friction"}, {"upFriction", "up_friction"},
+        {"forwardFriction", "forward_friction"},
+    };
+    static const struct { const char* key; const char* word; } kBoing[] = {
+        {"impactSpeed", "impact_speed"}, {"impactAngle", "impact_angle"},
+        {"dampingRate", "damping_rate"}, {"frequency", "frequency"}, {"amplitude", "amplitude"},
+    };
+    auto common = [&](const Json& s) {
+        for (const auto& o : kCommon) EmitClause(e, s, o.key, o.word);
+        EmitRange(e, s, "yawConstraint", "yaw_constraint");
+        EmitRange(e, s, "pitchConstraint", "pitch_constraint");
+    };
+
+    e.Command("$jigglebone", jb);
+    e.Text(Str(jb, "bone"));
+    e.Word("{");
+    if (const Json* s = Get(jb, "flexible")) {
+        e.Word("is_flexible");
+        e.Word("{");
+        for (const auto& o : kFlexible) EmitClause(e, *s, o.key, o.word);
+        EmitFlag(e, *s, "allowLengthFlex", "allow_length_flex");
+        common(*s);
+        e.Word("}");
+    }
+    if (const Json* s = Get(jb, "rigid")) {
+        e.Word("is_rigid");
+        e.Word("{");
+        common(*s);
+        e.Word("}");
+    }
+    if (const Json* s = Get(jb, "baseSpring")) {
+        e.Word("has_base_spring");
+        e.Word("{");
+        for (const auto& o : kBase) EmitClause(e, *s, o.key, o.word);
+        EmitRange(e, *s, "leftConstraint", "left_constraint");
+        EmitRange(e, *s, "upConstraint", "up_constraint");
+        EmitRange(e, *s, "forwardConstraint", "forward_constraint");
+        common(*s);
+        e.Word("}");
+    }
+    if (const Json* s = Get(jb, "boing")) {
+        e.Word("is_boing");
+        e.Word("{");
+        for (const auto& o : kBoing) EmitClause(e, *s, o.key, o.word);
+        e.Word("}");
+    }
+    e.Word("}");
+}
+
+bool LowerDriver(Emitter& e, const Json& d) {
+    e.Command("$driverbone", d);
+    e.Text(Str(d, "bone"));
+    e.Text(Str(d, "driver"));
+    if (True(d, "relative")) e.Word("relative");
+    EmitClause(e, d, "poseAnimation", "poseanim");
+    e.Word("{");
+    EmitClause(e, d, "basePos", "basepos");
+    for (const Json& t : d.at("triggers")) {
+        if (const Json* frame = Get(t, "frame")) {
+            if (Get(t, "driverAngles") || Get(t, "helperAngles") || Get(t, "position"))
+                return e.l.Fail(t, "frame", "a frame trigger samples its pose; drop the angles and position");
+            e.Word("posetrigger");
+            e.Num(t.at("tolerance"));
+            e.Num(*frame);
+            continue;
+        }
+        if (!Get(t, "driverAngles") || !Get(t, "helperAngles") || !Get(t, "position"))
+            return e.l.Fail(t, "", "a trigger needs driverAngles, helperAngles and position, or a frame");
+        e.Word("trigger");
+        e.Num(t.at("tolerance"));
+        e.Vec(t.at("driverAngles"));
+        e.Vec(t.at("helperAngles"));
+        e.Vec(t.at("position"));
+    }
+    e.Word("}");
+    return true;
+}
+
+bool LowerBones(Emitter& e, const Json& b) {
     if (const Json* list = Get(b, "define")) {
         for (const Json& d : *list) {
             e.Command("$definebone", d);
@@ -2191,6 +2416,77 @@ void LowerBones(Emitter& e, const Json& b) {
     }
     if (True(b, "realign")) e.Command("$realignbones", b, "realign");
     if (True(b, "lockLengths")) e.Command("$lockbonelengths", b, "lockLengths");
+
+    if (const Json* list = Get(b, "hierarchy")) {
+        for (const Json& h : *list) {
+            e.Command("$hierarchy", h);
+            e.Text(Str(h, "bone"));
+            const Json* parent = Get(h, "parent");
+            e.Text(parent ? parent->get<std::string>() : "");
+        }
+    }
+    if (const Json* list = Get(b, "jiggle"))
+        for (const Json& jb : *list) LowerJiggle(e, jb);
+    if (True(b, "cullJiggle")) e.Command("$culljigglebones", b, "cullJiggle");
+    if (const Json* list = Get(b, "drivers"))
+        for (const Json& d : *list)
+            if (!LowerDriver(e, d)) return false;
+    if (const Json* list = Get(b, "aimAt")) {
+        for (const Json& a : *list) {
+            e.Command("$driveraimat", a);
+            e.Text(Str(a, "bone"));
+            e.Text(Str(a, "target"));
+            e.Vec(a.at("up"));
+            e.Vec(a.at("aim"));
+        }
+    }
+    if (const Json* files = Get(b, "vrdFiles")) {
+        for (const Json& file : *files) {
+            e.Command("$proceduralbones", b, "vrdFiles");
+            e.Text(file.get<std::string>());
+        }
+    }
+    return true;
+}
+
+// Script-defined procedural bones come first: a $driverbone wins over a DMX one of the same name.
+bool LowerDataModelJoints(Emitter& e, const Json& d) {
+    e.Command("$datamodeljoints", d);
+    e.Text(Str(d, "file"));
+    EmitFlag(e, d, "jiggleBones", "jigglebones");
+    EmitFlag(e, d, "proceduralBones", "proceduralbones");
+    EmitFlag(e, d, "hitboxes", "hitboxes");
+    EmitFlag(e, d, "attachments", "attachments");
+
+    const Json* edits = Get(d, "triggerEdits");
+    if (!edits || edits->empty()) return true;
+    e.Word("{");
+    e.Word("$proceduralbones");
+    e.Word("{");
+    for (const Json& edit : *edits) {
+        const bool remove = True(edit, "remove");
+        if (remove == (Get(edit, "angle") != nullptr))
+            return e.l.Fail(edit, "", "a trigger edit takes angle, or remove: true");
+        const Json* frame = Get(edit, "frame");
+        const Json* frames = Get(edit, "frames");
+        if ((frame != nullptr) == (frames != nullptr))
+            return e.l.Fail(edit, "", "a trigger edit takes frame or frames");
+
+        e.Word(remove ? "removetrigger" : "settriggeraoi");
+        e.Text(Str(edit, "bone"));
+        if (!remove) e.Num(edit.at("angle"));
+        if (frame) {
+            e.Word("frame");
+            e.Num(*frame);
+        } else {
+            e.Word("framerange");
+            e.Num(frames->at("min"));
+            e.Num(frames->at("max"));
+        }
+    }
+    e.Word("}");
+    e.Word("}");
+    return true;
 }
 
 void LowerAttachment(Emitter& e, const Json& a) {
@@ -2483,7 +2779,10 @@ bool Lower(Emitter& e, const Json& m) {
             if (!LowerLod(e, lod)) return false;
     if (const Json* face = Get(m, "face"); face && !LowerFace(e, *face)) return false;
     if (const Json* flex = Get(m, "flex")) LowerFlex(e, *flex);
-    if (const Json* bones = Get(m, "bones")) LowerBones(e, *bones);
+    if (const Json* bones = Get(m, "bones"); bones && !LowerBones(e, *bones)) return false;
+    if (const Json* list = Get(m, "dataModelJoints"))
+        for (const Json& d : *list)
+            if (!LowerDataModelJoints(e, d)) return false;
     if (const Json* list = Get(m, "attachments"))
         for (const Json& a : *list) LowerAttachment(e, a);
     if (const Json* list = Get(m, "hitboxSets"))
