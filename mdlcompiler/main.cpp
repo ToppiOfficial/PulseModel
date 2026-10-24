@@ -283,6 +283,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         options.fileDirs = fileDirs;
         options.unsaved = api ? &api->unsaved : nullptr;
         loaded = pulse::pulsemodel::Load(script, options, input, &err);
+        // sent even when a command failed: the merge itself may still have worked
+        if (analyze || preview) pulse::pulsemodel::PrintResolved();
     } else {
         loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
                                              api ? &api->unsaved : nullptr);
@@ -317,6 +319,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     if (!pulse::compile::Compile(input, model, &err))
         return Fail("compile error", err);
     auto tCompile = Clock::now();
+    if (pulseModel && api) pulse::pulsemodel::PrintCompiled(model);
 
     if (dumpMaterials) {
         std::printf("Used materials:\n");

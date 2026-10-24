@@ -32,6 +32,14 @@ bool Load(const char* path, const LoadOptions& options, compile::CompileInput& o
 // The whole schema as one API "schema" record.
 void PrintSchema();
 
+// After a successful Load: one API "resolved" record, the model with variables,
+// prefabs and shared content merged, and the file + JSON pointer each part came from.
+void PrintResolved();
+
+// After a successful compile of a loaded model: one API "compiled" record mapping
+// each compiled bone, attachment and hitbox to the value that declared it, if any.
+void PrintCompiled(const compile::CompiledModel& model);
+
 } // namespace pulse::pulsemodel
 
 #endif // PULSEMDL_PULSEMODEL_H

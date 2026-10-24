@@ -59,11 +59,13 @@ struct Field {
     const Item* item = nullptr;
     const char* const* values = nullptr; // Enum, null-terminated
     const char* ref = nullptr;           // what a name refers to: bone, mesh, ...
+    const char* declares = nullptr;      // the kind of name this field defines
     bool required = false;
 
     constexpr Field Of(const Item* i) const { Field f = *this; f.item = i; return f; }
     constexpr Field Values(const char* const* v) const { Field f = *this; f.values = v; return f; }
     constexpr Field Ref(const char* r) const { Field f = *this; f.ref = r; return f; }
+    constexpr Field Declares(const char* d) const { Field f = *this; f.declares = d; return f; }
     constexpr Field Required() const { Field f = *this; f.required = true; return f; }
 };
 
@@ -196,7 +198,7 @@ const Field kScaleBone[] = {
 const Item kScaleBoneItem = MakeItem("scaleBone", kScaleBone);
 
 const Field kMesh[] = {
-    F("name", Type::String, "Mesh name model groups refer to.").Required(),
+    F("name", Type::String, "Mesh name model groups refer to.").Declares("mesh").Required(),
     F("file", Type::File, "Source file (.dmx, .smd, .fbx).").Required(),
     F("noMorph", Type::Bool, "Load without morphs."),
     F("flipNormals", Type::Bool, "Flip normals."),
@@ -217,7 +219,7 @@ const Field kChoice[] = {
 const Item kChoiceItem = MakeItem("choice", kChoice);
 
 const Field kModelGroup[] = {
-    F("name", Type::String, "Group name.").Required(),
+    F("name", Type::String, "Group name.").Declares("modelGroup").Required(),
     F("choices", Type::List, "Choices, in index order.").Of(&kChoiceItem).Required(),
 };
 const Item kModelGroupItem = MakeItem("modelGroup", kModelGroup);
@@ -286,7 +288,7 @@ const Field kPose[] = {
 const Item kPoseItem = MakeItem("pose", kPose);
 
 const Field kDefineBone[] = {
-    F("name", Type::String, "Bone name.").Required(),
+    F("name", Type::String, "Bone name.").Declares("bone").Required(),
     F("parent", Type::String, "Parent bone; omitted = root bone.").Ref("bone"),
     F("unlocked", Type::Bool, "Appended after the source bones instead of replacing one."),
     F("position", Type::Vec3, "Bind position.").Required(),
@@ -340,7 +342,7 @@ const Item kBonesItem = MakeItem("bones", kBones);
 // --- attachments, hitboxes, pose parameters, IK ---
 
 const Field kAttachment[] = {
-    F("name", Type::String, "Attachment name.").Required(),
+    F("name", Type::String, "Attachment name.").Declares("attachment").Required(),
     F("bone", Type::String, "Parent bone; omitted = model space.").Ref("bone"),
     F("position", Type::Vec3, "Position."),
     F("angles", Type::Vec3, "Rotation in degrees."),
@@ -365,13 +367,13 @@ const Field kHitbox[] = {
 const Item kHitboxItem = MakeItem("hitbox", kHitbox);
 
 const Field kHitboxSet[] = {
-    F("name", Type::String, "Set name.").Required(),
+    F("name", Type::String, "Set name.").Declares("hitboxSet").Required(),
     F("boxes", Type::List, "Hitboxes.").Of(&kHitboxItem),
 };
 const Item kHitboxSetItem = MakeItem("hitboxSet", kHitboxSet);
 
 const Field kPoseParameter[] = {
-    F("name", Type::String, "Parameter name.").Required(),
+    F("name", Type::String, "Parameter name.").Declares("poseParameter").Required(),
     F("min", Type::Number, "Start value.").Required(),
     F("max", Type::Number, "End value.").Required(),
     F("wrap", Type::Bool, "Wraps over the full range."),
@@ -380,7 +382,7 @@ const Field kPoseParameter[] = {
 const Item kPoseParameterItem = MakeItem("poseParameter", kPoseParameter);
 
 const Field kIkChain[] = {
-    F("name", Type::String, "Chain name.").Required(),
+    F("name", Type::String, "Chain name.").Declares("ikChain").Required(),
     F("bone", Type::String, "End bone.").Ref("bone").Required(),
     F("knee", Type::Vec3, "Knee direction."),
     F("height", Type::Number, "Height."),
@@ -417,7 +419,7 @@ const Field kClip[] = {
 const Item kClipItem = MakeItem("clip", kClip);
 
 const Field kAnimation[] = {
-    F("name", Type::String, "Animation name.").Required(),
+    F("name", Type::String, "Animation name.").Declares("animation").Required(),
     F("file", Type::File, "Source file."),
     F("bindPose", Type::Bool, "The compile's own bind pose instead of a file."),
     F("declare", Type::Bool, "An empty slot an included model fills."),
@@ -487,7 +489,7 @@ const Field kTransition[] = {
 const Item kTransitionItem = MakeItem("transition", kTransition);
 
 const Field kSequence[] = {
-    F("name", Type::String, "Sequence name.").Required(),
+    F("name", Type::String, "Sequence name.").Declares("sequence").Required(),
     F("file", Type::File, "Source file of the only clip."),
     F("files", Type::Files, "Source files of a blend grid."),
     F("animations", Type::Strings, "Animations of a blend grid.").Ref("animation"),
@@ -1924,6 +1926,55 @@ int SelectModel(Loader& l, const Json& doc) {
     return chosen;
 }
 
+// The model the last Load merged, kept for the API records that follow it.
+struct LoadedModel {
+    std::string id;
+    Json merged; // with the internal origin keys
+    std::vector<std::string> files;
+};
+LoadedModel g_loaded;
+
+Json SourceOf(const Json& origin, const std::string& at) {
+    const std::string path = origin[1].get<std::string>();
+    return Json{{"at", at}, {"file", g_loaded.files[origin[0].get<size_t>()]},
+                {"path", path.empty() ? "/" : path}};
+}
+
+// `value` without the internal keys; `sources` gets an entry per object and per
+// key another file merged in. A value without an entry lies inside its parent's.
+Json Clean(const Json& value, const std::string& at, Json& sources) {
+    if (value.is_array()) {
+        Json out = Json::array();
+        for (size_t i = 0; i < value.size(); ++i) out.push_back(Clean(value[i], Pointer(at, i), sources));
+        return out;
+    }
+    if (!value.is_object()) return value;
+
+    if (value.contains(kOrigin)) sources.push_back(SourceOf(KeyOrigin(value, ""), at));
+    if (const auto keys = value.find(kKeyOrigins); keys != value.end())
+        for (const auto& [key, origin] : keys->items()) sources.push_back(SourceOf(origin, Pointer(at, key)));
+
+    Json out = Json::object();
+    for (const auto& [key, entry] : value.items())
+        if (!IsInternal(key)) out[key] = Clean(entry, Pointer(at, key), sources);
+    return out;
+}
+
+// {file, path} of a declaring object; nothing for an item a mesh file or the compiler made.
+void Locate(Json& record, const Json* entry) {
+    if (!entry) return;
+    const Json source = SourceOf(KeyOrigin(*entry, ""), "");
+    record["file"] = source["file"];
+    record["path"] = source["path"];
+}
+
+const Json* FindNamed(const Json* list, const char* key, const std::string& name) {
+    if (!list) return nullptr;
+    for (const Json& entry : *list)
+        if (_stricmp(Str(entry, key).c_str(), name.c_str()) == 0) return &entry;
+    return nullptr;
+}
+
 void SchemaFields(const Item& item, Json& out) {
     for (size_t f = 0; f < item.count; ++f) {
         const Field& field = item.fields[f];
@@ -1934,6 +1985,7 @@ void SchemaFields(const Item& item, Json& out) {
             for (const char* const* v = field.values; *v; ++v) entry["values"].push_back(*v);
         }
         if (field.ref) entry["ref"] = field.ref;
+        if (field.declares) entry["declares"] = field.declares;
         if (field.required) entry["required"] = true;
         out.push_back(std::move(entry));
     }
@@ -1959,6 +2011,7 @@ bool Load(const char* path, const LoadOptions& options, compile::CompileInput& o
     const int index = SelectModel(l, doc);
     if (index < 0) return false;
     Json model = doc.at("models")[static_cast<size_t>(index)];
+    const std::string modelId = Str(model, "id");
     model.erase("id");
     model.erase("compile");
 
@@ -1988,6 +2041,9 @@ bool Load(const char* path, const LoadOptions& options, compile::CompileInput& o
     if (out.outname.empty() && (!settings || !Get(*settings, "name")))
         return l.Fail(parts[modelPart], "", "the model has no model.name");
 
+    g_loaded = {modelId, merged, {}};
+    for (const SourceFile& file : l.files) g_loaded.files.push_back(file.path);
+
     Emitter e{l};
     if (!Lower(e, merged)) return false;
 
@@ -2010,6 +2066,63 @@ void PrintSchema() {
     const Json schema{{"format", "pulsemodel"}, {"version", kFormatVersion}, {"root", kRootItem.name},
                       {"items", std::move(items)}};
     pulse::api::Record("schema", schema.dump());
+}
+
+void PrintResolved() {
+    if (g_loaded.id.empty()) return;
+
+    Json sources = Json::array();
+    Json content = Clean(g_loaded.merged, "", sources);
+    const Json record{{"model", g_loaded.id}, {"content", std::move(content)}, {"sources", std::move(sources)}};
+    pulse::api::Record("resolved", record.dump());
+}
+
+void PrintCompiled(const compile::CompiledModel& model) {
+    if (g_loaded.id.empty()) return;
+    const Json& m = g_loaded.merged;
+    const Json* bones = Get(m, "bones");
+    const Json* settings = Get(m, "model");
+
+    // a renamed bone is declared by its definition under the old name, else by the rename
+    Json compiledBones = Json::array();
+    for (const compile::Bone& bone : model.bones) {
+        Json record{{"name", bone.name}};
+        const Json* rename = bones ? FindNamed(Get(*bones, "renames"), "to", bone.name) : nullptr;
+        const std::string original = rename ? Str(*rename, "bone") : bone.name;
+        const Json* define = bones ? FindNamed(Get(*bones, "define"), "name", original) : nullptr;
+        Locate(record, define ? define : rename);
+        compiledBones.push_back(std::move(record));
+    }
+
+    Json attachments = Json::array();
+    for (const compile::Attachment& attachment : model.attachments) {
+        Json record{{"name", attachment.name}};
+        if (attachment.name == "__illumPosition" && settings)
+            Locate(record, Get(*settings, "illumPosition"));
+        else
+            Locate(record, FindNamed(Get(m, "attachments"), "name", attachment.name));
+        attachments.push_back(std::move(record));
+    }
+
+    // boxes map by index only while the set holds exactly what was authored
+    Json sets = Json::array();
+    for (const compile::HitboxSet& set : model.hitboxsets) {
+        Json record{{"name", set.name}, {"boxes", Json::array()}};
+        const Json* authored = FindNamed(Get(m, "hitboxSets"), "name", set.name);
+        Locate(record, authored);
+        const Json* boxes = authored ? Get(*authored, "boxes") : nullptr;
+        const bool exact = boxes && boxes->size() == set.hitboxes.size();
+        for (size_t i = 0; i < set.hitboxes.size(); ++i) {
+            Json box = Json::object();
+            if (exact) Locate(box, &(*boxes)[i]);
+            record["boxes"].push_back(std::move(box));
+        }
+        sets.push_back(std::move(record));
+    }
+
+    const Json record{{"model", g_loaded.id}, {"bones", std::move(compiledBones)},
+                      {"attachments", std::move(attachments)}, {"hitboxSets", std::move(sets)}};
+    pulse::api::Record("compiled", record.dump());
 }
 
 } // namespace pulse::pulsemodel
