@@ -22,6 +22,7 @@
 #include "pathcompat.h"
 #include "perf.h"
 #include "pulselimits.h"
+#include "pulsemodel.h"
 #include "qcloader.h"
 #include "rename.h"
 #include "writer.h"
@@ -46,9 +47,10 @@ static void PrintHeader() {
 }
 
 static int Usage() {
-    std::printf("usage: mdlcompiler <file.qc|file.pulseqc> [-game <dir>]\n");
+    std::printf("usage: mdlcompiler <file.qc|file.pulseqc|file.pulsemodel> [-game <dir>]\n");
     std::printf("\n");
     std::printf("  -api          read a versioned integration request from stdin\n");
+    std::printf("  -only <id>    the model to compile from a .pulsemodel holding several\n");
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
     std::printf("  -modelname <path>   overrides $modelname\n");
@@ -146,6 +148,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     const char* script = nullptr;
     std::string outdir;
     std::string modelname; // -modelname: overrides the script's $modelname
+    std::string only;      // -only: a .pulsemodel's model id
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
     bool noDx80 = false; // -nodx80: force-skip .dx80.vtx, overriding the script
     int launchMinLod = -1;
@@ -172,6 +175,10 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
             if (i + 1 >= argc)
                 return Fail("bad option", "-modelname needs a model path");
             modelname = argv[++i];
+        } else if (std::strcmp(argv[i], "-only") == 0) {
+            if (i + 1 >= argc)
+                return Fail("bad option", "-only needs a model id");
+            only = argv[++i];
         } else if (std::strcmp(argv[i], "-defvar") == 0) {
             // a .pulseqc $definevariable, set from the launch line and pinned
             if (i + 2 >= argc)
@@ -232,7 +239,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
             // studiomdl GUI front ends pass switches we do not have (-nop4,
             // -verbose, ...). Warn and carry on rather than refusing to run.
             pulse::diag::Warnf("ignoring unknown option: %s\n", argv[i]);
-        } else if (!script || pulse::loader::IsQcScriptPath(argv[i])) {
+        } else if (!script || pulse::loader::IsQcScriptPath(argv[i]) ||
+                   pulse::pulsemodel::IsPulseModelPath(argv[i])) {
             // an ignored option may have eaten a value we now see as
             // positional, so a real script extension always wins
             script = argv[i];
@@ -250,11 +258,14 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
 
-    // .pulseqc (keyvalues1) is the only front end. The keyvalues2 .pulsemdl
-    // loader is halted indefinitely - pulseloader.cpp is out of the build.
-    if (!pulse::loader::IsQcScriptPath(script))
-        return Fail("unsupported script",
-                    std::string(script) + ": only .pulseqc/.qc compile scripts are supported");
+    // .pulseqc (keyvalues1) and .pulsemodel (JSON, lowered onto the same
+    // commands). The keyvalues2 .pulsemdl loader is halted indefinitely.
+    const bool pulseModel = pulse::pulsemodel::IsPulseModelPath(script);
+    if (!pulse::loader::IsQcScriptPath(script) && !pulseModel)
+        return Fail("unsupported script", std::string(script) +
+                                              ": only .pulseqc/.qc/.pulsemodel files are supported");
+    if (!only.empty() && !pulseModel)
+        return Fail("bad option", "-only selects a model of a .pulsemodel");
 
     std::string err;
     pulse::compile::CompileInput input;
@@ -262,8 +273,18 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    const bool loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
-                                                    api ? &api->unsaved : nullptr);
+    bool loaded = false;
+    if (pulseModel) {
+        pulse::pulsemodel::LoadOptions options;
+        options.only = only;
+        options.defvars = defvars;
+        options.fileDirs = fileDirs;
+        options.unsaved = api ? &api->unsaved : nullptr;
+        loaded = pulse::pulsemodel::Load(script, options, input, &err);
+    } else {
+        loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
+                                             api ? &api->unsaved : nullptr);
+    }
     if (analyze) pulse::dependencies::Print(loaded);
     if (!loaded)
         return Fail("script error", err);
@@ -368,8 +389,12 @@ int main(int argc, char** argv) {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
                                                  "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
-                                                 "\"rename\":1}");
+                                                 "\"rename\":1,\"pulsemodel\":1,\"schema\":1}");
                 pulse::loader::PrintCommandNames();
+                rc = 0;
+            } else if (request.at("method") == "schema") {
+                pulse::api::CheckMembers(request, {});
+                pulse::pulsemodel::PrintSchema();
                 rc = 0;
             } else if (request.at("method") == "rename") {
                 pulse::api::CheckMembers(request, {"arguments"});

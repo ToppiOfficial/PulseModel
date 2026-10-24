@@ -223,6 +223,7 @@ struct Ctx {
     int macroExpansions = 0; // runaway-recursion guard
     std::vector<std::string> lockedVars; // -defvar names; locked against $definevariable
     bool scriptBreak = false; // $break, sticky through every $include parent
+    bool generated = false; // a .pulsemodel's lowered tokens: variables are already substituted
 
     float defaultFps = 30.0f;
     float defaultMotionRollback = 0.3f; // seed for a new anim's motionrollback
@@ -300,8 +301,12 @@ struct Ctx {
         if (abortErr) return false; // keep the first $include error, not a cascade
         if (!err) return false;
 
-        *err = file + "(" + std::to_string(line) + "): " + msg;
-        pulse::diag::NoteFailure(*err, {Path(), line}, msg);
+        const pulse::diag::Location at = pulse::diag::Resolve({Path(), line});
+        if (at.path.empty())
+            *err = file + "(" + std::to_string(line) + "): " + msg;
+        else
+            *err = fs::path(at.file).filename().string() + ": " + at.path + ": " + msg;
+        pulse::diag::NoteFailure(*err, at, msg);
         return false;
     }
 
@@ -9227,7 +9232,7 @@ bool RunCommands(Ctx& c) {
             c.pos = CommandExtent(c);
             continue;
         }
-        if (!ExpandCommandVars(c))
+        if (!c.generated && !ExpandCommandVars(c))
             return false;
 
         const Token cmd = c.toks[c.pos];
@@ -9273,7 +9278,72 @@ std::string SupportedList() {
     return os.str();
 }
 
+// The passes that need the whole script read, shared by both script loaders.
+bool FinishScript(Ctx& c, cm::CompileInput& out, std::string* err) {
+    if (out.outname.empty()) {
+        if (err) *err = c.file + ": no $modelname";
+        return false;
+    }
+    // animation-only models (.mdl + .ani, no geometry) are legal; a script with
+    // geometry that never groups it is not - the meshes would not ship.
+    if (out.bodyparts.empty() && !c.rendermeshes.empty())
+        pulse::diag::WarnAt({c.Path(), 0}, "$rendermesh but no $modelgroup");
+    if (c.shapelessPhysicsModelLine && !c.dataModelPhysics)
+        pulse::diag::WarnAt({c.Path(), c.shapelessPhysicsModelLine}, "$physicsmodel has no $physicsshape");
+
+    // set once every source has been read (the DMX loader latches it on the
+    // first model carrying an upAxis attribute)
+    out.upAxisY = source::DmxUpAxisY();
+
+    // $renamemorph: before anything below resolves a morph by name
+    if (!ApplyMorphRenames(c))
+        return false;
+
+    // $wrinklescale: every source, including the merged ones a `mesh` line built,
+    // so it never depends on where in the script it was written
+    if (!c.wrinkleScales.empty()) {
+        for (auto& src : c.in.sources)
+            source::ApplyWrinkleScales(*src, c.wrinkleScales);
+        for (const source::WrinkleScaleOption& w : c.wrinkleScales)
+            if (!w.matched)
+                return c.Fail(w.line, "$wrinklescale names \"" + w.shape +
+                                          "\", which is not a morph in any $rendermesh");
+    }
+
+    // both need every $modelgroup parsed. The sort must run HERE: RegisterFlex
+    // below flattens model indices by walking c.in.bodyparts, so permuting them
+    // any later leaves every FlexKey::imodel pointing at the wrong model.
+    CheckMeshSortOrder(c);
+    SortBodyPartsForMeshOrder(c);
+
+    // flex/morph: the automatic per-body DMX rig plus the $flexcontroller /
+    // $flexlocalvar / $flexrule / $flexcorrective block. Needs the finished
+    // bodygroup list, so it runs here rather than per command.
+    {
+        std::string flexErr;
+        if (!RegisterFlex(out, c.manual, &flexErr, &c.face)) {
+            if (err) *err = c.file + ": " + flexErr;
+            return false;
+        }
+    }
+
+    // needs the final rotation/scale, so it runs after everything above
+    FinishAttachments(c);
+    return true;
+}
+
 } // namespace
+
+bool IsScriptCommand(const std::string& name) { return IsCommandName(name); }
+
+const std::string* FindUnsavedText(const ScriptFiles* unsaved, const std::string& path) {
+    if (!unsaved) return nullptr;
+
+    const std::string key = UnsavedKey(pulse::FilePath(path));
+    for (const auto& [file, text] : *unsaved)
+        if (UnsavedKey(pulse::FilePath(file)) == key) return &text;
+    return nullptr;
+}
 
 void PrintCommandNames() {
     for (const Command& k : kCommands) {
@@ -9355,57 +9425,37 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     pulse::diag::Current() = {};
     if (!ran)
         return false;
+    return FinishScript(c, out, err);
+}
 
-    if (out.outname.empty()) {
-        if (err) *err = c.file + ": no $modelname";
+bool LoadTokenScript(const char* rawPath, const std::vector<ScriptToken>& tokens,
+                     cm::CompileInput& out, std::string* err, const SearchDirs& fileDirs) {
+    const fs::path path = pulse::FilePath(rawPath);
+    Ctx c{out};
+    c.generated = true;
+    c.scriptDir = path.parent_path();
+    c.curDir = c.scriptDir;
+    c.sourceDirStack.push_back(c.scriptDir);
+    c.file = path.filename().string();
+    c.rootFile = c.file;
+    c.err = err;
+
+    for (const std::string& dir : fileDirs) {
+        const fs::path p = pulse::FilePath(dir);
+        c.launchSearchDirs.push_back((p.is_absolute() ? p : fs::current_path() / p)
+                                         .lexically_normal().make_preferred());
+    }
+
+    c.toks.reserve(tokens.size());
+    for (const ScriptToken& t : tokens)
+        c.toks.push_back({t.text, t.line, t.quoted});
+    out.mdlPath = path.string();
+
+    const bool ran = RunCommands(c);
+    pulse::diag::Current() = {};
+    if (!ran)
         return false;
-    }
-    // animation-only models (.mdl + .ani, no geometry) are legal; a script with
-    // geometry that never groups it is not - the meshes would not ship.
-    if (out.bodyparts.empty() && !c.rendermeshes.empty())
-        pulse::diag::WarnAt({c.Path(), 0}, "$rendermesh but no $modelgroup");
-    if (c.shapelessPhysicsModelLine && !c.dataModelPhysics)
-        pulse::diag::WarnAt({c.Path(), c.shapelessPhysicsModelLine}, "$physicsmodel has no $physicsshape");
-
-    // set once every source has been read (the DMX loader latches it on the
-    // first model carrying an upAxis attribute)
-    out.upAxisY = source::DmxUpAxisY();
-
-    // $renamemorph: before anything below resolves a morph by name
-    if (!ApplyMorphRenames(c))
-        return false;
-
-    // $wrinklescale: every source, including the merged ones a `mesh` line built,
-    // so it never depends on where in the script it was written
-    if (!c.wrinkleScales.empty()) {
-        for (auto& src : c.in.sources)
-            source::ApplyWrinkleScales(*src, c.wrinkleScales);
-        for (const source::WrinkleScaleOption& w : c.wrinkleScales)
-            if (!w.matched)
-                return c.Fail(w.line, "$wrinklescale names \"" + w.shape +
-                                          "\", which is not a morph in any $rendermesh");
-    }
-
-    // both need every $modelgroup parsed. The sort must run HERE: RegisterFlex
-    // below flattens model indices by walking c.in.bodyparts, so permuting them
-    // any later leaves every FlexKey::imodel pointing at the wrong model.
-    CheckMeshSortOrder(c);
-    SortBodyPartsForMeshOrder(c);
-
-    // flex/morph: the automatic per-body DMX rig plus the $flexcontroller /
-    // $flexlocalvar / $flexrule / $flexcorrective block. Needs the finished
-    // bodygroup list, so it runs here rather than per command.
-    {
-        std::string flexErr;
-        if (!RegisterFlex(out, c.manual, &flexErr, &c.face)) {
-            if (err) *err = c.file + ": " + flexErr;
-            return false;
-        }
-    }
-
-    // needs the final rotation/scale, so it runs after everything above
-    FinishAttachments(c);
-    return true;
+    return FinishScript(c, out, err);
 }
 
 } // namespace pulse::loader
