@@ -2806,7 +2806,7 @@ bool SaveFile(const std::filesystem::path& path, const void* data, size_t len, s
 } // namespace
 
 bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legacyVtx,
-                     bool writeDx80, std::string* err) {
+                     bool writeDx80, std::string* err, std::vector<OutputFile>* memory) {
     Buf buf(kFileBuffer);
 
     fmt::studiohdr_t* phdr = buf.Reserve<fmt::studiohdr_t>();
@@ -3041,6 +3041,18 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     };
     std::filesystem::path stem = outputStem(m.outname);
 
+    // to disk, or into `memory` under the name the game asks for
+    auto save = [&](const std::string& path, const char* ext, const void* data, size_t size,
+                    std::string* error, const std::string& name = {}) {
+        if (!memory) return SaveFile(path, data, size, error);
+
+        std::string game = "models/" + (name.empty() ? m.outname : name) + ext;
+        std::replace(game.begin(), game.end(), '\\', '/');
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        memory->push_back({std::move(game), std::vector<uint8_t>(bytes, bytes + size)});
+        return true;
+    };
+
     // reference console format: a "writing <path>:" line
     // per output file, then its stats. GUI front ends scrape these lines for
     // the full paths, so the separator must be native - $modelname carries
@@ -3056,13 +3068,13 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     std::string mdlPath = announce(".mdl");
     FlushReport(g_mdlReport);
     std::printf("total      %7zu\n", mdlBuf.size());
-    if (!SaveFile(mdlPath, mdlBuf.data(), mdlBuf.size(), err)) return false;
+    if (!save(mdlPath, ".mdl", mdlBuf.data(), mdlBuf.size(), err)) return false;
 
     std::string vvdPath, vtxPath, vtxPath80;
     if (hasGeometry) {
         vvdPath = announce(".vvd");
         FlushReport(g_vvdReport);
-        if (!SaveFile(vvdPath, vvdBuf.data(), vvdBuf.size(), err)) return false;
+        if (!save(vvdPath, ".vvd", vvdBuf.data(), vvdBuf.size(), err)) return false;
 
         // which strip layout went out. SFM reads the Alien Swarm/CS:GO 35-byte
         // strips and crashes on the legacy ones, so make the format explicit.
@@ -3071,14 +3083,14 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         vtxPath = announce(".dx90.vtx");
         FlushReport(vtxReport);
         std::printf("everything (%zu bytes)\n", vtxBuf.size());
-        if (!SaveFile(vtxPath, vtxBuf.data(), vtxBuf.size(), err)) return false;
+        if (!save(vtxPath, ".dx90.vtx", vtxBuf.data(), vtxBuf.size(), err)) return false;
 
         // .dx80.vtx: DirectX 8 variant, same layout as the dx90 file
         if (!vtxBuf80.empty()) {
             vtxPath80 = announce(".dx80.vtx");
             FlushReport(vtxReport80);
             std::printf("everything (%zu bytes)\n", vtxBuf80.size());
-            if (!SaveFile(vtxPath80, vtxBuf80.data(), vtxBuf80.size(), err)) return false;
+            if (!save(vtxPath80, ".dx80.vtx", vtxBuf80.data(), vtxBuf80.size(), err)) return false;
         }
     }
 
@@ -3091,7 +3103,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         aniPath = announce(".ani");
         std::printf("blocks     %7zu\n", g_animblocks.count ? g_animblocks.count - 1 : 0);
         std::printf("total      %7zu\n", blockBuf->cur);
-        if (!SaveFile(aniPath, blockBuf->start(), blockBuf->pos, err))
+        if (!save(aniPath, ".ani", blockBuf->start(), blockBuf->pos, err))
             return false;
     }
 
@@ -3117,7 +3129,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         else if (!m.physCollisionPairs.empty())
             std::printf("pairs      %7zu\n", m.physCollisionPairs.size());
         std::printf("total      %7zu\n", phyBuf.size());
-        if (!SaveFile(phyPath, phyBuf.data(), phyBuf.size(), err)) return false;
+        if (!save(phyPath, ".phy", phyBuf.data(), phyBuf.size(), err, m.physName)) return false;
     }
 
     // footer: the shared output dir once, then each file by name with its
@@ -3146,7 +3158,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     if (!phyPath.empty())
         std::printf("  %-20s 0x%08X  %10zu bytes\n", name(phyPath).c_str(), checksum,
                     phyBuf.size());
-    if (pulse::api::Active()) pulse::api::Record("model", "{\"path\":" +
+    if (!memory && pulse::api::Active()) pulse::api::Record("model", "{\"path\":" +
         pulse::api::String(std::filesystem::absolute(std::filesystem::path(mdlPath)).lexically_normal().u8string()) + "}");
     return true;
 }

@@ -1,5 +1,7 @@
 #include "apiprotocol.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <utility>
@@ -151,6 +153,28 @@ void Line(const std::string& value) {
 }
 
 void Record(const char* tag, const std::string& json) { Line(std::string("@") + tag + " " + json); }
+
+void RecordFile(const std::string& path, const unsigned char* data, size_t size) {
+    constexpr size_t kChunk = 384 * 1024; // a multiple of 3, so no chunk but the last is padded
+    static const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    Record("file", "{\"path\":" + String(path) + ",\"size\":" + std::to_string(size) + "}");
+    for (size_t start = 0; start < size; start += kChunk) {
+        const size_t end = std::min(size, start + kChunk);
+        std::string text;
+        text.reserve((end - start + 2) / 3 * 4);
+        for (size_t i = start; i < end; i += 3) {
+            const uint32_t b = uint32_t(data[i]) << 16 |
+                               (i + 1 < end ? uint32_t(data[i + 1]) << 8 : 0) |
+                               (i + 2 < end ? uint32_t(data[i + 2]) : 0);
+            text += kAlphabet[b >> 18 & 63];
+            text += kAlphabet[b >> 12 & 63];
+            text += i + 1 < end ? kAlphabet[b >> 6 & 63] : '=';
+            text += i + 2 < end ? kAlphabet[b & 63] : '=';
+        }
+        Record("data", "{\"base64\":\"" + text + "\"}");
+    }
+}
 
 void Finish(int exitCode) {
     Record("result", "{\"exitCode\":" + std::to_string(exitCode) + "}");

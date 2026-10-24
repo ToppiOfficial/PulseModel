@@ -115,7 +115,8 @@ struct ApiCall {
 static ApiCall ParseApiCall(const nlohmann::json& request) {
     ApiCall call;
     call.method = request.at("method").get<std::string>();
-    if (call.method == "analyze") pulse::api::CheckMembers(request, {"script", "arguments", "files"});
+    if (call.method == "analyze" || call.method == "preview")
+        pulse::api::CheckMembers(request, {"script", "arguments", "files"});
     else if (call.method == "compile") pulse::api::CheckMembers(request, {"script", "arguments"});
     else throw std::runtime_error("Unknown API method \"" + call.method + "\"");
 
@@ -160,8 +161,9 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     bool dumpMaterials = false;
     const bool dumpDependencies = api && api->method == "compile";
     const bool analyze = api && api->method == "analyze";
-    pulse::dependencies::g_enabled = dumpDependencies || analyze;
-    pulse::dependencies::g_hashes = !analyze;
+    const bool preview = api && api->method == "preview"; // compile, files sent back instead of written
+    pulse::dependencies::g_enabled = dumpDependencies || analyze || preview;
+    pulse::dependencies::g_hashes = !analyze && !preview;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
@@ -328,6 +330,18 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         return 0;
     }
 
+    // the files a viewer needs; dx80 never reaches one, so it is not built
+    if (preview) {
+        g_stage = "write";
+        std::vector<pulse::writer::OutputFile> files;
+        if (!pulse::writer::WriteModelFiles(model, "", input.vtxArchetype == 0, false, &err, &files))
+            return Fail("write error", err);
+        for (const pulse::writer::OutputFile& file : files)
+            pulse::api::RecordFile(file.path, file.bytes.data(), file.bytes.size());
+        pulse::dependencies::Print();
+        return 0;
+    }
+
     if (!verify) {
         g_stage = "write";
         // dx80 only ships with the legacy archetype; Alien Swarm+ (archetype 1)
@@ -389,7 +403,7 @@ int main(int argc, char** argv) {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
                                                  "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
-                                                 "\"rename\":1,\"pulsemodel\":1,\"schema\":1}");
+                                                 "\"rename\":1,\"pulsemodel\":1,\"schema\":1,\"preview\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else if (request.at("method") == "schema") {

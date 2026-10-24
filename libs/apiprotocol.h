@@ -23,6 +23,9 @@ std::vector<std::string> GetStrings(const nlohmann::json& request, const char* n
 
 std::string String(const std::string& value);
 void Record(const char* tag, const std::string& json);
+// A binary file: one "file" record {path, size}, then "data" records whose
+// base64 chunks decode independently and concatenate to the file's bytes.
+void RecordFile(const std::string& path, const unsigned char* data, size_t size);
 void Line(const std::string& value);
 void Finish(int exitCode);
 
