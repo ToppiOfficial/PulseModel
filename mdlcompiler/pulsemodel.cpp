@@ -95,6 +95,15 @@ const char* const kLids[] = {"upper", "lower", nullptr};
 const char* const kPrimitives[] = {"box", "sphere", "capsule", nullptr};
 const char* const kImportTypes[] = {"perjoint", "singlejoint", "singlehull", nullptr};
 const char* const kJointTypes[] = {"free", "limit", "fixed", nullptr};
+const char* const kIkRuleTypes[] = {"touch", "footstep", "attachment", "release", "unlatch",
+                                    "autosteps", nullptr};
+const char* const kAnimOps[] = {
+    "reverse", "numFrames", "ikFixup", "localHierarchy", "derivative", "noAnimation",
+    "linearDelta", "compress", "counterRotate", "forceBonePosRot", "weightList", "subtract",
+    "fixupLoop", "walkFrame", "walkAlignTo", "walkAlign", "match", "matchBlend", "transformBone",
+    "matchPosition", "copyPose", "worldSpaceBlend", "alignTo", "align", "alignBoneTo", "alignBone",
+    "appendAnimation", "boneDriver", "rotateTo", nullptr};
+const char* const kAnimCulls[] = {"aggressive", "duplicates", "none", nullptr};
 
 // --- KeyValues ---
 
@@ -541,21 +550,102 @@ const Field kFrames[] = {
 };
 const Item kFramesItem = MakeItem("frames", kFrames);
 
+const Field kFrameRamp[] = {
+    F("start", Type::Integer, "Start frame (-1 = unset).").Required(),
+    F("peak", Type::Integer, "Peak frame (-1 = unset).").Required(),
+    F("tail", Type::Integer, "Tail frame (-1 = unset).").Required(),
+    F("end", Type::Integer, "End frame (-1 = unset).").Required(),
+};
+const Item kFrameRampItem = MakeItem("frameRamp", kFrameRamp);
+
+const Field kIkRule[] = {
+    F("chain", Type::String, "IK chain.").Ref("ikChain").Required(),
+    F("type", Type::Enum, "Rule type.").Values(kIkRuleTypes).Required(),
+    F("bone", Type::String, "touch: the bone touched; autosteps: the foot bone.").Ref("bone"),
+    F("attachment", Type::String, "attachment: the attachment.").Ref("attachment"),
+    F("steps", Type::Integer, "autosteps: step count."),
+    F("height", Type::Number, "Height."),
+    F("target", Type::Integer, "Target slot."),
+    F("floor", Type::Number, "Floor."),
+    F("pad", Type::Number, "Pad (sets radius to half)."),
+    F("radius", Type::Number, "Radius."),
+    F("contact", Type::Integer, "Contact frame."),
+    F("range", Type::Object, "Ramp frames.").Of(&kFrameRampItem),
+    F("useSequence", Type::Bool, "Use the sequence."),
+    F("useSource", Type::Bool, "Use the source."),
+    F("fakeOrigin", Type::Vec3, "Fake origin."),
+    F("fakeRotate", Type::Vec3, "Fake rotation."),
+};
+const Item kIkRuleItem = MakeItem("ikRule", kIkRule);
+
+// One ordered clip operation. `op` picks it; each takes only the keys its doc names.
+const Field kAnimOp[] = {
+    F("op", Type::Enum, "Operation.").Values(kAnimOps).Required(),
+    F("animation", Type::String, "subtract, match, matchBlend, walkAlign(To), worldSpaceBlend, "
+                                 "align*, appendAnimation: the reference clip.").Ref("animation"),
+    F("source", Type::String, "copyPose: animation, sequence or \"bindpose\"."),
+    F("bone", Type::String, "localHierarchy, counterRotate, forceBonePosRot, transformBone, "
+                            "matchPosition, alignBone(To), boneDriver: the bone.").Ref("bone"),
+    F("parent", Type::String, "localHierarchy: new parent (\"\" = world).").Ref("bone"),
+    F("weightList", Type::String, "weightList: list name.").Ref("weightList"),
+    F("ikRule", Type::Object, "ikFixup: the rule baked in.").Of(&kIkRuleItem),
+    F("count", Type::Integer, "numFrames: frame count; compress: frame skip."),
+    F("frame", Type::Integer, "subtract: reference frame; walk*: end frame; worldSpaceBlend: loop start."),
+    F("start", Type::Integer, "fixupLoop, copyPose: start frame."),
+    F("end", Type::Integer, "fixupLoop, copyPose: end frame."),
+    F("sourceFrame", Type::Integer, "matchBlend, walkAlign, copyPose, align, alignBone: source frame."),
+    F("destinationFrame", Type::Integer, "matchBlend, align, alignBone: destination frame; walkAlign: reference frame."),
+    F("preFrames", Type::Integer, "matchBlend: frames blended in before."),
+    F("postFrames", Type::Integer, "matchBlend: frames blended in after."),
+    F("scale", Type::Number, "derivative: scale."),
+    F("angle", Type::Number, "rotateTo: yaw in degrees."),
+    F("value", Type::Number, "boneDriver: value."),
+    F("fadeIn", Type::Number, "copyPose: fade-in frames."),
+    F("fadeOut", Type::Number, "copyPose: fade-out frames."),
+    F("controls", Type::Strings, "walk*, align, alignBone: motion controls (X Y Z XR YR ZR ...)."),
+    F("axes", Type::Strings, "matchPosition: axes (x y z); omitted = all."),
+    F("axis", Type::Enum, "boneDriver: axis.").Values(kAxes),
+    F("origin", Type::Vec3, "transformBone: offset."),
+    F("angles", Type::Vec3, "counterRotate: explicit target; transformBone: rotation."),
+    F("position", Type::Vec3, "forceBonePosRot: position."),
+    F("rotation", Type::Vec3, "forceBonePosRot: rotation."),
+    F("range", Type::Object, "localHierarchy, boneDriver: ramp frames.").Of(&kFrameRampItem),
+    F("local", Type::Bool, "forceBonePosRot: rotation is local."),
+    F("keepDuration", Type::Bool, "noAnimation: keep the frame count."),
+    F("spline", Type::Bool, "linearDelta: spline ease."),
+    F("pre", Type::Bool, "subtract: presubtract."),
+    F("loop", Type::Bool, "worldSpaceBlend: sample by cycle from frame."),
+    F("copyPosition", Type::Bool, "copyPose: copy position (both when neither is set)."),
+    F("copyRotation", Type::Bool, "copyPose: copy rotation."),
+};
+const Item kAnimOpItem = MakeItem("animationOperation", kAnimOp);
+
 // options shared by animations and a sequence's first clip
 const Field kClip[] = {
     F("fps", Type::Number, "Frame rate."),
     F("loop", Type::Bool, "Looping."),
     F("noForceLoop", Type::Bool, "Do not force the loop."),
     F("startLoop", Type::Integer, "Loop restart frame."),
+    F("percentStartLoop", Type::Number, "Loop restart as a percentage."),
+    F("fudgeLoop", Type::Bool, "Fudge the loop."),
     F("frames", Type::Object, "Frame range.").Of(&kFramesItem),
-    F("numFrames", Type::Integer, "Resample to this many frames."),
-    F("reverse", Type::Bool, "Play backwards."),
+    F("frameStart", Type::Integer, "First frame; the end stays the clip's."),
+    F("blockName", Type::String, "Clip of a multi-clip source."),
     F("origin", Type::Vec3, "Clip translation."),
     F("rotate", Type::Number, "Clip yaw in degrees."),
     F("angles", Type::Vec3, "Clip rotation in degrees."),
     F("scale", Type::Number, "Clip scale."),
+    F("motion", Type::Strings, "Motion extraction controls (X Y Z XR YR ZR LX LY LZ LXR LYR LZR LM LQ)."),
     F("motionRollback", Type::Number, "Motion rollback in seconds."),
     F("ignoreScale", Type::Bool, "Ignore $transformmodel scale."),
+    F("ignoreTransformBone", Type::Strings, "Undo bone transforms here: angles, position."),
+    F("noAutoIk", Type::Bool, "No automatic IK release rules."),
+    F("noCull", Type::Bool, "Never culled by the animation cull method."),
+    F("noAnimBlock", Type::Bool, "Keep out of the demand-loaded .ani."),
+    F("noAnimBlockStall", Type::Bool, "First section stays local."),
+    F("noStallFrames", Type::Number, "Frames that never stall."),
+    F("ikRules", Type::List, "IK rules.").Of(&kIkRuleItem),
+    F("operations", Type::List, "Clip operations, applied in order.").Of(&kAnimOpItem),
 };
 const Item kClipItem = MakeItem("clip", kClip);
 
@@ -910,6 +1000,87 @@ const Field kPhysics[] = {
 };
 const Item kPhysicsItem = MakeItem("physics", kPhysics);
 
+// --- model-wide animation settings ---
+
+const Field kWeight[] = {
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("weight", Type::Number, "Weight.").Required(),
+    F("posWeight", Type::Number, "Position weight (the weight when omitted)."),
+};
+const Item kWeightItem = MakeItem("weight", kWeight);
+
+const Field kWeightList[] = {
+    F("name", Type::String, "List name.").Declares("weightList").Required(),
+    F("bones", Type::List, "Bone weights.").Of(&kWeightItem).Required(),
+};
+const Item kWeightListItem = MakeItem("weightList", kWeightList);
+
+const Field kSectionFrames[] = {
+    F("frames", Type::Integer, "Section length in frames.").Required(),
+    F("minLimit", Type::Integer, "Minimum frame limit.").Required(),
+};
+const Item kSectionFramesItem = MakeItem("sectionFrames", kSectionFrames);
+
+const Field kAnimBlocks[] = {
+    F("size", Type::Integer, "Block size; under 1024 reads as kilobytes.").Required(),
+    F("noStall", Type::Bool, "No stall."),
+    F("highRes", Type::Bool, "High resolution cached frames."),
+    F("lowRes", Type::Bool, "Low resolution cached frames."),
+    F("zeroFrames", Type::Integer, "Cached frame count (1-4)."),
+    F("cacheHighRes", Type::Bool, "Cache high resolution."),
+    F("posDelta", Type::Number, "Position delta."),
+};
+const Item kAnimBlocksItem = MakeItem("animBlocks", kAnimBlocks);
+
+const Field kBoneSaveFrame[] = {
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("position", Type::Bool, "Save position."),
+    F("rotation", Type::Bool, "Save rotation."),
+    F("rotation64", Type::Bool, "Save 64-bit rotation."),
+};
+const Item kBoneSaveFrameItem = MakeItem("boneSaveFrame", kBoneSaveFrame);
+
+const Field kSkipTransition[] = {
+    F("nodes", Type::Strings, "Nodes routed directly between each other.").Required(),
+};
+const Item kSkipTransitionItem = MakeItem("skipTransition", kSkipTransition);
+
+const Field kAnimationSettings[] = {
+    F("defaultFps", Type::Number, "Frame rate of new clips."),
+    F("motionRollback", Type::Number, "Motion rollback of new clips."),
+    F("defaultFadeIn", Type::Number, "Fade-in of new sequences."),
+    F("defaultFadeOut", Type::Number, "Fade-out of new sequences."),
+    F("lowercaseSequences", Type::Bool, "Lowercase sequence names."),
+    F("allowedActivities", Type::Strings, "Only these activities may be used."),
+    F("sectionFrames", Type::Object, "Compression sectioning.").Of(&kSectionFramesItem),
+    F("animBlocks", Type::Object, "Demand-loaded animation (.ani).").Of(&kAnimBlocksItem),
+    F("cullMethod", Type::Enum, "Which animations reach the .mdl.").Values(kAnimCulls),
+    F("defaultWeights", Type::List, "The default weight list.").Of(&kWeightItem),
+    F("autoplayLocks", Type::List, "IK locks on autoplay sequences.").Of(&kIkLockItem),
+    F("boneSaveFrames", Type::List, "Bones cached for demand loading.").Of(&kBoneSaveFrameItem),
+    F("skipTransitions", Type::List, "Direct transition routes.").Of(&kSkipTransitionItem),
+    F("calcTransitions", Type::Bool, "Fill multi-stage transition routes."),
+};
+const Item kAnimationSettingsItem = MakeItem("animationSettings", kAnimationSettings);
+
+const Field kPresetChoice[] = {
+    F("group", Type::String, "Model group.").Ref("modelGroup").Required(),
+    F("choice", Type::Integer, "Choice index.").Required(),
+};
+const Item kPresetChoiceItem = MakeItem("presetChoice", kPresetChoice);
+
+const Field kModelGroupPreset[] = {
+    F("name", Type::String, "Preset name.").Declares("modelGroupPreset").Required(),
+    F("choices", Type::List, "Group choices.").Of(&kPresetChoiceItem).Required(),
+};
+const Item kModelGroupPresetItem = MakeItem("modelGroupPreset", kModelGroupPreset);
+
+const Field kHitGroup[] = {
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("group", Type::Integer, "Hit group of its automatic hitbox.").Required(),
+};
+const Item kHitGroupItem = MakeItem("hitGroup", kHitGroup);
+
 // --- files ---
 
 const Field kContent[] = {
@@ -921,6 +1092,7 @@ const Field kContent[] = {
     F("materials", Type::Object, "Materials and skins.").Of(&kMaterialsItem),
     F("meshes", Type::List, "Render meshes.").Of(&kMeshItem),
     F("modelGroups", Type::List, "Model groups (bodygroups).").Of(&kModelGroupItem),
+    F("modelGroupPresets", Type::List, "Named model group combinations.").Of(&kModelGroupPresetItem),
     F("lods", Type::List, "LODs, in switch order.").Of(&kLodItem),
     F("flex", Type::Object, "Flex controllers, rules and morph edits.").Of(&kFlexItem),
     F("face", Type::Object, "Eyeballs, mouths and eyelids.").Of(&kFaceItem),
@@ -928,9 +1100,12 @@ const Field kContent[] = {
     F("dataModelJoints", Type::List, "Bone markup imported from DMX files.").Of(&kDataModelJointsItem),
     F("attachments", Type::List, "Attachments.").Of(&kAttachmentItem),
     F("hitboxSets", Type::List, "Hitbox sets.").Of(&kHitboxSetItem),
+    F("hitGroups", Type::List, "Hit groups of automatic hitboxes.").Of(&kHitGroupItem),
     F("physics", Type::Object, "Collision model and ragdoll.").Of(&kPhysicsItem),
     F("poseParameters", Type::List, "Pose parameters.").Of(&kPoseParameterItem),
     F("ikChains", Type::List, "IK chains.").Of(&kIkChainItem),
+    F("animationSettings", Type::Object, "Model-wide animation settings.").Of(&kAnimationSettingsItem),
+    F("weightLists", Type::List, "Named bone weight lists.").Of(&kWeightListItem),
     F("animations", Type::List, "Named animations.").Of(&kAnimationItem),
     F("sequences", Type::List, "Sequences, in index order.").Of(&kSequenceItem),
     F("includeModels", Type::Strings, "Compiled .mdl files whose sequences this model uses."),
@@ -968,7 +1143,10 @@ const Item* const kAllItems[] = {
     &kAnimatedFrictionItem, &kJointContentsItem, &kJointSurfacePropItem, &kRangeItem,
     &kJiggleCommonItem, &kJiggleFlexibleItem, &kJiggleBaseSpringItem, &kJiggleBoingItem,
     &kJiggleBoneItem, &kDriverTriggerItem, &kDriverBoneItem, &kAimAtItem, &kHierarchyItem,
-    &kTriggerEditItem, &kDataModelJointsItem,
+    &kTriggerEditItem, &kDataModelJointsItem, &kFrameRampItem, &kIkRuleItem, &kAnimOpItem,
+    &kWeightItem, &kWeightListItem, &kSectionFramesItem, &kAnimBlocksItem, &kBoneSaveFrameItem,
+    &kSkipTransitionItem, &kAnimationSettingsItem, &kPresetChoiceItem, &kModelGroupPresetItem,
+    &kHitGroupItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -2555,25 +2733,325 @@ void LowerIk(Emitter& e, const Json& m) {
     }
 }
 
-// The clip options, written after the file so a sequence applies them to its first clip.
-void LowerClip(Emitter& e, const Json& a) {
+void EmitRamp(Emitter& e, const Json& ramp) {
+    for (const char* key : {"start", "peak", "tail", "end"}) e.Num(ramp.at(key));
+}
+
+// True when every key is present; otherwise reports the first missing one.
+bool Need(Emitter& e, const Json& obj, const std::string& what, std::initializer_list<const char*> keys) {
+    for (const char* key : keys)
+        if (!Get(obj, key)) return e.l.Fail(obj, "", what + " needs " + key);
+    return true;
+}
+
+bool EmitIkRule(Emitter& e, const Json& r, const char* word) {
+    const std::string type = Str(r, "type");
+    e.Word(word);
+    e.Text(Str(r, "chain"));
+    e.Word(type);
+    if (type == "touch") {
+        if (!Need(e, r, "a touch rule", {"bone"})) return false;
+        e.Text(Str(r, "bone"));
+    } else if (type == "attachment") {
+        if (!Need(e, r, "an attachment rule", {"attachment"})) return false;
+        e.Text(Str(r, "attachment"));
+    } else if (type == "autosteps") {
+        if (!Need(e, r, "an autosteps rule", {"steps", "bone"})) return false;
+        e.Num(r.at("steps"));
+        e.Text(Str(r, "bone"));
+    }
+
+    EmitClause(e, r, "height", "height");
+    EmitClause(e, r, "target", "target");
+    EmitClause(e, r, "floor", "floor");
+    EmitClause(e, r, "pad", "pad");
+    EmitClause(e, r, "radius", "radius");
+    EmitClause(e, r, "contact", "contact");
+    if (const Json* range = Get(r, "range")) {
+        e.Word("range");
+        EmitRamp(e, *range);
+    }
+    EmitFlag(e, r, "useSequence", "usesequence");
+    EmitFlag(e, r, "useSource", "usesource");
+    EmitClause(e, r, "fakeOrigin", "fakeorigin");
+    EmitClause(e, r, "fakeRotate", "fakerotate");
+    return true;
+}
+
+void EmitControls(Emitter& e, const Json& op, const char* key) {
+    if (const Json* list = Get(op, key))
+        for (const Json& word : *list) e.Word(word.get<std::string>());
+}
+
+bool EmitOperation(Emitter& e, const Json& op) {
+    const std::string name = Str(op, "op");
+    const std::string what = "a " + name + " operation";
+    auto need = [&](std::initializer_list<const char*> keys) { return Need(e, op, what, keys); };
+
+    if (name == "reverse") {
+        e.Word("reverse");
+    } else if (name == "numFrames" || name == "compress") {
+        if (!need({"count"})) return false;
+        e.Word(name == "compress" ? "compress" : "numframes");
+        e.Num(op.at("count"));
+    } else if (name == "ikFixup") {
+        if (!need({"ikRule"})) return false;
+        return EmitIkRule(e, op.at("ikRule"), "ikfixup");
+    } else if (name == "localHierarchy") {
+        if (!need({"bone"})) return false;
+        e.Word("localhierarchy");
+        e.Text(Str(op, "bone"));
+        const Json* parent = Get(op, "parent");
+        e.Text(parent ? parent->get<std::string>() : "");
+        if (const Json* range = Get(op, "range")) {
+            e.Word("range");
+            EmitRamp(e, *range);
+        }
+    } else if (name == "derivative") {
+        if (!need({"scale"})) return false;
+        e.Word("derivative");
+        e.Num(op.at("scale"));
+    } else if (name == "noAnimation") {
+        e.Word(True(op, "keepDuration") ? "noanim_keepduration" : "noanimation");
+    } else if (name == "linearDelta") {
+        e.Word(True(op, "spline") ? "splinedelta" : "lineardelta");
+    } else if (name == "counterRotate") {
+        if (!need({"bone"})) return false;
+        const Json* angles = Get(op, "angles");
+        e.Word(angles ? "counterrotateto" : "counterrotate");
+        if (angles) e.Vec(*angles);
+        e.Text(Str(op, "bone"));
+    } else if (name == "forceBonePosRot") {
+        if (!need({"bone"})) return false;
+        e.Word("forceboneposrot");
+        e.Text(Str(op, "bone"));
+        EmitClause(e, op, "position", "pos");
+        if (const Json* rotation = Get(op, "rotation")) {
+            e.Word("rot");
+            e.Vec(*rotation);
+            EmitFlag(e, op, "local", "local");
+        }
+    } else if (name == "weightList") {
+        if (!need({"weightList"})) return false;
+        e.Word("weightlist");
+        e.Text(Str(op, "weightList"));
+    } else if (name == "subtract") {
+        if (!need({"animation", "frame"})) return false;
+        e.Word(True(op, "pre") ? "presubtract" : "subtract");
+        e.Text(Str(op, "animation"));
+        e.Num(op.at("frame"));
+    } else if (name == "fixupLoop") {
+        if (!need({"start", "end"})) return false;
+        e.Word("fixuploop");
+        e.Num(op.at("start"));
+        e.Num(op.at("end"));
+    } else if (name == "walkFrame" || name == "walkAlignTo" || name == "walkAlign") {
+        const bool reference = name != "walkFrame";
+        if (!need({"frame", "controls"}) || (reference && !need({"animation"})) ||
+            (name == "walkAlign" && !need({"destinationFrame", "sourceFrame"})))
+            return false;
+        e.Word(name == "walkFrame" ? "walkframe" : name == "walkAlignTo" ? "walkalignto" : "walkalign");
+        e.Num(op.at("frame"));
+        if (reference) e.Text(Str(op, "animation"));
+        EmitControls(e, op, "controls");
+        if (name == "walkAlign") {
+            e.Num(op.at("destinationFrame"));
+            e.Num(op.at("sourceFrame"));
+        }
+    } else if (name == "match") {
+        if (!need({"animation"})) return false;
+        e.Word("match");
+        e.Text(Str(op, "animation"));
+    } else if (name == "matchBlend") {
+        if (!need({"animation", "sourceFrame", "destinationFrame", "preFrames", "postFrames"})) return false;
+        e.Word("matchblend");
+        e.Text(Str(op, "animation"));
+        for (const char* key : {"sourceFrame", "destinationFrame", "preFrames", "postFrames"}) e.Num(op.at(key));
+    } else if (name == "transformBone") {
+        if (!need({"bone"})) return false;
+        e.Word("transformbone");
+        e.Text(Str(op, "bone"));
+        EmitClause(e, op, "origin", "origin");
+        EmitClause(e, op, "angles", "angles");
+    } else if (name == "matchPosition") {
+        if (!need({"bone"})) return false;
+        e.Word("matchposition");
+        e.Text(Str(op, "bone"));
+        EmitControls(e, op, "axes");
+    } else if (name == "copyPose") {
+        if (!need({"source", "sourceFrame", "start", "end"})) return false;
+        e.Word("copypose");
+        e.Text(Str(op, "source"));
+        for (const char* key : {"sourceFrame", "start", "end"}) e.Num(op.at(key));
+        EmitClause(e, op, "fadeIn", "fadein");
+        EmitClause(e, op, "fadeOut", "fadeout");
+        EmitFlag(e, op, "copyPosition", "position");
+        EmitFlag(e, op, "copyRotation", "rotation");
+    } else if (name == "worldSpaceBlend") {
+        const bool loop = True(op, "loop");
+        if (!need({"animation"}) || (loop && !need({"frame"}))) return false;
+        e.Word(loop ? "worldspaceblendloop" : "worldspaceblend");
+        e.Text(Str(op, "animation"));
+        if (loop) e.Num(op.at("frame"));
+    } else if (name == "alignTo" || name == "align" || name == "alignBoneTo" || name == "alignBone") {
+        const bool bone = name == "alignBoneTo" || name == "alignBone";
+        const bool frames = name == "align" || name == "alignBone";
+        if (!need({"animation"}) || (bone && !need({"bone"})) ||
+            (frames && !need({"controls", "sourceFrame", "destinationFrame"})))
+            return false;
+        e.Word(name == "alignTo" ? "alignto" : name == "align" ? "align" :
+               name == "alignBoneTo" ? "alignboneto" : "alignbone");
+        if (bone) e.Text(Str(op, "bone"));
+        e.Text(Str(op, "animation"));
+        if (frames) {
+            EmitControls(e, op, "controls");
+            e.Num(op.at("sourceFrame"));
+            e.Num(op.at("destinationFrame"));
+        }
+    } else if (name == "appendAnimation") {
+        if (!need({"animation"})) return false;
+        e.Word("appendanim");
+        e.Text(Str(op, "animation"));
+    } else if (name == "boneDriver") {
+        if (!need({"bone"})) return false;
+        e.Word("bonedriver");
+        e.Text(Str(op, "bone"));
+        if (const Json* axis = Get(op, "axis")) {
+            e.Word("axis");
+            e.Word(axis->get<std::string>());
+        }
+        EmitClause(e, op, "value", "value");
+        if (const Json* range = Get(op, "range")) {
+            e.Word("range");
+            EmitRamp(e, *range);
+        }
+    } else if (name == "rotateTo") {
+        if (!need({"angle"})) return false;
+        e.Word("rotateto");
+        e.Num(op.at("angle"));
+    }
+    return true;
+}
+
+// The clip options, written after the file so a sequence applies them to its first
+// clip. IK rules and operations get a line each: several read clauses up to line end.
+bool LowerClip(Emitter& e, const Json& a) {
     EmitClause(e, a, "fps", "fps");
     EmitFlag(e, a, "loop", "loop");
     EmitFlag(e, a, "noForceLoop", "noforceloop");
     EmitClause(e, a, "startLoop", "startloop");
+    EmitClause(e, a, "percentStartLoop", "percentstartloop");
+    EmitFlag(e, a, "fudgeLoop", "fudgeloop");
     if (const Json* frames = Get(a, "frames")) {
         e.Word("frame");
         e.Num(frames->at("start"));
         e.Num(frames->at("end"));
     }
-    EmitClause(e, a, "numFrames", "numframes");
-    EmitFlag(e, a, "reverse", "reverse");
+    EmitClause(e, a, "frameStart", "framestart");
+    EmitClause(e, a, "blockName", "blockname");
     EmitClause(e, a, "origin", "origin");
     EmitClause(e, a, "rotate", "rotate");
     EmitClause(e, a, "angles", "angles");
     EmitClause(e, a, "scale", "scale");
+    EmitControls(e, a, "motion");
     EmitClause(e, a, "motionRollback", "motionrollback");
     EmitFlag(e, a, "ignoreScale", "ignorescale");
+    if (const Json* list = Get(a, "ignoreTransformBone"))
+        for (const Json& which : *list) {
+            e.Word("ignoretransformbone");
+            e.Word(which.get<std::string>());
+        }
+    EmitFlag(e, a, "noAutoIk", "noautoik");
+    EmitFlag(e, a, "noCull", "nocull");
+    EmitFlag(e, a, "noAnimBlock", "noanimblock");
+    EmitFlag(e, a, "noAnimBlockStall", "noanimblockstall");
+    EmitClause(e, a, "noStallFrames", "nostallframes");
+
+    if (const Json* rules = Get(a, "ikRules")) {
+        for (const Json& r : *rules) {
+            e.Line(r);
+            if (!EmitIkRule(e, r, "ikrule")) return false;
+        }
+    }
+    if (const Json* ops = Get(a, "operations")) {
+        for (const Json& op : *ops) {
+            e.Line(op);
+            if (!EmitOperation(e, op)) return false;
+        }
+    }
+    return true;
+}
+
+// `{ bone weight [posweight p] ... }`
+void EmitWeights(Emitter& e, const Json& weights) {
+    e.Word("{");
+    for (const Json& w : weights) {
+        e.Text(Str(w, "bone"));
+        e.Num(w.at("weight"));
+        EmitClause(e, w, "posWeight", "posweight");
+    }
+    e.Word("}");
+}
+
+// Defaults that only reach the clips and sequences written after them.
+void LowerAnimationSettings(Emitter& e, const Json& a) {
+    static const struct { const char* key; const char* command; } kValues[] = {
+        {"defaultFps", "$defaultfps"}, {"motionRollback", "$motionrollback"},
+        {"defaultFadeIn", "$defaultfadein"}, {"defaultFadeOut", "$defaultfadeout"},
+    };
+    for (const auto& value : kValues) {
+        const Json* v = Get(a, value.key);
+        if (!v) continue;
+        e.Command(value.command, a, value.key);
+        e.Num(*v);
+    }
+    if (True(a, "lowercaseSequences")) e.Command("$lcaseallsequences", a, "lowercaseSequences");
+    if (const Json* names = Get(a, "allowedActivities")) {
+        for (const Json& name : *names) {
+            e.Command("$allowactivityname", a, "allowedActivities");
+            e.Text(name.get<std::string>());
+        }
+    }
+    if (const Json* s = Get(a, "sectionFrames")) {
+        e.Command("$sectionframes", *s);
+        e.Num(s->at("frames"));
+        e.Num(s->at("minLimit"));
+    }
+    if (const Json* b = Get(a, "animBlocks")) {
+        e.Command("$animblocksize", *b);
+        e.Num(b->at("size"));
+        EmitFlag(e, *b, "noStall", "nostall");
+        EmitFlag(e, *b, "highRes", "highres");
+        EmitFlag(e, *b, "lowRes", "lowres");
+        EmitClause(e, *b, "zeroFrames", "numframes");
+        EmitFlag(e, *b, "cacheHighRes", "cachehighres");
+        EmitClause(e, *b, "posDelta", "posdelta");
+    }
+    if (const Json* v = Get(a, "cullMethod")) {
+        e.Command("$animationcullmethod", a, "cullMethod");
+        e.Word(v->get<std::string>());
+    }
+    if (const Json* weights = Get(a, "defaultWeights")) {
+        e.Command("$defaultweightlist", a, "defaultWeights");
+        EmitWeights(e, *weights);
+    }
+    if (const Json* locks = Get(a, "autoplayLocks")) {
+        for (const Json& lock : *locks) {
+            e.Command("$ikautoplaylock", lock);
+            e.Text(Str(lock, "chain"));
+            e.Num(lock.at("position"));
+            e.Num(lock.at("rotation"));
+        }
+    }
+    if (const Json* saves = Get(a, "boneSaveFrames")) {
+        for (const Json& s : *saves) {
+            e.Command("$bonesaveframe", s);
+            e.Text(Str(s, "bone"));
+            EmitFlag(e, s, "position", "position");
+            EmitFlag(e, s, "rotation", "rotation");
+            EmitFlag(e, s, "rotation64", "rotation64");
+        }
+    }
 }
 
 // A declared slot is only a name: anything else on it would be dropped silently.
@@ -2600,8 +3078,7 @@ bool LowerAnimation(Emitter& e, const Json& a) {
     if (!bindPose) e.Text(Str(a, "file"));
     EmitFlag(e, a, "snap", "snap");
     EmitFlag(e, a, "post", "post");
-    LowerClip(e, a);
-    return true;
+    return LowerClip(e, a);
 }
 
 bool LowerSequence(Emitter& e, const Json& s) {
@@ -2702,7 +3179,7 @@ bool LowerSequence(Emitter& e, const Json& s) {
         e.Word("keyvalues");
         if (!EmitKeyValues(e, *text)) return false;
     }
-    LowerClip(e, s);
+    if (!LowerClip(e, s)) return false;
 
     // an event reads an options string from the rest of its line, so each sits on its own
     if (const Json* events = Get(s, "events")) {
@@ -2743,6 +3220,18 @@ bool Lower(Emitter& e, const Json& m) {
     if (const Json* groups = Get(m, "modelGroups"))
         for (const Json& group : *groups)
             if (!LowerModelGroup(e, group)) return false;
+    if (const Json* presets = Get(m, "modelGroupPresets")) {
+        for (const Json& preset : *presets) {
+            e.Command("$modelgrouppreset", preset);
+            e.Text(Str(preset, "name"));
+            e.Word("{");
+            for (const Json& choice : preset.at("choices")) {
+                e.Text(Str(choice, "group"));
+                e.Num(choice.at("choice"));
+            }
+            e.Word("}");
+        }
+    }
     if (settings && !LowerPoints(e, *settings)) return false;
 
     if (materials) {
@@ -2787,13 +3276,42 @@ bool Lower(Emitter& e, const Json& m) {
         for (const Json& a : *list) LowerAttachment(e, a);
     if (const Json* list = Get(m, "hitboxSets"))
         for (const Json& set : *list) LowerHitboxSet(e, set);
+    if (const Json* list = Get(m, "hitGroups")) {
+        for (const Json& g : *list) {
+            e.Command("$hgroup", g);
+            e.Num(g.at("group"));
+            e.Text(Str(g, "bone"));
+        }
+    }
     LowerIk(e, m);
+
+    const Json* animation = Get(m, "animationSettings");
+    if (animation) LowerAnimationSettings(e, *animation);
+    if (const Json* lists = Get(m, "weightLists")) {
+        for (const Json& list : *lists) {
+            e.Command("$weightlist", list);
+            e.Text(Str(list, "name"));
+            EmitWeights(e, list.at("bones"));
+        }
+    }
     if (const Json* list = Get(m, "animations"))
         for (const Json& a : *list)
             if (!LowerAnimation(e, a)) return false;
     if (const Json* list = Get(m, "sequences"))
         for (const Json& s : *list)
             if (!LowerSequence(e, s)) return false;
+
+    // transition nodes are numbered as they are first named, so after every sequence
+    if (animation) {
+        if (const Json* skips = Get(*animation, "skipTransitions")) {
+            for (const Json& skip : *skips) {
+                e.Command("$skiptransition", skip);
+                EmitNames(e, skip.at("nodes"));
+            }
+        }
+        if (True(*animation, "calcTransitions"))
+            e.Command("$calctransitions", *animation, "calcTransitions");
+    }
     if (const Json* list = Get(m, "includeModels")) {
         for (const Json& name : *list) {
             e.Command("$includemodel", m, "includeModels");
