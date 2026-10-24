@@ -89,6 +89,9 @@ const char* const kUpAxes[] = {"x", "-x", "y", "-y", "z", "-z", nullptr};
 const char* const kBoneCulls[] = {"aggressive", "leafonly", "none", nullptr};
 const char* const kSkinnedBoneCulls[] = {"aggressive", "tree", nullptr};
 const char* const kAxes[] = {"x", "y", "z", nullptr};
+const char* const kFlexCulls[] = {"aggressive", "rules_only", "duplicates", "none", nullptr};
+const char* const kTranslations[] = {"tx", "ty", "tz", nullptr};
+const char* const kLids[] = {"upper", "lower", nullptr};
 
 // --- model settings ---
 
@@ -523,6 +526,131 @@ const Field kSequence[] = {
 };
 const Item kSequenceItem = MakeItem("sequence", kSequence, &kClipItem);
 
+// --- flex and face ---
+
+const Field kDataModelFlexes[] = {
+    F("file", Type::File, "DMX holding the flex rig.").Required(),
+    F("controllers", Type::Bool, "Import its flex controllers."),
+    F("correctives", Type::Bool, "Import its correctives (needs controllers)."),
+    F("dominators", Type::Bool, "Import its domination rules (needs correctives)."),
+    F("rules", Type::Bool, "Import its flex rules."),
+};
+const Item kDataModelFlexesItem = MakeItem("dataModelFlexes", kDataModelFlexes);
+
+const Field kFlexController[] = {
+    F("name", Type::String, "Controller name.").Declares("flexController").Required(),
+    F("group", Type::String, "Controller group.").Required(),
+    F("min", Type::Number, "Range start (0 when omitted)."),
+    F("max", Type::Number, "Range end (1 when omitted)."),
+};
+const Item kFlexControllerItem = MakeItem("flexController", kFlexController);
+
+const Field kFlexRule[] = {
+    F("name", Type::String, "Morph or local variable the rule drives.").Ref("morph").Required(),
+    F("expression", Type::String, "Rule expression: controller names, %morph, numbers, operators.").Required(),
+};
+const Item kFlexRuleItem = MakeItem("flexRule", kFlexRule);
+
+const Field kFlexCorrective[] = {
+    F("name", Type::String, "Corrective morph.").Ref("morph").Required(),
+    F("controls", Type::Strings, "Controls that must all be up: controller, or %morph.").Required(),
+};
+const Item kFlexCorrectiveItem = MakeItem("flexCorrective", kFlexCorrective);
+
+const Field kFlexDomination[] = {
+    F("name", Type::String, "Morph that is suppressed.").Ref("morph").Required(),
+    F("dominators", Type::Strings, "Controls suppressing it: controller, or %morph.").Required(),
+};
+const Item kFlexDominationItem = MakeItem("flexDomination", kFlexDomination);
+
+const Field kStereoSplit[] = {
+    F("morph", Type::String, "Morph split into <name>L/<name>R.").Ref("morph").Required(),
+    F("splitFactor", Type::Number, "Balance from vertex X when the mesh has none; 0 = mesh balance."),
+};
+const Item kStereoSplitItem = MakeItem("stereoSplit", kStereoSplit);
+
+const Field kMorphRename[] = {
+    F("morph", Type::String, "Source morph.").Ref("morph").Required(),
+    F("to", Type::String, "New name.").Required(),
+};
+const Item kMorphRenameItem = MakeItem("morphRename", kMorphRename);
+
+const Field kMorphValue[] = {
+    F("morph", Type::String, "Morph.").Ref("morph").Required(),
+    F("value", Type::Number, "Amount.").Required(),
+};
+const Item kMorphValueItem = MakeItem("morphValue", kMorphValue);
+
+const Field kBoneFlexDriver[] = {
+    F("bone", Type::String, "Driving bone.").Ref("bone").Required(),
+    F("component", Type::Enum, "Translation axis.").Values(kTranslations).Required(),
+    F("controller", Type::String, "Driven flex controller.").Ref("flexController").Required(),
+    F("min", Type::Number, "Translation at controller 0.").Required(),
+    F("max", Type::Number, "Translation at controller 1.").Required(),
+};
+const Item kBoneFlexDriverItem = MakeItem("boneFlexDriver", kBoneFlexDriver);
+
+const Field kFlex[] = {
+    F("dataModel", Type::List, "Flex rigs imported from DMX files.").Of(&kDataModelFlexesItem),
+    F("controllers", Type::List, "Flex controllers.").Of(&kFlexControllerItem),
+    F("localVars", Type::Strings, "Flex rule variables that drive no geometry."),
+    F("rules", Type::List, "Flex rules.").Of(&kFlexRuleItem),
+    F("correctives", Type::List, "Correctives.").Of(&kFlexCorrectiveItem),
+    F("dominations", Type::List, "Domination rules.").Of(&kFlexDominationItem),
+    F("stereoSplits", Type::List, "Morphs split into left/right halves.").Of(&kStereoSplitItem),
+    F("renames", Type::List, "Morph renames.").Of(&kMorphRenameItem),
+    F("fixed", Type::List, "Morph amounts baked into the rest mesh (0-1).").Of(&kMorphValueItem),
+    F("wrinkleScales", Type::List, "Wrinkle scale per morph.").Of(&kMorphValueItem),
+    F("boneDrivers", Type::List, "Bone translations driving controllers.").Of(&kBoneFlexDriverItem),
+    F("cullMethod", Type::Enum, "How hard unused flex data is pruned.").Values(kFlexCulls),
+};
+const Item kFlexItem = MakeItem("flex", kFlex);
+
+const Field kEyeball[] = {
+    F("name", Type::String, "Eyeball name.").Declares("eyeball").Required(),
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("material", Type::String, "Eyeball material.").Ref("material").Required(),
+    F("origin", Type::Vec3, "Center; with center, an offset from it."),
+    F("center", Type::Bool, "Center on the material's vertices."),
+    F("diameter", Type::Number, "Diameter."),
+    F("angle", Type::Number, "Angle in degrees."),
+    F("pupilScale", Type::Number, "Pupil scale."),
+};
+const Item kEyeballItem = MakeItem("eyeball", kEyeball);
+
+const Field kMouth[] = {
+    F("controller", Type::String, "Flex controller.").Ref("flexController").Required(),
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("forward", Type::Vec3, "Forward direction.").Required(),
+};
+const Item kMouthItem = MakeItem("mouth", kMouth);
+
+const Field kLidPose[] = {
+    F("delta", Type::String, "Delta state; omitted = no vertex data.").Ref("morph"),
+    F("target", Type::Number, "Lid target.").Required(),
+};
+const Item kLidPoseItem = MakeItem("lidPose", kLidPose);
+
+const Field kEyelid[] = {
+    F("type", Type::Enum, "Lid.").Values(kLids).Required(),
+    F("lowerer", Type::Object, "Lowered pose.").Of(&kLidPoseItem).Required(),
+    F("neutral", Type::Object, "Neutral pose.").Of(&kLidPoseItem).Required(),
+    F("raiser", Type::Object, "Raised pose.").Of(&kLidPoseItem).Required(),
+    F("split", Type::Number, "Mask deltas to one side; sign picks the side."),
+    F("rightEyeball", Type::String, "Right eyeball (paired form).").Ref("eyeball"),
+    F("leftEyeball", Type::String, "Left eyeball (paired form).").Ref("eyeball"),
+    F("eyeball", Type::String, "One eyeball (per-eye form, needs flexDesc).").Ref("eyeball"),
+    F("flexDesc", Type::String, "Lid flexdesc name (per-eye form)."),
+};
+const Item kEyelidItem = MakeItem("eyelid", kEyelid);
+
+const Field kFace[] = {
+    F("eyeballs", Type::List, "Eyeballs.").Of(&kEyeballItem),
+    F("mouths", Type::List, "Mouths, in index order.").Of(&kMouthItem),
+    F("eyelids", Type::List, "Eyelids.").Of(&kEyelidItem),
+};
+const Item kFaceItem = MakeItem("face", kFace);
+
 // --- files ---
 
 const Field kContent[] = {
@@ -535,6 +663,8 @@ const Field kContent[] = {
     F("meshes", Type::List, "Render meshes.").Of(&kMeshItem),
     F("modelGroups", Type::List, "Model groups (bodygroups).").Of(&kModelGroupItem),
     F("lods", Type::List, "LODs, in switch order.").Of(&kLodItem),
+    F("flex", Type::Object, "Flex controllers, rules and morph edits.").Of(&kFlexItem),
+    F("face", Type::Object, "Eyeballs, mouths and eyelids.").Of(&kFaceItem),
     F("bones", Type::Object, "Skeleton edits.").Of(&kBonesItem),
     F("attachments", Type::List, "Attachments.").Of(&kAttachmentItem),
     F("hitboxSets", Type::List, "Hitbox sets.").Of(&kHitboxSetItem),
@@ -569,7 +699,10 @@ const Item* const kAllItems[] = {
     &kTransformWeightsItem, &kAttachmentItem, &kHitboxSetItem, &kHitboxItem, &kPoseParameterItem,
     &kIkChainItem, &kClipItem, &kFramesItem, &kAnimationItem, &kSequenceItem, &kActivityItem,
     &kBlendItem, &kAddLayerItem, &kBlendLayerItem, &kIkLockItem, &kEventItem, &kAnimTagItem,
-    &kTransitionItem,
+    &kTransitionItem, &kFlexItem, &kDataModelFlexesItem, &kFlexControllerItem, &kFlexRuleItem,
+    &kFlexCorrectiveItem, &kFlexDominationItem, &kStereoSplitItem, &kMorphRenameItem,
+    &kMorphValueItem, &kBoneFlexDriverItem, &kFaceItem, &kEyeballItem, &kMouthItem,
+    &kLidPoseItem, &kEyelidItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -1518,6 +1651,142 @@ bool LowerLod(Emitter& e, const Json& lod) {
     return true;
 }
 
+void LowerFlex(Emitter& e, const Json& f) {
+    if (const Json* list = Get(f, "dataModel")) {
+        for (const Json& d : *list) {
+            e.Command("$datamodelflexes", d);
+            e.Text(Str(d, "file"));
+            EmitFlag(e, d, "controllers", "flexcontroller");
+            EmitFlag(e, d, "correctives", "flexcorrective");
+            EmitFlag(e, d, "dominators", "flexdominator");
+            EmitFlag(e, d, "rules", "flexrule");
+        }
+    }
+    // one command per controller: a range applies to the names after it, so it never leaks
+    if (const Json* list = Get(f, "controllers")) {
+        for (const Json& c : *list) {
+            e.Command("$flexcontroller", c);
+            e.Text(Str(c, "group"));
+            if (Get(c, "min") || Get(c, "max")) {
+                e.Word("range");
+                e.Num(Get(c, "min") ? c.at("min") : Json(0));
+                e.Num(Get(c, "max") ? c.at("max") : Json(1));
+            }
+            e.Text(Str(c, "name"));
+        }
+    }
+    if (const Json* names = Get(f, "localVars"); names && !names->empty()) {
+        e.Command("$flexlocalvar", f, "localVars");
+        EmitNames(e, *names);
+    }
+    if (const Json* list = Get(f, "rules")) {
+        for (const Json& r : *list) {
+            e.Command("$flexrule", r);
+            e.Text(Str(r, "name"));
+            e.Word("=");
+            e.Text(Str(r, "expression"));
+        }
+    }
+    static const struct { const char* list; const char* key; const char* command; } kCombos[] = {
+        {"correctives", "controls", "$flexcorrective"},
+        {"dominations", "dominators", "$flexdominate"},
+    };
+    for (const auto& combo : kCombos) {
+        const Json* list = Get(f, combo.list);
+        if (!list) continue;
+        for (const Json& r : *list) {
+            e.Command(combo.command, r);
+            e.Text(Str(r, "name"));
+            EmitNames(e, r.at(combo.key));
+        }
+    }
+    if (const Json* list = Get(f, "stereoSplits")) {
+        for (const Json& s : *list) {
+            e.Command("$morphsplitstereo", s);
+            EmitClause(e, s, "splitFactor", "splitfactor");
+            e.Text(Str(s, "morph"));
+        }
+    }
+    if (const Json* list = Get(f, "renames")) {
+        for (const Json& r : *list) {
+            e.Command("$renamemorph", r);
+            e.Text(Str(r, "morph"));
+            e.Text(Str(r, "to"));
+        }
+    }
+    static const struct { const char* list; const char* command; } kValues[] = {
+        {"fixed", "$setflex"}, {"wrinkleScales", "$wrinklescale"}};
+    for (const auto& values : kValues) {
+        const Json* list = Get(f, values.list);
+        if (!list) continue;
+        for (const Json& v : *list) {
+            e.Command(values.command, v);
+            e.Text(Str(v, "morph"));
+            e.Num(v.at("value"));
+        }
+    }
+    if (const Json* list = Get(f, "boneDrivers")) {
+        for (const Json& d : *list) {
+            e.Command("$boneflexdriver", d);
+            e.Text(Str(d, "bone"));
+            e.Word(Str(d, "component"));
+            e.Text(Str(d, "controller"));
+            e.Num(d.at("min"));
+            e.Num(d.at("max"));
+        }
+    }
+    if (const Json* v = Get(f, "cullMethod")) {
+        e.Command("$flexcullmethod", f, "cullMethod");
+        e.Word(v->get<std::string>());
+    }
+}
+
+// Eyeballs first: an eyelid names the eyeballs it closes over.
+bool LowerFace(Emitter& e, const Json& face) {
+    if (const Json* list = Get(face, "eyeballs")) {
+        for (const Json& b : *list) {
+            if (!Get(b, "origin") && !True(b, "center"))
+                return e.l.Fail(b, "", "an eyeball takes origin, or center: true");
+            e.Command("$eyeball", b);
+            e.Text(Str(b, "name"));
+            EmitClause(e, b, "bone", "bone");
+            EmitClause(e, b, "origin", "origin");
+            EmitFlag(e, b, "center", "center");
+            EmitClause(e, b, "material", "material");
+            EmitClause(e, b, "diameter", "diameter");
+            EmitClause(e, b, "angle", "angle");
+            EmitClause(e, b, "pupilScale", "pupilscale");
+        }
+    }
+    if (const Json* list = Get(face, "mouths")) {
+        for (const Json& m : *list) {
+            e.Command("$mouth", m);
+            e.Text(Str(m, "controller"));
+            e.Text(Str(m, "bone"));
+            e.Vec(m.at("forward"));
+        }
+    }
+    if (const Json* list = Get(face, "eyelids")) {
+        for (const Json& lid : *list) {
+            e.Command("$eyelid", lid);
+            e.Word(Str(lid, "type"));
+            for (const char* pose : {"lowerer", "neutral", "raiser"}) {
+                const Json& p = lid.at(pose);
+                e.Word(pose);
+                const Json* delta = Get(p, "delta");
+                e.Text(delta ? delta->get<std::string>() : "-");
+                e.Num(p.at("target"));
+            }
+            EmitClause(e, lid, "split", "split");
+            EmitClause(e, lid, "flexDesc", "flexdesc");
+            EmitClause(e, lid, "eyeball", "eyeball");
+            EmitClause(e, lid, "rightEyeball", "righteyeball");
+            EmitClause(e, lid, "leftEyeball", "lefteyeball");
+        }
+    }
+    return true;
+}
+
 void LowerBones(Emitter& e, const Json& b) {
     if (const Json* list = Get(b, "define")) {
         for (const Json& d : *list) {
@@ -1876,6 +2145,8 @@ bool Lower(Emitter& e, const Json& m) {
     if (const Json* lods = Get(m, "lods"))
         for (const Json& lod : *lods)
             if (!LowerLod(e, lod)) return false;
+    if (const Json* face = Get(m, "face"); face && !LowerFace(e, *face)) return false;
+    if (const Json* flex = Get(m, "flex")) LowerFlex(e, *flex);
     if (const Json* bones = Get(m, "bones")) LowerBones(e, *bones);
     if (const Json* list = Get(m, "attachments"))
         for (const Json& a : *list) LowerAttachment(e, a);
