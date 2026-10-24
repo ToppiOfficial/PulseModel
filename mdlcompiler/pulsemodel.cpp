@@ -92,6 +92,21 @@ const char* const kAxes[] = {"x", "y", "z", nullptr};
 const char* const kFlexCulls[] = {"aggressive", "rules_only", "duplicates", "none", nullptr};
 const char* const kTranslations[] = {"tx", "ty", "tz", nullptr};
 const char* const kLids[] = {"upper", "lower", nullptr};
+const char* const kPrimitives[] = {"box", "sphere", "capsule", nullptr};
+const char* const kImportTypes[] = {"perjoint", "singlejoint", "singlehull", nullptr};
+const char* const kJointTypes[] = {"free", "limit", "fixed", nullptr};
+
+// --- KeyValues ---
+
+// A KeyValues block keeps its order and may repeat keys ("break" per gib), so it
+// is a list of entries rather than a JSON object.
+extern const Item kKeyValueItem;
+const Field kKeyValue[] = {
+    F("key", Type::String, "Key.").Required(),
+    F("value", Type::String, "Value; omit when block is given."),
+    F("block", Type::List, "Nested entries.").Of(&kKeyValueItem),
+};
+const Item kKeyValueItem = MakeItem("keyValue", kKeyValue);
 
 // --- model settings ---
 
@@ -158,6 +173,7 @@ const Field kSettings[] = {
     F("castTextureShadows", Type::Bool, "Cast texture shadows."),
     F("constantDirectionalLight", Type::Number, "Constant directional light scale (0-1)."),
     F("skipBoneInBBox", Type::Bool, "Auto hitboxes grow from vertices only."),
+    F("keyValues", Type::List, "The model's KeyValues text.").Of(&kKeyValueItem),
     F("allowRootLods", Type::Integer, "Allowed root LOD count."),
     F("minLod", Type::Integer, "Promote this LOD to root."),
 };
@@ -523,6 +539,7 @@ const Field kSequence[] = {
     F("node", Type::String, "Transition node."),
     F("transition", Type::Object, "Transition between nodes.").Of(&kTransitionItem),
     F("activityModifiers", Type::Strings, "Activity modifiers."),
+    F("keyValues", Type::List, "The sequence's KeyValues text.").Of(&kKeyValueItem),
 };
 const Item kSequenceItem = MakeItem("sequence", kSequence, &kClipItem);
 
@@ -651,6 +668,126 @@ const Field kFace[] = {
 };
 const Item kFaceItem = MakeItem("face", kFace);
 
+// --- physics ---
+
+const Field kPrimitive[] = {
+    F("type", Type::Enum, "Primitive shape.").Values(kPrimitives).Required(),
+    F("bone", Type::String, "Bone the hull is on; values are in its space.").Ref("bone").Required(),
+    F("min", Type::Vec3, "Box minimum."),
+    F("max", Type::Vec3, "Box maximum."),
+    F("angles", Type::Vec3, "Box orientation."),
+    F("center", Type::Vec3, "Sphere center."),
+    F("radius", Type::Number, "Sphere radius."),
+    F("point0", Type::Vec3, "Capsule start."),
+    F("point1", Type::Vec3, "Capsule end."),
+    F("radius0", Type::Number, "Capsule start radius."),
+    F("radius1", Type::Number, "Capsule end radius."),
+    F("segments", Type::Integer, "Sphere/capsule tessellation."),
+};
+const Item kPrimitiveItem = MakeItem("physicsPrimitive", kPrimitive);
+
+const Field kPhysicsShape[] = {
+    F("file", Type::File, "Collision source file."),
+    F("renderMesh", Type::String, "Generate from this render mesh.").Ref("mesh"),
+    F("fromRender", Type::Bool, "Generate from the whole render model."),
+    F("primitive", Type::Object, "A box, sphere or capsule hull.").Of(&kPrimitiveItem),
+    F("offsetOrigin", Type::Vec3, "Translation."),
+    F("offsetAngles", Type::Vec3, "Rotation."),
+    F("importScale", Type::Number, "Scale."),
+    F("parentBone", Type::String, "Bone the shape belongs to.").Ref("bone"),
+    F("maxConvex", Type::Integer, "Convex piece limit."),
+    F("importType", Type::Enum, "File shapes: how parts are bound to bones.").Values(kImportTypes),
+    F("concave", Type::Bool, "File shapes: keep concave pieces."),
+    F("remove2d", Type::Bool, "File shapes: drop flat pieces."),
+    F("decimationFactor", Type::Number, "Generated shapes: decimation."),
+    F("cullWeight", Type::Number, "Generated shapes: bone weight cull (0-1)."),
+    F("concavity", Type::Number, "Generated shapes: concavity."),
+    F("maxHulls", Type::Integer, "Generated shapes: hull limit."),
+    F("maxDepth", Type::Integer, "Generated shapes: split depth (0-10)."),
+    F("extraBones", Type::Strings, "Generated shapes: more bones to include.").Ref("bone"),
+    F("excludeMeshes", Type::Strings, "Whole-model generation: render meshes left out.").Ref("mesh"),
+};
+const Item kPhysicsShapeItem = MakeItem("physicsShape", kPhysicsShape);
+
+const Field kJointAxis[] = {
+    F("axis", Type::Enum, "Axis.").Values(kAxes).Required(),
+    F("type", Type::Enum, "Motion.").Values(kJointTypes).Required(),
+    F("min", Type::Number, "Limit minimum in degrees."),
+    F("max", Type::Number, "Limit maximum in degrees."),
+    F("friction", Type::Number, "Friction (1 when omitted)."),
+};
+const Item kJointAxisItem = MakeItem("jointAxis", kJointAxis);
+
+const Field kPhysicsJoint[] = {
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("axes", Type::List, "Axes; an axis left out is locked.").Of(&kJointAxisItem).Required(),
+};
+const Item kPhysicsJointItem = MakeItem("physicsJoint", kPhysicsJoint);
+
+const Field kPhysicsMarkup[] = {
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("massBias", Type::Number, "Mass bias."),
+    F("inertia", Type::Number, "Inertia."),
+    F("damping", Type::Number, "Damping."),
+    F("rotDamping", Type::Number, "Rotation damping."),
+    F("skip", Type::Bool, "No body for this bone."),
+    F("mergeInto", Type::String, "Merge this body into another bone's.").Ref("bone"),
+};
+const Item kPhysicsMarkupItem = MakeItem("physicsMarkup", kPhysicsMarkup);
+
+const Field kBonePair[] = {
+    F("a", Type::String, "First bone.").Ref("bone").Required(),
+    F("b", Type::String, "Second bone.").Ref("bone").Required(),
+};
+const Item kBonePairItem = MakeItem("bonePair", kBonePair);
+
+const Field kAnimatedFriction[] = {
+    F("min", Type::Integer, "Minimum friction.").Required(),
+    F("max", Type::Integer, "Maximum friction.").Required(),
+    F("timeIn", Type::Number, "Ramp-in time.").Required(),
+    F("timeOut", Type::Number, "Ramp-out time.").Required(),
+    F("timeHold", Type::Number, "Hold time.").Required(),
+};
+const Item kAnimatedFrictionItem = MakeItem("animatedFriction", kAnimatedFriction);
+
+const Field kJointContents[] = {
+    F("bone", Type::String, "Bone; its children inherit.").Ref("bone").Required(),
+    F("contents", Type::Strings, "Contents words, as model.contents.").Required(),
+};
+const Item kJointContentsItem = MakeItem("jointContents", kJointContents);
+
+const Field kJointSurfaceProp[] = {
+    F("bone", Type::String, "Bone; its children inherit.").Ref("bone").Required(),
+    F("surfaceProp", Type::String, "Surface property.").Required(),
+};
+const Item kJointSurfacePropItem = MakeItem("jointSurfaceProp", kJointSurfaceProp);
+
+const Field kPhysics[] = {
+    F("dataModel", Type::File, "DMX whose physics shapes are imported."),
+    F("shapes", Type::List, "Collision shapes.").Of(&kPhysicsShapeItem),
+    F("joints", Type::List, "Ragdoll joints, one entry per bone.").Of(&kPhysicsJointItem),
+    F("markups", Type::List, "Per-body overrides, one entry per bone.").Of(&kPhysicsMarkupItem),
+    F("collisions", Type::List, "Body pairs that collide.").Of(&kBonePairItem),
+    F("mass", Type::Number, "Mass in kg."),
+    F("autoMass", Type::Bool, "Mass from volume."),
+    F("massCenter", Type::Vec3, "Center of mass."),
+    F("rootBone", Type::String, "Root body bone.").Ref("bone"),
+    F("damping", Type::Number, "Damping."),
+    F("rotDamping", Type::Number, "Rotation damping."),
+    F("inertia", Type::Number, "Inertia."),
+    F("drag", Type::Number, "Drag."),
+    F("weldPosition", Type::Number, "Position weld epsilon."),
+    F("weldNormal", Type::Number, "Normal weld epsilon."),
+    F("noSelfCollisions", Type::Bool, "Bodies never collide with each other."),
+    F("assumeWorldSpace", Type::Bool, "Source is already in world space."),
+    F("phyName", Type::String, "Name of the .phy, when not the model's."),
+    F("animatedFriction", Type::Object, "Animated friction.").Of(&kAnimatedFrictionItem),
+    F("jointContents", Type::List, "Trace contents per bone.").Of(&kJointContentsItem),
+    F("jointSurfaceProps", Type::List, "Surface property per bone.").Of(&kJointSurfacePropItem),
+    F("collisionText", Type::List, "The .phy's KeyValues text (gibs, break pieces, ...).").Of(&kKeyValueItem),
+};
+const Item kPhysicsItem = MakeItem("physics", kPhysics);
+
 // --- files ---
 
 const Field kContent[] = {
@@ -668,6 +805,7 @@ const Field kContent[] = {
     F("bones", Type::Object, "Skeleton edits.").Of(&kBonesItem),
     F("attachments", Type::List, "Attachments.").Of(&kAttachmentItem),
     F("hitboxSets", Type::List, "Hitbox sets.").Of(&kHitboxSetItem),
+    F("physics", Type::Object, "Collision model and ragdoll.").Of(&kPhysicsItem),
     F("poseParameters", Type::List, "Pose parameters.").Of(&kPoseParameterItem),
     F("ikChains", Type::List, "IK chains.").Of(&kIkChainItem),
     F("animations", Type::List, "Named animations.").Of(&kAnimationItem),
@@ -702,7 +840,9 @@ const Item* const kAllItems[] = {
     &kTransitionItem, &kFlexItem, &kDataModelFlexesItem, &kFlexControllerItem, &kFlexRuleItem,
     &kFlexCorrectiveItem, &kFlexDominationItem, &kStereoSplitItem, &kMorphRenameItem,
     &kMorphValueItem, &kBoneFlexDriverItem, &kFaceItem, &kEyeballItem, &kMouthItem,
-    &kLidPoseItem, &kEyelidItem,
+    &kLidPoseItem, &kEyelidItem, &kKeyValueItem, &kPhysicsItem, &kPrimitiveItem,
+    &kPhysicsShapeItem, &kJointAxisItem, &kPhysicsJointItem, &kPhysicsMarkupItem, &kBonePairItem,
+    &kAnimatedFrictionItem, &kJointContentsItem, &kJointSurfacePropItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -1348,6 +1488,8 @@ void EmitNames(Emitter& e, const Json& list) {
     for (const Json& name : list) e.Text(name.get<std::string>());
 }
 
+bool EmitKeyValues(Emitter& e, const Json& entries);
+
 bool LowerSettings(Emitter& e, const Json& m) {
     if (const Json* name = Get(m, "name")) {
         e.Command("$modelname", m, "name");
@@ -1423,6 +1565,10 @@ bool LowerSettings(Emitter& e, const Json& m) {
         e.Command("$cbox", *box);
         e.Vec(box->at("min"));
         e.Vec(box->at("max"));
+    }
+    if (const Json* text = Get(m, "keyValues")) {
+        e.Command("$keyvalues", m, "keyValues");
+        if (!EmitKeyValues(e, *text)) return false;
     }
     return true;
 }
@@ -1515,6 +1661,192 @@ void LowerMesh(Emitter& e, const Json& mesh) {
         }
     }
     if (body) e.Word("}");
+}
+
+// `{ key value key { ... } }`, entries in order.
+bool EmitKeyValues(Emitter& e, const Json& entries) {
+    e.Word("{");
+    for (const Json& entry : entries) {
+        const Json* value = Get(entry, "value");
+        const Json* block = Get(entry, "block");
+        if ((value != nullptr) == (block != nullptr))
+            return e.l.Fail(entry, "", "a KeyValues entry takes a value or a block");
+        e.Text(Str(entry, "key"));
+        if (value) e.Text(value->get<std::string>());
+        else if (!EmitKeyValues(e, *block)) return false;
+    }
+    e.Word("}");
+    return true;
+}
+
+bool LowerPhysics(Emitter& e, const Json& p) {
+    if (const Json* file = Get(p, "dataModel")) {
+        e.Command("$datamodelphysics", p, "dataModel");
+        e.Text(file->get<std::string>());
+    }
+
+    e.Command("$physicsmodel", p);
+    e.Word("{");
+    if (const Json* shapes = Get(p, "shapes")) {
+        for (const Json& s : *shapes) {
+            const Json* file = Get(s, "file");
+            const Json* mesh = Get(s, "renderMesh");
+            const Json* primitive = Get(s, "primitive");
+            const bool render = True(s, "fromRender");
+            if ((file ? 1 : 0) + (mesh ? 1 : 0) + (primitive ? 1 : 0) + (render ? 1 : 0) != 1)
+                return e.l.Fail(s, "", "a shape takes one of file, renderMesh, fromRender or primitive");
+
+            e.Line(s);
+            e.Word("$physicsshape");
+            if (primitive) {
+                const Json& q = *primitive;
+                const std::string type = Str(q, "type");
+                e.Word("primitive");
+                e.Word(type);
+                e.Text(Str(q, "bone"));
+                const char* const* keys = nullptr;
+                static const char* const kBox[] = {"min", "max", "angles", nullptr};
+                static const char* const kSphere[] = {"center", "radius", "segments", nullptr};
+                static const char* const kCapsule[] = {"point0", "point1", "radius0", "radius1", "segments", nullptr};
+                keys = type == "box" ? kBox : type == "sphere" ? kSphere : kCapsule;
+                // the values are positional; only the last ones are optional
+                for (const char* const* key = keys; *key; ++key) {
+                    const Json* v = Get(q, *key);
+                    const bool optional = std::string(*key) == "angles" || std::string(*key) == "segments";
+                    if (!v && optional) break;
+                    if (!v) return e.l.Fail(q, "", "a " + type + " needs " + *key);
+                    if (v->is_array()) e.Vec(*v);
+                    else e.Num(*v);
+                }
+                continue;
+            }
+            e.Word(file ? "fromfile" : mesh ? "fromrendermesh" : "fromrender");
+            if (file || mesh) e.Text((file ? file : mesh)->get<std::string>());
+
+            static const struct { const char* key; const char* word; } kOptions[] = {
+                {"offsetOrigin", "offsetorigin"}, {"offsetAngles", "offsetangles"},
+                {"importScale", "importscale"}, {"parentBone", "parentbone"},
+                {"maxConvex", "maxconvex"}, {"importType", "importtype"},
+                {"decimationFactor", "decimationfactor"}, {"cullWeight", "cullweight"},
+                {"concavity", "concavity"}, {"maxHulls", "maxhulls"}, {"maxDepth", "maxdepth"},
+            };
+            e.Word("{");
+            for (const auto& option : kOptions) EmitClause(e, s, option.key, option.word);
+            EmitFlag(e, s, "concave", "concave");
+            EmitFlag(e, s, "remove2d", "remove2d");
+            for (const auto& [key, word] : {std::pair{"extraBones", "extrabone"}, std::pair{"excludeMeshes", "excludemesh"}})
+                if (const Json* names = Get(s, key))
+                    for (const Json& name : *names) {
+                        e.Word(word);
+                        e.Text(name.get<std::string>());
+                    }
+            e.Word("}");
+        }
+    }
+
+    if (const Json* joints = Get(p, "joints")) {
+        for (const Json& j : *joints) {
+            e.Line(j);
+            e.Word("$physicsjoint");
+            e.Text(Str(j, "bone"));
+            e.Word("{");
+            for (const Json& a : j.at("axes")) {
+                const std::string type = Str(a, "type");
+                e.Word(Str(a, "axis"));
+                e.Word(type);
+                if (type == "limit") {
+                    if (!Get(a, "min") || !Get(a, "max")) return e.l.Fail(a, "", "a limit axis needs min and max");
+                    e.Num(a.at("min"));
+                    e.Num(a.at("max"));
+                }
+                if (const Json* friction = Get(a, "friction")) e.Num(*friction);
+            }
+            e.Word("}");
+        }
+    }
+    if (const Json* markups = Get(p, "markups")) {
+        for (const Json& m : *markups) {
+            e.Line(m);
+            e.Word("$physicsmarkup");
+            e.Text(Str(m, "bone"));
+            e.Word("{");
+            EmitClause(e, m, "massBias", "massbias");
+            EmitClause(e, m, "inertia", "inertia");
+            EmitClause(e, m, "damping", "damping");
+            EmitClause(e, m, "rotDamping", "rotdamping");
+            EmitFlag(e, m, "skip", "skip");
+            EmitClause(e, m, "mergeInto", "mergeinto");
+            e.Word("}");
+        }
+    }
+    if (const Json* pairs = Get(p, "collisions")) {
+        for (const Json& pair : *pairs) {
+            e.Line(pair);
+            e.Word("$physicscollide");
+            e.Text(Str(pair, "a"));
+            e.Text(Str(pair, "b"));
+        }
+    }
+
+    static const struct { const char* key; const char* command; } kValues[] = {
+        {"mass", "$mass"}, {"damping", "$damping"}, {"rotDamping", "$rotdamping"},
+        {"inertia", "$inertia"}, {"drag", "$drag"}, {"weldPosition", "$weldposition"},
+        {"weldNormal", "$weldnormal"},
+    };
+    for (const auto& value : kValues) {
+        const Json* v = Get(p, value.key);
+        if (!v) continue;
+        e.Line(p, value.key);
+        e.Word(value.command);
+        e.Num(*v);
+    }
+    static const struct { const char* key; const char* command; } kFlags[] = {
+        {"autoMass", "$automass"}, {"noSelfCollisions", "$noselfcollisions"},
+        {"assumeWorldSpace", "$assumeworldspace"},
+    };
+    for (const auto& flag : kFlags) {
+        if (!True(p, flag.key)) continue;
+        e.Line(p, flag.key);
+        e.Word(flag.command);
+    }
+    if (const Json* v = Get(p, "massCenter")) {
+        e.Line(p, "massCenter");
+        e.Word("$masscenter");
+        e.Vec(*v);
+    }
+    for (const auto& [key, command] : {std::pair{"rootBone", "$rootbone"}, std::pair{"phyName", "$phyname"}}) {
+        const Json* v = Get(p, key);
+        if (!v) continue;
+        e.Line(p, key);
+        e.Word(command);
+        e.Text(v->get<std::string>());
+    }
+    if (const Json* f = Get(p, "animatedFriction")) {
+        e.Line(*f);
+        e.Word("$animatedfriction");
+        for (const char* key : {"min", "max", "timeIn", "timeOut", "timeHold"}) e.Num(f->at(key));
+    }
+    e.Word("}");
+
+    if (const Json* list = Get(p, "jointContents")) {
+        for (const Json& j : *list) {
+            e.Command("$jointcontents", j);
+            e.Text(Str(j, "bone"));
+            EmitNames(e, j.at("contents"));
+        }
+    }
+    if (const Json* list = Get(p, "jointSurfaceProps")) {
+        for (const Json& j : *list) {
+            e.Command("$jointsurfaceprop", j);
+            e.Text(Str(j, "bone"));
+            e.Text(Str(j, "surfaceProp"));
+        }
+    }
+    if (const Json* text = Get(p, "collisionText")) {
+        e.Command("$collisiontext", p, "collisionText");
+        if (!EmitKeyValues(e, *text)) return false;
+    }
+    return true;
 }
 
 bool LowerModelGroup(Emitter& e, const Json& group) {
@@ -2070,6 +2402,10 @@ bool LowerSequence(Emitter& e, const Json& s) {
             e.Text(mod.get<std::string>());
         }
     }
+    if (const Json* text = Get(s, "keyValues")) {
+        e.Word("keyvalues");
+        if (!EmitKeyValues(e, *text)) return false;
+    }
     LowerClip(e, s);
 
     // an event reads an options string from the rest of its line, so each sits on its own
@@ -2165,6 +2501,7 @@ bool Lower(Emitter& e, const Json& m) {
             e.Text(name.get<std::string>());
         }
     }
+    if (const Json* physics = Get(m, "physics"); physics && !LowerPhysics(e, *physics)) return false;
     return true;
 }
 
