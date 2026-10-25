@@ -33,7 +33,7 @@ std::string Number(double value)
 
 void ApiCapabilities()
 {
-    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1,\"layers\":1}");
+    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1,\"layers\":1,\"faceSet\":1}");
 }
 
 std::vector<float> ApiTimes(uint32_t last, double fps)
@@ -339,6 +339,10 @@ int EmitCameraApi(const ApiOptions& api, const std::string& path, const matrix3x
     return 0;
 }
 
+// Sine of the root joint's bend below which an IK pole holds its previous direction; it is fully
+// free at twice this value.
+constexpr float kStraightSine = 0.1f;
+
 void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<float>& times,
                    const std::vector<std::vector<AnimPose>>& frames,
                    const std::vector<mdldecompiler::FlexTrack>& flex, bool body)
@@ -386,6 +390,8 @@ void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<flo
             if (!valid) continue;
 
             std::array<std::vector<double>, 3> endpoints, poles;
+            Vector3 held{};
+            bool holding = false;
             for (const auto& frame : frames)
             {
                 std::vector<matrix3x4> world(target.n);
@@ -399,12 +405,27 @@ void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<flo
                 const auto root = Origin(world[links[0].bone]), mid = Origin(world[links[1].bone]), end = Origin(world[links[2].bone]);
                 auto axis = Sub(end, root);
                 pm::VectorNormalize(axis);
-                auto bend = Sub(Sub(mid, root), Mul(axis, Dot(Sub(mid, root), axis)));
-                if (pm::VectorNormalize(bend) < 1e-5f)
+                const auto upper = Sub(mid, root);
+                auto bend = Sub(upper, Mul(axis, Dot(upper, axis)));
+                const float offset = pm::VectorNormalize(bend);
+
+                // A nearly straight chain has no reliable bend plane, so the previous frame's direction
+                // carries over, turned onto the current axis, and eases out as the chain bends.
+                auto previous = Sub(held, Mul(axis, Dot(held, axis)));
+                if (holding && pm::VectorNormalize(previous) > 1e-5f)
+                {
+                    const float bent = std::clamp((offset / std::max(Len(upper), 1e-5f) - kStraightSine) / kStraightSine, 0.0f, 1.0f);
+                    const float weight = bent * bent * (3 - 2 * bent);
+                    bend = Add(Mul(bend, weight), Mul(previous, 1 - weight));
+                    if (pm::VectorNormalize(bend) < 1e-5f) bend = previous;
+                }
+                else if (offset < 1e-5f)
                 {
                     bend = pm::VectorRotate(links[0].kneeDir, world[links[0].bone]);
                     if (pm::VectorNormalize(bend) < 1e-5f) bend = Cross(axis, std::fabs(axis.z) < 0.9f ? Vector3{0,0,1} : Vector3{0,1,0});
                 }
+                held = bend;
+                holding = true;
 
                 const auto pole = Add(mid, Mul(bend, std::max(1.0f, Len(Sub(mid, root)))));
                 for (int a = 0; a < 3; ++a)

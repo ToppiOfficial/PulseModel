@@ -278,6 +278,17 @@ matrix3x4 AxisRot(int axis, float a) {
     return r;
 }
 
+// Hand roll from rest that ValveBiped forearm twist helpers are rigged to follow.
+constexpr float kHandRoll = 90.0f * pm::kDeg2Rad;
+
+// Twist of rotation `m` about X, in radians within [-pi, pi].
+float RollAboutX(const matrix3x4& m) {
+    pm::Quaternion q;
+    Vector3 position;
+    pm::MatrixAngles(RotOnly(m), q, position);
+    return std::remainder(2.0f * std::atan2(q.x, q.w), 2.0f * pm::kPiF);
+}
+
 // Camera eye, view axes and vertical fov (degrees) at MMD frame f, in MMD space. Keys
 // one frame apart are a cut and hold the earlier key. Orbit is yaw, then roll, then pitch.
 void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector3& fwd, Vector3& up,
@@ -858,15 +869,13 @@ const FaceDef kFace[] = {
     {"browdown", "\x89\xba", "\xe4\xb8\x8b", "right_lowerer=0.6 left_lowerer=0.6"},
 };
 
-// Girls' Frontline 2 rigs, one controller per shape, by kFace id. `gf2` names the
-// current rig (Asteria, Koleda), `legacy` the older one (Mityl), whose vowels are
-// scaled down since its mouth shapes are stronger at full weight.
-struct Gf2FaceDef {
+// Direct morph controllers by kFace id. The scaled layout uses lower vowel weights.
+struct DirectFaceDef {
     const char* id;
-    const char* gf2;
-    const char* legacy;
+    const char* direct;
+    const char* scaled;
 };
-const Gf2FaceDef kFaceGf2[] = {
+const DirectFaceDef kFaceDirect[] = {
     {"a", "mouth_a=1", "mouth_a=0.6"},
     {"i", "mouth_ch_1=1", "mouth_i=0.7"},
     {"u", "mouth_u=1", "mouth_kiss=0.7"},
@@ -909,11 +918,11 @@ bool ParseFaceOps(const std::string& text, FaceOps& ops) {
 
 FaceMap BuiltinFaceMap(const std::string& set) {
     FaceMap map;
-    if (set == "gf2" || set == "gf2legacy") {
-        for (const Gf2FaceDef& g : kFaceGf2)
+    if (set == "direct" || set == "direct-scaled") {
+        for (const DirectFaceDef& g : kFaceDirect)
             for (const FaceDef& d : kFace)
                 if (!std::strcmp(d.id, g.id))
-                    ParseFaceOps(set == "gf2" ? g.gf2 : g.legacy, map[d.sj]);
+                    ParseFaceOps(set == "direct" ? g.direct : g.scaled, map[d.sj]);
         return map;
     }
     const bool visemes = set == "visemes";
@@ -922,7 +931,7 @@ FaceMap BuiltinFaceMap(const std::string& set) {
     return map;
 }
 
-// "auto": a GF2 rig by its signature mouth controller, else facs.
+// "auto": a direct morph layout by its signature mouth controllers, else facs.
 std::string ResolveFaceSet(const std::string& set, const std::vector<mdldecompiler::FlexTrack>& ctrls) {
     if (set != "auto")
         return set;
@@ -931,9 +940,9 @@ std::string ResolveFaceSet(const std::string& set, const std::vector<mdldecompil
                            [&](const mdldecompiler::FlexTrack& c) { return !_stricmp(c.name.c_str(), n); });
     };
     if (has("mouth_ch_1"))
-        return "gf2";
+        return "direct";
     if (has("mouth_kiss") && has("mouth_i"))
-        return "gf2legacy";
+        return "direct-scaled";
     return "facs";
 }
 
@@ -1109,13 +1118,13 @@ int Usage() {
         "                   binary (default) or keyvalues2 text\n"
         "  -dmxmodel <n>    the `format model` version: 15 (default), 1, 18, or 22\n"
         "                   for Source 2 modeldoc\n"
-        "  -faceset <name>  built-in face map: auto (default; gf2/gf2legacy when the\n"
-        "                   model has their controllers, else facs), facs (survivors,\n"
-        "                   HL2 citizens - vowels as Valve phonemes), visemes (one\n"
+        "  -faceset <name>  built-in face map: auto (default; direct/direct-scaled\n"
+        "                   when the model has their controllers, else facs),\n"
+        "                   facs (Valve phoneme combinations), visemes (one\n"
         "                   controller per vowel, for rigs whose mouth shapes each\n"
-        "                   normalise by the sum of all mouth controls), gf2 (Girls'\n"
-        "                   Frontline 2 rigs: Asteria, Koleda) or gf2legacy (older\n"
-        "                   GF2 rigs: Mityl)\n"
+        "                   normalise by the sum of all mouth controls), direct\n"
+        "                   (mouth_ch_1, mouth_u) or direct-scaled (mouth_i,\n"
+        "                   mouth_kiss, with lower vowel weights)\n"
         "  -eyerange <deg>  MMD eye-bone angle written as full gaze deflection\n"
         "                   (default 30), mapped onto the model's gaze range\n"
         "  -facemap <file>  MMD morph -> flex controller map replacing the built-in\n"
@@ -1457,9 +1466,11 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     BuiltinArms(mmd, armAngle);
     if (!pmxPath.empty() && !LoadPmxRest(pmxPath, mmd, err))
         return Fail(err);
-    if (faceSet != "auto" && faceSet != "facs" && faceSet != "visemes" && faceSet != "gf2"
-        && faceSet != "gf2legacy")
-        return Fail("unknown -faceset \"" + faceSet + "\" (auto, facs, visemes, gf2 or gf2legacy)");
+    if (faceSet == "gf2") faceSet = "direct";
+    else if (faceSet == "gf2legacy") faceSet = "direct-scaled";
+    if (faceSet != "auto" && faceSet != "facs" && faceSet != "visemes" && faceSet != "direct"
+        && faceSet != "direct-scaled")
+        return Fail("unknown -faceset \"" + faceSet + "\" (auto, facs, visemes, direct or direct-scaled)");
     if (eyeRange <= 0.0f)
         return Fail("-eyerange must be above 0 degrees");
 
@@ -1874,6 +1885,24 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                     W[bone] = t.parent[bone] >= 0 ? pm::ConcatTransforms(W[t.parent[bone]], L[bone]) : L[bone];
             }
 
+            // Valve forearms bend as hinges and their twist helpers follow the hand, so forearm
+            // roll moves into the hand as far as the hand stays within kHandRoll of its rest.
+            for (const Arm& arm : arms) {
+                if (arm.upper < 0 || arm.elbow < 0 || arm.hand < 0 ||
+                    t.parent[arm.elbow] != arm.upper || t.parent[arm.hand] != arm.elbow)
+                    continue;
+                const float forearm = RollAboutX(pm::ConcatTransforms(Transpose(t.local[arm.elbow]), L[arm.elbow]));
+                const float hand = RollAboutX(pm::ConcatTransforms(L[arm.hand], Transpose(t.local[arm.hand])));
+                const float moved = std::clamp(forearm + hand, -kHandRoll, kHandRoll) - hand;
+
+                L[arm.elbow] = pm::ConcatTransforms(L[arm.elbow], AxisRot(0, -moved));
+                const Vector3 handPosition = Origin(L[arm.hand]);
+                L[arm.hand] = pm::ConcatTransforms(AxisRot(0, moved), L[arm.hand]);
+                SetOrigin(L[arm.hand], handPosition);
+            }
+            for (int bone = 0; bone < t.n; ++bone)
+                W[bone] = t.parent[bone] >= 0 ? pm::ConcatTransforms(W[t.parent[bone]], L[bone]) : L[bone];
+
             for (int side = 0; side < 2; ++side) {
                 const Leg& g = legs[side];
                 const int mmdLegBone = mmd.Find("leg", side), mmdAnkle = mmd.Find("ankle", side);
@@ -2144,7 +2173,7 @@ int main(int argc, char** argv)
         }
         else
         {
-            if (method == "motion") pulse::api::CheckMembers(request, {"motions", "model", "modelData", "fps", "rotation"});
+            if (method == "motion") pulse::api::CheckMembers(request, {"motions", "model", "modelData", "fps", "rotation", "faceSet"});
             else if (method == "camera")
                 pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
                                                    "transform", "orientation", "distanceTransform",
@@ -2239,8 +2268,9 @@ int main(int argc, char** argv)
                 if ((&options.boundaryMax.x)[axis] - (&options.boundaryMin.x)[axis] < 1)
                     throw std::runtime_error("The camera boundary must be at least 1 unit on every axis");
 
-            std::array<std::string, 5> arguments{"vmd2valvebiped", "-vmd", motion, "-mdl", model};
-            std::array<char*, 5> argv2;
+            const std::string faceSet = request.value("faceSet", std::string("auto"));
+            std::array<std::string, 7> arguments{"vmd2valvebiped", "-vmd", motion, "-mdl", model, "-faceset", faceSet};
+            std::array<char*, 7> argv2;
             for (size_t i = 0; i < argv2.size(); ++i) argv2[i] = arguments[i].data();
 
             result = RunConversion(int(argv2.size()), argv2.data(), &options);
