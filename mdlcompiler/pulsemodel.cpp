@@ -142,6 +142,56 @@ const Field kKeyValue[] = {
 };
 const Item kKeyValueItem = MakeItem("keyValue", kKeyValue).Titled("Key Value", "Text").Holds(kKeyValueKids);
 
+// --- one-value nodes: each stands for one entry of a name list ---
+
+const Field kMeshRef[] = {F("mesh", Type::String, "Mesh.").Ref("mesh").Required()};
+const Field kMaterialRef[] = {F("material", Type::String, "Material.").Ref("material").Required()};
+const Field kBoneRef[] = {F("bone", Type::String, "Bone.").Ref("bone").Required()};
+const Field kWordRef[] = {F("word", Type::String, "Word matched in material names.").Required()};
+const Field kNameRef[] = {F("name", Type::String, "Name.").Required()};
+const Field kFileRef[] = {F("file", Type::File, "File.").Required()};
+const Field kFolderRef[] = {F("folder", Type::File, "Folder.").Required()};
+const Field kControlRef[] = {F("control", Type::String, "Flex controller, or %morph.").Required()};
+
+const Item kBoundsMeshItem = MakeItem("boundsMesh", kMeshRef).Titled("Bounds Mesh", "Model");
+const Item kSearchFolderItem = MakeItem("searchFolder", kFolderRef).Titled("Search Folder", "Model");
+const Item kIncludeModelItem = MakeItem("includeModel", kFileRef).Titled("Include Model", "Model");
+const Item kMaterialFolderItem = MakeItem("materialFolder", kFolderRef).Titled("Material Folder", "Materials");
+const Item kDrawOrderItem = MakeItem("drawOrder", kMaterialRef).Titled("Draw Order", "Materials");
+const Item kDropMaterialItem = MakeItem("dropMaterial", kMaterialRef).Titled("Drop Material", "Mesh");
+const Item kDropMaterialWordItem = MakeItem("dropMaterialWord", kWordRef).Titled("Drop Material Word", "Mesh");
+const Item kChoiceMeshItem = MakeItem("choiceMesh", kMeshRef).Titled("Mesh", "Model Groups");
+const Item kRemoveMeshItem = MakeItem("lodRemoveMesh", kMeshRef).Titled("Remove Mesh", "LOD");
+const Item kSmallMeshItem = MakeItem("lodSmallMesh", kMeshRef).Titled("Small Mesh Filter", "LOD");
+const Item kCollapseTreeItem = MakeItem("lodCollapseTree", kBoneRef).Titled("Collapse Bone Tree", "LOD");
+const Item kVrdFileItem = MakeItem("vrdFile", kFileRef).Titled("VRD File", "Bones");
+const Item kPlaceFlexGroupItem = MakeItem("placeOnFlexGroup", kNameRef).Titled("On Flex Group", "Attachments");
+const Item kPlaceMorphItem = MakeItem("placeOnMorph", kNameRef).Titled("On Morph", "Attachments");
+const Item kPlaceMaterialItem = MakeItem("placeOnMaterial", kMaterialRef).Titled("On Material", "Attachments");
+const Item kBlendFileItem = MakeItem("blendFile", kFileRef).Titled("Blend File", "Sequences");
+const Field kAnimationRef[] = {F("animation", Type::String, "Animation.").Ref("animation").Required()};
+const Item kBlendAnimationItem = MakeItem("blendAnimation", kAnimationRef).Titled("Blend Animation", "Sequences");
+const Item kActivityModifierItem = MakeItem("activityModifier", kNameRef).Titled("Activity Modifier", "Sequences");
+const Item kLocalVarItem = MakeItem("flexLocalVar", kNameRef).Titled("Local Variable", "Flex");
+const Item kCorrectiveControlItem = MakeItem("correctiveControl", kControlRef).Titled("Control", "Flex");
+const Item kDominatorItem = MakeItem("dominator", kControlRef).Titled("Dominator", "Flex");
+const Item kExtraBoneItem = MakeItem("extraBone", kBoneRef).Titled("Extra Bone", "Physics");
+const Item kExcludeMeshItem = MakeItem("excludeMesh", kMeshRef).Titled("Excluded Mesh", "Physics");
+const Item kTransitionNodeItem = MakeItem("transitionNode", kNameRef).Titled("Node", "Animation");
+const Item kAllowedActivityItem = MakeItem("allowedActivity", kNameRef).Titled("Allowed Activity", "Animation");
+
+// trace contents words, shared by the model and per-bone contents; a mask covers other bits
+const Field kContentsFlags[] = {
+    F("solid", Type::Bool, "Solid.").Group("Contents"),
+    F("grate", Type::Bool, "Grate: blocks movement, not bullets.").Group("Contents"),
+    F("ladder", Type::Bool, "Ladder.").Group("Contents"),
+    F("monster", Type::Bool, "Monster.").Group("Contents"),
+    F("debris", Type::Bool, "Debris.").Group("Contents"),
+    F("notSolid", Type::Bool, "Not solid.").Group("Contents"),
+    F("contentsMask", Type::Integer, "Extra contents bits as a number.").Group("Contents"),
+};
+const Item kContentsFlagsItem = MakeItem("contentsFlags", kContentsFlags);
+
 // --- settings ---
 
 const Field kSettings[] = {
@@ -153,12 +203,10 @@ const Field kSettings[] = {
     F("upAxis", Type::Enum, "Up axis of the source art; replaces angles.").Values(kUpAxes).Group("Transform"),
     F("renderPass", Type::Enum, "Render pass.").Values(kRenderPasses),
     F("surfaceProp", Type::String, "Surface property."),
-    F("contents", Type::Strings, "Trace contents: solid, grate, ladder, monster, debris, notsolid or a number."),
     F("maxBones", Type::Integer, "Bone ceiling.").Group("Budget"),
     F("maxMaterials", Type::Integer, "Material ceiling.").Group("Budget"),
     F("bboxMin", Type::Vec3, "Hull box minimum corner.").Group("Bounds"),
     F("bboxMax", Type::Vec3, "Hull box maximum corner.").Group("Bounds"),
-    F("bboxMeshes", Type::Strings, "Fit the hull box to these meshes instead.").Ref("mesh").Group("Bounds"),
     F("cboxMin", Type::Vec3, "View clipping box minimum corner.").Group("Bounds"),
     F("cboxMax", Type::Vec3, "View clipping box maximum corner.").Group("Bounds"),
     F("skipBoneInBBox", Type::Bool, "Auto hitboxes grow from vertices only.").Group("Bounds"),
@@ -179,11 +227,11 @@ const Field kSettings[] = {
     F("noDx80", Type::Bool, "Skip the .dx80.vtx.").Group("Output"),
     F("autoCenter", Type::Bool, "Center the model.").Group("Output"),
     F("forceWriteVertexData", Type::Bool, "Write .vvd/.vtx even without geometry.").Group("Output"),
-    F("searchDirs", Type::Files, "Extra directories for source files.").Group("Sources"),
-    F("includeModels", Type::Strings, "Compiled .mdl files whose sequences this model uses.").Group("Sources"),
 };
-const Item* const kSettingsKids[] = {&kKeyValueItem, nullptr};
-const Item kSettingsItem = MakeItem("settings", kSettings).Titled("Settings", "Model").Holds(kSettingsKids);
+const Item* const kSettingsKids[] = {&kSearchFolderItem, &kIncludeModelItem, &kBoundsMeshItem, &kKeyValueItem,
+                                     nullptr};
+const Item kSettingsItem =
+    MakeItem("settings", kSettings, &kContentsFlagsItem).Titled("Settings", "Model").Holds(kSettingsKids);
 
 // --- variables and prefabs ---
 
@@ -216,20 +264,18 @@ const Item kSkinItem = MakeItem("skin").Titled("Skin", "Materials").Holds(kSkinK
 const Item kMaterialRenameItem = MakeItem("materialRename", kReplace).Titled("Material Rename", "Materials");
 const Item kMaterialCollapseItem = MakeItem("materialCollapse", kReplace).Titled("Material Collapse", "Materials");
 
-const Field kMaterials[] = {
-    F("paths", Type::Strings, "Material search paths ($cdmaterials)."),
-    F("sortOrder", Type::Strings, "Mesh draw order by material.").Ref("material"),
-};
-const Item* const kMaterialsKids[] = {&kSkinItem, &kMaterialRenameItem, &kMaterialCollapseItem, nullptr};
-const Item kMaterialsItem =
-    MakeItem("materials", kMaterials).Titled("Materials", "Materials").Holds(kMaterialsKids);
+const Item* const kMaterialsKids[] = {&kMaterialFolderItem, &kSkinItem, &kMaterialRenameItem,
+                                      &kMaterialCollapseItem, &kDrawOrderItem, nullptr};
+const Item kMaterialsItem = MakeItem("materials").Titled("Materials", "Materials").Holds(kMaterialsKids);
 
 // --- meshes and model groups ---
 
 const Field kScaleBone[] = {
     F("bone", Type::String, "Bone to scale.").Ref("bone").Required(),
     F("factor", Type::Number, "Scale factor.").Required(),
-    F("axes", Type::Strings, "Axes to scale (x, y, z); omitted = all."),
+    F("x", Type::Bool, "Scale along X; no axis set = all.").Group("Axes"),
+    F("y", Type::Bool, "Scale along Y; no axis set = all.").Group("Axes"),
+    F("z", Type::Bool, "Scale along Z; no axis set = all.").Group("Axes"),
 };
 const Item kScaleBoneItem = MakeItem("scaleBone", kScaleBone).Titled("Scale Bone", "Mesh");
 
@@ -238,25 +284,23 @@ const Field kMesh[] = {
     F("file", Type::File, "Source file (.dmx, .smd, .fbx).").Required(),
     F("noMorph", Type::Bool, "Load without morphs."),
     F("flipNormals", Type::Bool, "Flip normals."),
-    F("removeMeshes", Type::Strings, "Drop meshes by material.").Ref("material"),
-    F("removeMeshWords", Type::Strings, "Drop meshes whose material contains a word."),
     F("decimate", Type::Number, "Keep this share of faces (0-1]."),
     F("skinnedBoneCull", Type::Enum, "Drop unweighted bones.").Values(kSkinnedBoneCulls),
     F("weld", Type::Bool, "Weld vertices.").Group("Weld"),
     F("weldSeams", Type::Bool, "Also weld across UV seams.").Group("Weld"),
     F("weldSharp", Type::Number, "Keep edges sharper than this many degrees.").Group("Weld"),
 };
-const Item* const kMeshKids[] = {&kScaleBoneItem, nullptr};
+const Item* const kMeshKids[] = {&kScaleBoneItem, &kDropMaterialItem, &kDropMaterialWordItem, nullptr};
 const Item kMeshItem = MakeItem("mesh", kMesh).Titled("Mesh", "Mesh").Holds(kMeshKids);
 const Item* const kMeshesKids[] = {&kMeshItem, nullptr};
 const Item kMeshesItem = MakeItem("meshes").Titled("Meshes", "Mesh").Holds(kMeshesKids);
 
 const Field kChoice[] = {
     F("name", Type::String, "Choice name; omitted = named after its meshes."),
-    F("meshes", Type::Strings, "Meshes drawn together by this choice.").Ref("mesh"),
     F("blank", Type::Bool, "An empty choice."),
 };
-const Item kChoiceItem = MakeItem("choice", kChoice).Titled("Choice", "Model Groups");
+const Item* const kChoiceKids[] = {&kChoiceMeshItem, nullptr};
+const Item kChoiceItem = MakeItem("choice", kChoice).Titled("Choice", "Model Groups").Holds(kChoiceKids);
 const Item* const kModelGroupKids[] = {&kChoiceItem, nullptr};
 const Field kModelGroup[] = {
     F("name", Type::String, "Group name.").Declares("modelGroup").Required(),
@@ -310,22 +354,17 @@ const Item kLodWordItem = MakeItem("lodReplaceMaterialWord", kLodWord).Titled("R
 const Field kLod[] = {
     F("switch", Type::Number, "Switch value; omit for the shadow LOD."),
     F("shadow", Type::Bool, "The shadow LOD (last, at most one)."),
-    F("removeModels", Type::Strings, "Stop drawing meshes.").Ref("mesh"),
     F("decimateAll", Type::Number, "Decimate every mesh to this share."),
-    F("collapseBoneTrees", Type::Strings, "Collapse whole bone subtrees.").Ref("bone"),
     F("collapseJiggleBones", Type::Bool, "Collapse jiggle bones."),
     F("collapseProceduralBones", Type::Bool, "Collapse procedural bones."),
-    F("removeMeshes", Type::Strings, "Drop meshes by material.").Ref("material"),
-    F("removeMeshWords", Type::Strings, "Drop meshes whose material contains a word."),
     F("facial", Type::Bool, "Facial animation on this LOD."),
     F("skeletalAwareDecimation", Type::Bool, "Decimate with the skeleton in mind."),
     F("useShadowLodMaterials", Type::Bool, "Shadow LOD keeps its own materials."),
-    F("removeSmallMeshes", Type::Number, "Drop meshes under this unit size.").Group("Small meshes"),
-    F("removeSmallMeshesIn", Type::Strings, "Limit the small mesh drop to these meshes.").Ref("mesh")
-        .Group("Small meshes"),
+    F("removeSmallMeshes", Type::Number, "Drop meshes under this unit size; Small Mesh Filter nodes limit it."),
 };
 const Item* const kLodKids[] = {&kLodModelItem, &kLodDecimateItem, &kLodBoneItem, &kLodMaterialItem,
-                                &kLodWordItem, nullptr};
+                                &kLodWordItem, &kRemoveMeshItem, &kCollapseTreeItem, &kDropMaterialItem,
+                                &kDropMaterialWordItem, &kSmallMeshItem, nullptr};
 const Item kLodItem = MakeItem("lod", kLod).Titled("LOD", "LOD").Holds(kLodKids);
 const Item* const kLodsKids[] = {&kLodItem, nullptr};
 const Item kLodsItem = MakeItem("lods").Titled("LODs", "LOD").Holds(kLodsKids);
@@ -489,14 +528,19 @@ const Field kBones[] = {
     F("realign", Type::Bool, "Realign single-child chains."),
     F("lockLengths", Type::Bool, "Pin bone lengths to the bind pose."),
     F("cullJiggle", Type::Bool, "Drop jiggle bones nothing is weighted to."),
-    F("boneMerge", Type::Strings, "Bones kept for bonemerge.").Ref("bone"),
-    F("doNotCollapse", Type::Strings, "Bones never collapsed.").Ref("bone"),
-    F("alwaysCollapse", Type::Strings, "Bones always collapsed.").Ref("bone"),
-    F("vrdFiles", Type::Files, "Procedural bones from .vrd files."),
 };
-const Item* const kBonesKids[] = {&kDefineBoneItem, &kRenameItem, &kTransformBoneItem, &kHierarchyItem,
-                                  &kJiggleBoneItem, &kDriverBoneItem, &kAimAtItem, &kDataModelJointsItem,
-                                  nullptr};
+
+const Field kBoneMarkup[] = {
+    F("bone", Type::String, "Bone.").Ref("bone").Required(),
+    F("boneMerge", Type::Bool, "Kept for bonemerge."),
+    F("doNotCollapse", Type::Bool, "Never collapsed."),
+    F("alwaysCollapse", Type::Bool, "Always collapsed."),
+};
+const Item kBoneMarkupItem = MakeItem("boneMarkup", kBoneMarkup).Titled("Bone Markup", "Bones");
+
+const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kRenameItem, &kTransformBoneItem,
+                                  &kHierarchyItem, &kJiggleBoneItem, &kDriverBoneItem, &kAimAtItem,
+                                  &kDataModelJointsItem, &kVrdFileItem, nullptr};
 const Item kBonesItem = MakeItem("bones", kBones).Titled("Bones", "Bones").Holds(kBonesKids);
 
 // --- attachments, hitboxes, pose parameters, IK ---
@@ -509,11 +553,10 @@ const Field kAttachment[] = {
     F("rigid", Type::Bool, "Rigid."),
     F("absolute", Type::Bool, "Position is in model space."),
     F("worldAlign", Type::Bool, "World aligned."),
-    F("flexGroups", Type::Strings, "Place at the average of these flex groups.").Group("Placement"),
-    F("flexMorphs", Type::Strings, "Place at the average of these morphs.").Group("Placement"),
-    F("materials", Type::Strings, "Place at the average of these materials.").Ref("material").Group("Placement"),
 };
-const Item kAttachmentItem = MakeItem("attachment", kAttachment).Titled("Attachment", "Attachments");
+const Item* const kAttachmentKids[] = {&kPlaceFlexGroupItem, &kPlaceMorphItem, &kPlaceMaterialItem, nullptr};
+const Item kAttachmentItem =
+    MakeItem("attachment", kAttachment).Titled("Attachment", "Attachments").Holds(kAttachmentKids);
 const Item* const kAttachmentsKids[] = {&kAttachmentItem, nullptr};
 const Item kAttachmentsItem = MakeItem("attachments").Titled("Attachments", "Attachments").Holds(kAttachmentsKids);
 
@@ -593,6 +636,18 @@ const Field kIkRule[] = {
 const Item kIkRuleItem = MakeItem("ikRule", kIkRule).Titled("IK Rule", "Animation");
 const Item kIkFixupRuleItem = MakeItem("ikFixupRule", &kIkRuleItem).Titled("IK Fixup Rule", "Animation").Single();
 
+// motion extraction controls; a clip's motion and an operation's controls both use them
+const Field kMotionControls[] = {
+    F("x", Type::Bool, "X.").Group("Motion"),       F("y", Type::Bool, "Y.").Group("Motion"),
+    F("z", Type::Bool, "Z.").Group("Motion"),       F("xr", Type::Bool, "XR.").Group("Motion"),
+    F("yr", Type::Bool, "YR.").Group("Motion"),     F("zr", Type::Bool, "ZR.").Group("Motion"),
+    F("lx", Type::Bool, "LX.").Group("Motion"),     F("ly", Type::Bool, "LY.").Group("Motion"),
+    F("lz", Type::Bool, "LZ.").Group("Motion"),     F("lxr", Type::Bool, "LXR.").Group("Motion"),
+    F("lyr", Type::Bool, "LYR.").Group("Motion"),   F("lzr", Type::Bool, "LZR.").Group("Motion"),
+    F("lm", Type::Bool, "LM.").Group("Motion"),     F("lq", Type::Bool, "LQ.").Group("Motion"),
+};
+const Item kMotionControlsItem = MakeItem("motionControls", kMotionControls);
+
 // One ordered clip operation. `op` picks it; each takes only the keys its doc names.
 const Field kAnimOp[] = {
     F("op", Type::Enum, "Operation.").Values(kAnimOps).Required(),
@@ -616,8 +671,9 @@ const Field kAnimOp[] = {
     F("value", Type::Number, "boneDriver: value."),
     F("fadeIn", Type::Number, "copyPose: fade-in frames."),
     F("fadeOut", Type::Number, "copyPose: fade-out frames."),
-    F("controls", Type::Strings, "walk*, align, alignBone: motion controls (X Y Z XR YR ZR ...)."),
-    F("axes", Type::Strings, "matchPosition: axes (x y z); omitted = all."),
+    F("axisX", Type::Bool, "matchPosition: match X; no axis set = all.").Group("Axes"),
+    F("axisY", Type::Bool, "matchPosition: match Y; no axis set = all.").Group("Axes"),
+    F("axisZ", Type::Bool, "matchPosition: match Z; no axis set = all.").Group("Axes"),
     F("axis", Type::Enum, "boneDriver: axis.").Values(kAxes),
     F("origin", Type::Vec3, "transformBone: offset."),
     F("angles", Type::Vec3, "counterRotate: explicit target; transformBone: rotation."),
@@ -636,7 +692,9 @@ const Field kAnimOp[] = {
     F("rangeEnd", Type::Integer, "localHierarchy, boneDriver: ramp end frame.").Group("Ramp"),
 };
 const Item* const kAnimOpKids[] = {&kIkFixupRuleItem, nullptr};
-const Item kAnimOpItem = MakeItem("animationOperation", kAnimOp).Titled("Operation", "Animation").Holds(kAnimOpKids);
+const Item kAnimOpItem = MakeItem("animationOperation", kAnimOp, &kMotionControlsItem)
+                             .Titled("Operation", "Animation")
+                             .Holds(kAnimOpKids);
 
 // options shared by animations and a sequence's first clip
 const Field kClip[] = {
@@ -655,9 +713,8 @@ const Field kClip[] = {
     F("angles", Type::Vec3, "Clip rotation in degrees.").Group("Transform"),
     F("scale", Type::Number, "Clip scale.").Group("Transform"),
     F("ignoreScale", Type::Bool, "Ignore the model transform scale.").Group("Transform"),
-    F("ignoreTransformBone", Type::Strings, "Undo bone transforms here: angles, position.").Group("Transform"),
-    F("motion", Type::Strings, "Motion extraction controls (X Y Z XR YR ZR LX LY LZ LXR LYR LZR LM LQ).")
-        .Group("Motion"),
+    F("ignoreBoneAngles", Type::Bool, "Undo the bone angle transforms here.").Group("Transform"),
+    F("ignoreBonePosition", Type::Bool, "Undo the bone position transforms here.").Group("Transform"),
     F("motionRollback", Type::Number, "Motion rollback in seconds.").Group("Motion"),
     F("noAutoIk", Type::Bool, "No automatic IK release rules."),
     F("noCull", Type::Bool, "Never culled by the animation cull method."),
@@ -665,7 +722,7 @@ const Field kClip[] = {
     F("noAnimBlockStall", Type::Bool, "First section stays local.").Group("Demand loading"),
     F("noStallFrames", Type::Number, "Frames that never stall.").Group("Demand loading"),
 };
-const Item kClipItem = MakeItem("clip", kClip);
+const Item kClipItem = MakeItem("clip", kClip, &kMotionControlsItem);
 
 const Field kAnimation[] = {
     F("name", Type::String, "Animation name.").Declares("animation").Required(),
@@ -730,15 +787,12 @@ const Item kAnimTagItem = MakeItem("animTag", kAnimTag).Titled("Animation Tag", 
 
 const Field kSequence[] = {
     F("name", Type::String, "Sequence name.").Declares("sequence").Required(),
-    F("file", Type::File, "Source file of the only clip."),
-    F("files", Type::Files, "Source files of a blend grid."),
-    F("animations", Type::Strings, "Animations of a blend grid.").Ref("animation"),
+    F("file", Type::File, "Source file of the only clip; Blend File or Blend Animation nodes make a grid."),
     F("bindPose", Type::Bool, "The compile's own bind pose instead of a file."),
     F("declare", Type::Bool, "An empty slot an included model fills."),
     F("blendWidth", Type::Integer, "Blend grid width."),
     F("activity", Type::String, "Activity, e.g. ACT_IDLE.").Group("Activity"),
     F("activityWeight", Type::Integer, "Activity weight.").Group("Activity"),
-    F("activityModifiers", Type::Strings, "Activity modifiers.").Group("Activity"),
     F("snap", Type::Bool, "Snap."),
     F("autoplay", Type::Bool, "Autoplay."),
     F("hidden", Type::Bool, "Hidden."),
@@ -758,8 +812,9 @@ const Field kSequence[] = {
     F("transitionTo", Type::String, "Transition exit node.").Group("Transition"),
     F("transitionReversible", Type::Bool, "The transition is reversible.").Group("Transition"),
 };
-const Item* const kSequenceKids[] = {&kBlendItem, &kAddLayerItem, &kBlendLayerItem, &kIkLockItem, &kEventItem,
-                                     &kAnimTagItem, &kIkRuleItem, &kAnimOpItem, &kKeyValueItem, nullptr};
+const Item* const kSequenceKids[] = {&kBlendFileItem, &kBlendAnimationItem, &kBlendItem, &kAddLayerItem,
+                                     &kBlendLayerItem, &kIkLockItem, &kEventItem, &kAnimTagItem, &kIkRuleItem,
+                                     &kAnimOpItem, &kActivityModifierItem, &kKeyValueItem, nullptr};
 const Item kSequenceItem =
     MakeItem("sequence", kSequence, &kClipItem).Titled("Sequence", "Sequences").Holds(kSequenceKids);
 const Item* const kSequencesKids[] = {&kSequenceItem, nullptr};
@@ -803,10 +858,9 @@ const Field kBoneSaveFrame[] = {
 };
 const Item kBoneSaveFrameItem = MakeItem("boneSaveFrame", kBoneSaveFrame).Titled("Bone Save Frame", "Animation");
 
-const Field kSkipTransition[] = {
-    F("nodes", Type::Strings, "Nodes routed directly between each other.").Required(),
-};
-const Item kSkipTransitionItem = MakeItem("skipTransition", kSkipTransition).Titled("Skip Transition", "Animation");
+const Item* const kSkipTransitionKids[] = {&kTransitionNodeItem, nullptr};
+const Item kSkipTransitionItem =
+    MakeItem("skipTransition").Titled("Skip Transition", "Animation").Holds(kSkipTransitionKids, 1);
 const Item kAutoplayLockItem = MakeItem("autoplayLock", kIkLock).Titled("Autoplay IK Lock", "Animation");
 
 const Field kAnimationSettings[] = {
@@ -815,14 +869,14 @@ const Field kAnimationSettings[] = {
     F("defaultFadeIn", Type::Number, "Fade-in of new sequences."),
     F("defaultFadeOut", Type::Number, "Fade-out of new sequences."),
     F("lowercaseSequences", Type::Bool, "Lowercase sequence names."),
-    F("allowedActivities", Type::Strings, "Only these activities may be used."),
     F("cullMethod", Type::Enum, "Which animations reach the .mdl.").Values(kAnimCulls),
     F("calcTransitions", Type::Bool, "Fill multi-stage transition routes."),
     F("sectionFrames", Type::Integer, "Compression section length in frames.").Group("Sections"),
     F("sectionMinLimit", Type::Integer, "Minimum frame limit.").Group("Sections"),
 };
-const Item* const kAnimationSettingsKids[] = {&kAnimBlocksItem, &kDefaultWeightItem, &kAutoplayLockItem,
-                                              &kBoneSaveFrameItem, &kSkipTransitionItem, nullptr};
+const Item* const kAnimationSettingsKids[] = {&kAnimBlocksItem, &kAllowedActivityItem, &kDefaultWeightItem,
+                                              &kAutoplayLockItem, &kBoneSaveFrameItem, &kSkipTransitionItem,
+                                              nullptr};
 const Item kAnimationSettingsItem = MakeItem("animationSettings", kAnimationSettings)
                                         .Titled("Animation Settings", "Animation")
                                         .Holds(kAnimationSettingsKids);
@@ -853,16 +907,18 @@ const Field kFlexRule[] = {
 const Item kFlexRuleItem = MakeItem("flexRule", kFlexRule).Titled("Flex Rule", "Flex");
 
 const Field kFlexCorrective[] = {
-    F("name", Type::String, "Corrective morph.").Ref("morph").Required(),
-    F("controls", Type::Strings, "Controls that must all be up: controller, or %morph.").Required(),
+    F("name", Type::String, "Corrective morph; its Control nodes must all be up.").Ref("morph").Required(),
 };
-const Item kFlexCorrectiveItem = MakeItem("flexCorrective", kFlexCorrective).Titled("Corrective", "Flex");
+const Item* const kFlexCorrectiveKids[] = {&kCorrectiveControlItem, nullptr};
+const Item kFlexCorrectiveItem =
+    MakeItem("flexCorrective", kFlexCorrective).Titled("Corrective", "Flex").Holds(kFlexCorrectiveKids, 1);
 
 const Field kFlexDomination[] = {
-    F("name", Type::String, "Morph that is suppressed.").Ref("morph").Required(),
-    F("dominators", Type::Strings, "Controls suppressing it: controller, or %morph.").Required(),
+    F("name", Type::String, "Morph its Dominator nodes suppress.").Ref("morph").Required(),
 };
-const Item kFlexDominationItem = MakeItem("flexDomination", kFlexDomination).Titled("Domination Rule", "Flex");
+const Item* const kFlexDominationKids[] = {&kDominatorItem, nullptr};
+const Item kFlexDominationItem =
+    MakeItem("flexDomination", kFlexDomination).Titled("Domination Rule", "Flex").Holds(kFlexDominationKids, 1);
 
 const Field kStereoSplit[] = {
     F("morph", Type::String, "Morph split into <name>L/<name>R.").Ref("morph").Required(),
@@ -893,10 +949,9 @@ const Field kBoneFlexDriver[] = {
 const Item kBoneFlexDriverItem = MakeItem("boneFlexDriver", kBoneFlexDriver).Titled("Bone Flex Driver", "Flex");
 
 const Field kFlex[] = {
-    F("localVars", Type::Strings, "Flex rule variables that drive no geometry."),
     F("cullMethod", Type::Enum, "How hard unused flex data is pruned.").Values(kFlexCulls),
 };
-const Item* const kFlexKids[] = {&kDataModelFlexesItem, &kFlexControllerItem, &kFlexRuleItem,
+const Item* const kFlexKids[] = {&kDataModelFlexesItem, &kFlexControllerItem, &kLocalVarItem, &kFlexRuleItem,
                                  &kFlexCorrectiveItem, &kFlexDominationItem, &kStereoSplitItem,
                                  &kMorphRenameItem, &kFixedMorphItem, &kWrinkleScaleItem,
                                  &kBoneFlexDriverItem, nullptr};
@@ -959,9 +1014,6 @@ const Field kPhysicsShape[] = {
     F("concavity", Type::Number, "Generated shapes: concavity.").Group("Generated"),
     F("maxHulls", Type::Integer, "Generated shapes: hull limit.").Group("Generated"),
     F("maxDepth", Type::Integer, "Generated shapes: split depth (0-10).").Group("Generated"),
-    F("extraBones", Type::Strings, "Generated shapes: more bones to include.").Ref("bone").Group("Generated"),
-    F("excludeMeshes", Type::Strings, "Whole-model generation: render meshes left out.").Ref("mesh")
-        .Group("Generated"),
     F("primitive", Type::Enum, "A box, sphere or capsule hull instead of a file or mesh.").Values(kPrimitives)
         .Group("Primitive"),
     F("bone", Type::String, "Bone the primitive is on; values are in its space.").Ref("bone").Group("Primitive"),
@@ -976,7 +1028,9 @@ const Field kPhysicsShape[] = {
     F("radius1", Type::Number, "Capsule end radius.").Group("Primitive"),
     F("segments", Type::Integer, "Sphere/capsule tessellation.").Group("Primitive"),
 };
-const Item kPhysicsShapeItem = MakeItem("physicsShape", kPhysicsShape).Titled("Collision Shape", "Physics");
+const Item* const kPhysicsShapeKids[] = {&kExtraBoneItem, &kExcludeMeshItem, nullptr};
+const Item kPhysicsShapeItem =
+    MakeItem("physicsShape", kPhysicsShape).Titled("Collision Shape", "Physics").Holds(kPhysicsShapeKids);
 
 const Field kJointAxis[] = {
     F("axis", Type::Enum, "Axis.").Values(kAxes).Required(),
@@ -1013,9 +1067,9 @@ const Item kBonePairItem = MakeItem("collisionPair", kBonePair).Titled("Collisio
 
 const Field kJointContents[] = {
     F("bone", Type::String, "Bone; its children inherit.").Ref("bone").Required(),
-    F("contents", Type::Strings, "Contents words, as the model contents.").Required(),
 };
-const Item kJointContentsItem = MakeItem("jointContents", kJointContents).Titled("Joint Contents", "Physics");
+const Item kJointContentsItem =
+    MakeItem("jointContents", kJointContents, &kContentsFlagsItem).Titled("Joint Contents", "Physics");
 
 const Field kJointSurfaceProp[] = {
     F("bone", Type::String, "Bone; its children inherit.").Ref("bone").Required(),
@@ -1107,7 +1161,12 @@ const Item* const kAllItems[] = {
     &kStereoSplitItem, &kMorphRenameItem, &kFixedMorphItem, &kWrinkleScaleItem, &kBoneFlexDriverItem,
     &kFlexItem, &kEyeballItem, &kMouthItem, &kEyelidItem, &kFaceItem, &kPhysicsShapeItem, &kJointAxisItem,
     &kPhysicsJointItem, &kPhysicsMarkupItem, &kBonePairItem, &kJointContentsItem, &kJointSurfacePropItem,
-    &kPhysicsItem,
+    &kPhysicsItem, &kContentsFlagsItem, &kMotionControlsItem, &kBoneMarkupItem, &kBoundsMeshItem,
+    &kSearchFolderItem, &kIncludeModelItem, &kMaterialFolderItem, &kDrawOrderItem, &kDropMaterialItem,
+    &kDropMaterialWordItem, &kChoiceMeshItem, &kRemoveMeshItem, &kSmallMeshItem, &kCollapseTreeItem,
+    &kVrdFileItem, &kPlaceFlexGroupItem, &kPlaceMorphItem, &kPlaceMaterialItem, &kBlendFileItem,
+    &kBlendAnimationItem, &kActivityModifierItem, &kLocalVarItem, &kCorrectiveControlItem, &kDominatorItem,
+    &kExtraBoneItem, &kExcludeMeshItem, &kTransitionNodeItem, &kAllowedActivityItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -1637,7 +1696,7 @@ bool Substitute(Loader& l, const Item& item, const Scope& scope, Json& obj) {
         default:
             if (!SubstituteValue(l, file, path, *field, scope, value)) return false;
             if (field->type == Type::File && source.prefab)
-                value = PrefabFile(source.dir, value.get<std::string>(), false);
+                value = PrefabFile(source.dir, value.get<std::string>(), key == "folder");
             break;
         }
     }
@@ -3410,6 +3469,81 @@ const Flat kFlats[] = {
     {"animationSettings", "sectionMinLimit", "sectionFrames", "minLimit", true},
 };
 
+// A switch that adds `word` to the record's `list`; without a word the field's own value goes in.
+struct Word {
+    const char* item;
+    const char* key;
+    const char* list;
+    const char* word;
+};
+
+const Word kWords[] = {
+    {"contentsFlags", "solid", "contents", "solid"},
+    {"contentsFlags", "grate", "contents", "grate"},
+    {"contentsFlags", "ladder", "contents", "ladder"},
+    {"contentsFlags", "monster", "contents", "monster"},
+    {"contentsFlags", "debris", "contents", "debris"},
+    {"contentsFlags", "notSolid", "contents", "notsolid"},
+    {"contentsFlags", "contentsMask", "contents", nullptr},
+    {"scaleBone", "x", "axes", "x"},
+    {"scaleBone", "y", "axes", "y"},
+    {"scaleBone", "z", "axes", "z"},
+    {"animationOperation", "axisX", "axes", "x"},
+    {"animationOperation", "axisY", "axes", "y"},
+    {"animationOperation", "axisZ", "axes", "z"},
+    {"clip", "ignoreBoneAngles", "ignoreTransformBone", "angles"},
+    {"clip", "ignoreBonePosition", "ignoreTransformBone", "position"},
+};
+
+// The words of the motion controls, the same for a clip's motion and an operation's controls.
+const struct { const char* key; const char* word; } kMotionWords[] = {
+    {"x", "X"},   {"y", "Y"},   {"z", "Z"},     {"xr", "XR"},   {"yr", "YR"},   {"zr", "ZR"}, {"lx", "LX"},
+    {"ly", "LY"}, {"lz", "LZ"}, {"lxr", "LXR"}, {"lyr", "LYR"}, {"lzr", "LZR"}, {"lm", "LM"}, {"lq", "LQ"},
+};
+
+// A child node that is one entry of its parent's `list`: its `field` value, when `flag` is
+// unset or true.
+struct Gather {
+    const char* parent;
+    const char* child;
+    const char* list;
+    const char* field;
+    const char* flag = nullptr;
+};
+
+const Gather kGathers[] = {
+    {"settings", "searchFolder", "searchDirs", "folder"},
+    {"settings", "includeModel", "includeModels", "file"},
+    {"settings", "boundsMesh", "bboxMeshes", "mesh"},
+    {"materials", "materialFolder", "paths", "folder"},
+    {"materials", "drawOrder", "sortOrder", "material"},
+    {"mesh", "dropMaterial", "removeMeshes", "material"},
+    {"mesh", "dropMaterialWord", "removeMeshWords", "word"},
+    {"choice", "choiceMesh", "meshes", "mesh"},
+    {"lod", "lodRemoveMesh", "removeModels", "mesh"},
+    {"lod", "lodCollapseTree", "collapseBoneTrees", "bone"},
+    {"lod", "dropMaterial", "removeMeshes", "material"},
+    {"lod", "dropMaterialWord", "removeMeshWords", "word"},
+    {"lod", "lodSmallMesh", "removeSmallMeshesIn", "mesh"},
+    {"bones", "boneMarkup", "boneMerge", "bone", "boneMerge"},
+    {"bones", "boneMarkup", "doNotCollapse", "bone", "doNotCollapse"},
+    {"bones", "boneMarkup", "alwaysCollapse", "bone", "alwaysCollapse"},
+    {"bones", "vrdFile", "vrdFiles", "file"},
+    {"attachment", "placeOnFlexGroup", "flexGroups", "name"},
+    {"attachment", "placeOnMorph", "flexMorphs", "name"},
+    {"attachment", "placeOnMaterial", "materials", "material"},
+    {"sequence", "blendFile", "files", "file"},
+    {"sequence", "blendAnimation", "animations", "animation"},
+    {"sequence", "activityModifier", "activityModifiers", "name"},
+    {"flex", "flexLocalVar", "localVars", "name"},
+    {"flexCorrective", "correctiveControl", "controls", "control"},
+    {"flexDomination", "dominator", "dominators", "control"},
+    {"physicsShape", "extraBone", "extraBones", "bone"},
+    {"physicsShape", "excludeMesh", "excludeMeshes", "mesh"},
+    {"skipTransition", "transitionNode", "nodes", "name"},
+    {"animationSettings", "allowedActivity", "allowedActivities", "name"},
+};
+
 // Fields named apart from the record key they fill, as "type" names the node itself.
 const struct { const char* item; const char* key; const char* record; } kRenamed[] = {
     {"ikRule", "rule", "type"},
@@ -3453,6 +3587,47 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
         out.erase(renamed.key);
     }
 
+    // switches become the word lists they stand for
+    const auto addWord = [&](const char* key, const char* list, const char* word) {
+        const auto found = out.find(key);
+        if (found == out.end()) return;
+        const Json value = *found;
+        out.erase(key);
+        if (word && !value.get<bool>()) return;
+        if (!out.contains(list)) out[kKeyOrigins][list] = KeyOrigin(node, key);
+        out[list].push_back(word ? Json(word) : Json(ValueText(value)));
+    };
+    for (const Word& word : kWords)
+        if (IsA(item, word.item)) addWord(word.key, word.list, word.word);
+    if (IsA(item, "motionControls"))
+        for (const auto& control : kMotionWords)
+            addWord(control.key, IsA(item, "clip") ? "motion" : "controls", control.word);
+    if (IsA(item, "jointContents") && !out.contains("contents"))
+        return l.Fail(node, "", "a Joint Contents node needs at least one contents flag");
+
+    // one-value children become their parent's lists; the rest keep their own records
+    if (const Json* children = Get(node, "children")) {
+        for (const Json& child : *children) {
+            const Item& kind = ItemOf(item, child);
+            bool gathered = false;
+            for (const Gather& gather : kGathers) {
+                if (!IsA(item, gather.parent) || std::strcmp(kind.name, gather.child) != 0) continue;
+                gathered = true;
+                if (gather.flag && !child.value(gather.flag, false)) continue;
+                if (!out.contains(gather.list)) out[kKeyOrigins][gather.list] = KeyOrigin(child, gather.field);
+                out[gather.list].push_back(child.at(gather.field));
+            }
+            if (gathered) continue;
+
+            const Move& move = MoveOf(item, kind);
+            Json shaped;
+            if (!Reshape(l, child, kind, model, shaped)) return false;
+            if (move.into == Into::Object) out[move.key] = std::move(shaped);
+            else if (move.into == Into::Model) model[move.key].push_back(std::move(shaped));
+            else out[move.key].push_back(std::move(shaped));
+        }
+    }
+
     // every grouped field is taken out first, as a field may share its object's name
     std::vector<std::pair<const Flat*, Json>> grouped;
     for (const Flat& flat : kFlats) {
@@ -3481,18 +3656,6 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
         if (flat.required && IsA(item, flat.item) && out.contains(flat.object) &&
             !out.at(flat.object).contains(flat.sub))
             return l.Fail(node, "", "missing \"" + std::string(flat.key) + "\"");
-
-    if (const Json* children = Get(node, "children")) {
-        for (const Json& child : *children) {
-            const Item& kind = ItemOf(item, child);
-            const Move& move = MoveOf(item, kind);
-            Json shaped;
-            if (!Reshape(l, child, kind, model, shaped)) return false;
-            if (move.into == Into::Object) out[move.key] = std::move(shaped);
-            else if (move.into == Into::Model) model[move.key].push_back(std::move(shaped));
-            else out[move.key].push_back(std::move(shaped));
-        }
-    }
     return true;
 }
 
