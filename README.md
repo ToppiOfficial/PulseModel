@@ -1,6 +1,5 @@
 <p align="center">
-<img alt="mdlcompiler" src=".github/images/mdlcompiler.png" width="128">
-<img alt="mdldecompiler" src=".github/images/mdldecompiler.png" width="128">
+<img alt="PulseModel" src="app.svg" width="128">
 </p>
 
 <h1 align="center">PulseModel</h1>

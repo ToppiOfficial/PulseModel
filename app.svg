@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="blue" x2="1" y2="1">
+      <stop stop-color="#82a7cb"/>
+      <stop offset="1" stop-color="#557fa8"/>
+    </linearGradient>
+    <linearGradient id="silver" x2="1" y2="1">
+      <stop stop-color="#f0f2f6"/>
+      <stop offset="1" stop-color="#bfc8d5"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#blue)" fill-rule="evenodd" stroke="url(#silver)" stroke-width="2.5"
+        stroke-linejoin="round"
+        d="M27.5 3h9l3 7 5 2 6-3 6 6-3 6 2 5 7 3v9l-7 3-2 5 3 6-6 6-6-3-5 2-3 7h-9l-3-7-5-2-6 3-6-6 3-6-2-5-7-3v-9l7-3 2-5-3-6 6-6 6 3 5-2Z
+           M49.5 33.5a17.5 17.5 0 1 0-35 0 17.5 17.5 0 1 0 35 0Z"/>
+  <path fill="url(#silver)" d="m32 19 12.5 7v15L32 48.5 19.5 41V26Z"/>
+  <path fill="url(#blue)" d="m22 26.7 10-5.6 10 5.6-10 5.6Z"/>
+  <path fill="#82a7cb" d="m21.5 29 9.5 5.3v11.3l-9.5-5.7Z"/>
+  <path fill="#557fa8" d="m33 34.3 9.5-5.3v10.9L33 45.6Z"/>
+  <path fill="none" stroke="#edf1f7" stroke-width="1.4" stroke-linecap="round"
+        stroke-linejoin="round" d="m21.5 35 3 1.5 1.4-3.5 1.7 7.4 1.1-2.8 1.5.7"/>
+</svg>
