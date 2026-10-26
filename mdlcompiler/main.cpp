@@ -10,6 +10,7 @@
 #include <cstring>
 #include <exception>
 #include <new>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "pulselimits.h"
 #include "pulsemodel.h"
 #include "qcloader.h"
+#include "qcpackage.h"
 #include "rename.h"
 #include "writer.h"
 
@@ -34,7 +36,8 @@ static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
 
 static int Fail(const char* what, const std::string& detail) {
     pulse::diag::RecordFatal(detail);
-    return pulse::fatal::Fail(what, detail);
+    const auto* package = pulse::qcpackage::active;
+    return pulse::fatal::Fail(what, package ? package->Describe(detail) : detail);
 }
 static const char*& g_stage = pulse::fatal::g_stage;
 
@@ -269,6 +272,10 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     if (!only.empty() && !pulseModel)
         return Fail("bad option", "-only selects a model of a .pulsemodel");
 
+    std::unique_ptr<pulse::qcpackage::Package> package;
+    if (!pulseModel && pulse::qcpackage::Package::IsPackage(pulse::FilePath(script)))
+        package = std::make_unique<pulse::qcpackage::Package>(pulse::FilePath(script));
+
     std::string err;
     pulse::compile::CompileInput input;
     // pre-seeded so a script without $modelname still loads under -modelname
@@ -406,7 +413,7 @@ int main(int argc, char** argv) {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
                                                  "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
-                                                 "\"rename\":1,\"pulsemodel\":1,\"schema\":1,\"preview\":1}");
+                                                 "\"pulseqcPackage\":1,\"rename\":1,\"pulsemodel\":1,\"schema\":1,\"preview\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else if (request.at("method") == "schema") {

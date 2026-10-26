@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "api.h"
+#include "qcpackage.h"
 
 namespace pulse::diag {
 
@@ -39,7 +40,9 @@ inline Origins& ScriptOrigins() {
     return origins;
 }
 
-inline Location Resolve(const Location& at) {
+inline Location Resolve(const Location& origin) {
+    Location at = origin;
+    at.file = pulse::qcpackage::Logical(at.file);
     const Origins& origins = ScriptOrigins();
     if (!at.path.empty() || origins.lines.empty() || at.file != origins.script) return at;
     if (at.line <= 0 || at.line > static_cast<int>(origins.lines.size())) return {at.file, 0, ""};
@@ -58,7 +61,7 @@ inline void Record(const char* severity, const Location& at, const std::string& 
     if (!at.path.empty()) path = ",\"path\":" + pulse::api::String(at.path);
     pulse::api::Record("diagnostic", std::string("{\"severity\":\"") + severity +
         "\",\"file\":" + pulse::api::String(at.file) + ",\"line\":" + std::to_string(at.line) +
-        path + ",\"text\":" + pulse::api::String(text) + "}");
+        path + ",\"text\":" + pulse::api::String(pulse::qcpackage::active ? pulse::qcpackage::active->Describe(text) : text) + "}");
 }
 
 inline void WarnAt(const Location& origin, const std::string& text) {

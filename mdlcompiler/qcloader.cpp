@@ -5,6 +5,7 @@
 
 #include "perf.h"
 #include "qcloader.h"
+#include "qcpackage.h"
 #include "api.h"
 #include "diagnostic.h"
 
@@ -200,6 +201,7 @@ struct Ctx {
     // dirs, so a script command always wins.
     std::vector<fs::path> launchIncludeDirs;
     std::vector<fs::path> launchSearchDirs;
+    std::vector<fs::path> packageIncludeDirs, packageSearchDirs;
     std::map<std::string, source::Source*> rendermeshes; // $rendermesh name -> loaded source
     // filename -> shared source. A bodied $rendermesh is excluded: its edits must not leak to other refs.
     std::map<std::string, source::Source*> sourceCache;
@@ -411,23 +413,35 @@ std::string LookedIn(const std::vector<fs::path>& tried) {
 // directory first, then each $addsearchdir dir in registration order.
 // Empty return = nowhere, and `tried` then holds every candidate.
 fs::path FindSourceFile(const Ctx& c, const std::string& filename,
-                        std::vector<fs::path>* tried) {
+                        std::vector<fs::path>* tried, bool internalOnly = false) {
     const fs::path rel = pulse::FilePath(filename);
-    std::vector<fs::path> cands;
+    std::vector<fs::path> cands, internalCands;
     if (rel.is_absolute()) {
         cands.push_back(rel);
     } else {
         cands.push_back(c.sourceDirStack.back() / rel);
         for (const fs::path& dir : c.searchDirs)
             cands.push_back(dir / rel);
+        internalCands = cands;
         for (const fs::path& dir : c.launchSearchDirs)
             cands.push_back(dir / rel);
+        for (const fs::path& dir : c.packageSearchDirs)
+            internalCands.push_back(dir / rel);
+    }
+
+    if (auto* package = pulse::qcpackage::active) {
+        for (const auto& candidate : internalCands) {
+            const auto internal = package->Internal(candidate);
+            if (!internal.empty()) return package->Materialize(internal);
+        }
+        if (internalOnly) return {};
+        if (!rel.is_absolute())
+            for (auto& candidate : cands) candidate = package->External(candidate);
     }
     for (fs::path& p : cands) {
         p = p.lexically_normal().make_preferred();
         std::error_code ec;
-        if (fs::is_regular_file(p, ec))
-            return p;
+        if (fs::is_regular_file(p, ec)) return p;
     }
     if (tried) *tried = std::move(cands);
     return {};
@@ -495,6 +509,9 @@ std::string WithDmxExtension(const std::string& s) {
 std::string WithSourceExtension(const Ctx& c, const std::string& s) {
     if (HasExtension(s))
         return s;
+    if (pulse::qcpackage::active)
+        for (const char* ext : {".dmx", ".smd", ".fbx"})
+            if (!FindSourceFile(c, s + ext, nullptr, true).empty()) return s + ext;
     for (const char* ext : {".dmx", ".smd", ".fbx"})
         if (!FindSourceFile(c, s + ext, nullptr).empty())
             return s + ext;
@@ -619,13 +636,14 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     // a render mesh names its alias and prints the basename only (the same file
     // loads once per $rendermesh); errors keep the full path. A DMX prints after
     // the read so the line can carry its "<format> <ver>, <encoding> <ver>".
+    const auto reported = pulse::FilePath(pulse::qcpackage::Logical(full.string()));
     const std::string head =
-        priv ? "loading rendermesh \"" + edit->name + "\": " + full.filename().string()
+        priv ? "loading rendermesh \"" + edit->name + "\": " + reported.filename().string()
              : std::string("loading ") +
                    (kind == source::LoadKind::Animation     ? "animation"
                     : kind == source::LoadKind::Collision   ? "collision"
                                                             : "model") +
-                   ": " + full.string();
+                   ": " + reported.string();
 
     auto src = std::make_unique<source::Source>();
     // the name AS WRITTEN, not where it was found - it is the cache key above,
@@ -1487,7 +1505,7 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadRigDmx(Ctx& c, const Token& cmd,
         c.Fail(cmd.line, "cannot load \"" + full.string() + "\": " + loadErr);
         return nullptr;
     }
-    std::printf("loading %s: %s (%s %d, %s %d)\n", what.c_str(), full.filename().string().c_str(),
+    std::printf("loading %s: %s (%s %d, %s %d)\n", what.c_str(), pulse::FilePath(pulse::qcpackage::Logical(full.string())).filename().string().c_str(),
                 dm->format.c_str(), dm->format_version, dm->encoding.c_str(),
                 dm->encoding_version);
     return dm;
@@ -8354,18 +8372,36 @@ bool SpliceInclude(Ctx& c) {
         if (c.curDir != c.scriptDir)
             tries.push_back(c.scriptDir / relPath);
         if (!localDir)
-            for (const auto* list : {&c.includeDirs, &c.launchIncludeDirs})
-                for (const fs::path& dir : *list) {
-                    tries.push_back(dir / relPath);
-                    // last resort: the bare filename in that dir, for a request
-                    // that carried a relative hierarchy the dir does not have
-                    if (relPath.has_parent_path())
-                        tries.push_back(dir / relPath.filename());
-                }
+            for (const fs::path& dir : c.includeDirs) {
+                tries.push_back(dir / relPath);
+                if (relPath.has_parent_path()) tries.push_back(dir / relPath.filename());
+            }
+    }
+
+    auto internalTries = tries;
+    if (!relPath.is_absolute() && !localDir) {
+        for (const fs::path& dir : c.launchIncludeDirs) {
+            tries.push_back(dir / relPath);
+            if (relPath.has_parent_path()) tries.push_back(dir / relPath.filename());
+        }
+        for (const fs::path& dir : c.packageIncludeDirs) {
+            internalTries.push_back(dir / relPath);
+            if (relPath.has_parent_path()) internalTries.push_back(dir / relPath.filename());
+        }
     }
 
     fs::path full;
+    if (auto* package = pulse::qcpackage::active) {
+        if (!relPath.is_absolute())
+            for (const auto& candidate : internalTries) {
+                const auto internal = package->Internal(candidate);
+                if (!internal.empty()) { full = internal; break; }
+            }
+        if (full.empty() && !relPath.is_absolute())
+            for (auto& candidate : tries) candidate = package->External(candidate);
+    }
     for (fs::path& t : tries) {
+        if (!full.empty()) break;
         t = t.lexically_normal().make_preferred();
         std::error_code fec;
         if (fs::is_regular_file(t, fec) || UnsavedText(c, t)) {
@@ -8397,6 +8433,8 @@ bool SpliceInclude(Ctx& c) {
     std::string text;
     if (unsavedText) {
         text = *unsavedText;
+    } else if (pulse::qcpackage::active && pulse::qcpackage::active->Contains(full)) {
+        text = pulse::qcpackage::active->Read(full);
     } else {
         std::ifstream f(full, std::ios::binary);
         if (!f)
@@ -9360,7 +9398,8 @@ bool IsQcScriptPath(const char* path) {
 bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
                   const ScriptVars& defvars, const SearchDirs& includeDirs,
                   const SearchDirs& fileDirs, const ScriptFiles* unsaved) {
-    const std::string normalizedPath = pulse::FilePath(rawPath).string();
+    const auto* package = pulse::qcpackage::active;
+    const std::string normalizedPath = (package ? package->Primary() : pulse::FilePath(rawPath)).string();
     const char* path = normalizedPath.c_str();
     Ctx c{out};
     c.unsaved = unsaved;
@@ -9370,6 +9409,8 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     std::string text;
     if (unsavedText) {
         text = *unsavedText;
+    } else if (pulse::qcpackage::active) {
+        text = pulse::qcpackage::active->Read(normalizedPath);
     } else {
         std::ifstream f(path, std::ios::binary);
         if (!f) {
@@ -9397,15 +9438,16 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
             c.lockedVars.push_back(kv.first);
     }
 
-    auto seedDirs = [](const SearchDirs& in, std::vector<fs::path>& out) {
+    auto seedDirs = [package](const SearchDirs& in, std::vector<fs::path>& out, std::vector<fs::path>& internal) {
         for (const std::string& dir : in) {
             const fs::path path = pulse::FilePath(dir);
-            const fs::path p = path.is_absolute() ? path : fs::current_path() / path;
-            out.push_back(p.lexically_normal().make_preferred());
+            const fs::path full = path.is_absolute() ? path : fs::current_path() / path;
+            out.push_back(full.lexically_normal().make_preferred());
+            internal.push_back(package && !path.is_absolute() ? package->Path() / path : full);
         }
     };
-    seedDirs(includeDirs, c.launchIncludeDirs);
-    seedDirs(fileDirs, c.launchSearchDirs);
+    seedDirs(includeDirs, c.launchIncludeDirs, c.packageIncludeDirs);
+    seedDirs(fileDirs, c.launchSearchDirs, c.packageSearchDirs);
 
     if (!Tokenize(text, c.file, c.Path(), c.toks, err))
         return false;
@@ -9419,7 +9461,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     const fs::path canon = fs::weakly_canonical(path, ec);
     c.includeStack.push_back(ec ? std::string(path) : canon.string());
 
-    out.mdlPath = path;
+    out.mdlPath = rawPath;
 
     const bool ran = RunCommands(c);
     pulse::diag::Current() = {};

@@ -81,3 +81,8 @@ target_link_libraries(pulse_keyvalues3 PRIVATE pulse_zstd PUBLIC pulse_libs)
 # nlohmann/json (Niels Lohmann, MIT) - vendored v3.12.0 single header, API requests and .pulsemodel.
 add_library(pulse_api STATIC apiprotocol.cpp apiprotocol.h)
 target_link_libraries(pulse_api PUBLIC pulse_libs)
+
+# miniz 3.1.2 (MIT) - standalone PulseQC ZIP reading.
+add_library(pulse_miniz STATIC miniz/miniz.c miniz/miniz_tinfl.c miniz/miniz_zip.c)
+target_include_directories(pulse_miniz PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/miniz)
+target_compile_definitions(pulse_miniz PUBLIC MINIZ_NO_DEFLATE_APIS MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

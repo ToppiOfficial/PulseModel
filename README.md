@@ -63,6 +63,13 @@ have been removed, renamed and reshaped, and an unrecognized `$command` is an
 error. A stock `.qc` input is read directly - the loader accepts the stock
 spellings alongside the `.pulseqc` ones, so no conversion step is needed.
 
+A `.pulseqc` can also be a standard ZIP containing `model.qc` at its root, plus
+QC/QCI scripts and sources such as DMX or SMD. The compiler runs only `model.qc`.
+Relative source and `$include` lookups search the package first, then beside the
+package and through the normal search directories. Stored and Deflate ZIPs,
+including ZIP64, are supported; encrypted packages are not. Plain-text
+`.pulseqc` files keep their existing behavior. No extra CLI flag is needed.
+
 ### Usage
 
 ```
