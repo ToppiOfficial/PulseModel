@@ -72,7 +72,33 @@ struct MeshFilter {
     // $toonoutline: DMX float vertex stream read into SrcVertex::outline (case-insensitive)
     std::string outlineStream;
     bool outlineStreamFound = false;
+
+    struct EditStream {
+        std::string name;
+        bool found = false;
+    };
+    std::vector<EditStream> editStreams;
+    std::string editStreamError;
 };
+
+enum class SelectionCombine { Add, Subtract, Intersect };
+enum class MeshOperation {
+    SelectStream, SelectAll, SelectNone, InvertSelection, DeleteFaces,
+    DeleteVertices, Duplicate, ReplaceMaterial, FlipNormals, Weld, Inflate
+};
+
+struct EditMeshOperation {
+    MeshOperation kind = MeshOperation::SelectAll;
+    SelectionCombine combine = SelectionCombine::Add;
+    std::string name;
+    float value = 0.5f, thicknessClamp = 0.0f;
+    bool replaceSelection = false, hull = true;
+    int line = 0;
+};
+
+bool ApplyEditMesh(Source& src, MaterialTable& mats,
+                   const std::vector<EditMeshOperation>& operations,
+                   std::string* err, int* errorLine);
 
 // $wrinklescale <morph> <scale> - what dmxedit's SetWrinkleScale would have
 // baked into the DMX, minus the controller argument: wrinkle bakes per morph,
@@ -110,7 +136,7 @@ enum class WeldMode { None, KeepSeams, All };
 // separate instead of averaging into one smooth normal. sharpAngle > 0 is a
 // tolerance in degrees, so near-equal normals still merge.
 void WeldVertices(Source& src, WeldMode mode, bool sharp = false,
-                  float sharpAngle = 0.0f);
+                  float sharpAngle = 0.0f, std::vector<char>* selection = nullptr);
 
 // Offset vertices and morph targets along their unit normals, in model units.
 // `meshTag` > 0 limits it to faces with that $inflate mesh group, `materials` to

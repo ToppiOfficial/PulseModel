@@ -210,6 +210,14 @@ struct Source {
     // first-seen order, then material-sorted with C qsort (unstable sort; same
     // comparator + same libc = same order).
     std::vector<SrcVertex> vertex;
+
+    // Requested model 22 float streams, per unified vertex; NaN means absent.
+    struct EditStream {
+        std::string name;
+        std::vector<float> values;
+    };
+    std::vector<EditStream> editStreams;
+
     // A $modelgroup `mesh a b` fused several $rendermesh sources into this one,
     // interleaved by material - so which part a vertex came from is the only
     // surviving identity. Empty when this Source is not a fusion.

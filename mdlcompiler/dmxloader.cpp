@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -439,6 +440,7 @@ struct TmpFace {
     uint32_t a, na, ta;
     uint32_t b, nb, tb;
     uint32_t c, nc, tc;
+    uint32_t sa = UINT32_MAX, sb = UINT32_MAX, sc = UINT32_MAX;
 };
 
 struct MeshTemp {
@@ -448,6 +450,7 @@ struct MeshTemp {
     std::vector<pm::Vector3> normal;   // rotated normals
     std::vector<pm::Vector2> texcoord;
     std::vector<TmpFace> face;
+    std::vector<Source::EditStream> editStreams;
 };
 
 // ---------------------------------------------------------------------------
@@ -1121,6 +1124,35 @@ void LoadDeltaState(FlexTemp& flex, const std::string& deltaName,
     }
 }
 
+struct FloatVertexStream {
+    const std::vector<float>* values = nullptr;
+    const std::vector<int32_t>* indices = nullptr;
+    bool present = false;
+
+    bool Read(size_t corner, float& value) const {
+        if (!values || !indices || corner >= indices->size()) return false;
+        const int32_t index = (*indices)[corner];
+        if (index < 0 || static_cast<size_t>(index) >= values->size()) return false;
+        value = (*values)[index];
+        return true;
+    }
+};
+
+FloatVertexStream FindFloatVertexStream(const dmx::Element& state, const std::string& name) {
+    FloatVertexStream stream;
+    const std::string indexName = name + "Indices";
+    for (const auto& attribute : state.attributes) {
+        if (_stricmp(attribute.name.c_str(), name.c_str()) == 0) {
+            stream.present = true;
+            stream.values = std::get_if<std::vector<float>>(&attribute.value);
+        } else if (_stricmp(attribute.name.c_str(), indexName.c_str()) == 0) {
+            stream.present = true;
+            stream.indices = std::get_if<std::vector<int32_t>>(&attribute.value);
+        }
+    }
+    return stream;
+}
+
 bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Element* mesh,
               const dmx::Element* bindState, const pm::matrix3x4& mat, int nBoneAssign) {
     MeshTemp& tmp = *info.tmp;
@@ -1187,27 +1219,51 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     { PULSE_PERF("mesh", "LoadVertices");
       LoadVertices(info, dag, bindState, mat, nBoneAssign, normals); }
 
+    size_t streamStart = 0;
+    if (info.filter && !info.filter->editStreams.empty() && positionIndices) {
+        if (tmp.editStreams.empty())
+            for (const auto& stream : info.filter->editStreams)
+                tmp.editStreams.push_back({stream.name, {}});
+        streamStart = tmp.editStreams.front().values.size();
+        for (size_t si = 0; si < info.filter->editStreams.size(); ++si) {
+            auto& request = info.filter->editStreams[si];
+            auto& values = tmp.editStreams[si].values;
+            values.resize(streamStart + positionIndices->size(), std::numeric_limits<float>::quiet_NaN());
+            const auto* format = bindState->GetStringArray("vertexFormat");
+            if (!format || std::none_of(format->begin(), format->end(), [&](const std::string& field) {
+                    return _stricmp(field.c_str(), request.name.c_str()) == 0;
+                })) continue;
+            const auto stream = FindFloatVertexStream(*bindState, request.name);
+            if (!stream.present) continue;
+            auto invalid = [&] {
+                info.filter->editStreamError = "invalid float stream \"" + request.name +
+                                               "\" on mesh \"" + mesh->name + "\"";
+                return false;
+            };
+            if (!stream.values || !stream.indices || stream.indices->size() != positionIndices->size())
+                return invalid();
+            for (size_t corner = 0; corner < positionIndices->size(); ++corner) {
+                float weight;
+                if (!stream.Read(corner, weight) || !std::isfinite(weight)) return invalid();
+                values[streamStart + corner] = weight;
+            }
+            request.found = true;
+        }
+    }
+
     // $toonoutline's per-corner float stream (a Blender vertex group), -1 when absent
     tmp.outline.resize(tmp.vertex.size(), -1.0f);
-    const std::vector<float>* ow = nullptr;
-    const std::vector<int32_t>* owi = nullptr;
+    FloatVertexStream outline;
     if (info.filter && !info.filter->outlineStream.empty()) {
-        const std::string idxName = info.filter->outlineStream + "Indices";
-        for (const dmx::Attribute& a : bindState->attributes) {
-            if (_stricmp(a.name.c_str(), info.filter->outlineStream.c_str()) == 0)
-                ow = std::get_if<std::vector<float>>(&a.value);
-            else if (_stricmp(a.name.c_str(), idxName.c_str()) == 0)
-                owi = std::get_if<std::vector<int32_t>>(&a.value);
-        }
-        if (ow && owi)
+        outline = FindFloatVertexStream(*bindState, info.filter->outlineStream);
+        if (outline.values && outline.indices)
             info.filter->outlineStreamFound = true;
     }
-    if (ow && owi && positionIndices)
-        for (size_t i = 0; i < owi->size() && i < positionIndices->size(); ++i) {
+    if (outline.values && outline.indices && positionIndices)
+        for (size_t i = 0; i < positionIndices->size(); ++i) {
             const size_t p = nStartingVertex + static_cast<size_t>((*positionIndices)[i]);
-            const int32_t w = (*owi)[i];
-            if (p < tmp.outline.size() && w >= 0 && w < static_cast<int32_t>(ow->size()))
-                tmp.outline[p] = (*ow)[w];
+            float weight;
+            if (p < tmp.outline.size() && outline.Read(i, weight)) tmp.outline[p] = weight;
         }
 
     // $cullvertex: flag corners over threshold in the named weight stream
@@ -1215,21 +1271,12 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     if (info.filter && !info.filter->cullGroups.empty() && positionIndices) {
         cullCorner.assign(positionIndices->size(), 0);
         for (MeshFilter::CullEntry& e : info.filter->cullGroups) {
-            const std::vector<float>* cw = nullptr;
-            const std::vector<int32_t>* cwi = nullptr;
-            const std::string idxName = e.group + "Indices";
-            for (const dmx::Attribute& a : bindState->attributes) {
-                if (_stricmp(a.name.c_str(), e.group.c_str()) == 0)
-                    cw = std::get_if<std::vector<float>>(&a.value);
-                else if (_stricmp(a.name.c_str(), idxName.c_str()) == 0)
-                    cwi = std::get_if<std::vector<int32_t>>(&a.value);
-            }
-            if (cw && cwi) {
+            const auto stream = FindFloatVertexStream(*bindState, e.group);
+            if (stream.values && stream.indices) {
                 e.matched = true;
-                for (size_t i = 0; i < cwi->size() && i < cullCorner.size(); ++i) {
-                    const int32_t w = (*cwi)[i];
-                    if (w >= 0 && w < static_cast<int32_t>(cw->size()) && (*cw)[w] > e.threshold)
-                        cullCorner[i] = 1;
+                for (size_t i = 0; i < cullCorner.size(); ++i) {
+                    float weight;
+                    if (stream.Read(i, weight) && weight > e.threshold) cullCorner[i] = 1;
                 }
             }
         }
@@ -1386,6 +1433,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                     uint32_t* fv[3] = {&f.a, &f.b, &f.c};
                     uint32_t* fn[3] = {&f.na, &f.nb, &f.nc};
                     uint32_t* ft[3] = {&f.ta, &f.tb, &f.tc};
+                    uint32_t* fs[3] = {&f.sa, &f.sb, &f.sc};
                     for (int cix = 0; cix < 3; ++cix) {
                         int corner = corners[cix];
                         int p = (corner < static_cast<int>(positionIndices->size()))
@@ -1397,6 +1445,8 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                         *fv[cix] = (p >= 0) ? static_cast<uint32_t>(nStartingVertex + p) : 0;
                         *fn[cix] = (n >= 0) ? static_cast<uint32_t>(nStartingNormal + n) : 0;
                         *ft[cix] = (t >= 0) ? static_cast<uint32_t>(nStartingTexCoord + t) : 0;
+                        if (!tmp.editStreams.empty())
+                            *fs[cix] = static_cast<uint32_t>(streamStart + corner);
                     }
                     tmp.face.push_back(f);
                 }
@@ -1547,6 +1597,7 @@ struct VUnify {
     int lastref = -1;
     int v = 0, m = 0, n = 0;
     uint32_t t = 0;
+    uint32_t stream = UINT32_MAX;
     int next = -1; // chained per position
 };
 
@@ -1555,12 +1606,24 @@ struct UnifyState {
     std::vector<int> vlist; // per position: head of chain, -1 none
 };
 
-int AddToVlist(UnifyState& st, int v, int m, int n, uint32_t t) {
+int AddToVlist(UnifyState& st, int v, int m, int n, uint32_t t,
+               uint32_t stream, const MeshTemp& tmp) {
     int prev = -1;
     int cur = st.vlist[v];
     while (cur != -1) {
         VUnify& u = st.listdata[cur];
-        if (u.m == m && u.n == n && u.t == t) {
+        bool sameStreams = true;
+        for (const auto& data : tmp.editStreams) {
+            const float a = u.stream < data.values.size() ? data.values[u.stream]
+                                                         : std::numeric_limits<float>::quiet_NaN();
+            const float b = stream < data.values.size() ? data.values[stream]
+                                                      : std::numeric_limits<float>::quiet_NaN();
+            if (a != b && !(std::isnan(a) && std::isnan(b))) {
+                sameStreams = false;
+                break;
+            }
+        }
+        if (u.m == m && u.n == n && u.t == t && sameStreams) {
             u.refcount++;
             return cur;
         }
@@ -1574,6 +1637,7 @@ int AddToVlist(UnifyState& st, int v, int m, int n, uint32_t t) {
     u.m = m;
     u.n = n;
     u.t = t;
+    u.stream = stream;
     st.listdata.push_back(u);
     if (prev != -1)
         st.listdata[prev].next = idx;
@@ -1788,9 +1852,9 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
     { PULSE_PERF("build", "UnifyIndices");
     for (size_t i = 0; i < tmp.face.size(); ++i) {
         const TmpFace& f = tmp.face[i];
-        ufaces[i].a = AddToVlist(st, f.a, f.material, f.na, f.ta);
-        ufaces[i].b = AddToVlist(st, f.b, f.material, f.nb, f.tb);
-        ufaces[i].c = AddToVlist(st, f.c, f.material, f.nc, f.tc);
+        ufaces[i].a = AddToVlist(st, f.a, f.material, f.na, f.ta, f.sa, tmp);
+        ufaces[i].b = AddToVlist(st, f.b, f.material, f.nb, f.tb, f.sb, tmp);
+        ufaces[i].c = AddToVlist(st, f.c, f.material, f.nc, f.tc, f.sc, tmp);
     } }
 
     // reference order: UnifyIndices -> BuildVertexAnimations -> sort/remap
@@ -1817,6 +1881,9 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
 
     // BuildUniqueVertexList
     out.vertex.resize(numvlist);
+    out.editStreams.clear();
+    for (const auto& stream : tmp.editStreams)
+        out.editStreams.push_back({stream.name, std::vector<float>(numvlist)});
     for (int i = 0; i < numvlist; i++) {
         const VUnify& u = st.listdata[v_listsort[i]];
         SrcVertex& vertex = out.vertex[i];
@@ -1827,6 +1894,11 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         vertex.outline = static_cast<size_t>(u.v) < tmp.outline.size() ? tmp.outline[u.v] : -1.0f;
         vertex.texcoord = (u.t < tmp.texcoord.size()) ? tmp.texcoord[u.t] : pm::Vector2{};
         vertex.material = u.m;
+        for (size_t si = 0; si < tmp.editStreams.size(); ++si) {
+            const auto& values = tmp.editStreams[si].values;
+            out.editStreams[si].values[i] = u.stream < values.size() ? values[u.stream]
+                                                                  : std::numeric_limits<float>::quiet_NaN();
+        }
     }
 
     // PointMeshesToVertexAndFaceData
@@ -2485,6 +2557,12 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
 bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, float scale,
                    std::string* err, bool morphSource, MeshFilter* filter, bool animOnly,
                    bool physicsShapes) {
+    if (filter && !filter->editStreams.empty() && dm.format_version != 22) {
+        if (err) *err = "$selectdatastream uses model 22 data streams; this file declares model " +
+                        std::to_string(dm.format_version);
+        return false;
+    }
+
     const dmx::Element* root = dm.root;
     if (!root) {
         if (err) *err = "DMX has no root element";
@@ -2539,13 +2617,17 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
         PULSE_PERF("load", "LoadMeshes");
         if (!LoadMeshes(model, dm.format_version, scale, boneMap, mats, tmp,
                         flexTemp.enabled ? &flexTemp : nullptr, filter, physicsShapes, out)) {
-            if (err) *err = "failed to load meshes";
+            if (err) *err = filter && !filter->editStreamError.empty()
+                               ? filter->editStreamError : "failed to load meshes";
             return false;
         }
         if (physicsShapes)
             LoadPhysicsPrimitives(root, scale, mats, tmp, out);
         if (!tmp.face.empty())
             { PULSE_PERF("load", "BuildIndividualMeshes"); BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out); }
+        else if (filter)
+            for (const auto& stream : filter->editStreams)
+                out.editStreams.push_back({stream.name, {}});
     }
 
     // one flexkey per delta state (reference AddFlexKeys). With no combination

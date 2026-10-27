@@ -540,6 +540,7 @@ bool IsFbxPath(const std::string& s) {
 struct MeshEdit {
     std::string name; // the $rendermesh alias, for the load print
     source::MeshFilter filter;
+    std::vector<std::vector<source::EditMeshOperation>> editBlocks;
     source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
     source::WeldMode weld = source::WeldMode::None;
     bool weldSharp = false;      // $weld sharp - keep authored split normals
@@ -571,6 +572,118 @@ struct MeshEdit {
     bool toonOutline = false; // $toonoutline, applied after every other edit
     source::ToonOutlineOption outline;
 };
+
+bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
+    if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
+        return c.Fail(cmd.line, "$editmesh expects '{'");
+    ++c.pos;
+
+    std::vector<source::EditMeshOperation> operations;
+    for (;;) {
+        const Token* t = c.Next();
+        if (!t)
+            return c.Fail(cmd.line, "$editmesh is missing '}'");
+        if (!t->quoted && t->text == "}")
+            break;
+
+        std::string name = Lower(t->text);
+        if (!name.empty() && name.front() == '$') name.erase(0, 1);
+        source::EditMeshOperation op;
+        op.line = t->line;
+        const std::string where = "$editmesh: " + t->text;
+        auto hasArg = [&] {
+            return !c.Eof() && c.Cur().line == t->line &&
+                   (c.Cur().quoted || (c.Cur().text != "}" && c.Cur().text != "{" &&
+                                      c.Cur().text.front() != '$'));
+        };
+        auto want = [&](const char* what, std::string& value) {
+            if (!hasArg()) return c.Fail(t->line, where + " expects " + what);
+            value = c.Next()->text;
+            return true;
+        };
+        auto number = [&](const char* what, float& value) {
+            if (!hasArg()) return c.Fail(t->line, where + " expects " + what);
+            if (!c.WantFloat(what, *t, value)) return false;
+            return std::isfinite(value) || c.Fail(t->line, where + " requires finite values");
+        };
+
+        using source::MeshOperation;
+        if (t->quoted)
+            return c.Fail(t->line, "$editmesh expects an unquoted operation");
+        if (name == "selectdatastream") {
+            op.kind = MeshOperation::SelectStream;
+            if (hasArg() && !c.Cur().quoted) {
+                const std::string mode = Lower(c.Cur().text);
+                if (mode == "add" || mode == "subtract" || mode == "intersect") {
+                    ++c.pos;
+                    if (mode == "subtract") op.combine = source::SelectionCombine::Subtract;
+                    if (mode == "intersect") op.combine = source::SelectionCombine::Intersect;
+                }
+            }
+            if (!want("a DMX float stream name", op.name)) return false;
+            if (hasArg() && !number("a selection threshold", op.value)) return false;
+
+            bool registered = false;
+            for (const auto& stream : edit.filter.editStreams)
+                registered = registered || _stricmp(stream.name.c_str(), op.name.c_str()) == 0;
+            if (!registered) edit.filter.editStreams.push_back({op.name});
+        } else if (name == "selectall") {
+            op.kind = MeshOperation::SelectAll;
+        } else if (name == "selectnone") {
+            op.kind = MeshOperation::SelectNone;
+        } else if (name == "invertselection") {
+            op.kind = MeshOperation::InvertSelection;
+        } else if (name == "deleteselection") {
+            std::string mode;
+            if (!want("faces or vertices", mode)) return false;
+            mode = Lower(mode);
+            if (mode == "faces") op.kind = MeshOperation::DeleteFaces;
+            else if (mode == "vertices") op.kind = MeshOperation::DeleteVertices;
+            else if (mode == "edges")
+                return c.Fail(t->line, where + ": edges mode is not supported yet");
+            else return c.Fail(t->line, where + " expects faces or vertices");
+        } else if (name == "duplicatemesh") {
+            op.kind = MeshOperation::Duplicate;
+            if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "replaceselection") {
+                ++c.pos;
+                op.replaceSelection = true;
+            }
+        } else if (name == "replacematerial") {
+            op.kind = MeshOperation::ReplaceMaterial;
+            if (!want("a material name", op.name)) return false;
+            if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty material");
+        } else if (name == "flipnormals") {
+            op.kind = MeshOperation::FlipNormals;
+        } else if (name == "weld") {
+            op.kind = MeshOperation::Weld;
+        } else if (name == "inflate") {
+            op.kind = MeshOperation::Inflate;
+            if (!number("an inflation amount", op.value)) return false;
+            bool modeSeen = false, clampSeen = false;
+            while (hasArg()) {
+                const std::string option = Lower(c.Next()->text);
+                if ((option == "normals" || option == "hull") && !modeSeen) {
+                    op.hull = option == "hull";
+                    modeSeen = true;
+                } else if (option == "thicknessclamp" && !clampSeen) {
+                    if (!number("a thickness clamp factor", op.thicknessClamp)) return false;
+                    if (op.thicknessClamp < 0.0f)
+                        return c.Fail(t->line, where + ": thicknessclamp must be 0 or above");
+                    clampSeen = true;
+                } else return c.Fail(t->line, where + ": unexpected option \"" + option + "\"");
+            }
+        } else {
+            return c.Fail(t->line, "$editmesh: unknown operation \"" + t->text + "\"");
+        }
+
+        if (hasArg())
+            return c.Fail(c.Cur().line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+        operations.push_back(std::move(op));
+    }
+
+    edit.editBlocks.push_back(std::move(operations));
+    return true;
+}
 
 // Load-or-reuse a source file, keyed by filename. `edit` marks the load as a
 // render mesh, always PRIVATE (never cached, never reused) since edits must
@@ -651,6 +764,15 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     // and the SMD path derives cdtextures from it
     src->filename = filename;
     src->kind = kind;
+
+    if (edit && !edit->filter.editStreams.empty() && (IsSmdPath(filename) || IsFbxPath(filename))) {
+        for (const auto& block : edit->editBlocks)
+            for (const auto& op : block)
+                if (op.kind == source::MeshOperation::SelectStream) {
+                    c.Fail(op.line, "$editmesh: $selectdatastream needs a DMX source");
+                    return nullptr;
+                }
+    }
 
     if (IsSmdPath(filename)) {
         std::printf("%s\n", head.c_str());
@@ -759,6 +881,15 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                              c.file.c_str(), line, e.group.c_str(), filename.c_str());
 
     if (edit) {
+        for (const auto& block : edit->editBlocks)
+            for (const auto& op : block)
+                if (op.kind == source::MeshOperation::SelectStream)
+                    for (const auto& stream : edit->filter.editStreams)
+                        if (_stricmp(op.name.c_str(), stream.name.c_str()) == 0 && !stream.found) {
+                            c.Fail(op.line, "$editmesh: no kept mesh has float stream \"" + op.name + "\"");
+                            return nullptr;
+                        }
+
         source::WeldVertices(*src, edit->weld, edit->weldSharp, edit->weldSharpAngle);
         source::CullUnskinnedBones(*src, edit->boneCull);
     }
@@ -825,6 +956,11 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             if (t->text == "}")
                 break;
             const std::string o = Lower(t->text);
+
+            if (o == "$editmesh") {
+                if (!ParseEditMesh(c, *t, edit)) return false;
+                continue;
+            }
 
             if (o == "$rendermeshcmdlist") {
                 std::string list;
@@ -1183,7 +1319,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, $removemesh, $removemeshword, "
-                                           "$cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
+                                           "$editmesh, $cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
                                            "$use_skeletalaware_decimation, $scalebone, $toonoutline, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
         }
@@ -1250,6 +1386,14 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
     for (const auto& [factor, tag] : edit.decimates)
         source::SimplifyFaces(*src, *src, factor, c.in.archetype == cm::Archetype::Static,
                               nullptr, tag, edit.skeletalAwareDecimation);
+
+    for (const auto& block : edit.editBlocks) {
+        std::string editError;
+        int errorLine = cmd.line;
+        if (!source::ApplyEditMesh(*src, c.in.mats, block, &editError, &errorLine))
+            return c.Fail(errorLine, "$rendermesh \"" + name + "\": $editmesh: " + editError);
+    }
+    src->editStreams.clear();
 
     if (edit.toonOutline) {
         if (!edit.filter.outlineStreamFound && !edit.outline.forceUse)

@@ -184,9 +184,221 @@ void FillMeshes(Source& out, const std::vector<MFace>& faces) {
     }
 }
 
+void InflationVectors(const Source& src, float thickness, float thicknessClamp,
+                      const std::vector<char>* selection, std::vector<Vector3>& push,
+                      std::vector<float>& clampScale) {
+    const int n = static_cast<int>(src.vertex.size());
+
+    // Push along Blender solidify's high quality normal, built from face geometry
+    // per position so authored normals cannot bend the hull: each edge takes the
+    // sum of its (at most two) face normals, each position the sum of its edges.
+    using PosKey = std::tuple<float, float, float>;
+    auto posKey = [&](uint32_t v) {
+        const Vector3& p = src.vertex[v].position;
+        return std::make_tuple(p.x, p.y, p.z);
+    };
+    struct EdgeFaces {
+        Vector3 sum{0.0f, 0.0f, 0.0f};
+        int count = 0;
+    };
+    std::map<std::pair<PosKey, PosKey>, EdgeFaces> edges;
+    for (int mi = 0; mi < src.nummeshes; ++mi) {
+        const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
+        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+            const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
+                                   mesh.vertexoffset + src.face[f].c};
+            if (selection && !(*selection)[c[0]] && !(*selection)[c[1]] && !(*selection)[c[2]])
+                continue;
+            const Vector3 &p0 = src.vertex[c[0]].position, &p1 = src.vertex[c[1]].position,
+                          &p2 = src.vertex[c[2]].position;
+            const Vector3 e1{p1.x - p0.x, p1.y - p0.y, p1.z - p0.z}, e2{p2.x - p0.x, p2.y - p0.y, p2.z - p0.z};
+            // e2 x e1: faces are stored in the reference's (v1, v3, v2) winding
+            Vector3 fn{e2.y * e1.z - e2.z * e1.y, e2.z * e1.x - e2.x * e1.z, e2.x * e1.y - e2.y * e1.x};
+            if (pm::VectorNormalize(fn) <= 0.0f)
+                continue;
+            for (int k = 0; k < 3; ++k) {
+                PosKey a = posKey(c[k]), b = posKey(c[(k + 1) % 3]);
+                if (a == b)
+                    continue;
+                if (b < a)
+                    std::swap(a, b);
+                EdgeFaces& e = edges[{a, b}];
+                e.sum = {e.sum.x + fn.x, e.sum.y + fn.y, e.sum.z + fn.z};
+                ++e.count;
+            }
+        }
+    }
+    std::map<PosKey, Vector3> byPos;
+    for (auto& [ends, e] : edges) {
+        if (e.count > 2 || pm::VectorNormalize(e.sum) <= 0.0f)
+            continue; // non-manifold edges add nothing
+        for (const PosKey& p : {ends.first, ends.second}) {
+            Vector3& s = byPos[p];
+            s = {s.x + e.sum.x, s.y + e.sum.y, s.z + e.sum.z};
+        }
+    }
+    push.assign(n, Vector3{});
+    for (int i = 0; i < n; ++i) {
+        auto it = byPos.find(posKey(i));
+        Vector3 s = it != byPos.end() ? it->second : Vector3{0.0f, 0.0f, 0.0f};
+        if (pm::VectorNormalize(s) <= 0.0f) {
+            s = src.vertex[i].normal;
+            pm::VectorNormalize(s);
+        }
+        push[i] = s;
+    }
+
+    // thicknessclamp: Blender solidify's Clamp. A vertex whose shortest edge is
+    // under |thickness| * clamp scales by edge / that. Edges are measured
+    // between positions, not split verts.
+    clampScale.assign(n, 1.0f);
+    const float clampOffset = std::fabs(thickness) * thicknessClamp;
+    if (clampOffset > FLT_EPSILON) {
+        std::map<PosKey, float> lenSq;
+        auto key = posKey;
+        for (int mi = 0; mi < src.nummeshes; ++mi) {
+            const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
+            for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+                const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
+                                  mesh.vertexoffset + src.face[f].c};
+                if (selection && !(*selection)[c[0]] && !(*selection)[c[1]] && !(*selection)[c[2]])
+                    continue;
+                for (int k = 0; k < 3; ++k) {
+                    const Vector3 &a = src.vertex[c[k]].position, &b = src.vertex[c[(k + 1) % 3]].position;
+                    const float l = (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z);
+                    if (l == 0.0f)
+                        continue;
+                    for (uint32_t v : {c[k], c[(k + 1) % 3]}) {
+                        auto it = lenSq.try_emplace(key(v), FLT_MAX).first;
+                        it->second = std::min(it->second, l);
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < n; ++i) {
+            auto it = lenSq.find(key(i));
+            if (it != lenSq.end() && it->second < clampOffset * clampOffset)
+                clampScale[i] = std::sqrt(it->second) / clampOffset;
+        }
+    }
+}
+
+void ApplyInflation(Source& src, const std::vector<char>& selection,
+                    const std::vector<Vector3>& push, const std::vector<float>& distance,
+                    bool hull = false) {
+    for (SrcMorphAnim& morph : src.morphs) {
+        for (SrcVertAnim& va : morph.vanims) {
+            if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= src.vertex.size() ||
+                !selection[va.vertex]) continue;
+            const Vector3& base = push[va.vertex];
+            const Vector3& normal = hull ? base : src.vertex[va.vertex].normal;
+            Vector3 target{normal.x + va.normal.x, normal.y + va.normal.y, normal.z + va.normal.z};
+            pm::VectorNormalize(target);
+            va.pos.x += distance[va.vertex] * (target.x - base.x);
+            va.pos.y += distance[va.vertex] * (target.y - base.y);
+            va.pos.z += distance[va.vertex] * (target.z - base.z);
+        }
+    }
+
+    for (size_t i = 0; i < src.vertex.size(); ++i) {
+        if (!selection[i]) continue;
+        Vector3& position = src.vertex[i].position;
+        position.x += distance[i] * push[i].x;
+        position.y += distance[i] * push[i].y;
+        position.z += distance[i] * push[i].z;
+    }
+    CalcModelTangentSpaces(src);
+}
+
+void ReindexEditVertices(Source& src, const std::vector<int>& origins, std::vector<char>& selection) {
+    std::vector<int> head(src.vertex.size(), -1), next(origins.size(), -1);
+    std::vector<SrcVertex> vertices;
+    std::vector<char> picked;
+    vertices.reserve(origins.size());
+    picked.reserve(origins.size());
+    for (int v : origins) {
+        vertices.push_back(src.vertex[v]);
+        picked.push_back(selection[v]);
+    }
+    for (size_t i = origins.size(); i-- > 0;) {
+        next[i] = head[origins[i]];
+        head[origins[i]] = static_cast<int>(i);
+    }
+
+    for (auto& stream : src.editStreams) {
+        std::vector<float> values;
+        values.reserve(origins.size());
+        for (int v : origins) values.push_back(stream.values[v]);
+        stream.values.swap(values);
+    }
+    for (auto& morph : src.morphs) {
+        std::vector<SrcVertAnim> deltas;
+        for (const auto& va : morph.vanims) {
+            if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= head.size()) continue;
+            for (int v = head[va.vertex]; v >= 0; v = next[v]) {
+                SrcVertAnim copy = va;
+                copy.vertex = v;
+                deltas.push_back(copy);
+            }
+        }
+        morph.vanims.swap(deltas);
+    }
+    src.vertex.swap(vertices);
+    selection.swap(picked);
+}
+
+std::vector<MFace> AbsoluteFaces(const Source& src) {
+    std::vector<MFace> faces;
+    faces.reserve(src.face.size());
+    for (int mi = 0; mi < src.nummeshes; ++mi) {
+        const int material = src.meshindex[mi];
+        const auto& mesh = src.mesh[material];
+        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+            const auto& face = src.face[f];
+            faces.push_back({material, mesh.vertexoffset + face.a, mesh.vertexoffset + face.b,
+                             mesh.vertexoffset + face.c, src.faceTag.empty() ? uint16_t(0) : src.faceTag[f]});
+        }
+    }
+    return faces;
+}
+
+void RebuildEditMeshes(Source& src, std::vector<MFace>& faces, std::vector<char>& selection) {
+    std::vector<int> origins(src.vertex.size()), remap(src.vertex.size());
+    for (size_t i = 0; i < origins.size(); ++i) origins[i] = static_cast<int>(i);
+    std::stable_sort(origins.begin(), origins.end(),
+                     [&](int a, int b) { return src.vertex[a].material < src.vertex[b].material; });
+    for (size_t i = 0; i < origins.size(); ++i) remap[origins[i]] = static_cast<int>(i);
+    ReindexEditVertices(src, origins, selection);
+    for (auto& face : faces) {
+        face.a = remap[face.a];
+        face.b = remap[face.b];
+        face.c = remap[face.c];
+    }
+    std::stable_sort(faces.begin(), faces.end(),
+                     [](const MFace& a, const MFace& b) { return a.material < b.material; });
+    FillMeshes(src, faces);
+}
+
+void PruneEditVertices(Source& src, std::vector<MFace>& faces, std::vector<char>& selection) {
+    std::vector<int> remap(src.vertex.size(), -1), origins;
+    for (const auto& face : faces) remap[face.a] = remap[face.b] = remap[face.c] = 0;
+    for (size_t i = 0; i < remap.size(); ++i) {
+        if (remap[i] < 0) continue;
+        remap[i] = static_cast<int>(origins.size());
+        origins.push_back(static_cast<int>(i));
+    }
+    for (auto& face : faces) {
+        face.a = remap[face.a];
+        face.b = remap[face.b];
+        face.c = remap[face.c];
+    }
+    ReindexEditVertices(src, origins, selection);
+}
+
 } // namespace
 
-void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle) {
+void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
+                  std::vector<char>* selection) {
     const int n = static_cast<int>(src.vertex.size());
     if (mode == WeldMode::None || n == 0)
         return;
@@ -218,6 +430,10 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle) {
         // is smooth with, so a sharp corner keeps its own split normal
         clusterHead.clear();
         for (int v : run) {
+            if (selection && !(*selection)[v]) {
+                rep[v] = v;
+                continue;
+            }
             int head = -1;
             for (int h : clusterHead) {
                 const Vector3& a = src.vertex[h].normal;
@@ -240,11 +456,13 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle) {
     std::vector<SrcVertex> kept;
     kept.reserve(n);
     std::vector<Vector3> normalSum;
+    std::vector<int> survivors;
     for (int i = 0; i < n; ++i) {
         if (rep[i] == i) {
             remap[i] = static_cast<int>(kept.size());
             kept.push_back(src.vertex[i]);
             normalSum.push_back(src.vertex[i].normal);
+            survivors.push_back(i);
         }
     }
     if (static_cast<int>(kept.size()) == n)
@@ -278,6 +496,18 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle) {
     }
 
     src.vertex.swap(kept);
+    for (auto& stream : src.editStreams) {
+        std::vector<float> values;
+        values.reserve(survivors.size());
+        for (int v : survivors) values.push_back(stream.values[v]);
+        stream.values.swap(values);
+    }
+    if (selection) {
+        std::vector<char> keptSelection;
+        keptSelection.reserve(survivors.size());
+        for (int v : survivors) keptSelection.push_back((*selection)[v]);
+        selection->swap(keptSelection);
+    }
     const int newCount = static_cast<int>(src.vertex.size());
     for (int m = 0; m < static_cast<int>(src.mesh.size()); ++m) {
         SrcMesh& mesh = src.mesh[m];
@@ -360,31 +590,13 @@ bool InflateVertices(Source& src, float amount, int meshTag,
         return src.vertex.empty();
     if (amount == 0.0f)
         return true;
-    for (SrcMorphAnim& morph : src.morphs) {
-        for (SrcVertAnim& va : morph.vanims) {
-            if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= src.vertex.size() ||
-                !pick[va.vertex])
-                continue;
-            Vector3 base = src.vertex[va.vertex].normal;
-            Vector3 target{base.x + va.normal.x, base.y + va.normal.y, base.z + va.normal.z};
-            pm::VectorNormalize(base);
-            pm::VectorNormalize(target);
-            va.pos.x += amount * (target.x - base.x);
-            va.pos.y += amount * (target.y - base.y);
-            va.pos.z += amount * (target.z - base.z);
-        }
+
+    std::vector<Vector3> push(src.vertex.size());
+    for (size_t i = 0; i < push.size(); ++i) {
+        push[i] = src.vertex[i].normal;
+        pm::VectorNormalize(push[i]);
     }
-    for (size_t i = 0; i < src.vertex.size(); ++i) {
-        if (!pick[i])
-            continue;
-        SrcVertex& v = src.vertex[i];
-        Vector3 normal = v.normal;
-        pm::VectorNormalize(normal);
-        v.position.x += amount * normal.x;
-        v.position.y += amount * normal.y;
-        v.position.z += amount * normal.z;
-    }
-    CalcModelTangentSpaces(src);
+    ApplyInflation(src, pick, push, std::vector<float>(push.size(), amount));
     return true;
 }
 
@@ -398,6 +610,154 @@ void FlipNormals(Source& src) {
             va.normal = {-va.normal.x, -va.normal.y, -va.normal.z};
     for (SrcFace& face : src.face)
         std::swap(face.b, face.c);
+}
+
+bool ApplyEditMesh(Source& src, MaterialTable& mats,
+                   const std::vector<EditMeshOperation>& operations,
+                   std::string* err, int* errorLine) {
+    std::vector<char> selection(src.vertex.size(), 1);
+    for (const auto& op : operations) {
+        auto fail = [&](const std::string& message) {
+            if (err) *err = message;
+            if (errorLine) *errorLine = op.line;
+            return false;
+        };
+        if (op.kind == MeshOperation::SelectAll || op.kind == MeshOperation::SelectNone) {
+            std::fill(selection.begin(), selection.end(), op.kind == MeshOperation::SelectAll);
+            continue;
+        }
+        if (op.kind == MeshOperation::InvertSelection) {
+            for (char& selected : selection) selected = !selected;
+            continue;
+        }
+        if (op.kind == MeshOperation::SelectStream) {
+            const Source::EditStream* stream = nullptr;
+            for (const auto& candidate : src.editStreams)
+                if (_stricmp(candidate.name.c_str(), op.name.c_str()) == 0) stream = &candidate;
+            if (!stream) return fail("no kept mesh has float stream \"" + op.name + "\"");
+            for (size_t i = 0; i < selection.size(); ++i) {
+                const bool match = std::isfinite(stream->values[i]) && stream->values[i] >= op.value;
+                if (op.combine == SelectionCombine::Add) selection[i] = selection[i] || match;
+                else if (op.combine == SelectionCombine::Subtract) selection[i] = selection[i] && !match;
+                else selection[i] = selection[i] && match;
+            }
+            continue;
+        }
+        if (std::find(selection.begin(), selection.end(), 1) == selection.end()) continue;
+
+        if (op.kind == MeshOperation::Weld) {
+            WeldVertices(src, WeldMode::All, false, 0.0f, &selection);
+            continue;
+        }
+        if (op.kind == MeshOperation::Inflate) {
+            if (op.value == 0.0f) continue;
+            std::vector<Vector3> push;
+            std::vector<float> distance;
+            InflationVectors(src, op.value, op.thicknessClamp, &selection, push, distance);
+            for (size_t i = 0; i < push.size(); ++i) {
+                if (!op.hull) {
+                    push[i] = src.vertex[i].normal;
+                    pm::VectorNormalize(push[i]);
+                }
+                distance[i] *= op.value;
+                const auto& p = src.vertex[i].position;
+                if (selection[i] && (!std::isfinite(p.x + push[i].x * distance[i]) ||
+                                     !std::isfinite(p.y + push[i].y * distance[i]) ||
+                                     !std::isfinite(p.z + push[i].z * distance[i])))
+                    return fail("inflate produces a non-finite position");
+            }
+            ApplyInflation(src, selection, push, distance, op.hull);
+            continue;
+        }
+
+        auto faces = AbsoluteFaces(src);
+        auto fullySelected = [&](const MFace& face) {
+            return selection[face.a] && selection[face.b] && selection[face.c];
+        };
+        if (op.kind == MeshOperation::DeleteFaces || op.kind == MeshOperation::DeleteVertices) {
+            faces.erase(std::remove_if(faces.begin(), faces.end(), [&](const MFace& face) {
+                return op.kind == MeshOperation::DeleteFaces ? fullySelected(face)
+                    : selection[face.a] || selection[face.b] || selection[face.c];
+            }), faces.end());
+            PruneEditVertices(src, faces, selection);
+            RebuildEditMeshes(src, faces, selection);
+            CalcModelTangentSpaces(src);
+            continue;
+        }
+
+        std::vector<char> pickedFaces(faces.size()), protectedVertices(src.vertex.size(), 0);
+        size_t pickedCount = 0;
+        for (size_t i = 0; i < faces.size(); ++i) {
+            const auto& face = faces[i];
+            pickedFaces[i] = fullySelected(face);
+            if (pickedFaces[i]) ++pickedCount;
+            else protectedVertices[face.a] = protectedVertices[face.b] = protectedVertices[face.c] = 1;
+        }
+        if (pickedCount == 0) {
+            if (op.kind == MeshOperation::Duplicate && op.replaceSelection)
+                std::fill(selection.begin(), selection.end(), 0);
+            continue;
+        }
+        if (op.kind == MeshOperation::Duplicate &&
+            pickedCount > static_cast<size_t>(lim::kMaxTriangles) - faces.size())
+            return fail("duplicatemesh exceeds the triangle limit");
+
+        int material = -1;
+        if (op.kind == MeshOperation::ReplaceMaterial) {
+            const int texture = mats.LookupTexture(op.name.c_str());
+            if (mats.textures[texture].material < 0 && mats.materialToTexture.size() >= lim::kMaxSkins)
+                return fail("replacematerial exceeds the material limit");
+            material = mats.UseTextureAsMaterial(texture);
+        }
+
+        std::vector<int> origins(src.vertex.size()), copied(src.vertex.size(), -1);
+        std::vector<char> affected(src.vertex.size(), 0);
+        for (size_t i = 0; i < origins.size(); ++i) origins[i] = static_cast<int>(i);
+        for (size_t i = 0; i < pickedFaces.size(); ++i) {
+            if (!pickedFaces[i]) continue;
+            MFace face = faces[i];
+            for (uint32_t* index : {&face.a, &face.b, &face.c}) {
+                const int original = static_cast<int>(*index);
+                if (op.kind == MeshOperation::Duplicate || protectedVertices[original]) {
+                    if (copied[original] < 0) {
+                        if (origins.size() >= static_cast<size_t>(lim::kMaxVerts))
+                            return fail("operation exceeds the vertex limit");
+                        copied[original] = static_cast<int>(origins.size());
+                        origins.push_back(original);
+                        affected.push_back(0);
+                    }
+                    *index = copied[original];
+                }
+                affected[*index] = 1;
+            }
+            if (op.kind == MeshOperation::Duplicate) faces.push_back(face);
+            else {
+                if (op.kind == MeshOperation::ReplaceMaterial) face.material = material;
+                if (op.kind == MeshOperation::FlipNormals) std::swap(face.b, face.c);
+                faces[i] = face;
+            }
+        }
+        ReindexEditVertices(src, origins, selection);
+
+        if (op.kind == MeshOperation::Duplicate && op.replaceSelection)
+            selection = affected;
+        if (op.kind == MeshOperation::ReplaceMaterial)
+            for (size_t i = 0; i < affected.size(); ++i)
+                if (affected[i]) src.vertex[i].material = material;
+        if (op.kind == MeshOperation::FlipNormals) {
+            for (size_t i = 0; i < affected.size(); ++i) {
+                if (!affected[i]) continue;
+                auto& v = src.vertex[i];
+                v.normal = {-v.normal.x, -v.normal.y, -v.normal.z};
+            }
+            for (auto& morph : src.morphs)
+                for (auto& va : morph.vanims)
+                    if (affected[va.vertex]) va.normal = {-va.normal.x, -va.normal.y, -va.normal.z};
+        }
+        RebuildEditMeshes(src, faces, selection);
+        CalcModelTangentSpaces(src);
+    }
+    return true;
 }
 
 void CullUnskinnedBones(Source& src, SkinnedBoneCull mode) {
@@ -889,95 +1249,9 @@ bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o
         return outMat[m] = mats.UseTextureAsMaterial(mats.LookupTexture(name.c_str()));
     };
 
-    // Push along Blender solidify's high quality normal, built from face geometry
-    // per position so authored normals cannot bend the hull: each edge takes the
-    // sum of its (at most two) face normals, each position the sum of its edges.
-    using PosKey = std::tuple<float, float, float>;
-    auto posKey = [&](uint32_t v) {
-        const Vector3& p = src.vertex[v].position;
-        return std::make_tuple(p.x, p.y, p.z);
-    };
-    struct EdgeFaces {
-        Vector3 sum{0.0f, 0.0f, 0.0f};
-        int count = 0;
-    };
-    std::map<std::pair<PosKey, PosKey>, EdgeFaces> edges;
-    for (int mi = 0; mi < src.nummeshes; ++mi) {
-        const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
-        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
-            const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
-                                   mesh.vertexoffset + src.face[f].c};
-            const Vector3 &p0 = src.vertex[c[0]].position, &p1 = src.vertex[c[1]].position,
-                          &p2 = src.vertex[c[2]].position;
-            const Vector3 e1{p1.x - p0.x, p1.y - p0.y, p1.z - p0.z}, e2{p2.x - p0.x, p2.y - p0.y, p2.z - p0.z};
-            // e2 x e1: faces are stored in the reference's (v1, v3, v2) winding
-            Vector3 fn{e2.y * e1.z - e2.z * e1.y, e2.z * e1.x - e2.x * e1.z, e2.x * e1.y - e2.y * e1.x};
-            if (pm::VectorNormalize(fn) <= 0.0f)
-                continue;
-            for (int k = 0; k < 3; ++k) {
-                PosKey a = posKey(c[k]), b = posKey(c[(k + 1) % 3]);
-                if (a == b)
-                    continue;
-                if (b < a)
-                    std::swap(a, b);
-                EdgeFaces& e = edges[{a, b}];
-                e.sum = {e.sum.x + fn.x, e.sum.y + fn.y, e.sum.z + fn.z};
-                ++e.count;
-            }
-        }
-    }
-    std::map<PosKey, Vector3> byPos;
-    for (auto& [ends, e] : edges) {
-        if (e.count > 2 || pm::VectorNormalize(e.sum) <= 0.0f)
-            continue; // non-manifold edges add nothing
-        for (const PosKey& p : {ends.first, ends.second}) {
-            Vector3& s = byPos[p];
-            s = {s.x + e.sum.x, s.y + e.sum.y, s.z + e.sum.z};
-        }
-    }
-    std::vector<Vector3> push(n);
-    for (int i = 0; i < n; ++i) {
-        auto it = byPos.find(posKey(i));
-        Vector3 s = it != byPos.end() ? it->second : Vector3{0.0f, 0.0f, 0.0f};
-        if (pm::VectorNormalize(s) <= 0.0f) {
-            s = src.vertex[i].normal;
-            pm::VectorNormalize(s);
-        }
-        push[i] = s;
-    }
-
-    // thicknessclamp: Blender solidify's Clamp. A vertex whose shortest edge is
-    // under |thickness| * clamp scales by edge / that; the weight stream then
-    // scales what is left. Edges are measured between positions, not split verts.
-    std::vector<float> clampScale(n, 1.0f);
-    const float clampOffset = std::fabs(o.thickness) * o.thicknessClamp;
-    if (clampOffset > FLT_EPSILON) {
-        std::map<PosKey, float> lenSq;
-        auto key = posKey;
-        for (int mi = 0; mi < src.nummeshes; ++mi) {
-            const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
-            for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
-                const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
-                                  mesh.vertexoffset + src.face[f].c};
-                for (int k = 0; k < 3; ++k) {
-                    const Vector3 &a = src.vertex[c[k]].position, &b = src.vertex[c[(k + 1) % 3]].position;
-                    const float l = (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z);
-                    if (l == 0.0f)
-                        continue;
-                    for (uint32_t v : {c[k], c[(k + 1) % 3]}) {
-                        auto it = lenSq.try_emplace(key(v), FLT_MAX).first;
-                        it->second = std::min(it->second, l);
-                    }
-                }
-            }
-        }
-        for (int i = 0; i < n; ++i) {
-            auto it = lenSq.find(key(i));
-            if (it != lenSq.end() && it->second < clampOffset * clampOffset)
-                clampScale[i] = std::sqrt(it->second) / clampOffset;
-        }
-    }
-
+    std::vector<Vector3> push;
+    std::vector<float> clampScale;
+    InflationVectors(src, o.thickness, o.thicknessClamp, nullptr, push, clampScale);
     std::vector<SrcVertex> verts = src.vertex;
     std::vector<int> origin; // per outline vertex, the source vertex it copies
     std::vector<int> noWeldOf(n, -1);
