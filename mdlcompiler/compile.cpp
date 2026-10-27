@@ -2154,24 +2154,29 @@ bool RealignBones(Ctx& ctx, std::string* err) {
     size_t numbones = m.bones.size();
 
     std::vector<int> childbone(numbones, -1);
+    std::vector<bool> noRealign(numbones, false);
+
+    for (const BoneMarkup& bm : ctx.in->bonemarkups) {
+        if (!bm.noRealign) continue;
+
+        const int k = FindGlobalBone(m, bm.name);
+        if (k != -1) noRealign[k] = true;
+    }
 
     // force bones with IK rules to realign themselves
     for (const IkChain& chain : m.ikchains) {
-        int k = chain.link[0].bone;
-        if (childbone[k] == -1 || childbone[k] == chain.link[1].bone) {
-            childbone[k] = chain.link[1].bone;
-        } else {
-            if (err) *err = "Trying to realign bone \"" + m.bones[k].name +
-                            "\" with two children";
-            return false;
-        }
-        k = chain.link[1].bone;
-        if (childbone[k] == -1 || childbone[k] == chain.link[2].bone) {
-            childbone[k] = chain.link[2].bone;
-        } else {
-            if (err) *err = "Trying to realign bone \"" + m.bones[k].name +
-                            "\" with two children";
-            return false;
+        for (int link = 0; link < 2; link++) {
+            const int k = chain.link[link].bone;
+            if (noRealign[k]) continue;
+
+            const int child = chain.link[link + 1].bone;
+            if (childbone[k] == -1 || childbone[k] == child) {
+                childbone[k] = child;
+            } else {
+                if (err) *err = "Trying to realign bone \"" + m.bones[k].name +
+                                "\" with two children";
+                return false;
+            }
         }
     }
 
@@ -2195,7 +2200,7 @@ bool RealignBones(Ctx& ctx, std::string* err) {
 
     // look for bones that aren't on a primary X axis
     for (size_t k = 0; k < numbones; k++) {
-        if (!m.bones[k].bPreAligned && childbone[k] != -1) {
+        if (!m.bones[k].bPreAligned && !noRealign[k] && childbone[k] != -1) {
             int cb = childbone[k];
             float d = VectorLength(m.bones[cb].pos);
 

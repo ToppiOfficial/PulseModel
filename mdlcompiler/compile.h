@@ -102,12 +102,12 @@ struct ImportBone {
     bool bUnlocked = false;   // unlocked bones are appended AFTER the source union
 };
 
-// one bonemarkuplist entry: per-bone flags that used to be separate QC
-// commands ($bonemerge, $donotcollapse). Both can be set on the same bone.
+// Per-bone markup flags can be combined on the same bone.
 struct BoneMarkup {
     std::string name;
     bool doNotCollapse = false; // $donotcollapse - force-keep through the cull
     bool isBonemerge = false;   // $bonemerge - BONE_USED_BY_BONE_MERGE
+    bool noRealign = false;     // $norealign - skip automatic axis rotation
 };
 
 // $transformbone <bone> [options]: a late bind-pose edit, applied by

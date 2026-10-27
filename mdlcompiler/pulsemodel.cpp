@@ -520,6 +520,7 @@ const Field kBoneMarkup[] = {
     F("bone", Type::String, "Bone.").Ref("bone").Required(),
     F("boneMerge", Type::Bool, "Kept for bonemerge."),
     F("doNotCollapse", Type::Bool, "Never collapsed."),
+    F("noRealign", Type::Bool, "Skip automatic axis rotation from IK and single-child realignment."),
     F("alwaysCollapse", Type::Bool, "Always collapsed."),
 };
 const Item kBoneMarkupItem = MakeItem("boneMarkup", kBoneMarkup).Titled("Bone Markup", "Bones");
@@ -2642,6 +2643,7 @@ bool LowerBones(Emitter& e, const Json& b) {
     static const struct { const char* key; const char* command; } kLists[] = {
         {"boneMerge", "$bonemerge"},
         {"doNotCollapse", "$donotcollapse"},
+        {"noRealign", "$norealign"},
         {"alwaysCollapse", "$alwayscollapse"},
     };
     for (const auto& list : kLists) {
@@ -3473,6 +3475,7 @@ const Gather kGathers[] = {
     {"lod", "lodSmallMesh", "removeSmallMeshesIn", "mesh"},
     {"bones", "boneMarkup", "boneMerge", "bone", "boneMerge"},
     {"bones", "boneMarkup", "doNotCollapse", "bone", "doNotCollapse"},
+    {"bones", "boneMarkup", "noRealign", "bone", "noRealign"},
     {"bones", "boneMarkup", "alwaysCollapse", "bone", "alwaysCollapse"},
     {"bones", "vrdFile", "vrdFiles", "file"},
     {"attachment", "placeOnFlexGroup", "flexGroups", "name"},

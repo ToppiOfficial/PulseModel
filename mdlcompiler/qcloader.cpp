@@ -5343,8 +5343,7 @@ bool CmdDefineBone(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// The markup entries share one BoneMarkup per bone, so $bonemerge and
-// $donotcollapse can both name it.
+// Markup commands share one entry per bone.
 cm::BoneMarkup& FindOrAddMarkup(Ctx& c, const std::string& name) {
     for (auto& bm : c.in.bonemarkups)
         if (_stricmp(bm.name.c_str(), name.c_str()) == 0)
@@ -5384,6 +5383,16 @@ bool CmdDoNotCollapse(Ctx& c, const Token& cmd) {
         return false;
     for (const std::string& n : names)
         FindOrAddMarkup(c, n).doNotCollapse = true;
+    return true;
+}
+
+bool CmdNoRealign(Ctx& c, const Token& cmd) {
+    std::vector<std::string> names;
+    if (!WantBoneNames(c, cmd, names))
+        return false;
+
+    for (const std::string& n : names)
+        FindOrAddMarkup(c, n).noRealign = true;
     return true;
 }
 
@@ -9151,6 +9160,7 @@ constexpr Command kCommands[] = {
     {"$unlockdefinebones", CmdUnlockDefineBones},
     {"$bonemerge", CmdBoneMerge},
     {"$donotcollapse", CmdDoNotCollapse},
+    {"$norealign", CmdNoRealign},
     {"$alwayscollapse", CmdAlwaysCollapse},
     {"$hierarchy", CmdHierarchy},
     {"$heirarchy", CmdHierarchy}, // stock's misspelling, same command
