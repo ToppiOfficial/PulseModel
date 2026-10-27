@@ -427,6 +427,17 @@ void ReindexEditVertices(Source& src, const std::vector<int>& origins, std::vect
         head[origins[i]] = static_cast<int>(i);
     }
 
+    if (!src.vertexEditMesh.empty()) {
+        std::vector<int> meshes;
+        meshes.reserve(origins.size());
+        for (int v : origins) meshes.push_back(src.vertexEditMesh[v]);
+        std::vector<std::pair<int, int>> extras;
+        for (const auto& [vertex, mesh] : src.extraEditMeshes)
+            for (int v = head[vertex]; v >= 0; v = next[v]) extras.emplace_back(v, mesh);
+        src.vertexEditMesh.swap(meshes);
+        src.extraEditMeshes.swap(extras);
+    }
+
     for (auto& stream : src.editStreams) {
         std::vector<float> values;
         values.reserve(origins.size());
@@ -550,6 +561,22 @@ void WeldVertices(Source& src, std::vector<char>& selection, float distance, boo
     }
 
     src.vertex.swap(kept);
+    if (!src.vertexEditMesh.empty()) {
+        std::vector<int> meshes;
+        meshes.reserve(survivors.size());
+        for (int v : survivors) meshes.push_back(src.vertexEditMesh[v]);
+
+        std::vector<std::pair<int, int>> extras;
+        for (int v = 0; v < n; ++v)
+            if (src.vertexEditMesh[v] != meshes[remap[v]])
+                extras.emplace_back(remap[v], src.vertexEditMesh[v]);
+        for (const auto& [vertex, mesh] : src.extraEditMeshes)
+            if (mesh != meshes[remap[vertex]]) extras.emplace_back(remap[vertex], mesh);
+        std::sort(extras.begin(), extras.end());
+        extras.erase(std::unique(extras.begin(), extras.end()), extras.end());
+        src.vertexEditMesh.swap(meshes);
+        src.extraEditMeshes.swap(extras);
+    }
     for (auto& stream : src.editStreams) {
         std::vector<float> values;
         values.reserve(survivors.size());
@@ -694,29 +721,46 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             for (char& selected : selection) selected = !selected;
             continue;
         }
-        if (op.kind == MeshOperation::SelectStream || op.kind == MeshOperation::SelectMaterial) {
-            const Source::EditStream* stream = nullptr;
-            std::vector<char> matchedMaterials;
+        if (op.kind == MeshOperation::SelectStream || op.kind == MeshOperation::SelectMaterial ||
+            op.kind == MeshOperation::SelectMesh || op.kind == MeshOperation::SelectMeshByStream) {
+            std::vector<char> matches(selection.size(), 0);
             if (op.kind == MeshOperation::SelectStream) {
+                const Source::EditStream* stream = nullptr;
                 for (const auto& candidate : src.editStreams)
                     if (_stricmp(candidate.name.c_str(), op.name.c_str()) == 0) stream = &candidate;
                 if (!stream) return fail("no kept mesh has float stream \"" + op.name + "\"");
-            } else {
-                matchedMaterials.resize(mats.materialToTexture.size());
+                for (size_t i = 0; i < matches.size(); ++i)
+                    matches[i] = std::isfinite(stream->values[i]) && stream->values[i] >= op.value;
+            } else if (op.kind == MeshOperation::SelectMaterial) {
+                std::vector<char> matchedMaterials(mats.materialToTexture.size());
                 for (size_t material = 0; material < matchedMaterials.size(); ++material)
                     matchedMaterials[material] = MaterialMatches(
                         mats.textures[mats.materialToTexture[material]].name, op.materials);
+                for (size_t i = 0; i < matches.size(); ++i) {
+                    const int material = src.vertex[i].material;
+                    matches[i] = material >= 0 && static_cast<size_t>(material) < matchedMaterials.size() &&
+                                 matchedMaterials[material];
+                }
+            } else {
+                std::vector<char> matchedMeshes(src.editMeshes.size());
+                for (size_t i = 0; i < src.editMeshes.size(); ++i) {
+                    const auto& mesh = src.editMeshes[i];
+                    matchedMeshes[i] = op.kind == MeshOperation::SelectMesh
+                        ? _stricmp(mesh.name.c_str(), op.name.c_str()) == 0 ||
+                          _stricmp(mesh.dagName.c_str(), op.name.c_str()) == 0
+                        : std::any_of(mesh.streams.begin(), mesh.streams.end(),
+                            [&](const std::string& name) { return _stricmp(name.c_str(), op.name.c_str()) == 0; });
+                }
+                for (size_t i = 0; i < src.vertexEditMesh.size(); ++i)
+                    matches[i] = matchedMeshes[src.vertexEditMesh[i]];
+                for (const auto& [vertex, mesh] : src.extraEditMeshes)
+                    matches[vertex] = matches[vertex] || matchedMeshes[mesh];
             }
 
             for (size_t i = 0; i < selection.size(); ++i) {
-                const int material = src.vertex[i].material;
-                const bool match = stream
-                    ? std::isfinite(stream->values[i]) && stream->values[i] >= op.value
-                    : material >= 0 && static_cast<size_t>(material) < matchedMaterials.size() &&
-                      matchedMaterials[material];
-                if (op.combine == SelectionCombine::Add) selection[i] = selection[i] || match;
-                else if (op.combine == SelectionCombine::Subtract) selection[i] = selection[i] && !match;
-                else selection[i] = selection[i] && match;
+                if (op.combine == SelectionCombine::Add) selection[i] = selection[i] || matches[i];
+                else if (op.combine == SelectionCombine::Subtract) selection[i] = selection[i] && !matches[i];
+                else selection[i] = selection[i] && matches[i];
             }
             continue;
         }

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "math/math.h"
@@ -216,6 +217,15 @@ struct Source {
         std::vector<float> values;
     };
     std::vector<EditStream> editStreams;
+
+    // Original DMX membership retained while mesh selectors execute.
+    struct EditMeshInfo {
+        std::string name, dagName;
+        std::vector<std::string> streams;
+    };
+    std::vector<EditMeshInfo> editMeshes;
+    std::vector<int> vertexEditMesh;
+    std::vector<std::pair<int, int>> extraEditMeshes; // (vertex, mesh) after cross-mesh welding
 
     // A $modelgroup `mesh a b` fused several $rendermesh sources into this one,
     // interleaved by material - so which part a vertex came from is the only

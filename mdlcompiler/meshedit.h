@@ -67,11 +67,13 @@ struct MeshFilter {
     };
     std::vector<EditStream> editStreams;
     std::string editStreamError;
+    bool keepMeshIdentity = false, selectMeshStreams = false;
 };
 
 enum class SelectionCombine { Add, Subtract, Intersect };
 enum class MeshOperation {
-    SelectStream, SelectMaterial, SelectAll, SelectNone, InvertSelection, DeleteFaces,
+    SelectStream, SelectMaterial, SelectMesh, SelectMeshByStream,
+    SelectAll, SelectNone, InvertSelection, DeleteFaces,
     DeleteVertices, Duplicate, ReplaceMaterial, FlipNormals, Weld, Inflate
 };
 

@@ -605,7 +605,8 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         using source::MeshOperation;
         if (t->quoted)
             return c.Fail(t->line, "$meshedit expects an unquoted operation");
-        if (name == "selectdatastream" || name == "selectmaterial") {
+        if (name == "selectdatastream" || name == "selectmaterial" ||
+            name == "selectmesh" || name == "selectmeshbystream") {
             if (hasArg() && !c.Cur().quoted) {
                 const std::string mode = Lower(c.Cur().text);
                 if (mode == "add" || mode == "subtract" || mode == "intersect") {
@@ -622,6 +623,13 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                     op.materials.push_back(std::move(material));
                 }
                 if (op.materials.empty()) return c.Fail(t->line, where + " expects one or more material names");
+            } else if (name == "selectmesh" || name == "selectmeshbystream") {
+                const bool byStream = name == "selectmeshbystream";
+                op.kind = byStream ? MeshOperation::SelectMeshByStream : MeshOperation::SelectMesh;
+                if (!want(byStream ? "a DMX stream name" : "a DMX mesh name", op.name)) return false;
+                if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
+                edit.filter.keepMeshIdentity = true;
+                edit.filter.selectMeshStreams = edit.filter.selectMeshStreams || byStream;
             } else {
                 op.kind = MeshOperation::SelectStream;
                 if (!want("a DMX float stream name", op.name)) return false;
@@ -780,11 +788,16 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     src->filename = filename;
     src->kind = kind;
 
-    if (edit && !edit->filter.editStreams.empty() && (IsSmdPath(filename) || IsFbxPath(filename))) {
+    if (edit && (!edit->filter.editStreams.empty() || edit->filter.keepMeshIdentity) &&
+        (IsSmdPath(filename) || IsFbxPath(filename))) {
         for (const auto& block : edit->editBlocks)
             for (const auto& op : block)
-                if (op.kind == source::MeshOperation::SelectStream) {
-                    c.Fail(op.line, "$meshedit: $selectdatastream needs a DMX source");
+                if (op.kind == source::MeshOperation::SelectStream ||
+                    op.kind == source::MeshOperation::SelectMesh ||
+                    op.kind == source::MeshOperation::SelectMeshByStream) {
+                    const char* selector = op.kind == source::MeshOperation::SelectStream ? "$selectdatastream"
+                        : op.kind == source::MeshOperation::SelectMesh ? "$selectmesh" : "$selectmeshbystream";
+                    c.Fail(op.line, std::string("$meshedit: ") + selector + " needs a DMX source");
                     return nullptr;
                 }
     }
@@ -1297,6 +1310,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
     }
     src->editStreams.clear();
+    src->editMeshes.clear();
+    src->vertexEditMesh.clear();
+    src->extraEditMeshes.clear();
 
     c.rendermeshes[name] = src;
     return true;

@@ -450,6 +450,7 @@ struct MeshTemp {
     std::vector<pm::Vector2> texcoord;
     std::vector<TmpFace> face;
     std::vector<Source::EditStream> editStreams;
+    std::vector<int> vertexEditMesh;
 };
 
 // ---------------------------------------------------------------------------
@@ -1218,6 +1219,21 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     { PULSE_PERF("mesh", "LoadVertices");
       LoadVertices(info, dag, bindState, mat, nBoneAssign, normals); }
 
+    if (info.filter && info.filter->keepMeshIdentity) {
+        const int meshIndex = static_cast<int>(info.source->editMeshes.size());
+        Source::EditMeshInfo identity{mesh->name, dag->name, {}};
+        const auto* format = bindState->GetStringArray("vertexFormat");
+        if (info.filter->selectMeshStreams && format) {
+            for (const auto& name : *format) {
+                const bool encoded = std::any_of(bindState->attributes.begin(), bindState->attributes.end(),
+                    [&](const dmx::Attribute& a) { return _stricmp(a.name.c_str(), name.c_str()) == 0; });
+                if (encoded) identity.streams.push_back(name);
+            }
+        }
+        info.source->editMeshes.push_back(std::move(identity));
+        tmp.vertexEditMesh.resize(tmp.vertex.size(), meshIndex);
+    }
+
     size_t streamStart = 0;
     if (info.filter && !info.filter->editStreams.empty() && positionIndices) {
         if (tmp.editStreams.empty())
@@ -1841,6 +1857,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
 
     // BuildUniqueVertexList
     out.vertex.resize(numvlist);
+    if (!tmp.vertexEditMesh.empty()) out.vertexEditMesh.resize(numvlist);
     out.editStreams.clear();
     for (const auto& stream : tmp.editStreams)
         out.editStreams.push_back({stream.name, std::vector<float>(numvlist)});
@@ -1853,6 +1870,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         vertex.boneweight = tmp.bone[u.v];
         vertex.texcoord = (u.t < tmp.texcoord.size()) ? tmp.texcoord[u.t] : pm::Vector2{};
         vertex.material = u.m;
+        if (!tmp.vertexEditMesh.empty()) out.vertexEditMesh[i] = tmp.vertexEditMesh[u.v];
         for (size_t si = 0; si < tmp.editStreams.size(); ++si) {
             const auto& values = tmp.editStreams[si].values;
             out.editStreams[si].values[i] = u.stream < values.size() ? values[u.stream]
@@ -2515,8 +2533,9 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
 bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, float scale,
                    std::string* err, bool morphSource, MeshFilter* filter, bool animOnly,
                    bool physicsShapes) {
-    if (filter && !filter->editStreams.empty() && dm.format_version != 22) {
-        if (err) *err = "$selectdatastream uses model 22 data streams; this file declares model " +
+    if (filter && (!filter->editStreams.empty() || filter->selectMeshStreams) && dm.format_version != 22) {
+        const char* selector = filter->editStreams.empty() ? "$selectmeshbystream" : "$selectdatastream";
+        if (err) *err = std::string(selector) + " uses model 22 data streams; this file declares model " +
                         std::to_string(dm.format_version);
         return false;
     }
