@@ -2518,10 +2518,7 @@ bool LinkAttachments(Ctx& ctx, std::string* err) {
         matrix3x4 boneToPose;
         matrix3x4 poseToBone;
 
-        // no bone named at all: the attachment is tied to model space, so
-        // anchor it to the model root (keyvalues1 $attachment with no `bone`
-        // clause). The .pulsemdl loader rejects an empty parent_bone before
-        // reaching here, so this only fires for a deliberately bone-less one.
+        // Anchor model-space attachments to the model root.
         if (att.bonename.empty()) {
             int root = 0;
             for (size_t b = 0; b < m.bones.size(); ++b) {

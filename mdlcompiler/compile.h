@@ -732,10 +732,8 @@ struct BoneFlexDriver {
 };
 
 // ---- physics -------------------------------------------------------------
-// The .pulsemdl schema drops QC's $collisionmodel / $collisionjoints split.
-// There is one set of lists, and the compile stage auto-detects: collision
-// geometry resolving to a single physics bone is a single body, more than one
-// is a ragdoll.
+// Collision geometry resolving to one physics bone forms a single body;
+// geometry spanning multiple physics bones forms a ragdoll.
 
 // How a shape gets its geometry. Both kinds live in the same
 // `physicsshapelist`; the element's class name picks the kind.
@@ -1108,7 +1106,7 @@ enum class Archetype {
     Simple,  // "simple" - $simpleprop: single "prop_root" bone, verts NOT baked
 };
 
-// Script-level inputs the compile stage needs (filled by the .pulsemdl loader).
+// Script-level inputs consumed by the compile stage.
 struct CompileInput {
     std::string outname;
     Archetype archetype = Archetype::General;

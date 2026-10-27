@@ -45,7 +45,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// animation/sequence flags (format/mdl.h, mirrored like pulseloader.cpp does)
+// Animation/sequence flags mirrored from format/mdl.h.
 constexpr int kStudioLooping = 0x0001;
 constexpr int kStudioSnap = 0x0002;
 constexpr int kStudioDelta = 0x0004;

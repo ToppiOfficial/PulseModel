@@ -264,7 +264,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     };
 
     // .pulseqc (keyvalues1) and .pulsemodel (JSON, lowered onto the same
-    // commands). The keyvalues2 .pulsemdl loader is halted indefinitely.
+    // commands).
     const bool pulseModel = pulse::pulsemodel::IsPulseModelPath(script);
     if (!pulse::loader::IsQcScriptPath(script) && !pulseModel)
         return Fail("unsupported script", std::string(script) +

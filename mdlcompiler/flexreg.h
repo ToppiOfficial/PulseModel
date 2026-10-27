@@ -6,9 +6,8 @@
 //   1. every body's source contributes its delta states (morphs -> flexkeys),
 //      plus the imported flex rig - a render mesh carries morphs only, and the
 //      rig behind them comes from `.pulseqc`'s $datamodelflexes;
-//   2. the script-authored ManualFlex block - `.pulsemdl`'s morphcontrollerlist
-//      + morphrulelist, or `.pulseqc`'s $flexcontroller / $flexlocalvar /
-//      $flexrule / $flexcorrective.
+//   2. the script-authored ManualFlex block from $flexcontroller /
+//      $flexlocalvar / $flexrule / $flexcorrective.
 //
 // Registration ORDER defines the table indices and the string table, so both
 // front ends must go through RegisterFlex() to stay byte-identical.
