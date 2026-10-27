@@ -55,21 +55,6 @@ cannot express; several limits are uncapped (bones, meshes, attachments,
 materials, animations). Its own ceilings live in `libs/pulselimits.h`. So a model
 that compiles is not guaranteed to load - the engine you ship to decides that.
 
-### The compile script
-
-The script is `.pulseqc` (a `.qc` extension is read as the same format). It looks
-like QC and shares much of its vocabulary, but **it is not stock QC** - commands
-have been removed, renamed and reshaped, and an unrecognized `$command` is an
-error. A stock `.qc` input is read directly - the loader accepts the stock
-spellings alongside the `.pulseqc` ones, so no conversion step is needed.
-
-A `.pulseqc` can also be a standard ZIP containing `model.qc` at its root, plus
-QC/QCI scripts and sources such as DMX or SMD. The compiler runs only `model.qc`.
-Relative source and `$include` lookups search the package first, then beside the
-package and through the normal search directories. Stored and Deflate ZIPs,
-including ZIP64, are supported; encrypted packages are not. Plain-text
-`.pulseqc` files keep their existing behavior. No extra CLI flag is needed.
-
 ### Usage
 
 ```
@@ -125,7 +110,7 @@ the job; it writes what it can parse and tells you what it skipped.
 
 ```
 mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
-              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-pulseqc]
+              [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation] [-newcommands]
               [-nomesh] [-noanimation] [-declaresequence] [-datamodeljoints]
               [-pause] [-perfmetrics]
 ```
@@ -135,8 +120,9 @@ every `.mdl` under it, recursively. Pass `-pause` to hold the window open before
 exiting so the summary stays on screen.
 
 Each model lands in its own folder under a `decompiled <version>` wrapper beside
-the input. By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the
-`.pulseqc` form. Either compiles back through `mdlcompiler`.
+the input. It always writes a `.qc`, using stock-studiomdl commands by default.
+Pass `-newcommands` to use newer `mdlcompiler` commands inside the same `.qc`
+format. Both command styles compile back through `mdlcompiler`.
 
 | Option | Meaning |
 | --- | --- |
@@ -145,11 +131,11 @@ the input. By default it writes a stock-studiomdl `.qc`; pass `-pulseqc` for the
 | `-dmxencoding <enc>` | How the `.dmx` meshes are encoded: `binary` (default) or `keyvalues2` text. |
 | `-dmxmodel <n>` | The `format model` version they declare: 15 (default), 1, 18, or 22 (Source 2 ModelDoc). |
 | `-smdanimation` | Write animation clips as `.smd` instead of `.dmx`. |
-| `-pulseqc` | Write a `.pulseqc` instead of the default stock-studiomdl `.qc`. |
+| `-newcommands` | Use newer `mdlcompiler` commands in the `.qc` instead of stock-studiomdl commands. |
 | `-nomesh` | Skip the mesh `.dmx` files, the `.phy` hull, the `.vrd` and the joints `.dmx`; the script still lists their commands. |
 | `-noanimation` | Skip the animation clip files; the script still lists the sequences and animations. |
 | `-declaresequence` | Also write a `<name>.qci` listing every sequence, in order, as `$declaresequence` - paste into a model that `$includemodel`'s this one. |
-| `-datamodeljoints` | Write hitboxes, procedural bones and jigglebones to `meshes/<name>_joints.dmx` and import it with one `$datamodeljoints` line instead of the raw `$hboxset`/`$driverbone`/`.vrd`/`$jigglebone` commands. Follows `-dmxencoding`/`-dmxmodel`; works with `.qc` and `-pulseqc`. The script then needs `mdlcompiler` - stock studiomdl has no `$datamodeljoints`. Hitbox names are dropped (a DMX hitbox has none). |
+| `-datamodeljoints` | Write hitboxes, procedural bones and jigglebones to `meshes/<name>_joints.dmx` and import it with one `$datamodeljoints` line instead of the raw `$hboxset`/`$driverbone`/`.vrd`/`$jigglebone` commands. Follows `-dmxencoding`/`-dmxmodel`; works with either command style. The script then needs `mdlcompiler` - stock studiomdl has no `$datamodeljoints`. Hitbox names are dropped (a DMX hitbox has none). |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 | `-perfmetrics` | Print wall time in ms per process once the run ends; a batch sums each process across all models. |
 

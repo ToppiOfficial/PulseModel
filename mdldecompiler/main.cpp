@@ -1,4 +1,4 @@
-// mdldecompiler - reads a compiled .mdl and writes back a .pulseqc describing it.
+// mdldecompiler - reads a compiled .mdl and writes back a .qc describing it.
 //
 // Usage:
 //   mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
@@ -64,7 +64,7 @@ void PrintHeader() {
 int Usage() {
     std::printf("usage: mdldecompiler <file.mdl|folder> ... [-outdir <dir>]\n");
     std::printf("                     [-forceversion <n>] [-dmxencoding <enc>] [-dmxmodel <n>]\n");
-    std::printf("                     [-smdanimation] [-pulseqc]\n");
+    std::printf("                     [-smdanimation] [-newcommands]\n");
     std::printf("                     [-nomesh] [-noanimation] [-declaresequence]\n");
     std::printf("                     [-datamodeljoints]\n");
     std::printf("\n");
@@ -77,7 +77,7 @@ int Usage() {
     std::printf("  -forceversion <n>\n");
     std::printf("                read the file as version <n>, ignoring the header field\n");
     std::printf("                (some compilers write a bogus one to block decompiling)\n");
-    std::printf("  -pulseqc      write a .pulseqc instead of the default stock .qc\n");
+    std::printf("  -newcommands use newer mdlcompiler commands in the .qc instead of stock QC\n");
     std::printf("  -smdanimation write the animation clips as .smd instead of .dmx\n");
     std::printf("  -dmxencoding <enc>\n");
     std::printf("                how the .dmx meshes are encoded: binary (default) or\n");
@@ -2873,8 +2873,7 @@ std::string OutFolder(const std::string& in, const std::string& root, const char
 }
 
 std::string OutScript(const std::string& dir) {
-    return (std::filesystem::path(dir) / (BaseName(dir) + (g_studiomdl ? ".qc" : ".pulseqc")))
-        .string();
+    return (std::filesystem::path(dir) / (BaseName(dir) + ".qc")).string();
 }
 
 int DecompileOne(const std::string& in, const std::string& root, const char* outDir,
@@ -3106,7 +3105,7 @@ int RunDecompile(int argc, char** argv) {
             dmxModel = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "-smdanimation") == 0)
             SetAnimFormat(true);
-        else if (std::strcmp(argv[i], "-pulseqc") == 0)
+        else if (std::strcmp(argv[i], "-newcommands") == 0)
             g_studiomdl = false;
         else if (std::strcmp(argv[i], "-studiomdl") == 0)
             g_studiomdl = true; // now the default; still accepted so old runs work
