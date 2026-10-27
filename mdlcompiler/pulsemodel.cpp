@@ -286,9 +286,6 @@ const Field kMesh[] = {
     F("flipNormals", Type::Bool, "Flip normals."),
     F("decimate", Type::Number, "Keep this share of faces (0-1]."),
     F("skinnedBoneCull", Type::Enum, "Drop unweighted bones.").Values(kSkinnedBoneCulls),
-    F("weld", Type::Bool, "Weld vertices.").Group("Weld"),
-    F("weldSeams", Type::Bool, "Also weld across UV seams.").Group("Weld"),
-    F("weldSharp", Type::Number, "Keep edges sharper than this many degrees.").Group("Weld"),
 };
 const Item* const kMeshKids[] = {&kScaleBoneItem, &kDropMaterialItem, &kDropMaterialWordItem, nullptr};
 const Item kMeshItem = MakeItem("mesh", kMesh).Titled("Mesh", "Mesh").Holds(kMeshKids);
@@ -2012,12 +2009,6 @@ void LowerMesh(Emitter& e, const Json& mesh) {
             e.Text(name.get<std::string>());
         }
     }
-    if (const Json* weld = Get(mesh, "weld")) {
-        open("weld");
-        e.Word("$weld");
-        EmitFlag(e, *weld, "seams", "seams");
-        EmitClause(e, *weld, "sharp", "sharp");
-    }
     if (const Json* v = Get(mesh, "decimate")) {
         open("decimate");
         e.Word("$decimate");
@@ -3365,9 +3356,6 @@ const Flat kFlats[] = {
     {"settings", "illumBone", "illumPosition", "bone"},
     {"settings", "eyePosition", "eyePosition", "position", true},
     {"settings", "eyeAutoHeight", "eyePosition", "autoHeight"},
-    {"mesh", "weld", "weld", nullptr},
-    {"mesh", "weldSeams", "weld", "seams"},
-    {"mesh", "weldSharp", "weld", "sharp"},
     {"lod", "removeSmallMeshes", "removeSmallMeshes", "size", true},
     {"lod", "removeSmallMeshesIn", "removeSmallMeshes", "meshes"},
     {"defineBone", "realignPosition", "realign", "position", true},

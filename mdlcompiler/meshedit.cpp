@@ -120,34 +120,23 @@ bool MaterialMatches(const std::string& material, const std::vector<std::string>
     return false;
 }
 
-// Attribute boundaries compare exactly; distance welding only relaxes positions.
-int CmpBits(const void* a, const void* b, size_t n) { return std::memcmp(a, b, n); }
-
-int WeldCompare(const SrcVertex& a, const SrcVertex& b, WeldMode mode, bool comparePosition = true) {
-    if (a.material != b.material)
-        return a.material < b.material ? -1 : 1;
-    if (comparePosition)
-        if (int c = CmpBits(&a.position, &b.position, sizeof(a.position))) return c;
-    if (mode == WeldMode::KeepSeams)
-        if (int c = CmpBits(&a.texcoord, &b.texcoord, sizeof(a.texcoord)))
-            return c;
-    if (a.boneweight.numbones != b.boneweight.numbones)
-        return a.boneweight.numbones < b.boneweight.numbones ? -1 : 1;
+bool WeldAttributesMatch(const SrcVertex& a, const SrcVertex& b) {
+    if (a.material != b.material || a.boneweight.numbones != b.boneweight.numbones)
+        return false;
     for (int i = 0; i < a.boneweight.numbones; ++i) {
-        if (a.boneweight.bone[i] != b.boneweight.bone[i])
-            return a.boneweight.bone[i] < b.boneweight.bone[i] ? -1 : 1;
-        if (int c = CmpBits(&a.boneweight.weight[i], &b.boneweight.weight[i], sizeof(float)))
-            return c;
+        if (a.boneweight.bone[i] != b.boneweight.bone[i] ||
+            std::memcmp(&a.boneweight.weight[i], &b.boneweight.weight[i], sizeof(float)) != 0)
+            return false;
     }
-    return 0;
+    return true;
 }
 
-bool DistanceWeldTargets(Source& src, WeldMode mode, const std::vector<char>* selection,
-                         float distance, bool sharp, float sharpAngle, bool sharpEdges,
+bool DistanceWeldTargets(Source& src, const std::vector<char>& selection,
+                         float distance, bool sharpEdges,
                          std::vector<int>& targets) {
     std::vector<int> order;
     for (size_t i = 0; i < src.vertex.size(); ++i)
-        if (!selection || (*selection)[i]) order.push_back(static_cast<int>(i));
+        if (selection[i]) order.push_back(static_cast<int>(i));
 
     std::vector<Vector3> positions;
     positions.reserve(src.vertex.size());
@@ -170,8 +159,6 @@ bool DistanceWeldTargets(Source& src, WeldMode mode, const std::vector<char>* se
     build(build, 0, static_cast<int>(order.size()), 0);
 
     const float radiusSquared = distance * distance;
-    const float sharpCos = !sharp ? -2.0f
-        : sharpAngle > 0.0f ? std::cos(sharpAngle * pm::kPiF / 180.0f) : 1.0f - 1e-6f;
     auto squaredDistance = [](const Vector3& a, const Vector3& b) {
         const float x = a.x - b.x, y = a.y - b.y, z = a.z - b.z;
         return x * x + y * y + z * z;
@@ -180,17 +167,14 @@ bool DistanceWeldTargets(Source& src, WeldMode mode, const std::vector<char>* se
     std::vector<int> cluster, normalHeads;
     bool changed = false;
     for (size_t seed = 0; seed < src.vertex.size(); ++seed) {
-        if ((selection && !(*selection)[seed]) || targets[seed] >= 0) continue;
+        if (!selection[seed] || targets[seed] >= 0) continue;
         cluster.clear();
         auto gather = [&](auto&& self, int begin, int end, int axis) -> void {
             if (begin >= end) return;
             const int middle = begin + (end - begin) / 2, candidate = order[middle];
             const float delta = coordinate(static_cast<int>(seed), axis) - coordinate(candidate, axis);
-            const auto& a = src.vertex[seed].normal;
-            const auto& b = src.vertex[candidate].normal;
             if (candidate != static_cast<int>(seed) && targets[candidate] < 0 &&
-                WeldCompare(src.vertex[seed], src.vertex[candidate], mode, false) == 0 &&
-                (!sharp || a.x * b.x + a.y * b.y + a.z * b.z >= sharpCos) &&
+                WeldAttributesMatch(src.vertex[seed], src.vertex[candidate]) &&
                 squaredDistance(positions[seed], positions[candidate]) <= radiusSquared)
                 cluster.push_back(candidate);
             if (delta <= 0.0f || delta * delta <= radiusSquared)
@@ -303,7 +287,7 @@ void FillMeshes(Source& out, const std::vector<MFace>& faces) {
 }
 
 void InflationVectors(const Source& src, float thickness, float thicknessClamp,
-                      const std::vector<char>* selection, std::vector<Vector3>& push,
+                      const std::vector<char>& selection, std::vector<Vector3>& push,
                       std::vector<float>& clampScale) {
     const int n = static_cast<int>(src.vertex.size());
 
@@ -325,7 +309,7 @@ void InflationVectors(const Source& src, float thickness, float thicknessClamp,
         for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
             const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
                                    mesh.vertexoffset + src.face[f].c};
-            if (selection && !(*selection)[c[0]] && !(*selection)[c[1]] && !(*selection)[c[2]])
+            if (!selection[c[0]] && !selection[c[1]] && !selection[c[2]])
                 continue;
             const Vector3 &p0 = src.vertex[c[0]].position, &p1 = src.vertex[c[1]].position,
                           &p2 = src.vertex[c[2]].position;
@@ -379,7 +363,7 @@ void InflationVectors(const Source& src, float thickness, float thicknessClamp,
             for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
                 const uint32_t c[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
                                   mesh.vertexoffset + src.face[f].c};
-                if (selection && !(*selection)[c[0]] && !(*selection)[c[1]] && !(*selection)[c[2]])
+                if (!selection[c[0]] && !selection[c[1]] && !selection[c[2]])
                     continue;
                 for (int k = 0; k < 3; ++k) {
                     const Vector3 &a = src.vertex[c[k]].position, &b = src.vertex[c[(k + 1) % 3]].position;
@@ -515,14 +499,13 @@ void PruneEditVertices(Source& src, std::vector<MFace>& faces, std::vector<char>
 
 } // namespace
 
-void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
-                  std::vector<char>* selection, float distance, bool sharpEdges) {
+void WeldVertices(Source& src, std::vector<char>& selection, float distance, bool sharpEdges) {
     const int n = static_cast<int>(src.vertex.size());
-    if (mode == WeldMode::None || n == 0)
+    if (n == 0)
         return;
 
     std::vector<int> rep;
-    if (!DistanceWeldTargets(src, mode, selection, distance, sharp, sharpAngle, sharpEdges, rep))
+    if (!DistanceWeldTargets(src, selection, distance, sharpEdges, rep))
         return;
 
     std::vector<int> remap(n, -1);
@@ -548,7 +531,7 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
         }
     }
     for (size_t i = 0; i < kept.size(); ++i) {
-        if (sharpEdges || (selection && !(*selection)[survivors[i]])) continue;
+        if (sharpEdges || !selection[survivors[i]]) continue;
         Vector3 nrm = normalSum[i];
         if (pm::VectorNormalize(nrm) > 0.0f)
             kept[i].normal = nrm;
@@ -573,12 +556,11 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
         for (int v : survivors) values.push_back(stream.values[v]);
         stream.values.swap(values);
     }
-    if (selection) {
-        std::vector<char> keptSelection;
-        keptSelection.reserve(survivors.size());
-        for (int v : survivors) keptSelection.push_back((*selection)[v]);
-        selection->swap(keptSelection);
-    }
+    std::vector<char> keptSelection;
+    keptSelection.reserve(survivors.size());
+    for (int v : survivors) keptSelection.push_back(selection[v]);
+    selection.swap(keptSelection);
+
     const int newCount = static_cast<int>(src.vertex.size());
     for (int m = 0; m < static_cast<int>(src.mesh.size()); ++m) {
         SrcMesh& mesh = src.mesh[m];
@@ -628,7 +610,7 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
         return p.x == q.x && p.y == q.y && p.z == q.z;
     };
     weldedFaces.erase(std::remove_if(weldedFaces.begin(), weldedFaces.end(), [&](const MFace& face) {
-        if (selection && !(*selection)[face.a] && !(*selection)[face.b] && !(*selection)[face.c])
+        if (!selection[face.a] && !selection[face.b] && !selection[face.c])
             return false;
         if (samePosition(face.a, face.b) || samePosition(face.b, face.c) || samePosition(face.c, face.a))
             return true;
@@ -637,9 +619,7 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
         return !seenFaces.emplace(face.material, corners[0], corners[1], corners[2]).second;
     }), weldedFaces.end());
 
-    std::vector<char> allSelected;
-    if (!selection) allSelected.assign(src.vertex.size(), 1);
-    PruneEditVertices(src, weldedFaces, selection ? *selection : allSelected);
+    PruneEditVertices(src, weldedFaces, selection);
     FillMeshes(src, weldedFaces);
     CalcModelTangentSpaces(src);
 }
@@ -743,14 +723,14 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
         if (std::find(selection.begin(), selection.end(), 1) == selection.end()) continue;
 
         if (op.kind == MeshOperation::Weld) {
-            WeldVertices(src, WeldMode::All, false, 0.0f, &selection, op.value, op.sharpEdges);
+            WeldVertices(src, selection, op.value, op.sharpEdges);
             continue;
         }
         if (op.kind == MeshOperation::Inflate) {
             if (op.value == 0.0f) continue;
             std::vector<Vector3> push;
             std::vector<float> distance;
-            InflationVectors(src, op.value, op.thicknessClamp, &selection, push, distance);
+            InflationVectors(src, op.value, op.thicknessClamp, selection, push, distance);
             for (size_t i = 0; i < push.size(); ++i) {
                 if (!op.hull) {
                     push[i] = src.vertex[i].normal;
@@ -1317,156 +1297,6 @@ bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* e
     out.kind = LoadKind::Model;
     return true;
 }
-
-bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o, std::string* err) {
-    auto fail = [&](const std::string& m) {
-        if (err) *err = m;
-        return false;
-    };
-    const int n = static_cast<int>(src.vertex.size());
-    for (SrcVertex& v : src.vertex)
-        if (v.outline < 0.0f)
-            v.outline = o.forceUse ? 1.0f : 0.0f;
-
-    std::string cd = o.cdmaterial;
-    if (!cd.empty() && cd.back() != '/' && cd.back() != '\\')
-        cd += '/';
-    std::map<int, int> outMat;
-    auto outlineMaterial = [&](int m) {
-        auto it = outMat.find(m);
-        if (it != outMat.end())
-            return it->second;
-        std::string name = cd + o.material;
-        if (o.perMaterial) {
-            const std::string& base = mats.textures[mats.materialToTexture[m]].name;
-            const size_t slash = base.find_last_of("/\\");
-            const std::string dir = !cd.empty() ? cd : slash == std::string::npos ? "" : base.substr(0, slash + 1);
-            name = dir + std::filesystem::path(base).stem().string() + "_" + o.material;
-        }
-        return outMat[m] = mats.UseTextureAsMaterial(mats.LookupTexture(name.c_str()));
-    };
-
-    std::vector<Vector3> push;
-    std::vector<float> clampScale;
-    InflationVectors(src, o.thickness, o.thicknessClamp, nullptr, push, clampScale);
-    std::vector<SrcVertex> verts = src.vertex;
-    std::vector<int> origin; // per outline vertex, the source vertex it copies
-    std::vector<int> noWeldOf(n, -1);
-    auto less = [](const SrcVertex& a, const SrcVertex& b) { return WeldCompare(a, b, WeldMode::All) < 0; };
-    std::map<SrcVertex, int, decltype(less)> welded(less);
-    auto outlineVertex = [&](int v, int om) {
-        if (!o.weld && noWeldOf[v] >= 0)
-            return noWeldOf[v];
-        SrcVertex ov = src.vertex[v];
-        const float d = o.thickness * ov.outline * clampScale[v];
-        ov.material = om;
-        ov.position = {ov.position.x + push[v].x * d, ov.position.y + push[v].y * d,
-                       ov.position.z + push[v].z * d};
-        ov.normal = {-push[v].x, -push[v].y, -push[v].z};
-        if (o.weld) {
-            auto it = welded.find(ov);
-            if (it != welded.end())
-                return it->second;
-        }
-        const int idx = static_cast<int>(verts.size());
-        verts.push_back(ov);
-        origin.push_back(v);
-        if (o.weld)
-            welded.emplace(ov, idx);
-        else
-            noWeldOf[v] = idx;
-        return idx;
-    };
-
-    std::vector<MFace> faces;
-    const bool tagged = !src.faceTag.empty();
-    for (int mi = 0; mi < src.nummeshes; ++mi) {
-        const int m = src.meshindex[mi];
-        const SrcMesh& mesh = src.mesh[m];
-        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f)
-            faces.push_back({m, mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
-                             mesh.vertexoffset + src.face[f].c, tagged ? src.faceTag[f] : uint16_t(0)});
-    }
-    const size_t numOrig = faces.size();
-    auto inRange = [&](uint32_t v) {
-        const float w = src.vertex[v].outline;
-        return w >= o.minWeight && w <= o.maxWeight;
-    };
-    for (size_t f = 0; f < numOrig; ++f) {
-        const MFace face = faces[f];
-        if (!inRange(face.a) && !inRange(face.b) && !inRange(face.c))
-            continue; // a face with any corner in range keeps its tapered hull
-        const int om = outlineMaterial(face.material);
-        if (om >= lim::kMaxSkins)
-            return fail("too many materials (max " + std::to_string(lim::kMaxSkins) + ")");
-        // inverse hull: reversed winding so only the back faces draw
-        faces.push_back({om, static_cast<uint32_t>(outlineVertex(face.a, om)),
-                         static_cast<uint32_t>(outlineVertex(face.c, om)),
-                         static_cast<uint32_t>(outlineVertex(face.b, om))});
-    }
-    if (faces.size() == numOrig)
-        return fail("min/max weight culls every face");
-    if (verts.size() > static_cast<size_t>(lim::kMaxVerts))
-        return fail("outlined mesh has " + std::to_string(verts.size()) + " vertices (max " +
-                    std::to_string(lim::kMaxVerts) + ")");
-    if (faces.size() > static_cast<size_t>(lim::kMaxTriangles))
-        return fail("outlined mesh has " + std::to_string(faces.size()) + " triangles (max " +
-                    std::to_string(lim::kMaxTriangles) + ")");
-
-    // the hull follows every flex its source vertex takes part in, re-aiming its
-    // offset along the flexed normal the way $inflate does
-    for (SrcMorphAnim& morph : src.morphs) {
-        std::vector<int> at(n, -1);
-        for (size_t i = 0; i < morph.vanims.size(); ++i)
-            if (morph.vanims[i].vertex >= 0 && morph.vanims[i].vertex < n)
-                at[morph.vanims[i].vertex] = static_cast<int>(i);
-        for (size_t k = 0; k < origin.size(); ++k) {
-            const int v = origin[k];
-            if (at[v] < 0)
-                continue;
-            SrcVertAnim va = morph.vanims[at[v]];
-            const float d = o.thickness * src.vertex[v].outline * clampScale[v];
-            Vector3 flexed{push[v].x + va.normal.x, push[v].y + va.normal.y, push[v].z + va.normal.z};
-            if (pm::VectorNormalize(flexed) > 0.0f) {
-                va.pos.x += d * (flexed.x - push[v].x);
-                va.pos.y += d * (flexed.y - push[v].y);
-                va.pos.z += d * (flexed.z - push[v].z);
-            }
-            va.vertex = n + static_cast<int>(k);
-            va.normal = {-va.normal.x, -va.normal.y, -va.normal.z};
-            morph.vanims.push_back(va);
-        }
-    }
-
-    // regroup by material; the source's own vertices are already sorted
-    std::vector<int> order(verts.size());
-    for (size_t i = 0; i < order.size(); ++i)
-        order[i] = static_cast<int>(i);
-    std::stable_sort(order.begin(), order.end(),
-                     [&](int a, int b) { return verts[a].material < verts[b].material; });
-    std::vector<int> remap(verts.size());
-    src.vertex.resize(verts.size());
-    for (size_t i = 0; i < order.size(); ++i) {
-        remap[order[i]] = static_cast<int>(i);
-        src.vertex[i] = verts[order[i]];
-    }
-    for (MFace& f : faces) {
-        f.a = remap[f.a];
-        f.b = remap[f.b];
-        f.c = remap[f.c];
-    }
-    std::stable_sort(faces.begin(), faces.end(),
-                     [](const MFace& a, const MFace& b) { return a.material < b.material; });
-    for (SrcMorphAnim& morph : src.morphs)
-        for (SrcVertAnim& va : morph.vanims)
-            if (va.vertex >= 0 && va.vertex < static_cast<int>(remap.size()))
-                va.vertex = remap[va.vertex];
-
-    FillMeshes(src, faces);
-    CalcModelTangentSpaces(src);
-    return true;
-}
-
 
 bool ScaleBone(Source& src, const std::string& bone, const Vector3& scale) {
     int b = -1;

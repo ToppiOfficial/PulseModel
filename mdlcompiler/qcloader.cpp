@@ -542,9 +542,6 @@ struct MeshEdit {
     source::MeshFilter filter;
     std::vector<std::vector<source::EditMeshOperation>> editBlocks;
     source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
-    source::WeldMode weld = source::WeldMode::None;
-    bool weldSharp = false;      // $weld sharp - keep authored split normals
-    float weldSharpAngle = 0.0f; // optional tolerance in degrees; 0 = exact normal match
     bool noMorph = false;
     // $inflate <amount> [material|mesh <name>...] in script order; tag 0 = no mesh scope
     struct Inflate {
@@ -569,8 +566,6 @@ struct MeshEdit {
     std::vector<source::VtaFlexOption> vtaFlexes;
     std::string vca, vcaName; // $vca: the same file played back as one NWAY run
     int vcaLine = 0;
-    bool toonOutline = false; // $toonoutline, applied after every other edit
-    source::ToonOutlineOption outline;
 };
 
 bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
@@ -810,10 +805,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "$inflate mesh needs a DMX or FBX source - an SMD has no named meshes");
             return nullptr;
         }
-        if (edit && !edit->filter.cullGroups.empty()) {
-            c.Fail(line, "$cullvertex needs a DMX source - an SMD has no vertex groups");
-            return nullptr;
-        }
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
                                    morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -821,10 +812,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
         }
     } else if (IsFbxPath(filename)) {
         std::printf("%s\n", head.c_str());
-        if (edit && !edit->filter.cullGroups.empty()) {
-            c.Fail(line, "$cullvertex needs a DMX source");
-            return nullptr;
-        }
         if (!source::LoadFbxSource(full.string(), *src, mats, c.in.scale, &loadErr, morphSource,
                                    edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -893,13 +880,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                                  filename + "\"");
                 return nullptr;
             }
-    if (edit)
-        for (const source::MeshFilter::CullEntry& e : edit->filter.cullGroups)
-            if (!e.matched)
-                std::fprintf(stderr,
-                             "warning: %s line %d: $cullvertex \"%s\" is not a vertex group in \"%s\"\n",
-                             c.file.c_str(), line, e.group.c_str(), filename.c_str());
-
     if (edit) {
         for (const auto& block : edit->editBlocks)
             for (const auto& op : block)
@@ -910,7 +890,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                             return nullptr;
                         }
 
-        source::WeldVertices(*src, edit->weld, edit->weldSharp, edit->weldSharpAngle);
         source::CullUnskinnedBones(*src, edit->boneCull);
     }
 
@@ -1054,19 +1033,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            // $cullvertex <stream> <threshold> - drop every face touching a vertex
-            // weighted above threshold in <stream> (e.g. cullvertex$0). Repeatable, DMX only.
-            if (o == "$cullvertex") {
-                source::MeshFilter::CullEntry e;
-                if (!c.Want("a vertex group name", *t, e.group) ||
-                    !c.WantFloat("a weight threshold", *t, e.threshold))
-                    return false;
-                if (!std::isfinite(e.threshold))
-                    return c.Fail(t->line, where + ": $cullvertex threshold must be finite");
-                edit.filter.cullGroups.push_back(std::move(e));
-                continue;
-            }
-
             // $inflate <amount> [material <name>... | mesh <name>...] - repeatable;
             // no scope inflates everything. Names run to the end of the line.
             if (o == "$inflate") {
@@ -1113,66 +1079,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            // $toonoutline <stream> <thickness> [<min> <max>] [noweld] [permaterial]
-            //              [forceuseoutline] [thicknessclamp <clamp>] [materialname <name>] [cdmaterial <dir>]
-            if (o == "$toonoutline") {
-                if (edit.toonOutline)
-                    return c.Fail(t->line, where + ": $toonoutline written twice");
-                edit.toonOutline = true;
-                source::ToonOutlineOption& ol = edit.outline;
-                ol.line = t->line;
-                if (!c.Want("a vertex stream name", *t, edit.filter.outlineStream) ||
-                    !c.WantFloat("an outline thickness", *t, ol.thickness))
-                    return false;
-                if (!std::isfinite(ol.thickness))
-                    return c.Fail(t->line, where + ": $toonoutline thickness must be finite");
-                auto onLine = [&] {
-                    return !c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
-                           !(!c.Cur().quoted && c.Cur().text == "}");
-                };
-                auto numberNext = [&] {
-                    if (!onLine())
-                        return false;
-                    char* end = nullptr;
-                    std::strtof(c.Cur().text.c_str(), &end);
-                    return end != c.Cur().text.c_str() && *end == '\0';
-                };
-                if (numberNext()) {
-                    if (!c.WantFloat("a min weight", *t, ol.minWeight) ||
-                        !c.WantFloat("a max weight", *t, ol.maxWeight))
-                        return false;
-                    if (ol.minWeight > ol.maxWeight)
-                        return c.Fail(t->line, where + ": $toonoutline min weight is above max weight");
-                }
-                while (onLine()) {
-                    const Token* k = c.Next();
-                    const std::string kw = Lower(k->text);
-                    if (kw == "noweld") {
-                        ol.weld = false;
-                    } else if (kw == "permaterial") {
-                        ol.perMaterial = true;
-                    } else if (kw == "forceuseoutline") {
-                        ol.forceUse = true;
-                    } else if (kw == "thicknessclamp") {
-                        if (!c.WantFloat("a thickness clamp factor", *t, ol.thicknessClamp))
-                            return false;
-                        if (!std::isfinite(ol.thicknessClamp) || ol.thicknessClamp < 0.0f)
-                            return c.Fail(k->line, where + ": $toonoutline thicknessclamp must be 0 or above");
-                    } else if (kw == "materialname") {
-                        if (!c.Want("a material name", *t, ol.material))
-                            return false;
-                    } else if (kw == "cdmaterial") {
-                        if (!c.Want("a material directory", *t, ol.cdmaterial))
-                            return false;
-                    } else {
-                        return c.Fail(k->line, where + ": $toonoutline expects noweld, permaterial, "
-                                                       "forceuseoutline, thicknessclamp, materialname or cdmaterial, got \"" +
-                                                       k->text + "\"");
-                    }
-                }
-                continue;
-            }
-
             if (o == "$use_skeletalaware_decimation") {
                 edit.skeletalAwareDecimation = true;
                 continue;
@@ -1180,29 +1086,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
 
             if (o == "$flipnormals") {
                 edit.flipNormals = true;
-                continue;
-            }
-
-            // $weld [seams] [sharp <degrees>]
-            if (o == "$weld") {
-                edit.weld = source::WeldMode::KeepSeams;
-                if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "seams") {
-                    ++c.pos;
-                    edit.weld = source::WeldMode::All;
-                }
-                if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "sharp") {
-                    ++c.pos;
-                    edit.weldSharpAngle = 0.0f;
-                    if (!c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
-                        !(!c.Cur().quoted && c.Cur().text == "}")) {
-                        if (!c.WantFloat("a sharp angle in degrees", *t, edit.weldSharpAngle))
-                            return false;
-                        if (edit.weldSharpAngle < 0.0f || edit.weldSharpAngle > 180.0f)
-                            return c.Fail(t->line,
-                                          where + ": $weld sharp angle must be in [0, 180]");
-                    }
-                    edit.weldSharp = true;
-                }
                 continue;
             }
 
@@ -1339,8 +1222,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, $removemesh, $removemeshword, "
-                                           "$meshedit, $cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
-                                           "$use_skeletalaware_decimation, $scalebone, $toonoutline, $nomorph, "
+                                           "$meshedit, $skinnedbonecull, $inflate, $flipnormals, $decimate, $decimatemesh, "
+                                           "$use_skeletalaware_decimation, $scalebone, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
         }
     }
@@ -1414,16 +1297,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
     }
     src->editStreams.clear();
-
-    if (edit.toonOutline) {
-        if (!edit.filter.outlineStreamFound && !edit.outline.forceUse)
-            return c.Fail(edit.outline.line, "$rendermesh \"" + name + "\": $toonoutline: no mesh in \"" + file +
-                                                 "\" has a \"" + edit.filter.outlineStream +
-                                                 "\" vertex stream (use forceuseoutline to outline it anyway)");
-        std::string outlineErr;
-        if (!source::AddToonOutline(*src, c.in.mats, edit.outline, &outlineErr))
-            return c.Fail(edit.outline.line, "$rendermesh \"" + name + "\": $toonoutline: " + outlineErr);
-    }
 
     c.rendermeshes[name] = src;
     return true;

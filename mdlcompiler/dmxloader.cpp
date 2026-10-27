@@ -446,7 +446,6 @@ struct TmpFace {
 struct MeshTemp {
     std::vector<pm::Vector3> vertex;   // transformed positions
     std::vector<SrcBoneWeight> bone;   // per position
-    std::vector<float> outline;        // per position, toonoutline_weight$0
     std::vector<pm::Vector3> normal;   // rotated normals
     std::vector<pm::Vector2> texcoord;
     std::vector<TmpFace> face;
@@ -1251,37 +1250,6 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
         }
     }
 
-    // $toonoutline's per-corner float stream (a Blender vertex group), -1 when absent
-    tmp.outline.resize(tmp.vertex.size(), -1.0f);
-    FloatVertexStream outline;
-    if (info.filter && !info.filter->outlineStream.empty()) {
-        outline = FindFloatVertexStream(*bindState, info.filter->outlineStream);
-        if (outline.values && outline.indices)
-            info.filter->outlineStreamFound = true;
-    }
-    if (outline.values && outline.indices && positionIndices)
-        for (size_t i = 0; i < positionIndices->size(); ++i) {
-            const size_t p = nStartingVertex + static_cast<size_t>((*positionIndices)[i]);
-            float weight;
-            if (p < tmp.outline.size() && outline.Read(i, weight)) tmp.outline[p] = weight;
-        }
-
-    // $cullvertex: flag corners over threshold in the named weight stream
-    std::vector<char> cullCorner;
-    if (info.filter && !info.filter->cullGroups.empty() && positionIndices) {
-        cullCorner.assign(positionIndices->size(), 0);
-        for (MeshFilter::CullEntry& e : info.filter->cullGroups) {
-            const auto stream = FindFloatVertexStream(*bindState, e.group);
-            if (stream.values && stream.indices) {
-                e.matched = true;
-                for (size_t i = 0; i < cullCorner.size(); ++i) {
-                    float weight;
-                    if (stream.Read(i, weight) && weight > e.threshold) cullCorner[i] = 1;
-                }
-            }
-        }
-    }
-
     // balance/speed data follows the mesh's vertices (reference LoadVertices
     // tail: whole array, or a single 1.0f so the 0-index default hits it)
     if (flex) {
@@ -1412,15 +1380,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                    (*faces)[nFirstIndex + nVertexCount] != -1)
                 ++nVertexCount;
 
-            bool culled = false;
-            if (!cullCorner.empty())
-                for (int k = 0; k < nVertexCount && !culled; ++k) {
-                    const int32_t corner = (*faces)[nFirstIndex + k];
-                    culled = corner >= 0 && corner < static_cast<int32_t>(cullCorner.size()) &&
-                             cullCorner[corner];
-                }
-
-            if (nVertexCount >= 3 && !culled) {
+            if (nVertexCount >= 3) {
                 ComputeTriangulatedIndices(*positions, *positionIndices, *faces, nFirstIndex,
                                            nVertexCount, triangulated);
                 for (size_t ii = 0; ii + 2 < triangulated.size() + 1 && ii < triangulated.size();
@@ -1891,7 +1851,6 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         vertex.normal = (u.n >= 0 && u.n < static_cast<int>(tmp.normal.size()))
                             ? tmp.normal[u.n] : pm::Vector3{};
         vertex.boneweight = tmp.bone[u.v];
-        vertex.outline = static_cast<size_t>(u.v) < tmp.outline.size() ? tmp.outline[u.v] : -1.0f;
         vertex.texcoord = (u.t < tmp.texcoord.size()) ? tmp.texcoord[u.t] : pm::Vector2{};
         vertex.material = u.m;
         for (size_t si = 0; si < tmp.editStreams.size(); ++si) {
@@ -2534,7 +2493,6 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
             w.bone[0] = g.bone;
             w.weight[0] = 1.0f;
             tmp.bone.push_back(w);
-            tmp.outline.push_back(-1.0f);
             pm::Vector3 n{hv.x - mid.x, hv.y - mid.y, hv.z - mid.z};
             const float nl = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             tmp.normal.push_back(nl > 0.0f ? pm::Vector3{n.x / nl, n.y / nl, n.z / nl}
