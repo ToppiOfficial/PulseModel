@@ -575,14 +575,14 @@ struct MeshEdit {
 
 bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
     if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
-        return c.Fail(cmd.line, "$editmesh expects '{'");
+        return c.Fail(cmd.line, "$meshedit expects '{'");
     ++c.pos;
 
     std::vector<source::EditMeshOperation> operations;
     for (;;) {
         const Token* t = c.Next();
         if (!t)
-            return c.Fail(cmd.line, "$editmesh is missing '}'");
+            return c.Fail(cmd.line, "$meshedit is missing '}'");
         if (!t->quoted && t->text == "}")
             break;
 
@@ -590,7 +590,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         if (!name.empty() && name.front() == '$') name.erase(0, 1);
         source::EditMeshOperation op;
         op.line = t->line;
-        const std::string where = "$editmesh: " + t->text;
+        const std::string where = "$meshedit: " + t->text;
         auto hasArg = [&] {
             return !c.Eof() && c.Cur().line == t->line &&
                    (c.Cur().quoted || (c.Cur().text != "}" && c.Cur().text != "{" &&
@@ -609,7 +609,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
 
         using source::MeshOperation;
         if (t->quoted)
-            return c.Fail(t->line, "$editmesh expects an unquoted operation");
+            return c.Fail(t->line, "$meshedit expects an unquoted operation");
         if (name == "selectdatastream" || name == "selectmaterial") {
             if (hasArg() && !c.Cur().quoted) {
                 const std::string mode = Lower(c.Cur().text);
@@ -693,7 +693,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 } else return c.Fail(t->line, where + ": unexpected option \"" + option + "\"");
             }
         } else {
-            return c.Fail(t->line, "$editmesh: unknown operation \"" + t->text + "\"");
+            return c.Fail(t->line, "$meshedit: unknown operation \"" + t->text + "\"");
         }
 
         if (hasArg())
@@ -789,7 +789,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
         for (const auto& block : edit->editBlocks)
             for (const auto& op : block)
                 if (op.kind == source::MeshOperation::SelectStream) {
-                    c.Fail(op.line, "$editmesh: $selectdatastream needs a DMX source");
+                    c.Fail(op.line, "$meshedit: $selectdatastream needs a DMX source");
                     return nullptr;
                 }
     }
@@ -906,7 +906,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 if (op.kind == source::MeshOperation::SelectStream)
                     for (const auto& stream : edit->filter.editStreams)
                         if (_stricmp(op.name.c_str(), stream.name.c_str()) == 0 && !stream.found) {
-                            c.Fail(op.line, "$editmesh: no kept mesh has float stream \"" + op.name + "\"");
+                            c.Fail(op.line, "$meshedit: no kept mesh has float stream \"" + op.name + "\"");
                             return nullptr;
                         }
 
@@ -977,7 +977,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 break;
             const std::string o = Lower(t->text);
 
-            if (o == "$editmesh") {
+            if (o == "$meshedit") {
                 if (!ParseEditMesh(c, *t, edit)) return false;
                 continue;
             }
@@ -1339,7 +1339,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, $removemesh, $removemeshword, "
-                                           "$editmesh, $cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
+                                           "$meshedit, $cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
                                            "$use_skeletalaware_decimation, $scalebone, $toonoutline, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
         }
@@ -1411,7 +1411,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         std::string editError;
         int errorLine = cmd.line;
         if (!source::ApplyEditMesh(*src, c.in.mats, block, &editError, &errorLine))
-            return c.Fail(errorLine, "$rendermesh \"" + name + "\": $editmesh: " + editError);
+            return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
     }
     src->editStreams.clear();
 
