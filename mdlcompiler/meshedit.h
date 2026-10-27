@@ -83,7 +83,7 @@ struct MeshFilter {
 
 enum class SelectionCombine { Add, Subtract, Intersect };
 enum class MeshOperation {
-    SelectStream, SelectAll, SelectNone, InvertSelection, DeleteFaces,
+    SelectStream, SelectMaterial, SelectAll, SelectNone, InvertSelection, DeleteFaces,
     DeleteVertices, Duplicate, ReplaceMaterial, FlipNormals, Weld, Inflate
 };
 
@@ -91,6 +91,7 @@ struct EditMeshOperation {
     MeshOperation kind = MeshOperation::SelectAll;
     SelectionCombine combine = SelectionCombine::Add;
     std::string name;
+    std::vector<std::string> materials;
     float value = 0.5f, thicknessClamp = 0.0f;
     bool replaceSelection = false, hull = true, sharpEdges = false;
     int line = 0;

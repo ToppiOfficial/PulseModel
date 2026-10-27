@@ -610,8 +610,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         using source::MeshOperation;
         if (t->quoted)
             return c.Fail(t->line, "$editmesh expects an unquoted operation");
-        if (name == "selectdatastream") {
-            op.kind = MeshOperation::SelectStream;
+        if (name == "selectdatastream" || name == "selectmaterial") {
             if (hasArg() && !c.Cur().quoted) {
                 const std::string mode = Lower(c.Cur().text);
                 if (mode == "add" || mode == "subtract" || mode == "intersect") {
@@ -620,13 +619,24 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                     if (mode == "intersect") op.combine = source::SelectionCombine::Intersect;
                 }
             }
-            if (!want("a DMX float stream name", op.name)) return false;
-            if (hasArg() && !number("a selection threshold", op.value)) return false;
+            if (name == "selectmaterial") {
+                op.kind = MeshOperation::SelectMaterial;
+                while (hasArg()) {
+                    std::string material = c.Next()->text;
+                    if (material.empty()) return c.Fail(t->line, where + " requires nonempty material names");
+                    op.materials.push_back(std::move(material));
+                }
+                if (op.materials.empty()) return c.Fail(t->line, where + " expects one or more material names");
+            } else {
+                op.kind = MeshOperation::SelectStream;
+                if (!want("a DMX float stream name", op.name)) return false;
+                if (hasArg() && !number("a selection threshold", op.value)) return false;
 
-            bool registered = false;
-            for (const auto& stream : edit.filter.editStreams)
-                registered = registered || _stricmp(stream.name.c_str(), op.name.c_str()) == 0;
-            if (!registered) edit.filter.editStreams.push_back({op.name});
+                bool registered = false;
+                for (const auto& stream : edit.filter.editStreams)
+                    registered = registered || _stricmp(stream.name.c_str(), op.name.c_str()) == 0;
+                if (!registered) edit.filter.editStreams.push_back({op.name});
+            }
         } else if (name == "selectall") {
             op.kind = MeshOperation::SelectAll;
         } else if (name == "selectnone") {

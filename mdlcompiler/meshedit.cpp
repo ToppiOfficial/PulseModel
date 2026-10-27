@@ -112,6 +112,14 @@ bool MeshFilter::MaterialRemoved(const std::string& materialName) const {
 
 namespace {
 
+bool MaterialMatches(const std::string& material, const std::vector<std::string>& names) {
+    const std::string base = std::filesystem::path(material).stem().string();
+    for (const auto& name : names)
+        if (_stricmp(name.c_str(), material.c_str()) == 0 || _stricmp(name.c_str(), base.c_str()) == 0)
+            return true;
+    return false;
+}
+
 // Attribute boundaries compare exactly; distance welding only relaxes positions.
 int CmpBits(const void* a, const void* b, size_t n) { return std::memcmp(a, b, n); }
 
@@ -659,15 +667,7 @@ bool InflateVertices(Source& src, float amount, int meshTag,
                 pick[i] = 0;
                 continue;
             }
-            std::string hay = mats->textures[mats->materialToTexture[mat]].name;
-            std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
-            const std::string base = std::filesystem::path(hay).stem().string();
-            bool hit = false;
-            for (std::string n : materials) {
-                std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-                hit = hit || n == hay || n == base;
-            }
-            pick[i] = pick[i] && hit;
+            pick[i] = pick[i] && MaterialMatches(mats->textures[mats->materialToTexture[mat]].name, materials);
         }
     }
     if (std::find(pick.begin(), pick.end(), 1) == pick.end())
@@ -714,13 +714,26 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             for (char& selected : selection) selected = !selected;
             continue;
         }
-        if (op.kind == MeshOperation::SelectStream) {
+        if (op.kind == MeshOperation::SelectStream || op.kind == MeshOperation::SelectMaterial) {
             const Source::EditStream* stream = nullptr;
-            for (const auto& candidate : src.editStreams)
-                if (_stricmp(candidate.name.c_str(), op.name.c_str()) == 0) stream = &candidate;
-            if (!stream) return fail("no kept mesh has float stream \"" + op.name + "\"");
+            std::vector<char> matchedMaterials;
+            if (op.kind == MeshOperation::SelectStream) {
+                for (const auto& candidate : src.editStreams)
+                    if (_stricmp(candidate.name.c_str(), op.name.c_str()) == 0) stream = &candidate;
+                if (!stream) return fail("no kept mesh has float stream \"" + op.name + "\"");
+            } else {
+                matchedMaterials.resize(mats.materialToTexture.size());
+                for (size_t material = 0; material < matchedMaterials.size(); ++material)
+                    matchedMaterials[material] = MaterialMatches(
+                        mats.textures[mats.materialToTexture[material]].name, op.materials);
+            }
+
             for (size_t i = 0; i < selection.size(); ++i) {
-                const bool match = std::isfinite(stream->values[i]) && stream->values[i] >= op.value;
+                const int material = src.vertex[i].material;
+                const bool match = stream
+                    ? std::isfinite(stream->values[i]) && stream->values[i] >= op.value
+                    : material >= 0 && static_cast<size_t>(material) < matchedMaterials.size() &&
+                      matchedMaterials[material];
                 if (op.combine == SelectionCombine::Add) selection[i] = selection[i] || match;
                 else if (op.combine == SelectionCombine::Subtract) selection[i] = selection[i] && !match;
                 else selection[i] = selection[i] && match;
