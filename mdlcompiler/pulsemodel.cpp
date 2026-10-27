@@ -501,16 +501,6 @@ const Field kAimAt[] = {
 };
 const Item kAimAtItem = MakeItem("aimAtBone", kAimAt).Titled("Aim-at Bone", "Bones");
 
-const Field kTriggerEdit[] = {
-    F("bone", Type::String, "Procedural bone from this file.").Ref("bone").Required(),
-    F("angle", Type::Number, "New angle of influence in degrees; omit with remove."),
-    F("remove", Type::Bool, "Remove the triggers instead."),
-    F("frame", Type::Integer, "Trigger index."),
-    F("firstFrame", Type::Number, "First trigger index of a range.").Group("Range"),
-    F("lastFrame", Type::Number, "Last trigger index of a range.").Group("Range"),
-};
-const Item kTriggerEditItem = MakeItem("triggerEdit", kTriggerEdit).Titled("Trigger Edit", "Bones");
-
 const Field kDataModelJoints[] = {
     F("file", Type::File, "DMX holding the bone markup.").Required(),
     F("jiggleBones", Type::Bool, "Import its jiggle bones."),
@@ -518,9 +508,8 @@ const Field kDataModelJoints[] = {
     F("hitboxes", Type::Bool, "Import its hitboxes."),
     F("attachments", Type::Bool, "Import its attachments."),
 };
-const Item* const kDataModelJointsKids[] = {&kTriggerEditItem, nullptr};
 const Item kDataModelJointsItem =
-    MakeItem("dataModelJoints", kDataModelJoints).Titled("DMX Bone Markup", "Bones").Holds(kDataModelJointsKids);
+    MakeItem("dataModelJoints", kDataModelJoints).Titled("DMX Bone Markup", "Bones");
 
 const Field kBones[] = {
     F("root", Type::String, "Motion root bone.").Ref("bone"),
@@ -1150,7 +1139,7 @@ const Item* const kAllItems[] = {
     &kLodDecimateItem, &kLodBoneItem, &kLodMaterialItem, &kLodWordItem, &kLodItem, &kLodsItem,
     &kDefineBoneItem, &kRenameItem, &kTransformBoneItem, &kHierarchyItem, &kJiggleCommonItem,
     &kJiggleFlexibleItem, &kJiggleRigidItem, &kJiggleBaseSpringItem, &kJiggleBoingItem, &kJiggleBoneItem,
-    &kDriverTriggerItem, &kDriverBoneItem, &kAimAtItem, &kTriggerEditItem, &kDataModelJointsItem, &kBonesItem,
+    &kDriverTriggerItem, &kDriverBoneItem, &kAimAtItem, &kDataModelJointsItem, &kBonesItem,
     &kAttachmentItem, &kAttachmentsItem, &kHitboxItem, &kHitboxSetItem, &kHitGroupItem, &kHitboxesItem,
     &kPoseParameterItem, &kPoseParametersItem, &kIkChainItem, &kIkItem, &kIkRuleItem, &kIkFixupRuleItem,
     &kAnimOpItem, &kClipItem, &kAnimationItem, &kAnimationsItem, &kBlendItem, &kAddLayerItem,
@@ -2723,34 +2712,6 @@ bool LowerDataModelJoints(Emitter& e, const Json& d) {
     EmitFlag(e, d, "hitboxes", "hitboxes");
     EmitFlag(e, d, "attachments", "attachments");
 
-    const Json* edits = Get(d, "triggerEdits");
-    if (!edits || edits->empty()) return true;
-    e.Word("{");
-    e.Word("$proceduralbones");
-    e.Word("{");
-    for (const Json& edit : *edits) {
-        const bool remove = True(edit, "remove");
-        if (remove == (Get(edit, "angle") != nullptr))
-            return e.l.Fail(edit, "", "a trigger edit takes angle, or remove: true");
-        const Json* frame = Get(edit, "frame");
-        const Json* frames = Get(edit, "frames");
-        if ((frame != nullptr) == (frames != nullptr))
-            return e.l.Fail(edit, "", "a trigger edit takes frame or frames");
-
-        e.Word(remove ? "removetrigger" : "settriggeraoi");
-        e.Text(Str(edit, "bone"));
-        if (!remove) e.Num(edit.at("angle"));
-        if (frame) {
-            e.Word("frame");
-            e.Num(*frame);
-        } else {
-            e.Word("framerange");
-            e.Num(frames->at("min"));
-            e.Num(frames->at("max"));
-        }
-    }
-    e.Word("}");
-    e.Word("}");
     return true;
 }
 
@@ -3322,7 +3283,6 @@ const Move kMoves[] = {
     {"jiggleBone", "jiggleBaseSpring", "baseSpring", Into::Object},
     {"jiggleBone", "jiggleBoing", "boing", Into::Object},
     {"driverBone", "driverTrigger", "triggers"},
-    {"dataModelJoints", "triggerEdit", "triggerEdits"},
     {"bones", "defineBone", "define"},
     {"bones", "renameBone", "renames"},
     {"bones", "transformBone", "transforms"},
@@ -3425,8 +3385,6 @@ const Flat kFlats[] = {
     {"jiggleBaseSpring", "upMax", "upConstraint", "max", true},
     {"jiggleBaseSpring", "forwardMin", "forwardConstraint", "min", true},
     {"jiggleBaseSpring", "forwardMax", "forwardConstraint", "max", true},
-    {"triggerEdit", "firstFrame", "frames", "min", true},
-    {"triggerEdit", "lastFrame", "frames", "max", true},
     {"ikRule", "rangeStart", "range", "start", true},
     {"ikRule", "rangePeak", "range", "peak", true},
     {"ikRule", "rangeTail", "range", "tail", true},

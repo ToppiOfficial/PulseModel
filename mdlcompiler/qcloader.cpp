@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -84,7 +85,7 @@ struct Token {
     // parameter). Only conditions care: an expanded operand is a literal value,
     // never the name of another variable to look up.
     bool expanded = false;
-    bool apiRootSource = false;
+    int apiSource = -1;
 };
 
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
@@ -176,7 +177,7 @@ struct Ctx {
     cm::CompileInput& in;
     fs::path scriptDir; // root script's directory
     std::string file;
-    std::string apiRootPath;
+    std::vector<std::string> apiSources;
     const ScriptFiles* unsaved = nullptr;
     std::string rootFile; // `file` for the root script; an $include changes `file`, not this
     std::vector<Token> toks;
@@ -1511,103 +1512,15 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadRigDmx(Ctx& c, const Token& cmd,
     return dm;
 }
 
-float DegToRad(float deg);
-
-// One settriggeraoi line (triggers [first, last] of `bone` get tolerance `aoiDeg`)
-// or removetrigger line (those triggers are dropped).
-struct TriggerAoiEdit {
-    int line = 0;
-    bool remove = false;
-    std::string bone;
-    float aoiDeg = 0.0f;
-    int first = 0, last = 0;
-};
-
-// Body of $datamodeljoints: `$proceduralbones { settriggeraoi <bone> <deg> <sel> |
-// removetrigger <bone> <sel> }`, sel = `frame <n> | framerange <min> <max>`, 0-based.
-bool ParseDataModelJointsBody(Ctx& c, const Token& cmd, std::vector<TriggerAoiEdit>& edits) {
-    ++c.pos; // '{'
-    for (;;) {
-        const Token* t = c.Next();
-        if (!t)
-            return c.Fail(cmd.line, "$datamodeljoints is missing '}'");
-        if (t->text == "}")
-            return true;
-        if (Lower(t->text) != "$proceduralbones")
-            return c.Fail(t->line, "$datamodeljoints: expected $proceduralbones, got \"" +
-                                       t->text + "\"");
-        const Token* brace = c.Next();
-        if (!brace || brace->quoted || brace->text != "{")
-            return c.Fail(t->line, "$proceduralbones expects '{'");
-        for (;;) {
-            const Token* s = c.Next();
-            if (!s)
-                return c.Fail(t->line, "$proceduralbones is missing '}'");
-            if (s->text == "}")
-                break;
-            const std::string kw = Lower(s->text);
-            if (kw != "settriggeraoi" && kw != "removetrigger")
-                return c.Fail(s->line, "$proceduralbones: expected settriggeraoi or "
-                                       "removetrigger, got \"" + s->text + "\"");
-            TriggerAoiEdit e;
-            e.line = s->line;
-            e.remove = kw == "removetrigger";
-            if (!c.Want("a procedural bone name", *s, e.bone))
-                return false;
-            if (!e.remove) {
-                if (!c.WantFloat("an angle of influence", *s, e.aoiDeg))
-                    return false;
-                if (e.aoiDeg <= 0.0f)
-                    return c.Fail(s->line, kw + " \"" + e.bone + "\": angle must be > 0");
-            }
-            // The first frame/framerange wins; any later one is parsed, warned and dropped.
-            for (bool have = false;;) {
-                const std::string mode = c.Eof() ? "" : Lower(c.Cur().text);
-                if (have && mode != "frame" && mode != "framerange")
-                    break;
-                std::string m;
-                if (!c.Want("frame or framerange", *s, m))
-                    return false;
-                int first = 0, last = 0;
-                if (mode == "frame") {
-                    if (!c.WantInt("a frame", *s, first))
-                        return false;
-                    last = first;
-                } else if (mode == "framerange") {
-                    if (!c.WantInt("a first frame", *s, first) ||
-                        !c.WantInt("a last frame", *s, last))
-                        return false;
-                } else {
-                    return c.Fail(s->line, kw + " expects frame or framerange, got \"" + m + "\"");
-                }
-                if (have) {
-                    pulse::diag::WarnAtf({c.Path(), s->line}, "%s \"%s\": extra %s "
-                                         "ignored, using the first frame selection",
-                                         kw.c_str(), e.bone.c_str(), mode.c_str());
-                    continue;
-                }
-                e.first = first;
-                e.last = last;
-                have = true;
-            }
-            if (e.first < 0 || e.last < e.first)
-                return c.Fail(s->line, kw + " \"" + e.bone + "\": invalid frame range " +
-                                           std::to_string(e.first) + ".." +
-                                           std::to_string(e.last));
-            edits.push_back(std::move(e));
-        }
-    }
-}
-
 // $datamodeljoints <file> [jigglebones] [proceduralbones] [hitboxes]
-//                        [attachments] [{ $proceduralbones { settriggeraoi|removetrigger ... } }]
+//                        [attachments]
 bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     std::string file;
     if (!c.Want("a source filename", cmd, file))
         return false;
 
     bool jiggle = false, procedural = false, hitboxes = false, attachments = false;
-    while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "{")) {
+    while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
         const std::string o = Lower(t.text);
         if (o == "jigglebones")
@@ -1625,11 +1538,6 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     if (!jiggle && !procedural && !hitboxes && !attachments)
         jiggle = procedural = hitboxes = attachments = true; // no list = the whole rig
 
-    std::vector<TriggerAoiEdit> edits;
-    if (!c.Eof() && !c.Cur().quoted && c.Cur().text == "{" &&
-        !ParseDataModelJointsBody(c, cmd, edits))
-        return false;
-
     const std::string resolved = WithDmxExtension(file);
     const std::string what = "joints (" + RigImportList({{jiggle, "jigglebones"},
                                                          {procedural, "proceduralbones"},
@@ -1639,48 +1547,9 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     auto dm = LoadRigDmx(c, cmd, resolved, what);
     if (!dm)
         return false;
-    const size_t firstBone = c.in.proceduralbones.size();
     if (!LoadDmxJoints(*dm, c.in, jiggle, procedural, hitboxes, attachments, &err))
         return c.Fail(cmd.line, "$datamodeljoints \"" + file + "\": " + err);
 
-    // Only bones this file contributed; an earlier $driverbone of the same name wins.
-    // A trigger already set by an earlier settriggeraoi keeps that value. Frames index
-    // the file's trigger order; removals apply after every settriggeraoi.
-    std::set<std::pair<cm::ProceduralBone*, int>> taken, removed;
-    for (const TriggerAoiEdit& e : edits) {
-        const std::string kw = e.remove ? "removetrigger" : "settriggeraoi";
-        cm::ProceduralBone* pb = nullptr;
-        for (size_t i = firstBone; i < c.in.proceduralbones.size() && !pb; ++i)
-            if (_stricmp(c.in.proceduralbones[i].helpername.c_str(), e.bone.c_str()) == 0)
-                pb = &c.in.proceduralbones[i];
-        if (!pb)
-            return c.Fail(e.line, kw + ": \"" + e.bone + "\" is not a procedural bone "
-                                       "imported by this $datamodeljoints");
-        if (static_cast<size_t>(e.last) >= pb->triggers.size())
-            return c.Fail(e.line, kw + " \"" + e.bone + "\": frame " +
-                                      std::to_string(e.last) + " out of range (" +
-                                      std::to_string(pb->triggers.size()) + " triggers)");
-        for (int f = e.first; f <= e.last; ++f) {
-            if (e.remove) {
-                removed.insert({pb, f});
-                continue;
-            }
-            if (!taken.insert({pb, f}).second) {
-                pulse::diag::WarnAtf({c.Path(), e.line}, "settriggeraoi \"%s\": frame %d "
-                                     "already set by an earlier line, skipped", e.bone.c_str(), f);
-                continue;
-            }
-            pb->triggers[f].tolerance = DegToRad(e.aoiDeg);
-        }
-    }
-    // Reverse order keeps the remaining indices valid while erasing.
-    for (auto it = removed.rbegin(); it != removed.rend(); ++it) {
-        auto& trig = it->first->triggers;
-        trig.erase(trig.begin() + it->second);
-        if (trig.empty())
-            return c.Fail(cmd.line, "removetrigger: \"" + it->first->helpername +
-                                        "\" has no triggers left");
-    }
     return true;
 }
 
@@ -1944,7 +1813,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
     // inline studio flags up to the '{' or the next command
     bool flip = false;
     float importScale = c.in.scale;
-    while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "{")) {
+    while (!c.AtCommand()) {
         const Token option = *c.Next();
         const std::string o = Lower(option.text);
         if (option.quoted) {
@@ -8449,8 +8318,14 @@ bool SpliceInclude(Ctx& c) {
 
     const std::string name = full.filename().string();
     std::vector<Token> toks;
-    if (!Tokenize(text, name, fs::absolute(full).lexically_normal().u8string(), toks, c.err))
+    const auto sourcePath = fs::absolute(full).lexically_normal().u8string();
+    if (!Tokenize(text, name, sourcePath, toks, c.err))
         return false;
+    if (pulse::api::Active()) {
+        const auto source = static_cast<int>(c.apiSources.size());
+        c.apiSources.push_back(sourcePath);
+        for (auto& token : toks) token.apiSource = source;
+    }
 
     // drop the $include directive, splice the file in its place, and open a
     // frame so pos crossing its end restores file/curDir and the cycle guard.
@@ -8729,7 +8604,7 @@ bool ExpandMacro(Ctx& c, const Token& cmd, const Ctx::Macro& m) {
     }
     std::vector<Token> body = m.body;
     for (Token& t : body) {
-        t.apiRootSource = false;
+        t.apiSource = -1;
         SubstMacroParams(t, m.params, args);
     }
     c.SpliceAt(c.pos, body);
@@ -8950,10 +8825,13 @@ bool ReadDefName(Ctx& c, const Token& cmd, bool& result) {
 }
 
 void ReportBranch(const Ctx& c, const Token& first, const Token& last, bool active) {
-    if (!pulse::api::Active() || !first.apiRootSource || !last.apiRootSource ||
+    if (!pulse::api::Active() || first.apiSource < 0 || first.apiSource != last.apiSource ||
         first.line <= 0 || last.line < first.line)
         return;
-    pulse::api::Record("branch", "{\"file\":" + pulse::api::String(c.apiRootPath) +
+
+    assert(static_cast<size_t>(first.apiSource) < c.apiSources.size());
+    const auto& path = c.apiSources[static_cast<size_t>(first.apiSource)];
+    pulse::api::Record("branch", "{\"file\":" + pulse::api::String(path) +
         ",\"firstLine\":" + std::to_string(first.line) + ",\"lastLine\":" +
         std::to_string(last.line) + ",\"active\":" + (active ? "true" : "false") + "}");
 }
@@ -9452,8 +9330,8 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     if (!Tokenize(text, c.file, c.Path(), c.toks, err))
         return false;
     if (pulse::api::Active()) {
-        c.apiRootPath = fs::absolute(pulse::FilePath(path)).lexically_normal().u8string();
-        for (auto& token : c.toks) token.apiRootSource = true;
+        c.apiSources.push_back(fs::absolute(pulse::FilePath(path)).lexically_normal().u8string());
+        for (auto& token : c.toks) token.apiSource = 0;
     }
 
     // the root of the $include cycle check
