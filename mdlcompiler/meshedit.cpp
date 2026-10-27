@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <tuple>
 #include <cctype>
 #include <cfloat>
@@ -111,15 +112,14 @@ bool MeshFilter::MaterialRemoved(const std::string& materialName) const {
 
 namespace {
 
-// Exact float compare on the bit pattern - a weld only ever joins vertices the
-// exporter emitted from one authored point.
+// Attribute boundaries compare exactly; distance welding only relaxes positions.
 int CmpBits(const void* a, const void* b, size_t n) { return std::memcmp(a, b, n); }
 
-int WeldCompare(const SrcVertex& a, const SrcVertex& b, WeldMode mode) {
+int WeldCompare(const SrcVertex& a, const SrcVertex& b, WeldMode mode, bool comparePosition = true) {
     if (a.material != b.material)
         return a.material < b.material ? -1 : 1;
-    if (int c = CmpBits(&a.position, &b.position, sizeof(a.position)))
-        return c;
+    if (comparePosition)
+        if (int c = CmpBits(&a.position, &b.position, sizeof(a.position))) return c;
     if (mode == WeldMode::KeepSeams)
         if (int c = CmpBits(&a.texcoord, &b.texcoord, sizeof(a.texcoord)))
             return c;
@@ -132,6 +132,116 @@ int WeldCompare(const SrcVertex& a, const SrcVertex& b, WeldMode mode) {
             return c;
     }
     return 0;
+}
+
+bool DistanceWeldTargets(Source& src, WeldMode mode, const std::vector<char>* selection,
+                         float distance, bool sharp, float sharpAngle, bool sharpEdges,
+                         std::vector<int>& targets) {
+    std::vector<int> order;
+    for (size_t i = 0; i < src.vertex.size(); ++i)
+        if (!selection || (*selection)[i]) order.push_back(static_cast<int>(i));
+
+    std::vector<Vector3> positions;
+    positions.reserve(src.vertex.size());
+    for (const auto& vertex : src.vertex) positions.push_back(vertex.position);
+    auto coordinate = [&](int index, int axis) {
+        const auto& p = positions[index];
+        return axis == 0 ? p.x : axis == 1 ? p.y : p.z;
+    };
+    auto build = [&](auto&& self, int begin, int end, int axis) -> void {
+        if (begin >= end) return;
+        const int middle = begin + (end - begin) / 2;
+        std::nth_element(order.begin() + begin, order.begin() + middle, order.begin() + end,
+                         [&](int a, int b) {
+                             const float ca = coordinate(a, axis), cb = coordinate(b, axis);
+                             return ca < cb || (ca == cb && a < b);
+                         });
+        self(self, begin, middle, (axis + 1) % 3);
+        self(self, middle + 1, end, (axis + 1) % 3);
+    };
+    build(build, 0, static_cast<int>(order.size()), 0);
+
+    const float radiusSquared = distance * distance;
+    const float sharpCos = !sharp ? -2.0f
+        : sharpAngle > 0.0f ? std::cos(sharpAngle * pm::kPiF / 180.0f) : 1.0f - 1e-6f;
+    auto squaredDistance = [](const Vector3& a, const Vector3& b) {
+        const float x = a.x - b.x, y = a.y - b.y, z = a.z - b.z;
+        return x * x + y * y + z * z;
+    };
+    targets.assign(src.vertex.size(), -1);
+    std::vector<int> cluster, normalHeads;
+    bool changed = false;
+    for (size_t seed = 0; seed < src.vertex.size(); ++seed) {
+        if ((selection && !(*selection)[seed]) || targets[seed] >= 0) continue;
+        cluster.clear();
+        auto gather = [&](auto&& self, int begin, int end, int axis) -> void {
+            if (begin >= end) return;
+            const int middle = begin + (end - begin) / 2, candidate = order[middle];
+            const float delta = coordinate(static_cast<int>(seed), axis) - coordinate(candidate, axis);
+            const auto& a = src.vertex[seed].normal;
+            const auto& b = src.vertex[candidate].normal;
+            if (candidate != static_cast<int>(seed) && targets[candidate] < 0 &&
+                WeldCompare(src.vertex[seed], src.vertex[candidate], mode, false) == 0 &&
+                (!sharp || a.x * b.x + a.y * b.y + a.z * b.z >= sharpCos) &&
+                squaredDistance(positions[seed], positions[candidate]) <= radiusSquared)
+                cluster.push_back(candidate);
+            if (delta <= 0.0f || delta * delta <= radiusSquared)
+                self(self, begin, middle, (axis + 1) % 3);
+            if (delta >= 0.0f || delta * delta <= radiusSquared)
+                self(self, middle + 1, end, (axis + 1) % 3);
+        };
+        gather(gather, 0, static_cast<int>(order.size()), 0);
+        if (cluster.empty()) {
+            targets[seed] = static_cast<int>(seed);
+            continue;
+        }
+        changed = true;
+        std::sort(cluster.begin(), cluster.end());
+        cluster.push_back(static_cast<int>(seed));
+
+        Vector3 center{};
+        for (int index : cluster) {
+            center.x += positions[index].x;
+            center.y += positions[index].y;
+            center.z += positions[index].z;
+        }
+        const float count = static_cast<float>(cluster.size());
+        center = {center.x / count, center.y / count, center.z / count};
+        int survivor = static_cast<int>(seed);
+        for (int index : cluster) {
+            const float candidateDistance = squaredDistance(center, positions[index]);
+            const float bestDistance = squaredDistance(center, positions[survivor]);
+            if (candidateDistance < bestDistance || (candidateDistance == bestDistance && index < survivor))
+                survivor = index;
+        }
+        if (cluster.size() == 2) survivor = std::min(cluster[0], cluster[1]);
+
+        normalHeads.clear();
+        normalHeads.push_back(survivor);
+        for (int index : cluster) {
+            int head = survivor;
+            if (sharpEdges) {
+                head = -1;
+                for (int normalHead : normalHeads) {
+                    const auto& a = src.vertex[index].normal;
+                    const auto& b = src.vertex[normalHead].normal;
+                    if (a.x == b.x && a.y == b.y && a.z == b.z) {
+                        head = normalHead;
+                        break;
+                    }
+                }
+                if (head < 0) {
+                    head = index;
+                    normalHeads.push_back(head);
+                }
+            }
+            targets[index] = head;
+            src.vertex[index].position = center;
+        }
+    }
+    for (size_t i = 0; i < targets.size(); ++i)
+        if (targets[i] < 0) targets[i] = static_cast<int>(i);
+    return changed;
 }
 
 // One face in model-absolute vertex indices, before FillMeshes groups it.
@@ -398,59 +508,14 @@ void PruneEditVertices(Source& src, std::vector<MFace>& faces, std::vector<char>
 } // namespace
 
 void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
-                  std::vector<char>* selection) {
+                  std::vector<char>* selection, float distance, bool sharpEdges) {
     const int n = static_cast<int>(src.vertex.size());
     if (mode == WeldMode::None || n == 0)
         return;
 
-    // group the equal vertices; the lowest index in a group is its survivor, so
-    // the surviving order (and with it the material grouping) is unchanged
-    std::vector<int> order(n);
-    for (int i = 0; i < n; ++i)
-        order[i] = i;
-    std::sort(order.begin(), order.end(), [&](int a, int b) {
-        const int c = WeldCompare(src.vertex[a], src.vertex[b], mode);
-        return c ? c < 0 : a < b;
-    });
-
-    // no sharp pass: one cluster per position, every normal averages together
-    const float sharpCos =
-        !sharp ? -2.0f
-               : (sharpAngle > 0.0f ? std::cos(sharpAngle * pm::kPiF / 180.0f) : 1.0f - 1e-6f);
-
-    std::vector<int> rep(n);
-    std::vector<int> run, clusterHead;
-    for (int i = 0; i < n;) {
-        int j = i + 1;
-        while (j < n && WeldCompare(src.vertex[order[i]], src.vertex[order[j]], mode) == 0)
-            ++j;
-        run.assign(order.begin() + i, order.begin() + j);
-        std::sort(run.begin(), run.end());
-        // one cluster per normal direction: a vertex joins the first cluster it
-        // is smooth with, so a sharp corner keeps its own split normal
-        clusterHead.clear();
-        for (int v : run) {
-            if (selection && !(*selection)[v]) {
-                rep[v] = v;
-                continue;
-            }
-            int head = -1;
-            for (int h : clusterHead) {
-                const Vector3& a = src.vertex[h].normal;
-                const Vector3& b = src.vertex[v].normal;
-                if (a.x * b.x + a.y * b.y + a.z * b.z >= sharpCos) {
-                    head = h;
-                    break;
-                }
-            }
-            if (head < 0) {
-                clusterHead.push_back(v);
-                head = v;
-            }
-            rep[v] = head;
-        }
-        i = j;
-    }
+    std::vector<int> rep;
+    if (!DistanceWeldTargets(src, mode, selection, distance, sharp, sharpAngle, sharpEdges, rep))
+        return;
 
     std::vector<int> remap(n, -1);
     std::vector<SrcVertex> kept;
@@ -465,12 +530,9 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
             survivors.push_back(i);
         }
     }
-    if (static_cast<int>(kept.size()) == n)
-        return;
     for (int i = 0; i < n; ++i) {
         remap[i] = remap[rep[i]];
-        if (rep[i] != i)
-        {
+        if (rep[i] != i) {
             Vector3& sum = normalSum[remap[i]];
             sum.x += src.vertex[i].normal.x;
             sum.y += src.vertex[i].normal.y;
@@ -478,6 +540,7 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
         }
     }
     for (size_t i = 0; i < kept.size(); ++i) {
+        if (sharpEdges || (selection && !(*selection)[survivors[i]])) continue;
         Vector3 nrm = normalSum[i];
         if (pm::VectorNormalize(nrm) > 0.0f)
             kept[i].normal = nrm;
@@ -549,6 +612,27 @@ void WeldVertices(Source& src, WeldMode mode, bool sharp, float sharpAngle,
         morph.vanims.swap(out);
     }
 
+    auto weldedFaces = AbsoluteFaces(src);
+    std::set<std::tuple<int, uint32_t, uint32_t, uint32_t>> seenFaces;
+    auto samePosition = [&](uint32_t a, uint32_t b) {
+        const auto& p = src.vertex[a].position;
+        const auto& q = src.vertex[b].position;
+        return p.x == q.x && p.y == q.y && p.z == q.z;
+    };
+    weldedFaces.erase(std::remove_if(weldedFaces.begin(), weldedFaces.end(), [&](const MFace& face) {
+        if (selection && !(*selection)[face.a] && !(*selection)[face.b] && !(*selection)[face.c])
+            return false;
+        if (samePosition(face.a, face.b) || samePosition(face.b, face.c) || samePosition(face.c, face.a))
+            return true;
+        uint32_t corners[] = {face.a, face.b, face.c};
+        std::sort(corners, corners + 3);
+        return !seenFaces.emplace(face.material, corners[0], corners[1], corners[2]).second;
+    }), weldedFaces.end());
+
+    std::vector<char> allSelected;
+    if (!selection) allSelected.assign(src.vertex.size(), 1);
+    PruneEditVertices(src, weldedFaces, selection ? *selection : allSelected);
+    FillMeshes(src, weldedFaces);
     CalcModelTangentSpaces(src);
 }
 
@@ -646,7 +730,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
         if (std::find(selection.begin(), selection.end(), 1) == selection.end()) continue;
 
         if (op.kind == MeshOperation::Weld) {
-            WeldVertices(src, WeldMode::All, false, 0.0f, &selection);
+            WeldVertices(src, WeldMode::All, false, 0.0f, &selection, op.value, op.sharpEdges);
             continue;
         }
         if (op.kind == MeshOperation::Inflate) {

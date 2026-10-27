@@ -92,7 +92,7 @@ struct EditMeshOperation {
     SelectionCombine combine = SelectionCombine::Add;
     std::string name;
     float value = 0.5f, thicknessClamp = 0.0f;
-    bool replaceSelection = false, hull = true;
+    bool replaceSelection = false, hull = true, sharpEdges = false;
     int line = 0;
 };
 
@@ -124,7 +124,7 @@ enum class SkinnedBoneCull { None, Tree, Aggressive };
 
 void CullUnskinnedBones(Source& src, SkinnedBoneCull mode);
 
-// $weld [seams] [sharp [deg]] - merge vertices that share an exact position,
+// $weld [seams] [sharp [deg]] - merge nearby vertices, default distance 0.0001,
 // within one material and with identical bone weights. Normals are averaged,
 // so hard-edge splits collapse.
 
@@ -132,11 +132,11 @@ void CullUnskinnedBones(Source& src, SkinnedBoneCull mode);
 // without it a UV split still keeps its own vertex.
 enum class WeldMode { None, KeepSeams, All };
 
-// sharp keeps hard edges: vertices at one position whose normals differ stay
-// separate instead of averaging into one smooth normal. sharpAngle > 0 is a
-// tolerance in degrees, so near-equal normals still merge.
+// sharp restricts merge clusters by normal angle; sharpEdges instead preserves
+// normal splits at each merged centroid. sharpAngle is the tolerance in degrees.
 void WeldVertices(Source& src, WeldMode mode, bool sharp = false,
-                  float sharpAngle = 0.0f, std::vector<char>* selection = nullptr);
+                  float sharpAngle = 0.0f, std::vector<char>* selection = nullptr,
+                  float distance = 0.0001f, bool sharpEdges = false);
 
 // Offset vertices and morph targets along their unit normals, in model units.
 // `meshTag` > 0 limits it to faces with that $inflate mesh group, `materials` to

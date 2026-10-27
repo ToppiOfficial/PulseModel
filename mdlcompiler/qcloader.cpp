@@ -656,6 +656,16 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
             op.kind = MeshOperation::FlipNormals;
         } else if (name == "weld") {
             op.kind = MeshOperation::Weld;
+            op.value = 0.0001f;
+            if (hasArg() && Lower(c.Cur().text) != "sharpedges") {
+                if (!number("a merge distance", op.value)) return false;
+                if (op.value < 0.0f)
+                    return c.Fail(t->line, where + ": merge distance must be 0 or above");
+            }
+            if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "sharpedges") {
+                ++c.pos;
+                op.sharpEdges = true;
+            }
         } else if (name == "inflate") {
             op.kind = MeshOperation::Inflate;
             if (!number("an inflation amount", op.value)) return false;
