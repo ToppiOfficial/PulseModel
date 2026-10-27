@@ -1464,7 +1464,7 @@ bool CmdModelGroupPreset(Ctx& c, const Token& cmd) {
 // (may be a different file than the mesh - borrows another character's rig).
 // Neither builds skeleton or geometry; an imported entry with no matching bone
 // is dropped like a hand-written one, EXCEPT a hitbox, which is still a hard
-// $hitboxset error. Empty import list = import everything. First definition
+// $hboxset error. Empty import list = import everything. First definition
 // wins on duplicates, except hitbox sets: any set already declared makes the
 // whole imported list a no-op (model-global, all-or-nothing).
 // ---------------------------------------------------------------------------
@@ -6054,7 +6054,7 @@ bool CmdConstantDirectionalLight(Ctx& c, const Token& cmd) {
 // $skipboneinbbox (Cmd_SkipBoneInBBox): clears
 // useBoneInBBox, so the auto-generated hitboxes (and the sequence boxes derived
 // from them) grow from the bone's vertices alone instead of always containing
-// the bone origin. No arguments, no effect when $hitboxset is authored.
+// the bone origin. No arguments, no effect when $hboxset is authored.
 bool CmdSkipBoneInBBox(Ctx& c, const Token&) {
     c.in.skipBoneInBBox = true;
     return true;
@@ -6755,11 +6755,11 @@ bool CmdMeshSortOrder(Ctx& c, const Token& cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Hitboxes - $hitboxset may use a body or select a set for following top-level
+// Hitboxes - $hboxset may use a body or select a set for following top-level
 // $hbox commands. A bare $hbox falls into an implicit "default" set.
 // ---------------------------------------------------------------------------
 
-// One $hbox inside a $hitboxset body:
+// One $hbox inside a $hboxset body:
 //   $hbox <group> <bone> <minx> <miny> <minz> <maxx> <maxy> <maxz>
 //         [angles <p> <y> <r>] [radius <r>] [name <hitboxname>]
 // The trailing clauses are stock's positional optionals ($hbox ... [angles]
@@ -6827,7 +6827,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
     return true;
 }
 
-// $hitboxset <name> [{ $hbox ... }] also accepts stock's flat, order-dependent
+// $hboxset <name> [{ $hbox ... }] also accepts stock's flat, order-dependent
 // form. Declaring any set turns automatic hitbox generation off entirely.
 bool CmdHitboxSet(Ctx& c, const Token& cmd) {
     cm::HitboxSet set;
@@ -6884,7 +6884,7 @@ bool CmdHGroup(Ctx& c, const Token& cmd) {
 // $renamehboxset <target> <newname> - rename an already-declared set.
 //
 // Acts on the sets declared ABOVE it, so it must be written after the
-// $hitboxset it renames; naming a set that does not exist yet is an error
+// $hboxset it renames; naming a set that does not exist yet is an error
 // rather than a silently-deferred rename. The point is reusing one hitbox
 // layout under a different set name - a shared block pulled in by (future)
 // $include can be renamed at the use site without editing the block.
@@ -9070,8 +9070,7 @@ constexpr Command kCommands[] = {
     {"$upaxis", CmdUpAxis},
     {"$attachment", CmdAttachment},
     {"$declareattachment", CmdDeclareAttachment},
-    {"$hitboxset", CmdHitboxSet},
-    {"$hboxset", CmdHitboxSet}, // stock's spelling, same command
+    {"$hboxset", CmdHitboxSet},
     {"$hbox", CmdHboxOutsideSet},
     {"$hgroup", CmdHGroup},
     {"$renamehboxset", CmdRenameHboxSet},

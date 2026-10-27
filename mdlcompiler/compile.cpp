@@ -7401,7 +7401,7 @@ void CompressAnimations(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// SetupHitBoxes - authored $hitboxset sets, or one auto-generated set
+// SetupHitBoxes - authored $hboxset sets, or one auto-generated set
 // ---------------------------------------------------------------------------
 
 // flag all bones used by hitboxes (up the ancestry)

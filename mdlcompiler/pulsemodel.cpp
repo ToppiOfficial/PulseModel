@@ -2737,7 +2737,7 @@ void LowerAttachment(Emitter& e, const Json& a) {
 }
 
 void LowerHitboxSet(Emitter& e, const Json& set) {
-    e.Command("$hitboxset", set);
+    e.Command("$hboxset", set);
     e.Text(Str(set, "name"));
     e.Word("{");
     if (const Json* boxes = Get(set, "boxes")) {

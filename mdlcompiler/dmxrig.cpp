@@ -296,7 +296,7 @@ void WalkAttachments(const dmx::Element* dag, float scale, cm::CompileInput& in,
 
 // root."hitboxSetList" -> DmeHitboxSetList."hitboxSetList" -> DmeHitboxSet
 // ("hitboxList" of DmeHitbox). Reference LoadDmxHitboxes: hitboxes are
-// model-global and first-to-populate wins, so an existing $hitboxset makes the
+// model-global and first-to-populate wins, so an existing $hboxset makes the
 // whole DMX list a no-op. An EMPTY set is skipped - a stray "default" set would
 // suppress the compile stage's auto-generation.
 void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
@@ -308,7 +308,7 @@ void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
         return;
     if (!in.hitboxsets.empty()) {
         pulse::diag::Warnf("DMX hitboxSetList ignored - hitbox sets are already "
-                             "defined ($hitboxset or an earlier $datamodeljoints)\n");
+                             "defined ($hboxset or an earlier $datamodeljoints)\n");
         return;
     }
 
