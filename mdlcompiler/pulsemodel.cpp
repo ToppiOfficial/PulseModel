@@ -72,6 +72,7 @@ struct Field {
     const char* defaultText = nullptr;
     double defaultVector[3] = {};
     bool hasVectorDefault = false;
+    bool hidden = false;
 
     constexpr Field Of(const Item* i) const { Field f = *this; f.item = i; return f; }
     constexpr Field Values(const char* const* v) const { Field f = *this; f.values = v; return f; }
@@ -79,6 +80,7 @@ struct Field {
     constexpr Field Declares(const char* d) const { Field f = *this; f.declares = d; return f; }
     constexpr Field Group(const char* g) const { Field f = *this; f.group = g; return f; }
     constexpr Field Required() const { Field f = *this; f.required = true; return f; }
+    constexpr Field Hidden() const { Field f = *this; f.hidden = true; return f; }
     constexpr Field Default(bool value) const { Field f = *this; f.defaultBool = value; return f; }
     constexpr Field Default(double value) const {
         Field f = *this; f.defaultNumber = value; f.hasNumberDefault = true; return f;
@@ -110,6 +112,7 @@ struct Item {
     const Item* const* children = nullptr;   // node types it holds, null-terminated
     size_t minChildren = 0;
     bool single = false;                     // at most one per parent
+    bool hidden = false;                     // omitted from add menus
 
     constexpr Item Titled(const char* t, const char* c) const {
         Item i = *this;
@@ -124,6 +127,7 @@ struct Item {
         return i;
     }
     constexpr Item Single() const { Item i = *this; i.single = true; return i; }
+    constexpr Item Hidden() const { Item i = *this; i.hidden = true; return i; }
 };
 
 constexpr Field F(const char* key, Type type, const char* doc) { return {key, type, doc}; }
@@ -1039,6 +1043,75 @@ const Item kFaceItem = MakeItem("face").Titled("Face", "Face").Holds(kFaceKids);
 
 // --- physics ---
 
+const Item kPhysicsShapeBaseItem = MakeItem("physicsShapeBase");
+
+const Field kPhysicsShapeFrame[] = {
+    F("parentBone", Type::String, "Bone the shape belongs to.").Ref("bone").Default(""),
+    F("offsetOrigin", Type::Vec3, "Translation.").Default(0, 0, 0),
+    F("offsetAngles", Type::Vec3, "Rotation.").Default(0, 0, 0),
+    F("importScale", Type::Number, "Scale.").Default(1.0),
+    F("maxConvex", Type::Integer, "Convex piece limit.").Default(double(pulse::limits::kMaxConvexPieces)),
+};
+const Item kPhysicsShapeFrameItem = MakeItem("physicsShapeFrame", kPhysicsShapeFrame, &kPhysicsShapeBaseItem);
+
+const Field kPhysicsFile[] = {
+    F("file", Type::File, "Collision source file.").Required(),
+    F("importType", Type::Enum, "How parts are bound to bones.").Values(kImportTypes).Default("perjoint"),
+    F("concave", Type::Bool, "Keep concave pieces."),
+    F("remove2d", Type::Bool, "Drop flat pieces."),
+};
+const Item kPhysicsFileItem =
+    MakeItem("physicsFile", kPhysicsFile, &kPhysicsShapeFrameItem).Titled("Physics File", "Physics");
+
+const Field kPhysicsGenerated[] = {
+    F("decimationFactor", Type::Number, "Generated hull decimation.").Default(0.22),
+    F("cullWeight", Type::Number, "Bone weight cull (0-1).").Default(0.42),
+    F("concavity", Type::Number, "Concavity.").Default(0.04),
+    F("maxHulls", Type::Integer, "Hull limit; 0 uses the compiler limit.").Default(0.0),
+    F("maxDepth", Type::Integer, "Split depth (0-10).").Default(4.0),
+};
+const Item kPhysicsGeneratedItem = MakeItem("physicsGenerated", kPhysicsGenerated, &kPhysicsShapeFrameItem);
+const Field kPhysicsRenderMesh[] = {
+    F("renderMesh", Type::String, "Render mesh to generate from.").Ref("mesh").Required(),
+};
+const Item* const kPhysicsRenderMeshKids[] = {&kExtraBoneItem, nullptr};
+const Item kPhysicsRenderMeshItem =
+    MakeItem("physicsRenderMesh", kPhysicsRenderMesh, &kPhysicsGeneratedItem)
+        .Titled("Physics Render Mesh", "Physics").Holds(kPhysicsRenderMeshKids);
+const Item* const kPhysicsRenderKids[] = {&kExtraBoneItem, &kExcludeMeshItem, nullptr};
+const Item kPhysicsRenderItem = MakeItem("physicsRender", &kPhysicsGeneratedItem)
+                                  .Titled("Physics Render Model", "Physics").Holds(kPhysicsRenderKids);
+
+const Field kPhysicsPrimitive[] = {
+    F("bone", Type::String, "Bone the primitive is on; values are in its space.").Ref("bone").Required(),
+};
+const Item kPhysicsPrimitiveItem = MakeItem("physicsPrimitive", kPhysicsPrimitive, &kPhysicsShapeBaseItem);
+const Field kPhysicsBox[] = {
+    F("min", Type::Vec3, "Box minimum.").Required().Default(-1, -1, -1),
+    F("max", Type::Vec3, "Box maximum.").Required().Default(1, 1, 1),
+    F("angles", Type::Vec3, "Box orientation.").Default(0, 0, 0),
+};
+const Item kPhysicsBoxItem =
+    MakeItem("physicsBox", kPhysicsBox, &kPhysicsPrimitiveItem).Titled("Physics Box", "Physics");
+const Field kPhysicsSphere[] = {
+    F("center", Type::Vec3, "Sphere center.").Required().Default(0, 0, 0),
+    F("radius", Type::Number, "Sphere radius.").Required().Default(1.0),
+    F("segments", Type::Integer, "Tessellation.").Default(6.0),
+};
+const Item kPhysicsSphereItem =
+    MakeItem("physicsSphere", kPhysicsSphere, &kPhysicsPrimitiveItem).Titled("Physics Sphere", "Physics");
+const Field kPhysicsCapsule[] = {
+    F("point0", Type::Vec3, "Capsule start.").Required().Default(0, 0, 0),
+    F("point1", Type::Vec3, "Capsule end.").Required().Default(0, 0, 1),
+    F("radius0", Type::Number, "Start radius.").Required().Default(1.0),
+    F("radius1", Type::Number, "End radius.").Required().Default(1.0),
+    F("segments", Type::Integer, "Tessellation.").Default(6.0),
+};
+const Item kPhysicsCapsuleItem =
+    MakeItem("physicsCapsule", kPhysicsCapsule, &kPhysicsPrimitiveItem).Titled("Physics Capsule", "Physics");
+const Item kPhysicsDataModelItem =
+    MakeItem("physicsDataModel", kFileRef).Titled("Physics Data Model", "Physics").Single();
+
 const Field kPhysicsShape[] = {
     F("file", Type::File, "Collision source file."),
     F("renderMesh", Type::String, "Generate from this render mesh.").Ref("mesh"),
@@ -1073,7 +1146,8 @@ const Field kPhysicsShape[] = {
 };
 const Item* const kPhysicsShapeKids[] = {&kExtraBoneItem, &kExcludeMeshItem, nullptr};
 const Item kPhysicsShapeItem =
-    MakeItem("physicsShape", kPhysicsShape).Titled("Collision Shape", "Physics").Holds(kPhysicsShapeKids);
+    MakeItem("physicsShape", kPhysicsShape, &kPhysicsShapeBaseItem)
+        .Titled("Collision Shape", "Physics").Holds(kPhysicsShapeKids).Hidden();
 
 const Field kJointAxis[] = {
     F("axis", Type::Enum, "Axis.").Values(kAxes).Required(),
@@ -1122,7 +1196,7 @@ const Item kJointSurfacePropItem =
     MakeItem("jointSurfaceProp", kJointSurfaceProp).Titled("Joint Surface", "Physics");
 
 const Field kPhysics[] = {
-    F("dataModel", Type::File, "DMX whose physics shapes are imported."),
+    F("dataModel", Type::File, "DMX whose physics shapes are imported.").Hidden(),
     F("mass", Type::Number, "Mass in kg.").Default(1.0),
     F("autoMass", Type::Bool, "Mass from volume."),
     F("massCenter", Type::Vec3, "Center of mass."),
@@ -1142,8 +1216,11 @@ const Field kPhysics[] = {
     F("frictionTimeOut", Type::Number, "Ramp-out time.").Group("Animated friction"),
     F("frictionTimeHold", Type::Number, "Hold time.").Group("Animated friction"),
 };
-const Item* const kPhysicsKids[] = {&kPhysicsShapeItem, &kPhysicsJointItem, &kPhysicsMarkupItem, &kBonePairItem,
-                                    &kJointContentsItem, &kJointSurfacePropItem, &kKeyValueItem, nullptr};
+const Item* const kPhysicsKids[] = {
+    &kPhysicsFileItem, &kPhysicsRenderMeshItem, &kPhysicsRenderItem, &kPhysicsBoxItem, &kPhysicsSphereItem,
+    &kPhysicsCapsuleItem, &kPhysicsDataModelItem, &kPhysicsJointItem, &kPhysicsMarkupItem, &kBonePairItem,
+    &kJointContentsItem, &kJointSurfacePropItem, &kKeyValueItem, &kPhysicsShapeItem, nullptr,
+};
 const Item kPhysicsItem = MakeItem("physics", kPhysics).Titled("Physics", "Physics").Holds(kPhysicsKids);
 
 // --- files ---
@@ -1215,6 +1292,9 @@ const Item* const kAllItems[] = {
     &kExtraBoneItem, &kExcludeMeshItem, &kTransitionNodeItem, &kAllowedActivityItem,
     &kBBoxItem, &kCBoxItem, &kIllumPositionItem, &kEyePositionItem, &kBlankItem, &kLodOptionsItem, &kShadowLodItem,
     &kJiggleBonesItem, &kProceduralBonesItem, &kDoNotCollapseItem, &kLimitRotationItem,
+    &kPhysicsShapeBaseItem, &kPhysicsShapeFrameItem, &kPhysicsGeneratedItem, &kPhysicsPrimitiveItem,
+    &kPhysicsFileItem, &kPhysicsRenderMeshItem, &kPhysicsRenderItem, &kPhysicsBoxItem,
+    &kPhysicsSphereItem, &kPhysicsCapsuleItem, &kPhysicsDataModelItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -2113,7 +2193,14 @@ bool EmitKeyValues(Emitter& e, const Json& entries) {
 }
 
 bool LowerPhysics(Emitter& e, const Json& p) {
-    if (const Json* file = Get(p, "dataModel")) {
+    const Json* dataModel = Get(p, "dataModelSource");
+    const Json* file = Get(p, "dataModel");
+    if (dataModel && file) return e.l.Fail(*dataModel, "", "physics already has a dataModel source");
+
+    if (dataModel) {
+        e.Command("$datamodelphysics", *dataModel, "file");
+        e.Text(Str(*dataModel, "file"));
+    } else if (file) {
         e.Command("$datamodelphysics", p, "dataModel");
         e.Text(file->get<std::string>());
     }
@@ -3388,6 +3475,13 @@ const Move kMoves[] = {
     {"face", "eyelid", "eyelids"},
     {"physicsJoint", "jointAxis", "axes"},
     {"physics", "physicsShape", "shapes"},
+    {"physics", "physicsFile", "shapes"},
+    {"physics", "physicsRenderMesh", "shapes"},
+    {"physics", "physicsRender", "shapes"},
+    {"physics", "physicsBox", "shapes"},
+    {"physics", "physicsSphere", "shapes"},
+    {"physics", "physicsCapsule", "shapes"},
+    {"physics", "physicsDataModel", "dataModelSource", Into::Object},
     {"physics", "physicsJoint", "joints"},
     {"physics", "physicsMarkup", "markups"},
     {"physics", "collisionPair", "collisions"},
@@ -3449,18 +3543,18 @@ const Flat kFlats[] = {
     {"eyelid", "neutralDelta", "neutral", "delta"},
     {"eyelid", "raiserTarget", "raiser", "target", true},
     {"eyelid", "raiserDelta", "raiser", "delta"},
-    {"physicsShape", "primitive", "primitive", "type", true},
-    {"physicsShape", "bone", "primitive", "bone", true},
-    {"physicsShape", "min", "primitive", "min"},
-    {"physicsShape", "max", "primitive", "max"},
-    {"physicsShape", "angles", "primitive", "angles"},
-    {"physicsShape", "center", "primitive", "center"},
-    {"physicsShape", "radius", "primitive", "radius"},
-    {"physicsShape", "point0", "primitive", "point0"},
-    {"physicsShape", "point1", "primitive", "point1"},
-    {"physicsShape", "radius0", "primitive", "radius0"},
-    {"physicsShape", "radius1", "primitive", "radius1"},
-    {"physicsShape", "segments", "primitive", "segments"},
+    {"physicsShapeBase", "primitive", "primitive", "type", true},
+    {"physicsShapeBase", "bone", "primitive", "bone", true},
+    {"physicsShapeBase", "min", "primitive", "min"},
+    {"physicsShapeBase", "max", "primitive", "max"},
+    {"physicsShapeBase", "angles", "primitive", "angles"},
+    {"physicsShapeBase", "center", "primitive", "center"},
+    {"physicsShapeBase", "radius", "primitive", "radius"},
+    {"physicsShapeBase", "point0", "primitive", "point0"},
+    {"physicsShapeBase", "point1", "primitive", "point1"},
+    {"physicsShapeBase", "radius0", "primitive", "radius0"},
+    {"physicsShapeBase", "radius1", "primitive", "radius1"},
+    {"physicsShapeBase", "segments", "primitive", "segments"},
     {"physics", "frictionMin", "animatedFriction", "min", true},
     {"physics", "frictionMax", "animatedFriction", "max", true},
     {"physics", "frictionTimeIn", "animatedFriction", "timeIn", true},
@@ -3539,8 +3633,8 @@ const Gather kGathers[] = {
     {"flex", "flexLocalVar", "localVars", "name"},
     {"flexCorrective", "correctiveControl", "controls", "control"},
     {"flexDomination", "dominator", "dominators", "control"},
-    {"physicsShape", "extraBone", "extraBones", "bone"},
-    {"physicsShape", "excludeMesh", "excludeMeshes", "mesh"},
+    {"physicsShapeBase", "extraBone", "extraBones", "bone"},
+    {"physicsShapeBase", "excludeMesh", "excludeMeshes", "mesh"},
     {"skipTransition", "transitionNode", "nodes", "name"},
     {"animationSettings", "allowedActivity", "allowedActivities", "name"},
 };
@@ -3585,6 +3679,10 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
     if (std::strcmp(item.name, "blank") == 0) out["blank"] = true;
     if (std::strcmp(item.name, "shadowLod") == 0) out["shadow"] = true;
     if (std::strcmp(item.name, "declareAttachment") == 0) out["declare"] = true;
+    if (std::strcmp(item.name, "physicsRender") == 0) out["fromRender"] = true;
+    if (std::strcmp(item.name, "physicsBox") == 0) out["primitive"] = "box";
+    if (std::strcmp(item.name, "physicsSphere") == 0) out["primitive"] = "sphere";
+    if (std::strcmp(item.name, "physicsCapsule") == 0) out["primitive"] = "capsule";
 
     for (const auto& renamed : kRenamed) {
         if (!IsA(item, renamed.item) || !out.contains(renamed.key)) continue;
@@ -3921,6 +4019,7 @@ void SchemaFields(const Item& item, Json& out) {
         if (field.declares) entry["declares"] = field.declares;
         if (field.group) entry["group"] = field.group;
         if (field.required) entry["required"] = true;
+        if (field.hidden) entry["hidden"] = true;
         if (field.type == Type::Bool) entry["default"] = field.defaultBool;
         else if (field.hasNumberDefault || field.hasSchemaNumberDefault)
             entry["default"] = field.type == Type::Integer ? Json(static_cast<int>(field.defaultNumber))
@@ -4009,6 +4108,7 @@ void PrintSchema() {
         }
         if (item->minChildren) entry["minChildren"] = item->minChildren;
         if (item->single) entry["single"] = true;
+        if (item->hidden) entry["hidden"] = true;
         SchemaFields(*item, entry["fields"]);
         items[item->name] = std::move(entry);
     }
