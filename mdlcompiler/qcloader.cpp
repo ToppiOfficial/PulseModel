@@ -96,6 +96,7 @@ bool Tokenize(const std::string& s, const std::string& file, const std::string& 
               std::vector<Token>& out, std::string* err) {
     int line = 1;
     size_t i = 0;
+    bool variableList = false;
     while (i < s.size()) {
         const char c = s[i];
         if (c == '\n') {
@@ -120,6 +121,18 @@ bool Tokenize(const std::string& s, const std::string& file, const std::string& 
                 i++;
             }
             i = i + 1 < s.size() ? i + 2 : s.size();
+            continue;
+        }
+        if (c == '[' && !variableList && out.size() >= 2) {
+            const Token& directive = out[out.size() - 2];
+            variableList = !directive.quoted &&
+                (_stricmp(directive.text.c_str(), "$definevariable") == 0 ||
+                 _stricmp(directive.text.c_str(), "$redefinevariable") == 0);
+        }
+        if (variableList && (c == '[' || c == ']')) {
+            out.push_back({std::string(1, c), line, false});
+            variableList = c != ']';
+            i++;
             continue;
         }
         if (c == '"') {
@@ -152,7 +165,7 @@ bool Tokenize(const std::string& s, const std::string& file, const std::string& 
         while (i < s.size()) {
             const char d = s[i];
             if (std::isspace(static_cast<unsigned char>(d)) || d == '{' || d == '}' ||
-                d == '"' || d == ';' ||
+                d == '"' || d == ';' || (variableList && (d == '[' || d == ']')) ||
                 (d == '/' && i + 1 < s.size() && (s[i + 1] == '/' || s[i + 1] == '*')))
                 break;
             t.text.push_back(d);
@@ -216,7 +229,12 @@ struct Ctx {
     std::map<std::string, std::vector<Token>> cmdlists; // $cmdlist name -> body tokens
     std::map<std::string, std::vector<Token>> lodCmdlists; // $lodcmdlist, keyed lowercased
     std::map<std::string, std::vector<Token>> rendermeshCmdlists; // $rendermeshcmdlist, keyed lowercased
-    std::map<std::string, std::string> variables; // $definevariable, case-sensitive, shared across $include
+    struct Variable {
+        std::string text;
+        std::vector<Token> tokens;
+        bool list = false;
+    };
+    std::map<std::string, Variable> variables; // case-sensitive, shared across $include
     struct Macro {
         std::vector<std::string> params;
         std::map<std::string, std::string> defaults;
@@ -894,14 +912,22 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 return nullptr;
             }
     if (edit) {
-        for (const auto& block : edit->editBlocks)
-            for (const auto& op : block)
-                if (op.kind == source::MeshOperation::SelectStream)
-                    for (const auto& stream : edit->filter.editStreams)
-                        if (_stricmp(op.name.c_str(), stream.name.c_str()) == 0 && !stream.found) {
-                            c.Fail(op.line, "$meshedit: no kept mesh has float stream \"" + op.name + "\"");
-                            return nullptr;
-                        }
+        for (auto& block : edit->editBlocks) {
+            block.erase(std::remove_if(block.begin(), block.end(), [&](const auto& op) {
+                if (op.kind != source::MeshOperation::SelectStream) return false;
+
+                for (const auto& stream : edit->filter.editStreams) {
+                    if (_stricmp(op.name.c_str(), stream.name.c_str()) != 0 || stream.found) continue;
+
+                    pulse::diag::WarnAt({c.Path(), op.line}, "$rendermesh \"" + edit->name +
+                        "\": $meshedit: no kept mesh has float stream \"" + op.name +
+                        "\"; $selectdatastream skipped");
+                    return true;
+                }
+
+                return false;
+            }), block.end());
+        }
 
         source::CullUnskinnedBones(*src, edit->boneCull);
     }
@@ -1866,7 +1892,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
     // inline studio flags up to the '{' or the next command
     bool flip = false;
     float importScale = c.in.scale;
-    while (!c.AtCommand()) {
+    while (!c.AtCommand() && (c.Cur().quoted || c.Cur().text != "{")) {
         const Token option = *c.Next();
         const std::string o = Lower(option.text);
         if (option.quoted) {
@@ -8242,13 +8268,38 @@ bool ExpandVars(Ctx& c, Token& t) {
         if (it == c.variables.end())
             return c.Fail(t.line, "unknown variable \"$" + name + "$\" - no "
                                   "$definevariable for it above this line");
-        out += it->second;
+        out += it->second.text;
         i = e + 1;
         t.expanded = true;
     }
     t.text = std::move(out);
     return true;
 }
+
+// Only a whole, unquoted reference expands into separate list arguments.
+bool ExpandVarTokens(Ctx& c, const Token& token, std::vector<Token>& out) {
+    if (!token.quoted && !token.text.empty() && token.text[0] == '$' &&
+        VarRefEnd(token.text, 0) == token.text.size() - 1) {
+        const auto it = c.variables.find(token.text.substr(1, token.text.size() - 2));
+        if (it != c.variables.end() && it->second.list) {
+            for (Token value : it->second.tokens) {
+                value.line = token.line;
+                value.apiSource = token.apiSource;
+                value.expanded = true;
+                out.push_back(std::move(value));
+            }
+            return true;
+        }
+    }
+
+    Token value = token;
+    if (!ExpandVars(c, value)) return false;
+
+    out.push_back(std::move(value));
+    return true;
+}
+
+bool ExpandCommandVars(Ctx& c);
 
 // $include "file.qci" [localdir] [optional]   (scriplib's
 // AttemptConditionalInclude; its nofallbackdir flag is `localdir` here, its
@@ -8265,6 +8316,8 @@ bool ExpandVars(Ctx& c, Token& t) {
 // an included file - source filenames, $proceduralbones - stays relative to the
 // ROOT script's directory, matching how stock keeps cddir pinned to the top.
 bool SpliceInclude(Ctx& c) {
+    if (!ExpandCommandVars(c)) return false;
+
     const Token cmd = c.toks[c.pos]; // the $include token
     size_t p = c.pos + 1;
     if (p >= c.toks.size() || (!c.toks[p].quoted && c.toks[p].text[0] == '$'))
@@ -8511,22 +8564,42 @@ size_t CommandExtent(const Ctx& c) {
     return i;
 }
 
-// Expand variables in the token run the command at c.pos is about to read. Run
-// per command rather than once over the whole file, so a $redefinevariable
-// takes effect exactly where it is written. $definemacro is skipped whole: its
-// body is stored raw and expands at each invocation instead, and so are $if /
-// $switch - only the branch that is taken may expand, and it does so after the
-// splice, one command at a time like anything else.
+// Expand per command so redefinitions take effect where written.
+// Variable definitions, macros and conditionals expand in their own handlers.
 bool ExpandCommandVars(Ctx& c) {
     const char* cmd = c.toks[c.pos].text.c_str();
     if (_stricmp(cmd, "$definemacro") == 0 || _stricmp(cmd, "$if") == 0 ||
         _stricmp(cmd, "$ifdef") == 0 || _stricmp(cmd, "$ifndef") == 0 ||
-        _stricmp(cmd, "$switch") == 0)
+        _stricmp(cmd, "$switch") == 0 || _stricmp(cmd, "$definevariable") == 0 ||
+        _stricmp(cmd, "$redefinevariable") == 0)
         return true;
-    const size_t end = CommandExtent(c);
-    for (size_t i = c.pos; i < end; i++)
-        if (!ExpandVars(c, c.toks[i]))
-            return false;
+
+    size_t end = CommandExtent(c);
+    for (size_t i = c.pos; i < end;) {
+        if (c.toks[i].text.find('$') == std::string::npos) {
+            i++;
+            continue;
+        }
+
+        std::vector<Token> values;
+        if (!ExpandVarTokens(c, c.toks[i], values)) return false;
+
+        if (values.size() == 1) {
+            c.toks[i++] = std::move(values.front());
+            continue;
+        }
+        if (i == c.pos)
+            return c.Fail(c.toks[i].line, "a variable list cannot replace a command name");
+
+        c.SpliceAt(i, values);
+        const size_t removed = i + values.size();
+        c.toks.erase(c.toks.begin() + removed);
+        for (Ctx::IncludeFrame& frame : c.includeFrames)
+            if (frame.endPos > removed) frame.endPos--;
+
+        end = end - 1 + values.size();
+        i += values.size();
+    }
     return true;
 }
 
@@ -8538,38 +8611,87 @@ bool PinnedByDefVar(Ctx& c, const Token& cmd, const std::string& name) {
         return false;
     std::printf("%s(%d): %s \"%s\" ignored - pinned to \"%s\" by -defvar\n",
                 c.file.c_str(), cmd.line, cmd.text.c_str(), name.c_str(),
-                c.variables[name].c_str());
+                c.variables[name].text.c_str());
     return true;
 }
 
-// $definevariable <name> <value>  (Cmd_DefineVariable)
-bool CmdDefineVariable(Ctx& c, const Token& cmd) {
-    std::string name, value;
-    if (!c.Want("a name", cmd, name) || !c.Want("a value", cmd, value))
+bool ReadVariableValue(Ctx& c, const Token& cmd, Ctx::Variable& value) {
+    if (c.Eof()) return c.Fail(cmd.line, cmd.text + " expects a value");
+
+    Token token = c.toks[c.pos++];
+    if (!token.quoted && token.text == "[") {
+        value.list = true;
+        while (c.pos < c.toks.size()) {
+            token = c.toks[c.pos++];
+            if (!token.quoted) {
+                if (token.text == "]") return true;
+                if (token.text == "[")
+                    return c.Fail(token.line, "nested variable lists are not supported");
+                if (token.text == "{" || token.text == "}" ||
+                    (!token.text.empty() && token.text[0] == '$' &&
+                     VarRefEnd(token.text, 0) == std::string::npos))
+                    return c.Fail(cmd.line, cmd.text + " list expects a closing \"]\"");
+            }
+
+            std::vector<Token> elements;
+            if (!ExpandVarTokens(c, token, elements)) return false;
+
+            for (Token& element : elements) {
+                if (!value.tokens.empty()) value.text += ' ';
+                value.text += element.text;
+                value.tokens.push_back(std::move(element));
+            }
+        }
+        return c.Fail(cmd.line, cmd.text + " list expects a closing \"]\"");
+    }
+
+    if (!token.quoted && !token.text.empty() && token.text[0] == '$') {
+        if (VarRefEnd(token.text, 0) == std::string::npos)
+            return c.Fail(cmd.line, cmd.text + " expects a value");
+
+        const auto it = c.variables.find(token.text.substr(1, token.text.size() - 2));
+        if (VarRefEnd(token.text, 0) == token.text.size() - 1 &&
+            it != c.variables.end() && it->second.list) {
+            value = it->second;
+            return true;
+        }
+    }
+    if (!ExpandVars(c, token)) return false;
+
+    value.text = std::move(token.text);
+    return true;
+}
+
+bool SetVariable(Ctx& c, const Token& cmd, bool redefine) {
+    if (!c.Eof() && !ExpandVars(c, c.toks[c.pos])) return false;
+
+    std::string name;
+    Ctx::Variable value;
+    if (!c.Want("a name", cmd, name) || !ReadVariableValue(c, cmd, value))
         return false;
     if (PinnedByDefVar(c, cmd, name))
         return true;
-    if (c.variables.count(name))
+
+    const bool exists = c.variables.count(name) != 0;
+    if (exists && !redefine)
         return c.Fail(cmd.line, "duplicate $definevariable \"" + name +
                                 "\" - use $redefinevariable to change it");
-    c.variables[name] = value;
+    if (!exists && redefine)
+        return c.Fail(cmd.line, "$redefinevariable \"" + name + "\" is not "
+                                "defined - use $definevariable first");
+
+    c.variables[name] = std::move(value);
     return true;
 }
 
-// $redefinevariable <name> <value>. Replaces a value in place; the variable has
-// to exist already, which is the whole difference from $definevariable.
+// $definevariable <name> <value> or <name> [<value> ...].
+bool CmdDefineVariable(Ctx& c, const Token& cmd) {
+    return SetVariable(c, cmd, false);
+}
+
+// $redefinevariable accepts the same values and requires an existing name.
 bool CmdRedefineVariable(Ctx& c, const Token& cmd) {
-    std::string name, value;
-    if (!c.Want("a name", cmd, name) || !c.Want("a value", cmd, value))
-        return false;
-    if (PinnedByDefVar(c, cmd, name))
-        return true;
-    auto it = c.variables.find(name);
-    if (it == c.variables.end())
-        return c.Fail(cmd.line, "$redefinevariable \"" + name + "\" is not "
-                                "defined - use $definevariable first");
-    it->second = value;
-    return true;
+    return SetVariable(c, cmd, true);
 }
 
 bool IsCommandName(const std::string& name); // the kCommands lookup, below
@@ -8774,9 +8896,11 @@ bool ReadCondition(Ctx& c, const Token& cmd, std::vector<CondTok>& out) {
         Token t = c.toks[c.pos++];
         if (!t.quoted && t.text == "{")
             break;
-        if (!ExpandVars(c, t))
-            return false;
-        out.push_back({t.text, t.line, t.quoted || t.expanded});
+        std::vector<Token> values;
+        if (!ExpandVarTokens(c, t, values)) return false;
+
+        for (const Token& value : values)
+            out.push_back({value.text, value.line, value.quoted || value.expanded});
     }
     if (out.empty())
         return c.Fail(cmd.line, cmd.text + " has an empty condition");
@@ -8821,7 +8945,7 @@ struct CondEval {
                                 "$definevariable for it above this line (a string "
                                 "literal goes in quotes)");
         }
-        value = it->second;
+        value = it->second.text;
         return CondTruthy(value);
     }
 
@@ -8958,7 +9082,7 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
     if (it == c.variables.end())
         return c.Fail(var.line, "$switch: unknown variable \"" + var.text +
                                 "\" - no $definevariable for it above this line");
-    const std::string value = it->second;
+    const std::string value = it->second.text;
     if (!ExpectBrace(c, cmd))
         return false;
 
@@ -9373,7 +9497,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     // -defvar: in effect from the first line, and pinned - a later repeat on
     // the command line just wins over the earlier one
     for (const auto& kv : defvars) {
-        c.variables[kv.first] = kv.second;
+        c.variables[kv.first].text = kv.second;
         if (!c.IsLockedVar(kv.first))
             c.lockedVars.push_back(kv.first);
     }

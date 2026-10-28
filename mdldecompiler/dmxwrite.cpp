@@ -768,18 +768,14 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
                             : 1.0f / 4096.0f;
                     d.wrinkle.push_back(static_cast<float>(w.wrinkledelta) * scale);
                 }
-                // side/speed are the mesh's own per-vertex fields, stored on
-                // every vertanim that touches the vertex rather than once. Only
-                // a stereo flex carries a real side - a mono one writes a flat
-                // 0, which would erase the balance on any vertex it shares.
-                if (stereo && a.side != 255) {
+
+                // Only stereo flexes carry balance; convert both endpoints
+                // before preserving the vertex against ramp and lid synthesis.
+                if (stereo) {
                     balance[mv] = vtaStereo ? 1.0f - a.side / 255.0f : a.side / 255.0f;
                     authored[mv] = 1;
                     touched[mv] = 1;
                     anyBalance = true;
-                } else if (stereo) {
-                    // 255 IS the 1.0 default - keep the ramp off it
-                    touched[mv] = 1;
                 } else if (mergedLid && !authored[mv]) {
                     // The merged halves carry no side of their own, so it comes
                     // from the eye each came off - the model's right is 1, which
@@ -790,6 +786,7 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
                     touched[mv] = 1;
                     anyBalance = true;
                 }
+
                 if (a.speed != 255) {
                     speed[mv] = a.speed / 255.0f;
                     anySpeed = true;
@@ -1098,6 +1095,8 @@ void WriteOne(const Mdl& m, const std::string& path, const std::string& meshName
                 q.StrArray("rawControlNames", c.rawControls);
                 q.Bool("stereo", c.stereo);
                 q.Bool("eyelid", c.eyelid);
+                if (!c.flexgroup.empty())
+                    q.Str("flexgroup", c.flexgroup);
                 if (!c.eyesUpDownFlex.empty())
                     q.Str("eyesUpDownFlex", c.eyesUpDownFlex);
                 if (c.hasRange) {

@@ -16,6 +16,7 @@ namespace mdldecompiler {
 // passthru, two for a 2-way, n for an n-way.
 struct RigControl {
     std::string name;
+    std::string flexgroup;
     std::vector<std::string> rawControls;
     bool stereo = false;
     bool eyelid = false;
