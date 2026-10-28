@@ -402,6 +402,19 @@ const Field kTransformBone[] = {
 };
 const Item kTransformBoneItem = MakeItem("transformBone", kTransformBone).Titled("Transform Bone", "Bones");
 
+const Field kRealignBone[] = {
+    F("bone", Type::String, "Bone to realign; does not prevent collapse.").Ref("bone").Required(),
+    F("origin", Type::Vec3, "Origin offset along the starting bone axes."),
+    F("angles", Type::Vec3, "Rotation offset in degrees (pitch, yaw, roll)."),
+    F("worldAxes", Type::Bool, "Apply relative offsets in model/pose axes."),
+    F("absolute", Type::Bool, "Set supplied components to absolute model/pose values."),
+    F("affectChildren", Type::Bool,
+      "Carry descendant bone frames; requires origin or angles and preserves the rest mesh."),
+    F("ignoreAnimation", Type::Bool,
+      "Exclude from source animation; bind-pose clips still use the edited pose."),
+};
+const Item kRealignBoneItem = MakeItem("realignBone", kRealignBone).Titled("Realign Bone", "Bones");
+
 const Field kHierarchy[] = {
     F("bone", Type::String, "Bone to reparent.").Ref("bone").Required(),
     F("parent", Type::String, "New parent; omitted = root bone.").Ref("bone"),
@@ -520,13 +533,14 @@ const Field kBoneMarkup[] = {
     F("bone", Type::String, "Bone.").Ref("bone").Required(),
     F("boneMerge", Type::Bool, "Kept for bonemerge."),
     F("doNotCollapse", Type::Bool, "Never collapsed."),
-    F("noRealign", Type::Bool, "Skip automatic axis rotation from IK and single-child realignment."),
+    F("noRealign", Type::Bool,
+      "Disable realignment; the last per-bone realign or noRealign instruction wins."),
     F("alwaysCollapse", Type::Bool, "Always collapsed."),
 };
 const Item kBoneMarkupItem = MakeItem("boneMarkup", kBoneMarkup).Titled("Bone Markup", "Bones");
 
 const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kRenameItem, &kTransformBoneItem,
-                                  &kHierarchyItem, &kJiggleBoneItem, &kDriverBoneItem, &kAimAtItem,
+                                  &kRealignBoneItem, &kHierarchyItem, &kJiggleBoneItem, &kDriverBoneItem, &kAimAtItem,
                                   &kDataModelJointsItem, &kVrdFileItem, nullptr};
 const Item kBonesItem = MakeItem("bones", kBones).Titled("Bones", "Bones").Holds(kBonesKids);
 
@@ -1135,7 +1149,7 @@ const Item* const kAllItems[] = {
     &kMaterialCollapseItem, &kMaterialsItem, &kScaleBoneItem, &kMeshItem, &kMeshesItem, &kChoiceItem,
     &kModelGroupItem, &kPresetChoiceItem, &kModelGroupPresetItem, &kModelGroupsItem, &kLodModelItem,
     &kLodDecimateItem, &kLodBoneItem, &kLodMaterialItem, &kLodWordItem, &kLodItem, &kLodsItem,
-    &kDefineBoneItem, &kRenameItem, &kTransformBoneItem, &kHierarchyItem, &kJiggleCommonItem,
+    &kDefineBoneItem, &kRenameItem, &kTransformBoneItem, &kRealignBoneItem, &kHierarchyItem, &kJiggleCommonItem,
     &kJiggleFlexibleItem, &kJiggleRigidItem, &kJiggleBaseSpringItem, &kJiggleBoingItem, &kJiggleBoneItem,
     &kDriverTriggerItem, &kDriverBoneItem, &kAimAtItem, &kDataModelJointsItem, &kBonesItem,
     &kAttachmentItem, &kAttachmentsItem, &kHitboxItem, &kHitboxSetItem, &kHitGroupItem, &kHitboxesItem,
@@ -2643,7 +2657,6 @@ bool LowerBones(Emitter& e, const Json& b) {
     static const struct { const char* key; const char* command; } kLists[] = {
         {"boneMerge", "$bonemerge"},
         {"doNotCollapse", "$donotcollapse"},
-        {"noRealign", "$norealign"},
         {"alwaysCollapse", "$alwayscollapse"},
     };
     for (const auto& list : kLists) {
@@ -2651,6 +2664,22 @@ bool LowerBones(Emitter& e, const Json& b) {
         if (!names || names->empty()) continue;
         e.Command(list.command, b, list.key);
         EmitNames(e, *names);
+    }
+
+    if (const Json* list = Get(b, "realignDirectives")) {
+        for (const Json& edit : *list) {
+            const bool disable = True(edit, "noRealign");
+            e.Command(disable ? "$norealign" : "$realignbone", edit);
+            e.Text(Str(edit, "bone"));
+            if (disable) continue;
+
+            EmitClause(e, edit, "origin", "origin");
+            EmitClause(e, edit, "angles", "angles");
+            EmitFlag(e, edit, "worldAxes", "worldaxes");
+            EmitFlag(e, edit, "absolute", "absolute");
+            EmitFlag(e, edit, "ignoreAnimation", "ignoreanimation");
+            EmitFlag(e, edit, "affectChildren", "affectchildren");
+        }
     }
 
     if (const Json* v = Get(b, "root")) {
@@ -3279,6 +3308,7 @@ const Move kMoves[] = {
     {"bones", "defineBone", "define"},
     {"bones", "renameBone", "renames"},
     {"bones", "transformBone", "transforms"},
+    {"bones", "realignBone", "realignDirectives"},
     {"bones", "reparentBone", "hierarchy"},
     {"bones", "jiggleBone", "jiggle"},
     {"bones", "driverBone", "drivers"},
@@ -3475,7 +3505,6 @@ const Gather kGathers[] = {
     {"lod", "lodSmallMesh", "removeSmallMeshesIn", "mesh"},
     {"bones", "boneMarkup", "boneMerge", "bone", "boneMerge"},
     {"bones", "boneMarkup", "doNotCollapse", "bone", "doNotCollapse"},
-    {"bones", "boneMarkup", "noRealign", "bone", "noRealign"},
     {"bones", "boneMarkup", "alwaysCollapse", "bone", "alwaysCollapse"},
     {"bones", "vrdFile", "vrdFiles", "file"},
     {"attachment", "placeOnFlexGroup", "flexGroups", "name"},
@@ -3558,6 +3587,10 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
     if (const Json* children = Get(node, "children")) {
         for (const Json& child : *children) {
             const Item& kind = ItemOf(item, child);
+            if (IsA(item, "bones") && std::strcmp(kind.name, "boneMarkup") == 0 &&
+                child.value("noRealign", false))
+                out["realignDirectives"].push_back(child);
+
             bool gathered = false;
             for (const Gather& gather : kGathers) {
                 if (!IsA(item, gather.parent) || std::strcmp(kind.name, gather.child) != 0) continue;

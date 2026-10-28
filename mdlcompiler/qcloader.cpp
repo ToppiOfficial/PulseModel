@@ -5412,13 +5412,61 @@ bool CmdDoNotCollapse(Ctx& c, const Token& cmd) {
     return true;
 }
 
+bool CmdRealignBone(Ctx& c, const Token& cmd) {
+    std::string name;
+    if (!c.Want("a bone name", cmd, name)) return false;
+
+    cm::BoneRealignEdit edit;
+    edit.line = cmd.line;
+    while (!c.AtCommand()) {
+        const Token option = c.toks[c.pos++];
+        const std::string word = Lower(option.text);
+        if (!option.quoted && (word == "origin" || word == "angles")) {
+            const bool origin = word == "origin";
+            bool& present = origin ? edit.hasOrigin : edit.hasAngles;
+            if (present) return c.Fail(option.line, "$realignbone: " + word + " written twice");
+
+            pm::Vector3& value = origin ? edit.origin : edit.angles;
+            if (!c.WantFloat("an X value", option, value.x) ||
+                !c.WantFloat("a Y value", option, value.y) ||
+                !c.WantFloat("a Z value", option, value.z))
+                return false;
+            if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
+                return c.Fail(option.line, "$realignbone: " + word + " must be finite");
+            present = true;
+        } else if (!option.quoted && word == "worldaxes") {
+            edit.worldAxes = true;
+        } else if (!option.quoted && word == "absolute") {
+            edit.absolute = true;
+        } else if (!option.quoted && word == "ignoreanimation") {
+            edit.ignoreAnimation = true;
+        } else if (!option.quoted && word == "affectchildren") {
+            edit.affectChildren = true;
+        } else {
+            return c.Fail(option.line, "$realignbone: unknown option \"" + option.text + "\"");
+        }
+    }
+
+    if (edit.affectChildren && !edit.hasOrigin && !edit.hasAngles)
+        return c.Fail(cmd.line, "$realignbone: affectchildren requires origin or angles");
+
+    cm::BoneMarkup& markup = FindOrAddMarkup(c, name);
+    markup.noRealign = false;
+    markup.hasRealign = true;
+    markup.realign = edit;
+    return true;
+}
+
 bool CmdNoRealign(Ctx& c, const Token& cmd) {
     std::vector<std::string> names;
     if (!WantBoneNames(c, cmd, names))
         return false;
 
-    for (const std::string& n : names)
-        FindOrAddMarkup(c, n).noRealign = true;
+    for (const std::string& n : names) {
+        cm::BoneMarkup& markup = FindOrAddMarkup(c, n);
+        markup.noRealign = true;
+        markup.hasRealign = false;
+    }
     return true;
 }
 
@@ -9285,6 +9333,7 @@ constexpr Command kCommands[] = {
     {"$bonemerge", CmdBoneMerge},
     {"$donotcollapse", CmdDoNotCollapse},
     {"$norealign", CmdNoRealign},
+    {"$realignbone", CmdRealignBone},
     {"$alwayscollapse", CmdAlwaysCollapse},
     {"$hierarchy", CmdHierarchy},
     {"$heirarchy", CmdHierarchy}, // stock's misspelling, same command

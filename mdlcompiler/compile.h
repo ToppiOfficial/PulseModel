@@ -102,12 +102,23 @@ struct ImportBone {
     bool bUnlocked = false;   // unlocked bones are appended AFTER the source union
 };
 
+struct BoneRealignEdit {
+    Vector3 origin{}, angles{};
+    bool hasOrigin = false, hasAngles = false;
+    bool worldAxes = false, absolute = false;
+    bool ignoreAnimation = false;
+    bool affectChildren = false;
+    int line = 0;
+};
+
 // Per-bone markup flags can be combined on the same bone.
 struct BoneMarkup {
     std::string name;
     bool doNotCollapse = false; // $donotcollapse - force-keep through the cull
     bool isBonemerge = false;   // $bonemerge - BONE_USED_BY_BONE_MERGE
-    bool noRealign = false;     // $norealign - skip automatic axis rotation
+    bool noRealign = false;     // $norealign - disable this bone's realignment
+    bool hasRealign = false;
+    BoneRealignEdit realign;
 };
 
 // $transformbone <bone> [options]: a late bind-pose edit, applied by
