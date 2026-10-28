@@ -194,6 +194,24 @@ const Item kContentsFlagsItem = MakeItem("contentsFlags", kContentsFlags);
 
 // --- settings ---
 
+const Field kBounds[] = {
+    F("min", Type::Vec3, "Minimum corner in model space.").Required(),
+    F("max", Type::Vec3, "Maximum corner in model space.").Required(),
+};
+const Item kBBoxItem = MakeItem("bbox", kBounds).Titled("BBox", "Model").Single();
+const Item kCBoxItem = MakeItem("cbox", kBounds).Titled("CBox", "Model").Single();
+const Field kIllumPosition[] = {
+    F("position", Type::Vec3, "Lighting sample point; bone space when a bone is set.").Required(),
+    F("bone", Type::String, "Bone the lighting point follows; omitted = static.").Ref("bone"),
+};
+const Item kIllumPositionItem =
+    MakeItem("illumPosition", kIllumPosition).Titled("Illum Position", "Model").Single();
+const Field kEyePosition[] = {
+    F("position", Type::Vec3, "Ideal eye point.").Required(),
+    F("autoHeight", Type::Bool, "Z comes from the eyeballs; position Z is an offset."),
+};
+const Item kEyePositionItem = MakeItem("eyePosition", kEyePosition).Titled("Eye Position", "Model").Single();
+
 const Field kSettings[] = {
     F("name", Type::String, "Model path under models/, e.g. player/foo."),
     F("archetype", Type::Enum, "Model archetype.").Values(kArchetypes),
@@ -205,19 +223,11 @@ const Field kSettings[] = {
     F("surfaceProp", Type::String, "Surface property."),
     F("maxBones", Type::Integer, "Bone ceiling.").Group("Budget"),
     F("maxMaterials", Type::Integer, "Material ceiling.").Group("Budget"),
-    F("bboxMin", Type::Vec3, "Hull box minimum corner.").Group("Bounds"),
-    F("bboxMax", Type::Vec3, "Hull box maximum corner.").Group("Bounds"),
-    F("cboxMin", Type::Vec3, "View clipping box minimum corner.").Group("Bounds"),
-    F("cboxMax", Type::Vec3, "View clipping box maximum corner.").Group("Bounds"),
     F("skipBoneInBBox", Type::Bool, "Auto hitboxes grow from vertices only.").Group("Bounds"),
-    F("illumPosition", Type::Vec3, "Lighting sample point.").Group("Lighting"),
-    F("illumBone", Type::String, "Bone the lighting point follows; omitted = static.").Ref("bone").Group("Lighting"),
     F("constantDirectionalLight", Type::Number, "Constant directional light scale (0-1).").Group("Lighting"),
     F("ambientBoost", Type::Bool, "Ambient boost flag.").Group("Lighting"),
     F("doNotCastShadows", Type::Bool, "Cast no shadows.").Group("Lighting"),
     F("castTextureShadows", Type::Bool, "Cast texture shadows.").Group("Lighting"),
-    F("eyePosition", Type::Vec3, "Ideal eye point.").Group("Eyes"),
-    F("eyeAutoHeight", Type::Bool, "Z comes from the eyeballs; the eye position Z is an offset.").Group("Eyes"),
     F("maxEyeDeflection", Type::Number, "Eye turn limit in degrees.").Group("Eyes"),
     F("forcePhonemeCrossfade", Type::Bool, "Force phoneme crossfade.").Group("Eyes"),
     F("allowRootLods", Type::Integer, "Allowed root LOD count.").Group("LOD"),
@@ -228,8 +238,8 @@ const Field kSettings[] = {
     F("autoCenter", Type::Bool, "Center the model.").Group("Output"),
     F("forceWriteVertexData", Type::Bool, "Write .vvd/.vtx even without geometry.").Group("Output"),
 };
-const Item* const kSettingsKids[] = {&kSearchFolderItem, &kIncludeModelItem, &kBoundsMeshItem, &kKeyValueItem,
-                                     nullptr};
+const Item* const kSettingsKids[] = {&kSearchFolderItem, &kIncludeModelItem, &kBoundsMeshItem, &kBBoxItem,
+                                     &kCBoxItem, &kIllumPositionItem, &kEyePositionItem, &kKeyValueItem, nullptr};
 const Item kSettingsItem =
     MakeItem("settings", kSettings, &kContentsFlagsItem).Titled("Settings", "Model").Holds(kSettingsKids);
 
@@ -294,11 +304,11 @@ const Item kMeshesItem = MakeItem("meshes").Titled("Meshes", "Mesh").Holds(kMesh
 
 const Field kChoice[] = {
     F("name", Type::String, "Choice name; omitted = named after its meshes."),
-    F("blank", Type::Bool, "An empty choice."),
 };
 const Item* const kChoiceKids[] = {&kChoiceMeshItem, nullptr};
-const Item kChoiceItem = MakeItem("choice", kChoice).Titled("Choice", "Model Groups").Holds(kChoiceKids);
-const Item* const kModelGroupKids[] = {&kChoiceItem, nullptr};
+const Item kChoiceItem = MakeItem("choice", kChoice).Titled("Mesh", "Model Groups").Holds(kChoiceKids, 1);
+const Item kBlankItem = MakeItem("blank").Titled("Blank", "Model Groups");
+const Item* const kModelGroupKids[] = {&kBlankItem, &kChoiceItem, nullptr};
 const Field kModelGroup[] = {
     F("name", Type::String, "Group name.").Declares("modelGroup").Required(),
 };
@@ -348,9 +358,7 @@ const Field kLodWord[] = {
 };
 const Item kLodWordItem = MakeItem("lodReplaceMaterialWord", kLodWord).Titled("Replace Material Word", "LOD");
 
-const Field kLod[] = {
-    F("switch", Type::Number, "Switch value; omit for the shadow LOD."),
-    F("shadow", Type::Bool, "The shadow LOD (last, at most one)."),
+const Field kLodOptions[] = {
     F("decimateAll", Type::Number, "Decimate every mesh to this share."),
     F("collapseJiggleBones", Type::Bool, "Collapse jiggle bones."),
     F("collapseProceduralBones", Type::Bool, "Collapse procedural bones."),
@@ -362,8 +370,14 @@ const Field kLod[] = {
 const Item* const kLodKids[] = {&kLodModelItem, &kLodDecimateItem, &kLodBoneItem, &kLodMaterialItem,
                                 &kLodWordItem, &kRemoveMeshItem, &kCollapseTreeItem, &kDropMaterialItem,
                                 &kDropMaterialWordItem, &kSmallMeshItem, nullptr};
-const Item kLodItem = MakeItem("lod", kLod).Titled("LOD", "LOD").Holds(kLodKids);
-const Item* const kLodsKids[] = {&kLodItem, nullptr};
+const Item kLodOptionsItem = MakeItem("lodOptions", kLodOptions);
+const Field kLod[] = {
+    F("switch", Type::Number, "Distance at which this LOD starts.").Required(),
+};
+const Item kLodItem = MakeItem("lod", kLod, &kLodOptionsItem).Titled("LOD", "LOD").Holds(kLodKids);
+const Item kShadowLodItem =
+    MakeItem("shadowLod", &kLodOptionsItem).Titled("Shadow LOD", "LOD").Holds(kLodKids).Single();
+const Item* const kLodsKids[] = {&kLodItem, &kShadowLodItem, nullptr};
 const Item kLodsItem = MakeItem("lods").Titled("LODs", "LOD").Holds(kLodsKids);
 
 // --- bones ---
@@ -1149,6 +1163,7 @@ const Item* const kAllItems[] = {
     &kVrdFileItem, &kPlaceFlexGroupItem, &kPlaceMorphItem, &kPlaceMaterialItem, &kBlendFileItem,
     &kBlendAnimationItem, &kActivityModifierItem, &kLocalVarItem, &kCorrectiveControlItem, &kDominatorItem,
     &kExtraBoneItem, &kExcludeMeshItem, &kTransitionNodeItem, &kAllowedActivityItem,
+    &kBBoxItem, &kCBoxItem, &kIllumPositionItem, &kEyePositionItem, &kBlankItem, &kLodOptionsItem, &kShadowLodItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -2230,7 +2245,7 @@ bool LowerModelGroup(Emitter& e, const Json& group) {
             continue;
         }
         if (!meshes || meshes->empty())
-            return e.l.Fail(choice, "", "a choice needs meshes, or blank: true");
+            return e.l.Fail(choice, "", "a Mesh node needs at least one mesh");
         e.Line(choice);
         e.Word("mesh");
         if (const Json* name = Get(choice, "name")) {
@@ -2246,7 +2261,7 @@ bool LowerModelGroup(Emitter& e, const Json& group) {
 bool LowerLod(Emitter& e, const Json& lod) {
     const bool shadow = True(lod, "shadow");
     if (shadow == (Get(lod, "switch") != nullptr))
-        return e.l.Fail(lod, "", "a LOD takes a switch value, or shadow: true");
+        return e.l.Fail(lod, "", "a LOD needs a switch value; use a Shadow LOD node for shadows");
 
     e.Command(shadow ? "$shadowlod" : "$lod", lod);
     if (!shadow) e.Num(lod.at("switch"));
@@ -3233,6 +3248,10 @@ struct Move {
 const Move kMoves[] = {
     {"keyValue", "keyValue", "block"},
     {"settings", "keyValue", "keyValues"},
+    {"settings", "bbox", "bbox", Into::Object},
+    {"settings", "cbox", "cbox", Into::Object},
+    {"settings", "illumPosition", "illumPosition", Into::Object},
+    {"settings", "eyePosition", "eyePosition", Into::Object},
     {"skin", "skinReplace", "replace"},
     {"materials", "skin", "skins"},
     {"materials", "materialRename", "renames"},
@@ -3240,15 +3259,17 @@ const Move kMoves[] = {
     {"mesh", "scaleBone", "scaleBones"},
     {"meshes", "mesh", "meshes", Into::Model},
     {"modelGroup", "choice", "choices"},
+    {"modelGroup", "blank", "choices"},
     {"modelGroupPreset", "presetChoice", "choices"},
     {"modelGroups", "modelGroup", "modelGroups", Into::Model},
     {"modelGroups", "modelGroupPreset", "modelGroupPresets", Into::Model},
-    {"lod", "lodReplaceMesh", "replaceModels"},
-    {"lod", "lodDecimateMesh", "decimateModels"},
-    {"lod", "lodReplaceBone", "replaceBones"},
-    {"lod", "lodReplaceMaterial", "replaceMaterials"},
-    {"lod", "lodReplaceMaterialWord", "replaceMaterialWords"},
+    {"lodOptions", "lodReplaceMesh", "replaceModels"},
+    {"lodOptions", "lodDecimateMesh", "decimateModels"},
+    {"lodOptions", "lodReplaceBone", "replaceBones"},
+    {"lodOptions", "lodReplaceMaterial", "replaceMaterials"},
+    {"lodOptions", "lodReplaceMaterialWord", "replaceMaterialWords"},
     {"lods", "lod", "lods", Into::Model},
+    {"lods", "shadowLod", "lods", Into::Model},
     {"jiggleBone", "jiggleFlexible", "flexible", Into::Object},
     {"jiggleBone", "jiggleRigid", "rigid", Into::Object},
     {"jiggleBone", "jiggleBaseSpring", "baseSpring", Into::Object},
@@ -3327,17 +3348,9 @@ const Flat kFlats[] = {
     {"settings", "upAxis", "transform", "upAxis"},
     {"settings", "maxBones", "budget", "bones"},
     {"settings", "maxMaterials", "budget", "materials"},
-    {"settings", "bboxMin", "bbox", "min"},
-    {"settings", "bboxMax", "bbox", "max"},
     {"settings", "bboxMeshes", "bbox", "meshes"},
-    {"settings", "cboxMin", "cbox", "min", true},
-    {"settings", "cboxMax", "cbox", "max", true},
-    {"settings", "illumPosition", "illumPosition", "position", true},
-    {"settings", "illumBone", "illumPosition", "bone"},
-    {"settings", "eyePosition", "eyePosition", "position", true},
-    {"settings", "eyeAutoHeight", "eyePosition", "autoHeight"},
-    {"lod", "removeSmallMeshes", "removeSmallMeshes", "size", true},
-    {"lod", "removeSmallMeshesIn", "removeSmallMeshes", "meshes"},
+    {"lodOptions", "removeSmallMeshes", "removeSmallMeshes", "size", true},
+    {"lodOptions", "removeSmallMeshesIn", "removeSmallMeshes", "meshes"},
     {"defineBone", "realignPosition", "realign", "position", true},
     {"defineBone", "realignAngles", "realign", "angles", true},
     {"jiggleCommon", "yawMin", "yawConstraint", "min", true},
@@ -3441,11 +3454,11 @@ const Gather kGathers[] = {
     {"mesh", "dropMaterial", "removeMeshes", "material"},
     {"mesh", "dropMaterialWord", "removeMeshWords", "word"},
     {"choice", "choiceMesh", "meshes", "mesh"},
-    {"lod", "lodRemoveMesh", "removeModels", "mesh"},
-    {"lod", "lodCollapseTree", "collapseBoneTrees", "bone"},
-    {"lod", "dropMaterial", "removeMeshes", "material"},
-    {"lod", "dropMaterialWord", "removeMeshWords", "word"},
-    {"lod", "lodSmallMesh", "removeSmallMeshesIn", "mesh"},
+    {"lodOptions", "lodRemoveMesh", "removeModels", "mesh"},
+    {"lodOptions", "lodCollapseTree", "collapseBoneTrees", "bone"},
+    {"lodOptions", "dropMaterial", "removeMeshes", "material"},
+    {"lodOptions", "dropMaterialWord", "removeMeshWords", "word"},
+    {"lodOptions", "lodSmallMesh", "removeSmallMeshesIn", "mesh"},
     {"bones", "boneMarkup", "boneMerge", "bone", "boneMerge"},
     {"bones", "boneMarkup", "doNotCollapse", "bone", "doNotCollapse"},
     {"bones", "boneMarkup", "alwaysCollapse", "bone", "alwaysCollapse"},
@@ -3501,6 +3514,9 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
     out = Json::object();
     for (const auto& [key, value] : node.items())
         if (key != "type" && key != "enabled" && key != "children" && key != "editor") out[key] = value;
+    if (std::strcmp(item.name, "blank") == 0) out["blank"] = true;
+    if (std::strcmp(item.name, "shadowLod") == 0) out["shadow"] = true;
+
     for (const auto& renamed : kRenamed) {
         if (!IsA(item, renamed.item) || !out.contains(renamed.key)) continue;
         out[renamed.record] = out.at(renamed.key);
@@ -3547,8 +3563,11 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
             const Move& move = MoveOf(item, kind);
             Json shaped;
             if (!Reshape(l, child, kind, model, shaped)) return false;
-            if (move.into == Into::Object) out[move.key] = std::move(shaped);
-            else if (move.into == Into::Model) model[move.key].push_back(std::move(shaped));
+            if (move.into == Into::Object) {
+                if (out.contains(move.key))
+                    return l.Fail(child, "", std::string("only one ") + kind.title + " fits in " + item.name);
+                out[move.key] = std::move(shaped);
+            } else if (move.into == Into::Model) model[move.key].push_back(std::move(shaped));
             else out[move.key].push_back(std::move(shaped));
         }
     }
