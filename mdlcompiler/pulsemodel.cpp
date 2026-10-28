@@ -12,6 +12,7 @@
 #include "dependencies.h"
 #include "diagnostic.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,6 +66,8 @@ struct Field {
     const char* group = nullptr;         // inspector heading of related fields
     bool required = false;
     bool defaultBool = false;
+    double defaultNumber = 0;
+    bool hasNumberDefault = false;
 
     constexpr Field Of(const Item* i) const { Field f = *this; f.item = i; return f; }
     constexpr Field Values(const char* const* v) const { Field f = *this; f.values = v; return f; }
@@ -73,6 +76,9 @@ struct Field {
     constexpr Field Group(const char* g) const { Field f = *this; f.group = g; return f; }
     constexpr Field Required() const { Field f = *this; f.required = true; return f; }
     constexpr Field Default(bool value) const { Field f = *this; f.defaultBool = value; return f; }
+    constexpr Field Default(double value) const {
+        Field f = *this; f.defaultNumber = value; f.hasNumberDefault = true; return f;
+    }
 };
 
 struct Item {
@@ -423,29 +429,33 @@ const Field kHierarchy[] = {
 };
 const Item kHierarchyItem = MakeItem("reparentBone", kHierarchy).Titled("Reparent Bone", "Bones");
 
+const compile::JiggleBone kJiggleDefaults;
+const double kBoingImpactDegrees =
+    std::round(std::acos(double(0.7071f)) * 180.0 / std::acos(-1.0) * 1e12) / 1e12;
+
 // options every jiggle behavior but boing takes
 const Field kJiggleCommon[] = {
-    F("tipMass", Type::Number, "Tip mass."),
-    F("length", Type::Number, "Length."),
-    F("yawFriction", Type::Number, "Yaw friction."),
-    F("yawBounce", Type::Number, "Yaw bounce."),
-    F("pitchFriction", Type::Number, "Pitch friction."),
-    F("pitchBounce", Type::Number, "Pitch bounce."),
-    F("angleConstraint", Type::Number, "Angle limit in degrees.").Group("Limits"),
-    F("yawMin", Type::Number, "Yaw limit minimum in degrees.").Group("Limits"),
-    F("yawMax", Type::Number, "Yaw limit maximum in degrees.").Group("Limits"),
-    F("pitchMin", Type::Number, "Pitch limit minimum in degrees.").Group("Limits"),
-    F("pitchMax", Type::Number, "Pitch limit maximum in degrees.").Group("Limits"),
+    F("tipMass", Type::Number, "Tip mass.").Default(kJiggleDefaults.tipMass),
+    F("length", Type::Number, "Length.").Default(kJiggleDefaults.length),
+    F("yawFriction", Type::Number, "Yaw friction.").Default(kJiggleDefaults.yawFriction),
+    F("yawBounce", Type::Number, "Yaw bounce.").Default(kJiggleDefaults.yawBounce),
+    F("pitchFriction", Type::Number, "Pitch friction.").Default(kJiggleDefaults.pitchFriction),
+    F("pitchBounce", Type::Number, "Pitch bounce.").Default(kJiggleDefaults.pitchBounce),
+    F("angleConstraint", Type::Number, "Angle limit in degrees.").Group("Limits").Default(0.0),
+    F("yawMin", Type::Number, "Yaw limit minimum in degrees.").Group("Limits").Default(0.0),
+    F("yawMax", Type::Number, "Yaw limit maximum in degrees.").Group("Limits").Default(0.0),
+    F("pitchMin", Type::Number, "Pitch limit minimum in degrees.").Group("Limits").Default(0.0),
+    F("pitchMax", Type::Number, "Pitch limit maximum in degrees.").Group("Limits").Default(0.0),
 };
 const Item kJiggleCommonItem = MakeItem("jiggleCommon", kJiggleCommon);
 
 const Field kJiggleFlexible[] = {
-    F("yawStiffness", Type::Number, "Yaw stiffness (0-1000)."),
-    F("yawDamping", Type::Number, "Yaw damping (0-1000)."),
-    F("pitchStiffness", Type::Number, "Pitch stiffness (0-1000)."),
-    F("pitchDamping", Type::Number, "Pitch damping (0-1000)."),
-    F("alongStiffness", Type::Number, "Along stiffness (0-1000)."),
-    F("alongDamping", Type::Number, "Along damping (0-1000)."),
+    F("yawStiffness", Type::Number, "Yaw stiffness (0-1000).").Default(kJiggleDefaults.yawStiffness),
+    F("yawDamping", Type::Number, "Yaw damping (0-1000).").Default(kJiggleDefaults.yawDamping),
+    F("pitchStiffness", Type::Number, "Pitch stiffness (0-1000).").Default(kJiggleDefaults.pitchStiffness),
+    F("pitchDamping", Type::Number, "Pitch damping (0-1000).").Default(kJiggleDefaults.pitchDamping),
+    F("alongStiffness", Type::Number, "Along stiffness (0-1000).").Default(kJiggleDefaults.alongStiffness),
+    F("alongDamping", Type::Number, "Along damping (0-1000).").Default(kJiggleDefaults.alongDamping),
     F("allowLengthFlex", Type::Bool, "Let the length stretch."),
 };
 const Item kJiggleFlexibleItem =
@@ -453,28 +463,28 @@ const Item kJiggleFlexibleItem =
 const Item kJiggleRigidItem = MakeItem("jiggleRigid", &kJiggleCommonItem).Titled("Rigid", "Jiggle Bones").Single();
 
 const Field kJiggleBaseSpring[] = {
-    F("stiffness", Type::Number, "Stiffness (0-1000)."),
-    F("damping", Type::Number, "Damping (0-1000)."),
-    F("baseMass", Type::Number, "Base mass."),
-    F("leftMin", Type::Number, "Left limit minimum.").Group("Left"),
-    F("leftMax", Type::Number, "Left limit maximum.").Group("Left"),
-    F("leftFriction", Type::Number, "Left friction.").Group("Left"),
-    F("upMin", Type::Number, "Up limit minimum.").Group("Up"),
-    F("upMax", Type::Number, "Up limit maximum.").Group("Up"),
-    F("upFriction", Type::Number, "Up friction.").Group("Up"),
-    F("forwardMin", Type::Number, "Forward limit minimum.").Group("Forward"),
-    F("forwardMax", Type::Number, "Forward limit maximum.").Group("Forward"),
-    F("forwardFriction", Type::Number, "Forward friction.").Group("Forward"),
+    F("stiffness", Type::Number, "Stiffness (0-1000).").Default(kJiggleDefaults.baseStiffness),
+    F("damping", Type::Number, "Damping (0-1000).").Default(kJiggleDefaults.baseDamping),
+    F("baseMass", Type::Number, "Base mass.").Default(kJiggleDefaults.baseMass),
+    F("leftMin", Type::Number, "Left limit minimum.").Group("Left").Default(kJiggleDefaults.baseMinLeft),
+    F("leftMax", Type::Number, "Left limit maximum.").Group("Left").Default(kJiggleDefaults.baseMaxLeft),
+    F("leftFriction", Type::Number, "Left friction.").Group("Left").Default(kJiggleDefaults.baseLeftFriction),
+    F("upMin", Type::Number, "Up limit minimum.").Group("Up").Default(kJiggleDefaults.baseMinUp),
+    F("upMax", Type::Number, "Up limit maximum.").Group("Up").Default(kJiggleDefaults.baseMaxUp),
+    F("upFriction", Type::Number, "Up friction.").Group("Up").Default(kJiggleDefaults.baseUpFriction),
+    F("forwardMin", Type::Number, "Forward limit minimum.").Group("Forward").Default(kJiggleDefaults.baseMinForward),
+    F("forwardMax", Type::Number, "Forward limit maximum.").Group("Forward").Default(kJiggleDefaults.baseMaxForward),
+    F("forwardFriction", Type::Number, "Forward friction.").Group("Forward").Default(kJiggleDefaults.baseForwardFriction),
 };
 const Item kJiggleBaseSpringItem =
     MakeItem("jiggleBaseSpring", kJiggleBaseSpring, &kJiggleCommonItem).Titled("Base Spring", "Jiggle Bones").Single();
 
 const Field kJiggleBoing[] = {
-    F("impactSpeed", Type::Number, "Impact speed (100 when omitted)."),
-    F("impactAngle", Type::Number, "Impact angle in degrees."),
-    F("dampingRate", Type::Number, "Damping rate."),
-    F("frequency", Type::Number, "Frequency."),
-    F("amplitude", Type::Number, "Amplitude."),
+    F("impactSpeed", Type::Number, "Impact speed (100 when omitted).").Default(100.0),
+    F("impactAngle", Type::Number, "Impact angle in degrees.").Default(kBoingImpactDegrees),
+    F("dampingRate", Type::Number, "Damping rate.").Default(0.25),
+    F("frequency", Type::Number, "Frequency.").Default(30.0),
+    F("amplitude", Type::Number, "Amplitude.").Default(0.35),
 };
 const Item kJiggleBoingItem = MakeItem("jiggleBoing", kJiggleBoing).Titled("Boing", "Jiggle Bones").Single();
 
@@ -3611,10 +3621,15 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
     for (const auto& [flat, value] : grouped)
         if (flat->sub && off.count(flat->object))
             return l.Fail(node, flat->key, "\"" + std::string(flat->key) + "\" is set while its switch is off");
-    for (const Flat& flat : kFlats)
-        if (flat.required && IsA(item, flat.item) && out.contains(flat.object) &&
-            !out.at(flat.object).contains(flat.sub))
+    for (const Flat& flat : kFlats) {
+        if (!flat.required || !IsA(item, flat.item) || !out.contains(flat.object) ||
+            out.at(flat.object).contains(flat.sub)) continue;
+
+        const Field* field = FindField(item, flat.key);
+        if (!field || !field->hasNumberDefault)
             return l.Fail(node, "", "missing \"" + std::string(flat.key) + "\"");
+        out[flat.object][flat.sub] = field->defaultNumber;
+    }
     return true;
 }
 
@@ -3863,6 +3878,7 @@ void SchemaFields(const Item& item, Json& out) {
         if (field.group) entry["group"] = field.group;
         if (field.required) entry["required"] = true;
         if (field.type == Type::Bool) entry["default"] = field.defaultBool;
+        else if (field.hasNumberDefault) entry["default"] = field.defaultNumber;
         out.push_back(std::move(entry));
     }
 }
