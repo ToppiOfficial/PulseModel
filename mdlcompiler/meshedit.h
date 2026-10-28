@@ -88,6 +88,7 @@ struct EditMeshOperation {
     float value = 0.5f, thicknessClamp = 0.0f;
     bool replaceSelection = false, hull = true, sharpEdges = false;
     bool selectChildren = false;
+    bool worldAxes = false;
     int line = 0;
 };
 

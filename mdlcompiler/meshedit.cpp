@@ -903,8 +903,8 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                 matrix3x4 rotation;
                 pm::AngleMatrixDeg(op.angles, rotation);
                 origin = pm::VectorTransform(Vector3{}, src.boneToPose[weightBone]);
-                axis = pm::VectorRotate(pm::VectorRotate(op.offset, rotation),
-                                        src.boneToPose[weightBone]);
+                axis = pm::VectorRotate(op.offset, rotation);
+                if (!op.worldAxes) axis = pm::VectorRotate(axis, src.boneToPose[weightBone]);
                 if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z) ||
                     !std::isfinite(axis.x) || !std::isfinite(axis.y) || !std::isfinite(axis.z))
                     return fail("shift produces a non-finite ramp");

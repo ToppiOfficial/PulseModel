@@ -696,10 +696,18 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 !number("a yaw", op.angles.y) ||
                 !number("a roll", op.angles.z))
                 return false;
-            if (hasArg()) {
-                if (!want("a residual bone name", op.residualBone)) return false;
-                if (op.residualBone.empty())
-                    return c.Fail(t->line, where + ": residual bone must be nonempty");
+            while (hasArg()) {
+                if (!c.Cur().quoted && Lower(c.Cur().text) == "worldaxes") {
+                    if (op.worldAxes) return c.Fail(t->line, where + ": worldaxes written twice");
+                    ++c.pos;
+                    op.worldAxes = true;
+                } else if (op.residualBone.empty()) {
+                    if (!want("a residual bone name", op.residualBone)) return false;
+                    if (op.residualBone.empty())
+                        return c.Fail(t->line, where + ": residual bone must be nonempty");
+                } else {
+                    return c.Fail(t->line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+                }
             }
         } else if (name == "selectall") {
             op.kind = MeshOperation::SelectAll;
