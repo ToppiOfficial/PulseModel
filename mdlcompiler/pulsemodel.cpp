@@ -64,6 +64,7 @@ struct Field {
     const char* declares = nullptr;      // the kind of name this field defines
     const char* group = nullptr;         // inspector heading of related fields
     bool required = false;
+    bool defaultBool = false;
 
     constexpr Field Of(const Item* i) const { Field f = *this; f.item = i; return f; }
     constexpr Field Values(const char* const* v) const { Field f = *this; f.values = v; return f; }
@@ -71,6 +72,7 @@ struct Field {
     constexpr Field Declares(const char* d) const { Field f = *this; f.declares = d; return f; }
     constexpr Field Group(const char* g) const { Field f = *this; f.group = g; return f; }
     constexpr Field Required() const { Field f = *this; f.required = true; return f; }
+    constexpr Field Default(bool value) const { Field f = *this; f.defaultBool = value; return f; }
 };
 
 struct Item {
@@ -164,7 +166,7 @@ const Item kChoiceMeshItem = MakeItem("choiceMesh", kMeshRef).Titled("Mesh", "Mo
 const Item kRemoveMeshItem = MakeItem("lodRemoveMesh", kMeshRef).Titled("Remove Mesh", "LOD");
 const Item kSmallMeshItem = MakeItem("lodSmallMesh", kMeshRef).Titled("Small Mesh Filter", "LOD");
 const Item kCollapseTreeItem = MakeItem("lodCollapseTree", kBoneRef).Titled("Collapse Bone Tree", "LOD");
-const Item kVrdFileItem = MakeItem("vrdFile", kFileRef).Titled("VRD File", "Bones");
+const Item kVrdFileItem = MakeItem("vrdFile", kFileRef).Titled("VRD File", "Procedural Bones");
 const Item kPlaceFlexGroupItem = MakeItem("placeOnFlexGroup", kNameRef).Titled("On Flex Group", "Attachments");
 const Item kPlaceMorphItem = MakeItem("placeOnMorph", kNameRef).Titled("On Morph", "Attachments");
 const Item kPlaceMaterialItem = MakeItem("placeOnMaterial", kMaterialRef).Titled("On Material", "Attachments");
@@ -362,7 +364,6 @@ const Field kLodOptions[] = {
     F("decimateAll", Type::Number, "Decimate every mesh to this share."),
     F("collapseJiggleBones", Type::Bool, "Collapse jiggle bones."),
     F("collapseProceduralBones", Type::Bool, "Collapse procedural bones."),
-    F("facial", Type::Bool, "Facial animation on this LOD."),
     F("skeletalAwareDecimation", Type::Bool, "Decimate with the skeleton in mind."),
     F("useShadowLodMaterials", Type::Bool, "Shadow LOD keeps its own materials."),
     F("removeSmallMeshes", Type::Number, "Drop meshes under this unit size; Small Mesh Filter nodes limit it."),
@@ -373,10 +374,14 @@ const Item* const kLodKids[] = {&kLodModelItem, &kLodDecimateItem, &kLodBoneItem
 const Item kLodOptionsItem = MakeItem("lodOptions", kLodOptions);
 const Field kLod[] = {
     F("switch", Type::Number, "Distance at which this LOD starts.").Required(),
+    F("facial", Type::Bool, "Facial animation on this LOD.").Default(true),
 };
 const Item kLodItem = MakeItem("lod", kLod, &kLodOptionsItem).Titled("LOD", "LOD").Holds(kLodKids);
+const Field kShadowLod[] = {
+    F("facial", Type::Bool, "Facial animation on this LOD."),
+};
 const Item kShadowLodItem =
-    MakeItem("shadowLod", &kLodOptionsItem).Titled("Shadow LOD", "LOD").Holds(kLodKids).Single();
+    MakeItem("shadowLod", kShadowLod, &kLodOptionsItem).Titled("Shadow LOD", "LOD").Holds(kLodKids).Single();
 const Item* const kLodsKids[] = {&kLodItem, &kShadowLodItem, nullptr};
 const Item kLodsItem = MakeItem("lods").Titled("LODs", "LOD").Holds(kLodsKids);
 
@@ -444,8 +449,8 @@ const Field kJiggleFlexible[] = {
     F("allowLengthFlex", Type::Bool, "Let the length stretch."),
 };
 const Item kJiggleFlexibleItem =
-    MakeItem("jiggleFlexible", kJiggleFlexible, &kJiggleCommonItem).Titled("Flexible", "Bones").Single();
-const Item kJiggleRigidItem = MakeItem("jiggleRigid", &kJiggleCommonItem).Titled("Rigid", "Bones").Single();
+    MakeItem("jiggleFlexible", kJiggleFlexible, &kJiggleCommonItem).Titled("Flexible", "Jiggle Bones").Single();
+const Item kJiggleRigidItem = MakeItem("jiggleRigid", &kJiggleCommonItem).Titled("Rigid", "Jiggle Bones").Single();
 
 const Field kJiggleBaseSpring[] = {
     F("stiffness", Type::Number, "Stiffness (0-1000)."),
@@ -462,7 +467,7 @@ const Field kJiggleBaseSpring[] = {
     F("forwardFriction", Type::Number, "Forward friction.").Group("Forward"),
 };
 const Item kJiggleBaseSpringItem =
-    MakeItem("jiggleBaseSpring", kJiggleBaseSpring, &kJiggleCommonItem).Titled("Base Spring", "Bones").Single();
+    MakeItem("jiggleBaseSpring", kJiggleBaseSpring, &kJiggleCommonItem).Titled("Base Spring", "Jiggle Bones").Single();
 
 const Field kJiggleBoing[] = {
     F("impactSpeed", Type::Number, "Impact speed (100 when omitted)."),
@@ -471,14 +476,14 @@ const Field kJiggleBoing[] = {
     F("frequency", Type::Number, "Frequency."),
     F("amplitude", Type::Number, "Amplitude."),
 };
-const Item kJiggleBoingItem = MakeItem("jiggleBoing", kJiggleBoing).Titled("Boing", "Bones").Single();
+const Item kJiggleBoingItem = MakeItem("jiggleBoing", kJiggleBoing).Titled("Boing", "Jiggle Bones").Single();
 
 const Field kJiggleBone[] = {
     F("bone", Type::String, "Bone.").Ref("bone").Required(),
 };
 const Item* const kJiggleBoneKids[] = {&kJiggleFlexibleItem, &kJiggleRigidItem, &kJiggleBaseSpringItem,
                                        &kJiggleBoingItem, nullptr};
-const Item kJiggleBoneItem = MakeItem("jiggleBone", kJiggleBone).Titled("Jiggle Bone", "Bones").Holds(kJiggleBoneKids);
+const Item kJiggleBoneItem = MakeItem("jiggleBone", kJiggleBone).Titled("Jiggle Bone", "Jiggle Bones").Holds(kJiggleBoneKids);
 
 const Field kDriverTrigger[] = {
     F("tolerance", Type::Number, "Tolerance in degrees.").Required(),
@@ -487,7 +492,7 @@ const Field kDriverTrigger[] = {
     F("position", Type::Vec3, "Helper position."),
     F("frame", Type::Integer, "Sample both poses from this frame of poseAnimation instead."),
 };
-const Item kDriverTriggerItem = MakeItem("driverTrigger", kDriverTrigger).Titled("Trigger", "Bones");
+const Item kDriverTriggerItem = MakeItem("driverTrigger", kDriverTrigger).Titled("Trigger", "Procedural Bones");
 
 const Field kDriverBone[] = {
     F("bone", Type::String, "Helper bone the engine drives.").Ref("bone").Required(),
@@ -498,7 +503,7 @@ const Field kDriverBone[] = {
 };
 const Item* const kDriverBoneKids[] = {&kDriverTriggerItem, nullptr};
 const Item kDriverBoneItem =
-    MakeItem("driverBone", kDriverBone).Titled("Driver Bone", "Bones").Holds(kDriverBoneKids, 1);
+    MakeItem("driverBone", kDriverBone).Titled("Driver Bone", "Procedural Bones").Holds(kDriverBoneKids, 1);
 
 const Field kAimAt[] = {
     F("bone", Type::String, "Bone that aims.").Ref("bone").Required(),
@@ -506,7 +511,7 @@ const Field kAimAt[] = {
     F("up", Type::Vec3, "Up vector.").Required(),
     F("aim", Type::Vec3, "Aim vector.").Required(),
 };
-const Item kAimAtItem = MakeItem("aimAtBone", kAimAt).Titled("Aim-at Bone", "Bones");
+const Item kAimAtItem = MakeItem("aimAtBone", kAimAt).Titled("Aim-at Bone", "Procedural Bones");
 
 const Field kDataModelJoints[] = {
     F("file", Type::File, "DMX holding the bone markup.").Required(),
@@ -536,10 +541,15 @@ const Field kBoneMarkup[] = {
 };
 const Item kBoneMarkupItem = MakeItem("boneMarkup", kBoneMarkup).Titled("Bone Markup", "Bones");
 
-const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kRenameItem,
-                                  &kRealignBoneItem, &kHierarchyItem, &kJiggleBoneItem, &kDriverBoneItem, &kAimAtItem,
-                                  &kDataModelJointsItem, &kVrdFileItem, nullptr};
+const Item kDoNotCollapseItem = MakeItem("doNotCollapse", kBoneRef).Titled("Do Not Collapse", "Bones");
+const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kDoNotCollapseItem, &kRenameItem,
+                                  &kRealignBoneItem, &kHierarchyItem, &kDataModelJointsItem, nullptr};
 const Item kBonesItem = MakeItem("bones", kBones).Titled("Bones", "Bones").Holds(kBonesKids);
+const Item* const kJiggleBonesKids[] = {&kJiggleBoneItem, nullptr};
+const Item kJiggleBonesItem = MakeItem("jiggleBones").Titled("Jiggle Bones", "Jiggle Bones").Holds(kJiggleBonesKids);
+const Item* const kProceduralBonesKids[] = {&kDriverBoneItem, &kAimAtItem, &kVrdFileItem, nullptr};
+const Item kProceduralBonesItem =
+    MakeItem("proceduralBones").Titled("Procedural Bones", "Procedural Bones").Holds(kProceduralBonesKids);
 
 // --- attachments, hitboxes, pose parameters, IK ---
 
@@ -1110,6 +1120,8 @@ const Field kContent[] = {
     F("materials", Type::Object, "Materials and skins.").Of(&kMaterialsItem),
     F("lods", Type::Object, "LODs, in switch order.").Of(&kLodsItem),
     F("bones", Type::Object, "Skeleton edits.").Of(&kBonesItem),
+    F("jiggleBones", Type::Object, "Jiggle bones and their behaviors.").Of(&kJiggleBonesItem),
+    F("proceduralBones", Type::Object, "Driven and aiming bones.").Of(&kProceduralBonesItem),
     F("attachments", Type::Object, "Attachments.").Of(&kAttachmentsItem),
     F("hitboxes", Type::Object, "Hitbox sets and hit groups.").Of(&kHitboxesItem),
     F("physics", Type::Object, "Collision model and ragdoll.").Of(&kPhysicsItem),
@@ -1126,7 +1138,7 @@ const Item kContentItem = MakeItem("content", kContent);
 
 const Field kModel[] = {
     F("id", Type::String, "Model id, unique in the file.").Required(),
-    F("compile", Type::Bool, "Compiled by default (true when omitted)."),
+    F("compile", Type::Bool, "Compiled by default (true when omitted).").Default(true),
 };
 const Item kModelItem = MakeItem("modelEntry", kModel, &kContentItem).Titled("Model", "Model");
 
@@ -1164,6 +1176,7 @@ const Item* const kAllItems[] = {
     &kBlendAnimationItem, &kActivityModifierItem, &kLocalVarItem, &kCorrectiveControlItem, &kDominatorItem,
     &kExtraBoneItem, &kExcludeMeshItem, &kTransitionNodeItem, &kAllowedActivityItem,
     &kBBoxItem, &kCBoxItem, &kIllumPositionItem, &kEyePositionItem, &kBlankItem, &kLodOptionsItem, &kShadowLodItem,
+    &kJiggleBonesItem, &kProceduralBonesItem, &kDoNotCollapseItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -3279,9 +3292,9 @@ const Move kMoves[] = {
     {"bones", "renameBone", "renames"},
     {"bones", "realignBone", "realignDirectives"},
     {"bones", "reparentBone", "hierarchy"},
-    {"bones", "jiggleBone", "jiggle"},
-    {"bones", "driverBone", "drivers"},
-    {"bones", "aimAtBone", "aimAt"},
+    {"jiggleBones", "jiggleBone", "jiggle"},
+    {"proceduralBones", "driverBone", "drivers"},
+    {"proceduralBones", "aimAtBone", "aimAt"},
     {"bones", "dataModelJoints", "dataModelJoints", Into::Model},
     {"attachments", "attachment", "attachments", Into::Model},
     {"hitboxSet", "hitbox", "boxes"},
@@ -3462,7 +3475,8 @@ const Gather kGathers[] = {
     {"bones", "boneMarkup", "boneMerge", "bone", "boneMerge"},
     {"bones", "boneMarkup", "doNotCollapse", "bone", "doNotCollapse"},
     {"bones", "boneMarkup", "alwaysCollapse", "bone", "alwaysCollapse"},
-    {"bones", "vrdFile", "vrdFiles", "file"},
+    {"bones", "doNotCollapse", "doNotCollapse", "bone"},
+    {"proceduralBones", "vrdFile", "vrdFiles", "file"},
     {"attachment", "placeOnFlexGroup", "flexGroups", "name"},
     {"attachment", "placeOnMorph", "flexMorphs", "name"},
     {"attachment", "placeOnMaterial", "materials", "material"},
@@ -3490,6 +3504,7 @@ const struct { const char* section; const char* key; } kSectionRecords[] = {
     {"settings", "model"},         {"materials", "materials"}, {"bones", "bones"},
     {"physics", "physics"},        {"face", "face"},           {"flex", "flex"},
     {"animationSettings", "animationSettings"},
+    {"jiggleBones", "jiggleBones"}, {"proceduralBones", "proceduralBones"},
 };
 
 bool IsA(const Item& item, const char* name) {
@@ -3700,7 +3715,8 @@ bool Lower(Emitter& e, const Json& m) {
             if (!LowerLod(e, lod)) return false;
     if (const Json* face = Get(m, "face"); face && !LowerFace(e, *face)) return false;
     if (const Json* flex = Get(m, "flex")) LowerFlex(e, *flex);
-    if (const Json* bones = Get(m, "bones"); bones && !LowerBones(e, *bones)) return false;
+    for (const char* section : {"bones", "jiggleBones", "proceduralBones"})
+        if (const Json* bones = Get(m, section); bones && !LowerBones(e, *bones)) return false;
     if (const Json* list = Get(m, "dataModelJoints"))
         for (const Json& d : *list)
             if (!LowerDataModelJoints(e, d)) return false;
@@ -3846,6 +3862,7 @@ void SchemaFields(const Item& item, Json& out) {
         if (field.declares) entry["declares"] = field.declares;
         if (field.group) entry["group"] = field.group;
         if (field.required) entry["required"] = true;
+        if (field.type == Type::Bool) entry["default"] = field.defaultBool;
         out.push_back(std::move(entry));
     }
 }
