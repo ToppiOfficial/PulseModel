@@ -68,6 +68,10 @@ struct Field {
     bool defaultBool = false;
     double defaultNumber = 0;
     bool hasNumberDefault = false;
+    bool hasSchemaNumberDefault = false;
+    const char* defaultText = nullptr;
+    double defaultVector[3] = {};
+    bool hasVectorDefault = false;
 
     constexpr Field Of(const Item* i) const { Field f = *this; f.item = i; return f; }
     constexpr Field Values(const char* const* v) const { Field f = *this; f.values = v; return f; }
@@ -78,6 +82,21 @@ struct Field {
     constexpr Field Default(bool value) const { Field f = *this; f.defaultBool = value; return f; }
     constexpr Field Default(double value) const {
         Field f = *this; f.defaultNumber = value; f.hasNumberDefault = true; return f;
+    }
+    // Displaying a default does not fill a required field during reshaping.
+    constexpr Field SchemaDefault(double value) const {
+        Field f = *this; f.defaultNumber = value; f.hasSchemaNumberDefault = true; return f;
+    }
+    constexpr Field Default(const char* value) const {
+        Field f = *this; f.defaultText = value; return f;
+    }
+    constexpr Field Default(double x, double y, double z) const {
+        Field f = *this;
+        f.defaultVector[0] = x;
+        f.defaultVector[1] = y;
+        f.defaultVector[2] = z;
+        f.hasVectorDefault = true;
+        return f;
     }
 };
 
@@ -222,26 +241,27 @@ const Item kEyePositionItem = MakeItem("eyePosition", kEyePosition).Titled("Eye 
 
 const Field kSettings[] = {
     F("name", Type::String, "Model path under models/, e.g. player/foo."),
-    F("archetype", Type::Enum, "Model archetype.").Values(kArchetypes),
-    F("origin", Type::Vec3, "Model translation.").Group("Transform"),
+    F("archetype", Type::Enum, "Model archetype.").Values(kArchetypes).Default("general"),
+    F("origin", Type::Vec3, "Model translation.").Group("Transform").Default(0, 0, 0),
     F("angles", Type::Vec3, "Model rotation in degrees (pitch yaw roll).").Group("Transform"),
-    F("scale", Type::Number, "Uniform model scale.").Group("Transform"),
+    F("scale", Type::Number, "Uniform model scale.").Group("Transform").Default(1.0),
     F("upAxis", Type::Enum, "Up axis of the source art; replaces angles.").Values(kUpAxes).Group("Transform"),
-    F("renderPass", Type::Enum, "Render pass.").Values(kRenderPasses),
-    F("surfaceProp", Type::String, "Surface property."),
-    F("maxBones", Type::Integer, "Bone ceiling.").Group("Budget"),
-    F("maxMaterials", Type::Integer, "Material ceiling.").Group("Budget"),
+    F("renderPass", Type::Enum, "Render pass.").Values(kRenderPasses).Default("none"),
+    F("surfaceProp", Type::String, "Surface property.").Default("default"),
+    F("maxBones", Type::Integer, "Bone ceiling.").Group("Budget").Default(255.0),
+    F("maxMaterials", Type::Integer, "Material ceiling.").Group("Budget").Default(double(pulse::limits::kMaxSkins)),
     F("skipBoneInBBox", Type::Bool, "Auto hitboxes grow from vertices only.").Group("Bounds"),
     F("constantDirectionalLight", Type::Number, "Constant directional light scale (0-1).").Group("Lighting"),
     F("ambientBoost", Type::Bool, "Ambient boost flag.").Group("Lighting"),
     F("doNotCastShadows", Type::Bool, "Cast no shadows.").Group("Lighting"),
     F("castTextureShadows", Type::Bool, "Cast texture shadows.").Group("Lighting"),
-    F("maxEyeDeflection", Type::Number, "Eye turn limit in degrees.").Group("Eyes"),
+    F("maxEyeDeflection", Type::Number, "Eye turn limit in degrees.").Group("Eyes").Default(30.0),
     F("forcePhonemeCrossfade", Type::Bool, "Force phoneme crossfade.").Group("Eyes"),
-    F("allowRootLods", Type::Integer, "Allowed root LOD count.").Group("LOD"),
-    F("minLod", Type::Integer, "Promote this LOD to root.").Group("LOD"),
+    F("allowRootLods", Type::Integer, "Allowed root LOD count.").Group("LOD").Default(0.0),
+    F("minLod", Type::Integer, "Promote this LOD to root.").Group("LOD").Default(0.0),
     F("noForcedFade", Type::Bool, "No forced fade.").Group("LOD"),
-    F("vtxFormat", Type::Integer, ".vtx layout: 0 legacy (TF2/L4D2/GMod/HL2), 1 full (SFM/CS:GO).").Group("Output"),
+    F("vtxFormat", Type::Integer, ".vtx layout: 0 legacy (TF2/L4D2/GMod/HL2), 1 full (SFM/CS:GO).")
+        .Group("Output").Default(0.0),
     F("noDx80", Type::Bool, "Skip the .dx80.vtx.").Group("Output"),
     F("autoCenter", Type::Bool, "Center the model.").Group("Output"),
     F("forceWriteVertexData", Type::Bool, "Write .vvd/.vtx even without geometry.").Group("Output"),
@@ -302,7 +322,7 @@ const Field kMesh[] = {
     F("file", Type::File, "Source file (.dmx, .smd, .fbx).").Required(),
     F("noMorph", Type::Bool, "Load without morphs."),
     F("flipNormals", Type::Bool, "Flip normals."),
-    F("decimate", Type::Number, "Keep this share of faces (0-1]."),
+    F("decimate", Type::Number, "Keep this share of faces (0-1].").Default(1.0),
     F("skinnedBoneCull", Type::Enum, "Drop unweighted bones.").Values(kSkinnedBoneCulls),
 };
 const Item* const kMeshKids[] = {&kScaleBoneItem, &kDropMaterialItem, &kDropMaterialWordItem, nullptr};
@@ -395,7 +415,7 @@ const Item kLodsItem = MakeItem("lods").Titled("LODs", "LOD").Holds(kLodsKids);
 
 const Field kDefineBone[] = {
     F("name", Type::String, "Bone name.").Declares("bone").Required(),
-    F("parent", Type::String, "Parent bone; omitted = root bone.").Ref("bone"),
+    F("parent", Type::String, "Parent bone; omitted = root bone.").Ref("bone").Default(""),
     F("unlocked", Type::Bool, "Appended after the source bones instead of replacing one."),
     F("position", Type::Vec3, "Bind position.").Required(),
     F("angles", Type::Vec3, "Bind rotation in degrees.").Required(),
@@ -425,7 +445,7 @@ const Item kRealignBoneItem = MakeItem("realignBone", kRealignBone).Titled("Real
 
 const Field kHierarchy[] = {
     F("bone", Type::String, "Bone to reparent.").Ref("bone").Required(),
-    F("parent", Type::String, "New parent; omitted = root bone.").Ref("bone"),
+    F("parent", Type::String, "New parent; omitted = root bone.").Ref("bone").Default(""),
 };
 const Item kHierarchyItem = MakeItem("reparentBone", kHierarchy).Titled("Reparent Bone", "Bones");
 
@@ -509,7 +529,7 @@ const Field kDriverBone[] = {
     F("driver", Type::String, "Bone it follows.").Ref("bone").Required(),
     F("relative", Type::Bool, "Trigger poses are deltas from the bind pose."),
     F("poseAnimation", Type::File, "Animation the frame triggers sample."),
-    F("basePos", Type::Vec3, "Offset added to every trigger position."),
+    F("basePos", Type::Vec3, "Offset added to every trigger position.").Default(0, 0, 0),
 };
 const Item* const kDriverBoneKids[] = {&kDriverTriggerItem, nullptr};
 const Item kDriverBoneItem =
@@ -535,7 +555,7 @@ const Item kDataModelJointsItem =
 
 const Field kBones[] = {
     F("root", Type::String, "Motion root bone.").Ref("bone"),
-    F("cullMethod", Type::Enum, "Bone cull method.").Values(kBoneCulls),
+    F("cullMethod", Type::Enum, "Bone cull method.").Values(kBoneCulls).Default("aggressive"),
     F("realign", Type::Bool, "Realign single-child chains."),
     F("lockLengths", Type::Bool, "Pin bone lengths to the bind pose."),
     F("cullJiggle", Type::Bool, "Drop jiggle bones nothing is weighted to."),
@@ -565,8 +585,8 @@ const Item kProceduralBonesItem =
 
 const Field kAttachment[] = {
     F("name", Type::String, "Attachment name.").Declares("attachment").Required(),
-    F("bone", Type::String, "Parent bone; omitted = model space.").Ref("bone"),
-    F("position", Type::Vec3, "Position."),
+    F("bone", Type::String, "Parent bone; omitted = model space.").Ref("bone").Default(""),
+    F("position", Type::Vec3, "Position.").Default(0, 0, 0),
     F("angles", Type::Vec3, "Rotation in degrees."),
     F("rigid", Type::Bool, "Rigid."),
     F("absolute", Type::Bool, "Position is in model space."),
@@ -583,9 +603,9 @@ const Field kHitbox[] = {
     F("bone", Type::String, "Bone.").Ref("bone").Required(),
     F("min", Type::Vec3, "Minimum corner.").Required(),
     F("max", Type::Vec3, "Maximum corner.").Required(),
-    F("angles", Type::Vec3, "Rotation in degrees."),
-    F("radius", Type::Number, "Capsule radius."),
-    F("name", Type::String, "Hitbox name."),
+    F("angles", Type::Vec3, "Rotation in degrees.").Default(0, 0, 0),
+    F("radius", Type::Number, "Capsule radius.").Default(0.0),
+    F("name", Type::String, "Hitbox name.").Default(""),
 };
 const Item kHitboxItem = MakeItem("hitbox", kHitbox).Titled("Hitbox", "Hitboxes");
 
@@ -618,11 +638,11 @@ const Item kPoseParametersItem =
 const Field kIkChain[] = {
     F("name", Type::String, "Chain name.").Declares("ikChain").Required(),
     F("bone", Type::String, "End bone.").Ref("bone").Required(),
-    F("knee", Type::Vec3, "Knee direction."),
-    F("height", Type::Number, "Height."),
-    F("pad", Type::Number, "Pad."),
-    F("floor", Type::Number, "Floor."),
-    F("center", Type::Vec3, "Center."),
+    F("knee", Type::Vec3, "Knee direction.").Default(0, 0, 0),
+    F("height", Type::Number, "Height.").Default(18.0),
+    F("pad", Type::Number, "Pad.").Default(0.0),
+    F("floor", Type::Number, "Floor.").Default(0.0),
+    F("center", Type::Vec3, "Center.").Default(0, 0, 0),
 };
 const Item kIkChainItem = MakeItem("ikChain", kIkChain).Titled("IK Chain", "IK");
 const Item* const kIkKids[] = {&kIkChainItem, nullptr};
@@ -719,13 +739,13 @@ const Field kClip[] = {
     F("fps", Type::Number, "Frame rate."),
     F("loop", Type::Bool, "Looping.").Group("Loop"),
     F("noForceLoop", Type::Bool, "Do not force the loop.").Group("Loop"),
-    F("startLoop", Type::Integer, "Loop restart frame.").Group("Loop"),
-    F("percentStartLoop", Type::Number, "Loop restart as a percentage.").Group("Loop"),
+    F("startLoop", Type::Integer, "Loop restart frame.").Group("Loop").Default(0.0),
+    F("percentStartLoop", Type::Number, "Loop restart as a percentage.").Group("Loop").Default(0.0),
     F("fudgeLoop", Type::Bool, "Fudge the loop.").Group("Loop"),
     F("framesFrom", Type::Integer, "First frame of the range.").Group("Frames"),
     F("framesTo", Type::Integer, "Last frame of the range.").Group("Frames"),
-    F("frameStart", Type::Integer, "First frame; the end stays the clip's.").Group("Frames"),
-    F("blockName", Type::String, "Clip of a multi-clip source."),
+    F("frameStart", Type::Integer, "First frame; the end stays the clip's.").Group("Frames").Default(0.0),
+    F("blockName", Type::String, "Clip of a multi-clip source.").Default(""),
     F("origin", Type::Vec3, "Clip translation.").Group("Transform"),
     F("rotate", Type::Number, "Clip yaw in degrees.").Group("Transform"),
     F("angles", Type::Vec3, "Clip rotation in degrees.").Group("Transform"),
@@ -791,7 +811,7 @@ const Item kIkLockItem = MakeItem("ikLock", kIkLock).Titled("IK Lock", "Sequence
 const Field kEvent[] = {
     F("name", Type::String, "Event name or numeric id.").Required(),
     F("frame", Type::Integer, "Frame.").Required(),
-    F("options", Type::String, "Option string the game reads."),
+    F("options", Type::String, "Option string the game reads.").Default(""),
 };
 const Item kEventItem = MakeItem("event", kEvent).Titled("Event", "Sequences");
 
@@ -819,7 +839,7 @@ const Field kSequence[] = {
     F("worldSpace", Type::Bool, "World space."),
     F("worldRelative", Type::Bool, "World relative."),
     F("rootDriver", Type::String, "Root transform bone.").Ref("bone"),
-    F("exitPhase", Type::Number, "Exit phase."),
+    F("exitPhase", Type::Number, "Exit phase.").Default(0.0),
     F("poseCycle", Type::String, "Pose parameter driving the cycle.").Ref("poseParameter"),
     F("fadeIn", Type::Number, "Fade-in time."),
     F("fadeOut", Type::Number, "Fade-out time."),
@@ -860,9 +880,9 @@ const Field kAnimBlocks[] = {
     F("noStall", Type::Bool, "No stall."),
     F("highRes", Type::Bool, "High resolution cached frames."),
     F("lowRes", Type::Bool, "Low resolution cached frames."),
-    F("zeroFrames", Type::Integer, "Cached frame count (1-4)."),
+    F("zeroFrames", Type::Integer, "Cached frame count (1-4).").Default(3.0),
     F("cacheHighRes", Type::Bool, "Cache high resolution."),
-    F("posDelta", Type::Number, "Position delta."),
+    F("posDelta", Type::Number, "Position delta.").Default(2.0),
 };
 const Item kAnimBlocksItem = MakeItem("animBlocks", kAnimBlocks).Titled("Animation Blocks", "Animation").Single();
 
@@ -880,15 +900,15 @@ const Item kSkipTransitionItem =
 const Item kAutoplayLockItem = MakeItem("autoplayLock", kIkLock).Titled("Autoplay IK Lock", "Animation");
 
 const Field kAnimationSettings[] = {
-    F("defaultFps", Type::Number, "Frame rate of new clips."),
-    F("motionRollback", Type::Number, "Motion rollback of new clips."),
-    F("defaultFadeIn", Type::Number, "Fade-in of new sequences."),
-    F("defaultFadeOut", Type::Number, "Fade-out of new sequences."),
+    F("defaultFps", Type::Number, "Frame rate of new clips.").Default(30.0),
+    F("motionRollback", Type::Number, "Motion rollback of new clips.").Default(0.3),
+    F("defaultFadeIn", Type::Number, "Fade-in of new sequences.").Default(0.2),
+    F("defaultFadeOut", Type::Number, "Fade-out of new sequences.").Default(0.2),
     F("lowercaseSequences", Type::Bool, "Lowercase sequence names."),
-    F("cullMethod", Type::Enum, "Which animations reach the .mdl.").Values(kAnimCulls),
+    F("cullMethod", Type::Enum, "Which animations reach the .mdl.").Values(kAnimCulls).Default("aggressive"),
     F("calcTransitions", Type::Bool, "Fill multi-stage transition routes."),
-    F("sectionFrames", Type::Integer, "Compression section length in frames.").Group("Sections"),
-    F("sectionMinLimit", Type::Integer, "Minimum frame limit.").Group("Sections"),
+    F("sectionFrames", Type::Integer, "Compression section length in frames.").Group("Sections").SchemaDefault(30.0),
+    F("sectionMinLimit", Type::Integer, "Minimum frame limit.").Group("Sections").SchemaDefault(30.0),
 };
 const Item* const kAnimationSettingsKids[] = {&kAnimBlocksItem, &kAllowedActivityItem, &kDefaultWeightItem,
                                               &kAutoplayLockItem, &kBoneSaveFrameItem, &kSkipTransitionItem,
@@ -911,8 +931,8 @@ const Item kDataModelFlexesItem = MakeItem("dataModelFlexes", kDataModelFlexes).
 const Field kFlexController[] = {
     F("name", Type::String, "Controller name.").Declares("flexController").Required(),
     F("group", Type::String, "Controller group.").Required(),
-    F("min", Type::Number, "Range start (0 when omitted)."),
-    F("max", Type::Number, "Range end (1 when omitted)."),
+    F("min", Type::Number, "Range start (0 when omitted).").Default(0.0),
+    F("max", Type::Number, "Range end (1 when omitted).").Default(1.0),
 };
 const Item kFlexControllerItem = MakeItem("flexController", kFlexController).Titled("Flex Controller", "Flex");
 
@@ -938,7 +958,7 @@ const Item kFlexDominationItem =
 
 const Field kStereoSplit[] = {
     F("morph", Type::String, "Morph split into <name>L/<name>R.").Ref("morph").Required(),
-    F("splitFactor", Type::Number, "Balance from vertex X when the mesh has none; 0 = mesh balance."),
+    F("splitFactor", Type::Number, "Balance from vertex X when the mesh has none; 0 = mesh balance.").Default(0.0),
 };
 const Item kStereoSplitItem = MakeItem("stereoSplit", kStereoSplit).Titled("Stereo Split", "Flex");
 
@@ -965,7 +985,7 @@ const Field kBoneFlexDriver[] = {
 const Item kBoneFlexDriverItem = MakeItem("boneFlexDriver", kBoneFlexDriver).Titled("Bone Flex Driver", "Flex");
 
 const Field kFlex[] = {
-    F("cullMethod", Type::Enum, "How hard unused flex data is pruned.").Values(kFlexCulls),
+    F("cullMethod", Type::Enum, "How hard unused flex data is pruned.").Values(kFlexCulls).Default("rules_only"),
 };
 const Item* const kFlexKids[] = {&kDataModelFlexesItem, &kFlexControllerItem, &kLocalVarItem, &kFlexRuleItem,
                                  &kFlexCorrectiveItem, &kFlexDominationItem, &kStereoSplitItem,
@@ -979,9 +999,9 @@ const Field kEyeball[] = {
     F("material", Type::String, "Eyeball material.").Ref("material").Required(),
     F("origin", Type::Vec3, "Center; with center, an offset from it."),
     F("center", Type::Bool, "Center on the material's vertices."),
-    F("diameter", Type::Number, "Diameter."),
-    F("angle", Type::Number, "Angle in degrees."),
-    F("pupilScale", Type::Number, "Pupil scale."),
+    F("diameter", Type::Number, "Diameter.").Default(0.0),
+    F("angle", Type::Number, "Angle in degrees.").Default(0.0),
+    F("pupilScale", Type::Number, "Pupil scale.").Default(0.0),
 };
 const Item kEyeballItem = MakeItem("eyeball", kEyeball).Titled("Eyeball", "Face");
 
@@ -994,7 +1014,7 @@ const Item kMouthItem = MakeItem("mouth", kMouth).Titled("Mouth", "Face");
 
 const Field kEyelid[] = {
     F("lid", Type::Enum, "Lid.").Values(kLids).Required(),
-    F("split", Type::Number, "Mask deltas to one side; sign picks the side."),
+    F("split", Type::Number, "Mask deltas to one side; sign picks the side.").Default(0.0),
     F("rightEyeball", Type::String, "Right eyeball (paired form).").Ref("eyeball"),
     F("leftEyeball", Type::String, "Left eyeball (paired form).").Ref("eyeball"),
     F("eyeball", Type::String, "One eyeball (per-eye form, needs flexDesc).").Ref("eyeball"),
@@ -1018,31 +1038,32 @@ const Field kPhysicsShape[] = {
     F("renderMesh", Type::String, "Generate from this render mesh.").Ref("mesh"),
     F("fromRender", Type::Bool, "Generate from the whole render model."),
     F("parentBone", Type::String, "Bone the shape belongs to.").Ref("bone"),
-    F("offsetOrigin", Type::Vec3, "Translation."),
-    F("offsetAngles", Type::Vec3, "Rotation."),
-    F("importScale", Type::Number, "Scale."),
-    F("maxConvex", Type::Integer, "Convex piece limit."),
-    F("importType", Type::Enum, "File shapes: how parts are bound to bones.").Values(kImportTypes).Group("File"),
+    F("offsetOrigin", Type::Vec3, "Translation.").Default(0, 0, 0),
+    F("offsetAngles", Type::Vec3, "Rotation.").Default(0, 0, 0),
+    F("importScale", Type::Number, "Scale.").Default(1.0),
+    F("maxConvex", Type::Integer, "Convex piece limit.").Default(double(pulse::limits::kMaxConvexPieces)),
+    F("importType", Type::Enum, "File shapes: how parts are bound to bones.")
+        .Values(kImportTypes).Group("File").Default("perjoint"),
     F("concave", Type::Bool, "File shapes: keep concave pieces.").Group("File"),
     F("remove2d", Type::Bool, "File shapes: drop flat pieces.").Group("File"),
-    F("decimationFactor", Type::Number, "Generated shapes: decimation.").Group("Generated"),
-    F("cullWeight", Type::Number, "Generated shapes: bone weight cull (0-1).").Group("Generated"),
-    F("concavity", Type::Number, "Generated shapes: concavity.").Group("Generated"),
-    F("maxHulls", Type::Integer, "Generated shapes: hull limit.").Group("Generated"),
-    F("maxDepth", Type::Integer, "Generated shapes: split depth (0-10).").Group("Generated"),
+    F("decimationFactor", Type::Number, "Generated shapes: decimation.").Group("Generated").Default(0.22),
+    F("cullWeight", Type::Number, "Generated shapes: bone weight cull (0-1).").Group("Generated").Default(0.42),
+    F("concavity", Type::Number, "Generated shapes: concavity.").Group("Generated").Default(0.04),
+    F("maxHulls", Type::Integer, "Generated shapes: hull limit.").Group("Generated").Default(0.0),
+    F("maxDepth", Type::Integer, "Generated shapes: split depth (0-10).").Group("Generated").Default(4.0),
     F("primitive", Type::Enum, "A box, sphere or capsule hull instead of a file or mesh.").Values(kPrimitives)
         .Group("Primitive"),
     F("bone", Type::String, "Bone the primitive is on; values are in its space.").Ref("bone").Group("Primitive"),
     F("min", Type::Vec3, "Box minimum.").Group("Primitive"),
     F("max", Type::Vec3, "Box maximum.").Group("Primitive"),
-    F("angles", Type::Vec3, "Box orientation.").Group("Primitive"),
+    F("angles", Type::Vec3, "Box orientation.").Group("Primitive").Default(0, 0, 0),
     F("center", Type::Vec3, "Sphere center.").Group("Primitive"),
     F("radius", Type::Number, "Sphere radius.").Group("Primitive"),
     F("point0", Type::Vec3, "Capsule start.").Group("Primitive"),
     F("point1", Type::Vec3, "Capsule end.").Group("Primitive"),
     F("radius0", Type::Number, "Capsule start radius.").Group("Primitive"),
     F("radius1", Type::Number, "Capsule end radius.").Group("Primitive"),
-    F("segments", Type::Integer, "Sphere/capsule tessellation.").Group("Primitive"),
+    F("segments", Type::Integer, "Sphere/capsule tessellation.").Group("Primitive").Default(6.0),
 };
 const Item* const kPhysicsShapeKids[] = {&kExtraBoneItem, &kExcludeMeshItem, nullptr};
 const Item kPhysicsShapeItem =
@@ -1053,7 +1074,7 @@ const Field kJointAxis[] = {
     F("motion", Type::Enum, "Motion.").Values(kJointTypes).Required(),
     F("min", Type::Number, "Limit minimum in degrees."),
     F("max", Type::Number, "Limit maximum in degrees."),
-    F("friction", Type::Number, "Friction (1 when omitted)."),
+    F("friction", Type::Number, "Friction (1 when omitted).").Default(1.0),
 };
 const Item kJointAxisItem = MakeItem("jointAxis", kJointAxis).Titled("Joint Axis", "Physics");
 
@@ -1066,7 +1087,7 @@ const Item kPhysicsJointItem =
 
 const Field kPhysicsMarkup[] = {
     F("bone", Type::String, "Bone.").Ref("bone").Required(),
-    F("massBias", Type::Number, "Mass bias."),
+    F("massBias", Type::Number, "Mass bias.").Default(1.0),
     F("inertia", Type::Number, "Inertia."),
     F("damping", Type::Number, "Damping."),
     F("rotDamping", Type::Number, "Rotation damping."),
@@ -1096,16 +1117,16 @@ const Item kJointSurfacePropItem =
 
 const Field kPhysics[] = {
     F("dataModel", Type::File, "DMX whose physics shapes are imported."),
-    F("mass", Type::Number, "Mass in kg."),
+    F("mass", Type::Number, "Mass in kg.").Default(1.0),
     F("autoMass", Type::Bool, "Mass from volume."),
     F("massCenter", Type::Vec3, "Center of mass."),
     F("rootBone", Type::String, "Root body bone.").Ref("bone"),
-    F("damping", Type::Number, "Damping."),
-    F("rotDamping", Type::Number, "Rotation damping."),
-    F("inertia", Type::Number, "Inertia."),
-    F("drag", Type::Number, "Drag."),
-    F("weldPosition", Type::Number, "Position weld epsilon."),
-    F("weldNormal", Type::Number, "Normal weld epsilon."),
+    F("damping", Type::Number, "Damping.").Default(0.0),
+    F("rotDamping", Type::Number, "Rotation damping.").Default(0.0),
+    F("inertia", Type::Number, "Inertia.").Default(1.0),
+    F("drag", Type::Number, "Drag.").Default(-1.0),
+    F("weldPosition", Type::Number, "Position weld epsilon.").Default(0.0),
+    F("weldNormal", Type::Number, "Normal weld epsilon.").Default(0.999),
     F("noSelfCollisions", Type::Bool, "Bodies never collide with each other."),
     F("assumeWorldSpace", Type::Bool, "Source is already in world space."),
     F("phyName", Type::String, "Name of the .phy, when not the model's."),
@@ -3878,7 +3899,12 @@ void SchemaFields(const Item& item, Json& out) {
         if (field.group) entry["group"] = field.group;
         if (field.required) entry["required"] = true;
         if (field.type == Type::Bool) entry["default"] = field.defaultBool;
-        else if (field.hasNumberDefault) entry["default"] = field.defaultNumber;
+        else if (field.hasNumberDefault || field.hasSchemaNumberDefault)
+            entry["default"] = field.type == Type::Integer ? Json(static_cast<int>(field.defaultNumber))
+                                                           : Json(field.defaultNumber);
+        else if (field.defaultText) entry["default"] = field.defaultText;
+        else if (field.hasVectorDefault)
+            entry["default"] = Json::array({field.defaultVector[0], field.defaultVector[1], field.defaultVector[2]});
         out.push_back(std::move(entry));
     }
 }
