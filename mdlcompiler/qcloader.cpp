@@ -624,7 +624,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         if (t->quoted)
             return c.Fail(t->line, "$meshedit expects an unquoted operation");
         if (name == "selectdatastream" || name == "selectmaterial" ||
-            name == "selectmesh" || name == "selectmeshbystream") {
+            name == "selectmesh" || name == "selectmeshbystream" || name == "selectweights") {
             if (hasArg() && !c.Cur().quoted) {
                 const std::string mode = Lower(c.Cur().text);
                 if (mode == "add" || mode == "subtract" || mode == "intersect") {
@@ -648,6 +648,27 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
                 edit.filter.keepMeshIdentity = true;
                 edit.filter.selectMeshStreams = edit.filter.selectMeshStreams || byStream;
+            } else if (name == "selectweights") {
+                op.kind = MeshOperation::SelectWeights;
+                op.value = 0.001f;
+                if (!want("a bone name", op.name)) return false;
+
+                bool thresholdSeen = false;
+                while (hasArg()) {
+                    if (!c.Cur().quoted && Lower(c.Cur().text) == "selectchildren") {
+                        if (op.selectChildren)
+                            return c.Fail(t->line, where + ": selectchildren written twice");
+                        ++c.pos;
+                        op.selectChildren = true;
+                    } else if (!thresholdSeen) {
+                        if (!number("a selection threshold", op.value)) return false;
+                        if (op.value < 0.0f || op.value > 1.0f)
+                            return c.Fail(t->line, where + ": threshold must be between 0 and 1");
+                        thresholdSeen = true;
+                    } else {
+                        return c.Fail(t->line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+                    }
+                }
             } else {
                 op.kind = MeshOperation::SelectStream;
                 if (!want("a DMX float stream name", op.name)) return false;
@@ -657,6 +678,28 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 for (const auto& stream : edit.filter.editStreams)
                     registered = registered || _stricmp(stream.name.c_str(), op.name.c_str()) == 0;
                 if (!registered) edit.filter.editStreams.push_back({op.name});
+            }
+        } else if (name == "setweight") {
+            op.kind = MeshOperation::SetWeight;
+            op.value = 1.0f;
+            if (!want("a bone name", op.name)) return false;
+            if (hasArg() && !number("a weight", op.value)) return false;
+            if (op.value < 0.0f || op.value > 1.0f)
+                return c.Fail(t->line, where + ": weight must be between 0 and 1");
+        } else if (name == "shiftweights") {
+            op.kind = MeshOperation::ShiftWeights;
+            if (!want("a bone name", op.name) ||
+                !number("an X offset", op.offset.x) ||
+                !number("a Y offset", op.offset.y) ||
+                !number("a Z offset", op.offset.z) ||
+                !number("a pitch", op.angles.x) ||
+                !number("a yaw", op.angles.y) ||
+                !number("a roll", op.angles.z))
+                return false;
+            if (hasArg()) {
+                if (!want("a residual bone name", op.residualBone)) return false;
+                if (op.residualBone.empty())
+                    return c.Fail(t->line, where + ": residual bone must be nonempty");
             }
         } else if (name == "selectall") {
             op.kind = MeshOperation::SelectAll;
@@ -717,6 +760,9 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
             return c.Fail(t->line, "$meshedit: unknown operation \"" + t->text + "\"");
         }
 
+        if ((op.kind == MeshOperation::SelectWeights || op.kind == MeshOperation::SetWeight ||
+             op.kind == MeshOperation::ShiftWeights) && op.name.empty())
+            return c.Fail(t->line, where + ": bone name must be nonempty");
         if (hasArg())
             return c.Fail(c.Cur().line, where + ": unexpected argument \"" + c.Cur().text + "\"");
         operations.push_back(std::move(op));

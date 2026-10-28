@@ -1,6 +1,7 @@
 // meshedit.cpp - $rendermesh edit options. See meshedit.h.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "meshedit.h"
 
@@ -111,6 +112,97 @@ bool MeshFilter::MaterialRemoved(const std::string& materialName) const {
 }
 
 namespace {
+
+int FindWeightBone(const Source& src, const std::string& name) {
+    for (int i = 0; i < src.numbones; ++i)
+        if (_stricmp(src.localBone[i].name.c_str(), name.c_str()) == 0) return i;
+    return -1;
+}
+
+int FindWeightSlot(const SrcBoneWeight& weights, int bone) {
+    for (int i = 0; i < weights.numbones; ++i)
+        if (weights.bone[i] == bone) return i;
+    return -1;
+}
+
+bool ValidBoneWeights(const Source& src, const SrcBoneWeight& weights) {
+    if (weights.numbones <= 0 || weights.numbones > lim::kMaxSrcBoneWeights) return false;
+    for (int i = 0; i < weights.numbones; ++i)
+        if (weights.bone[i] < 0 || weights.bone[i] >= src.numbones ||
+            !std::isfinite(weights.weight[i]) || weights.weight[i] < 0.0f)
+            return false;
+    return true;
+}
+
+enum class WeightEditResult { Applied, NoRecipient, Full };
+
+WeightEditResult SetBoneWeight(SrcBoneWeight& weights, int bone, float value) {
+    if (value == 1.0f) {
+        weights.numbones = 1;
+        weights.bone[0] = bone;
+        weights.weight[0] = 1.0f;
+        return WeightEditResult::Applied;
+    }
+
+    const int slot = FindWeightSlot(weights, bone);
+    if (slot < 0 && value == 0.0f) return WeightEditResult::Applied;
+
+    double otherWeight = 0.0;
+    int otherCount = 0;
+    for (int i = 0; i < weights.numbones; ++i) {
+        if (i == slot || weights.weight[i] <= 0.0f) continue;
+        otherWeight += weights.weight[i];
+        ++otherCount;
+    }
+    if (otherWeight == 0.0) return WeightEditResult::NoRecipient;
+    if (value > 0.0f && otherCount >= lim::kMaxSrcBoneWeights) return WeightEditResult::Full;
+
+    SrcBoneWeight updated;
+    for (int i = 0; i < weights.numbones; ++i) {
+        const float weight = i == slot ? value :
+            static_cast<float>(weights.weight[i] * ((1.0 - value) / otherWeight));
+        if (weight <= 0.0f) continue;
+        const int next = updated.numbones++;
+        updated.bone[next] = weights.bone[i];
+        updated.weight[next] = weight;
+    }
+    if (slot < 0 && value > 0.0f) {
+        const int next = updated.numbones++;
+        updated.bone[next] = bone;
+        updated.weight[next] = value;
+    }
+    weights = updated;
+    return WeightEditResult::Applied;
+}
+
+WeightEditResult TransferBoneWeight(SrcBoneWeight& weights, int slot, int residual, float moved) {
+    const float kept = weights.weight[slot] - moved;
+    if (residual < 0) return SetBoneWeight(weights, weights.bone[slot], kept);
+
+    const int residualSlot = FindWeightSlot(weights, residual);
+    int count = 0;
+    for (int i = 0; i < weights.numbones; ++i)
+        if (weights.weight[i] > 0.0f) ++count;
+    if (residualSlot < 0 && kept > 0.0f && count >= lim::kMaxSrcBoneWeights)
+        return WeightEditResult::Full;
+
+    SrcBoneWeight updated;
+    for (int i = 0; i < weights.numbones; ++i) {
+        float weight = i == slot ? kept : weights.weight[i];
+        if (i == residualSlot) weight += moved;
+        if (weight <= 0.0f) continue;
+        const int next = updated.numbones++;
+        updated.bone[next] = weights.bone[i];
+        updated.weight[next] = weight;
+    }
+    if (residualSlot < 0) {
+        const int next = updated.numbones++;
+        updated.bone[next] = residual;
+        updated.weight[next] = moved;
+    }
+    weights = updated;
+    return WeightEditResult::Applied;
+}
 
 bool MaterialMatches(const std::string& material, const std::vector<std::string>& names) {
     const std::string base = std::filesystem::path(material).stem().string();
@@ -721,10 +813,40 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             for (char& selected : selection) selected = !selected;
             continue;
         }
+
+        int weightBone = -1;
+        if (op.kind == MeshOperation::SelectWeights || op.kind == MeshOperation::SetWeight ||
+            op.kind == MeshOperation::ShiftWeights) {
+            if (src.numbones < 0 || src.localBone.size() != static_cast<size_t>(src.numbones))
+                return fail("invalid source bone table");
+            weightBone = FindWeightBone(src, op.name);
+            if (weightBone < 0) return fail("unknown source bone \"" + op.name + "\"");
+            if (op.kind != MeshOperation::ShiftWeights &&
+                (!std::isfinite(op.value) || op.value < 0.0f || op.value > 1.0f))
+                return fail("weight or threshold must be between 0 and 1");
+        }
+
         if (op.kind == MeshOperation::SelectStream || op.kind == MeshOperation::SelectMaterial ||
-            op.kind == MeshOperation::SelectMesh || op.kind == MeshOperation::SelectMeshByStream) {
+            op.kind == MeshOperation::SelectMesh || op.kind == MeshOperation::SelectMeshByStream ||
+            op.kind == MeshOperation::SelectWeights) {
             std::vector<char> matches(selection.size(), 0);
-            if (op.kind == MeshOperation::SelectStream) {
+            if (op.kind == MeshOperation::SelectWeights) {
+                std::vector<char> bones(src.numbones, 0);
+                bones[weightBone] = 1;
+                if (op.selectChildren)
+                    for (int i = weightBone + 1; i < src.numbones; ++i) {
+                        const int parent = src.localBone[i].parent;
+                        if (parent >= 0 && parent < i) bones[i] = bones[parent];
+                    }
+
+                for (size_t i = 0; i < matches.size(); ++i) {
+                    const SrcBoneWeight& weights = src.vertex[i].boneweight;
+                    if (!ValidBoneWeights(src, weights)) return fail("invalid vertex bone weights");
+                    for (int j = 0; j < weights.numbones; ++j)
+                        if (bones[weights.bone[j]] && weights.weight[j] > op.value)
+                            matches[i] = 1;
+                }
+            } else if (op.kind == MeshOperation::SelectStream) {
                 const Source::EditStream* stream = nullptr;
                 for (const auto& candidate : src.editStreams)
                     if (_stricmp(candidate.name.c_str(), op.name.c_str()) == 0) stream = &candidate;
@@ -761,6 +883,73 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                 if (op.combine == SelectionCombine::Add) selection[i] = selection[i] || matches[i];
                 else if (op.combine == SelectionCombine::Subtract) selection[i] = selection[i] && !matches[i];
                 else selection[i] = selection[i] && matches[i];
+            }
+            continue;
+        }
+
+        if (op.kind == MeshOperation::SetWeight || op.kind == MeshOperation::ShiftWeights) {
+            const bool shift = op.kind == MeshOperation::ShiftWeights;
+            int residual = -1;
+            Vector3 origin, axis;
+            double lengthSquared = 0.0;
+            if (shift) {
+                if (!op.residualBone.empty()) {
+                    residual = FindWeightBone(src, op.residualBone);
+                    if (residual < 0) return fail("unknown residual bone \"" + op.residualBone + "\"");
+                }
+                if (src.boneToPose.size() != static_cast<size_t>(src.numbones))
+                    return fail("missing source bind transforms");
+
+                matrix3x4 rotation;
+                pm::AngleMatrixDeg(op.angles, rotation);
+                origin = pm::VectorTransform(Vector3{}, src.boneToPose[weightBone]);
+                axis = pm::VectorRotate(pm::VectorRotate(op.offset, rotation),
+                                        src.boneToPose[weightBone]);
+                if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z) ||
+                    !std::isfinite(axis.x) || !std::isfinite(axis.y) || !std::isfinite(axis.z))
+                    return fail("shift produces a non-finite ramp");
+                lengthSquared = static_cast<double>(axis.x) * axis.x +
+                                static_cast<double>(axis.y) * axis.y +
+                                static_cast<double>(axis.z) * axis.z;
+                if (lengthSquared == 0.0 || residual == weightBone) continue;
+            }
+
+            size_t noRecipient = 0, full = 0;
+            for (size_t i = 0; i < src.vertex.size(); ++i) {
+                if (!shift && !selection[i]) continue;
+                SrcVertex& vertex = src.vertex[i];
+                SrcBoneWeight& weights = vertex.boneweight;
+                if (!ValidBoneWeights(src, weights)) return fail("invalid vertex bone weights");
+
+                WeightEditResult result;
+                if (shift) {
+                    const int slot = FindWeightSlot(weights, weightBone);
+                    if (slot < 0 || weights.weight[slot] <= 0.0f) continue;
+                    const Vector3& position = vertex.position;
+                    if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
+                        !std::isfinite(position.z))
+                        return fail("shift requires finite vertex positions");
+                    const double projection = (static_cast<double>(position.x) - origin.x) * axis.x +
+                                              (static_cast<double>(position.y) - origin.y) * axis.y +
+                                              (static_cast<double>(position.z) - origin.z) * axis.z;
+                    const float blend = static_cast<float>(
+                        std::clamp(1.0 - projection / lengthSquared, 0.0, 1.0));
+                    const float moved = weights.weight[slot] * blend;
+                    if (moved <= 0.0f) continue;
+                    result = TransferBoneWeight(weights, slot, residual, moved);
+                } else {
+                    result = SetBoneWeight(weights, weightBone, op.value);
+                }
+                if (result == WeightEditResult::NoRecipient) ++noRecipient;
+                if (result == WeightEditResult::Full) ++full;
+            }
+            if (noRecipient || full) {
+                pulse::diag::Location at = pulse::diag::Current();
+                at.line = op.line;
+                pulse::diag::WarnAtf(at, "$meshedit: %s \"%s\": left vertices unchanged "
+                                     "(%zu without another positive influence, %zu at the influence limit)",
+                                     shift ? "$shiftweights" : "$setweight",
+                                     op.name.c_str(), noRecipient, full);
             }
             continue;
         }
