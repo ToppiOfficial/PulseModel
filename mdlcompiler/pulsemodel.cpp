@@ -555,7 +555,15 @@ const Field kDataModelJoints[] = {
     F("attachments", Type::Bool, "Import its attachments."),
 };
 const Item kDataModelJointsItem =
-    MakeItem("dataModelJoints", kDataModelJoints).Titled("DMX Bone Markup", "Bones");
+    MakeItem("dataModelJoints", kDataModelJoints).Titled("DMX Bone Markup", "Bones").Hidden();
+const Item kDataModelJiggleBonesItem =
+    MakeItem("dataModelJiggleBones", kFileRef).Titled("DMX Jiggle Bones", "Jiggle Bones");
+const Item kDataModelProceduralBonesItem =
+    MakeItem("dataModelProceduralBones", kFileRef).Titled("DMX Procedural Bones", "Procedural Bones");
+const Item kDataModelHitboxesItem =
+    MakeItem("dataModelHitboxes", kFileRef).Titled("DMX Hitboxes", "Hitboxes");
+const Item kDataModelAttachmentsItem =
+    MakeItem("dataModelAttachments", kFileRef).Titled("DMX Attachments", "Attachments");
 
 const Field kBones[] = {
     F("root", Type::String, "Motion root bone.").Ref("bone"),
@@ -580,9 +588,11 @@ const Item kLimitRotationItem = MakeItem("limitRotation", kBoneRef).Titled("Limi
 const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kDoNotCollapseItem, &kLimitRotationItem,
                                   &kRenameItem, &kRealignBoneItem, &kHierarchyItem, &kDataModelJointsItem, nullptr};
 const Item kBonesItem = MakeItem("bones", kBones).Titled("Bones", "Bones").Holds(kBonesKids);
-const Item* const kJiggleBonesKids[] = {&kJiggleBoneItem, nullptr};
+const Item* const kJiggleBonesKids[] = {&kJiggleBoneItem, &kDataModelJiggleBonesItem, nullptr};
 const Item kJiggleBonesItem = MakeItem("jiggleBones").Titled("Jiggle Bones", "Jiggle Bones").Holds(kJiggleBonesKids);
-const Item* const kProceduralBonesKids[] = {&kDriverBoneItem, &kAimAtItem, &kVrdFileItem, nullptr};
+const Item* const kProceduralBonesKids[] = {
+    &kDriverBoneItem, &kAimAtItem, &kVrdFileItem, &kDataModelProceduralBonesItem, nullptr,
+};
 const Item kProceduralBonesItem =
     MakeItem("proceduralBones").Titled("Procedural Bones", "Procedural Bones").Holds(kProceduralBonesKids);
 
@@ -605,7 +615,9 @@ const Field kDeclareAttachment[] = {
 };
 const Item kDeclareAttachmentItem =
     MakeItem("declareAttachment", kDeclareAttachment).Titled("Declare Attachment", "Attachments");
-const Item* const kAttachmentsKids[] = {&kAttachmentItem, &kDeclareAttachmentItem, nullptr};
+const Item* const kAttachmentsKids[] = {
+    &kAttachmentItem, &kDeclareAttachmentItem, &kDataModelAttachmentsItem, nullptr,
+};
 const Item kAttachmentsItem = MakeItem("attachments").Titled("Attachments", "Attachments").Holds(kAttachmentsKids);
 
 const Field kHitbox[] = {
@@ -630,7 +642,7 @@ const Field kHitGroup[] = {
     F("group", Type::Integer, "Hit group of its automatic hitbox.").Required(),
 };
 const Item kHitGroupItem = MakeItem("hitGroup", kHitGroup).Titled("Hit Group", "Hitboxes");
-const Item* const kHitboxesKids[] = {&kHitboxSetItem, &kHitGroupItem, nullptr};
+const Item* const kHitboxesKids[] = {&kHitboxSetItem, &kHitGroupItem, &kDataModelHitboxesItem, nullptr};
 const Item kHitboxesItem = MakeItem("hitboxes").Titled("Hitboxes", "Hitboxes").Holds(kHitboxesKids);
 
 const Field kPoseParameter[] = {
@@ -1295,6 +1307,7 @@ const Item* const kAllItems[] = {
     &kPhysicsShapeBaseItem, &kPhysicsShapeFrameItem, &kPhysicsGeneratedItem, &kPhysicsPrimitiveItem,
     &kPhysicsFileItem, &kPhysicsRenderMeshItem, &kPhysicsRenderItem, &kPhysicsBoxItem,
     &kPhysicsSphereItem, &kPhysicsCapsuleItem, &kPhysicsDataModelItem,
+    &kDataModelJiggleBonesItem, &kDataModelProceduralBonesItem, &kDataModelHitboxesItem, &kDataModelAttachmentsItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -3434,6 +3447,10 @@ const Move kMoves[] = {
     {"proceduralBones", "driverBone", "drivers"},
     {"proceduralBones", "aimAtBone", "aimAt"},
     {"bones", "dataModelJoints", "dataModelJoints", Into::Model},
+    {"jiggleBones", "dataModelJiggleBones", "dataModelJoints", Into::Model},
+    {"proceduralBones", "dataModelProceduralBones", "dataModelJoints", Into::Model},
+    {"hitboxes", "dataModelHitboxes", "dataModelJoints", Into::Model},
+    {"attachments", "dataModelAttachments", "dataModelJoints", Into::Model},
     {"attachments", "attachment", "attachments", Into::Model},
     {"attachments", "declareAttachment", "attachments", Into::Model},
     {"hitboxSet", "hitbox", "boxes"},
@@ -3683,6 +3700,10 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
     if (std::strcmp(item.name, "physicsBox") == 0) out["primitive"] = "box";
     if (std::strcmp(item.name, "physicsSphere") == 0) out["primitive"] = "sphere";
     if (std::strcmp(item.name, "physicsCapsule") == 0) out["primitive"] = "capsule";
+    if (std::strcmp(item.name, "dataModelJiggleBones") == 0) out["jiggleBones"] = true;
+    if (std::strcmp(item.name, "dataModelProceduralBones") == 0) out["proceduralBones"] = true;
+    if (std::strcmp(item.name, "dataModelHitboxes") == 0) out["hitboxes"] = true;
+    if (std::strcmp(item.name, "dataModelAttachments") == 0) out["attachments"] = true;
 
     for (const auto& renamed : kRenamed) {
         if (!IsA(item, renamed.item) || !out.contains(renamed.key)) continue;
