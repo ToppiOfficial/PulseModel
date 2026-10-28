@@ -121,36 +121,6 @@ struct BoneMarkup {
     BoneRealignEdit realign;
 };
 
-// $transformbone <bone> [options]: a late bind-pose edit, applied by
-// ApplyBoneTransformEdits after the global bone table is built and just before
-// RealignBones. The default edit is pivot-only - the delta is folded into
-// srcRealign, so neither the rest mesh nor any animation moves; only the bone's
-// frame does. See compile.cpp for the mechanism
-struct BoneTransformEdit {
-    std::string name;
-    bool hasAngles = false;     // `angles <p y r>`
-    bool worldAngles = false;   // `worldangles` - rotate about world axes
-    Vector3 angles{};           // euler DEGREES (pitch, yaw, roll)
-    bool hasPosition = false;   // `position <x y z>`
-    bool worldPosition = false; // `worldposition` - translate along world axes
-    Vector3 pos{};
-    // `transformweights <residualbone> [factor] [smoothing]`: hand this bone's
-    // vertex weight to residualbone as a spatial ramp along the move axis
-    bool hasMoveWeight = false;
-    std::string residualbone;
-    float moveWeightFactor = 1.0f;    // [0,1] band width (1 = whole span, 0 = hard cut)
-    float moveWeightSmoothing = 0.0f; // [0,1] S-curve easing inside the band
-    bool hasMoveWeightOffset = false; // `offset <x y z>` - shifts the ramp END only
-    Vector3 moveWeightOffset{};
-    bool transformVerts = false;  // carry the rigged verts instead of pivoting
-    // `transformchildren`: move the bone's whole subtree rigidly with it, instead
-    // of recompensating the children to stay where they were
-    bool transformChildren = false;
-    bool ignoreAnimation = false; // the edit never reaches any animation frame
-    bool ignoreHitbox = false;    // keep this bone's authored $hbox where it was
-    int line = 0;                 // script line, for diagnostics
-};
-
 // ---- procedural bones ----------------------------------------------------
 
 // JiggleBone::flags (format/mdl.h JIGGLE_*, mirrored like the other flag sets
@@ -574,10 +544,6 @@ struct Anim {
     bool isBindPose = false;  // sanim comes from the bone table, not from src
     bool noAutoIK = false;
     bool nocull = false;      // `nocull`: exempt from $animationcullmethod
-    // `ignoretransformbone <angles|position>`: convert this clip with that
-    // category of $transformbone bind-pose edits rolled back
-    bool ignoreTransformAngles = false;
-    bool ignoreTransformPosition = false;
     // motion extraction output (piecewisemove); motionrollback is how far back
     // a non-looping clip starts its extraction, in seconds
     std::vector<LinearMove> piecewisemove;
@@ -1212,9 +1178,6 @@ struct CompileInput {
     // the very end of the compile, so every other command still names the
     // source bone.
     std::vector<std::pair<std::string, std::string>> boneRenames;
-    // $transformbone, script order. Applied as one batch after the bone table
-    // is built, so the command is position-independent.
-    std::vector<BoneTransformEdit> boneTransformEdits;
     // $hierarchy: reparent a bone once the global bone table exists. An empty
     // parent makes the child a root.
     struct ForcedHierarchy { std::string child, parent; };
@@ -1479,9 +1442,6 @@ struct CompileInput {
         // routes it to blend anim 0 like every other animation token.
         std::vector<InIkRule> ikrules;
         bool nocull = false;   // `nocull`: exempt from $animationcullmethod
-        // `ignoretransformbone <angles|position>`, see Anim
-        bool ignoreTransformAngles = false;
-        bool ignoreTransformPosition = false;
         int motiontype = 0;    // motion controls (LX/LY/LZ/LXR/.../LM/LQ)
         float motionrollback = 0.3f; // `motionrollback`, see Anim
         int looprestart = 0;

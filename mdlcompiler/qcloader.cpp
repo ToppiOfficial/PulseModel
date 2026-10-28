@@ -2598,24 +2598,6 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     // nocull: keep this animation whatever $animationcullmethod says, both as
     // unreferenced and as a duplicate of another one
     if (_stricmp(o.c_str(), "nocull") == 0) { a.nocull = true; return 1; }
-    // ignoretransformbone <angles|position>: roll back that category of
-    // $transformbone bind-pose edits while converting this clip
-    if (_stricmp(o.c_str(), "ignoretransformbone") == 0) {
-        std::string which;
-        if (!c.Want("angles or position", t, which))
-            return -1;
-        if (_stricmp(which.c_str(), "angles") == 0) {
-            a.ignoreTransformAngles = true;
-        } else if (_stricmp(which.c_str(), "position") == 0) {
-            a.ignoreTransformPosition = true;
-        } else {
-            c.Fail(t.line, "ignoretransformbone: expected angles or position, got \"" +
-                               which + "\"");
-            return -1;
-        }
-        return 1;
-    }
-
     // demand loading, all no-ops without $animblocksize
     if (_stricmp(o.c_str(), "noanimblock") == 0) { a.disableAnimblocks = true; return 1; }
     if (_stricmp(o.c_str(), "noanimblockstall") == 0) {
@@ -5248,112 +5230,6 @@ bool CmdLimitRotation(Ctx& c, const Token& cmd) {
     c.in.limitRotationBones.push_back(std::move(bone));
     while (!c.Eof() && c.Cur().line == cmd.line)
         c.pos++;
-    return true;
-}
-
-// $transformbone <bone> [options]  (Cmd_TransformBindPoseBone)
-//
-// Edits a bone's bind pose late in the pipeline, after the global bone table is
-// built - the merged replacement for stock's $rotatebone + $movebone. The
-// options are order-independent:
-//   angles <p y r>                          rotate the bind orientation
-//   position <x y z>                        translate the bind position
-//   worldangles / worldposition             use world axes instead of the bone's
-//   transformweights <residualbone> [f] [s] re-skin ramp onto residualbone
-//   offset <x y z>                          shift the transformweights ramp end
-//   transformverts                          carry the rigged verts at rest
-//   transformchildren                       move the bone's whole subtree with it
-//   ignoreanimation                         never let the edit reach a clip
-//   ignorehitbox                            keep this bone's $hbox in place
-// Position-independent: the whole list is applied in one batch by the compile
-// stage, so the bone is resolved there, not here.
-bool CmdTransformBone(Ctx& c, const Token& cmd) {
-    cm::BoneTransformEdit e;
-    e.line = cmd.line;
-    if (!c.Want("a bone name", cmd, e.name))
-        return false;
-
-    // an optional trailing number: consumed only when the token parses whole as
-    // a float, so a following keyword is left for the option loop
-    auto optFloat = [&](float& out) {
-        if (c.AtCommand() || c.Cur().quoted)
-            return;
-        const std::string& s = c.Cur().text;
-        try {
-            size_t used = 0;
-            const float v = std::stof(s, &used);
-            if (used != s.size())
-                return;
-            out = std::min(std::max(v, 0.0f), 1.0f);
-            c.pos++;
-        } catch (const std::exception&) {
-        }
-    };
-
-    while (!c.AtCommand()) {
-        const Token& t = c.toks[c.pos++];
-        const Token sub{cmd.text + " " + t.text, t.line, false};
-        const char* o = t.text.c_str();
-
-        if (!t.quoted && _stricmp(o, "angles") == 0) {
-            if (!c.WantFloat("a pitch", sub, e.angles.x) ||
-                !c.WantFloat("a yaw", sub, e.angles.y) ||
-                !c.WantFloat("a roll", sub, e.angles.z))
-                return false;
-            e.hasAngles = true;
-        } else if (!t.quoted && _stricmp(o, "position") == 0) {
-            if (!c.WantFloat("an X offset", sub, e.pos.x) ||
-                !c.WantFloat("a Y offset", sub, e.pos.y) ||
-                !c.WantFloat("a Z offset", sub, e.pos.z))
-                return false;
-            e.hasPosition = true;
-        } else if (!t.quoted && _stricmp(o, "worldangles") == 0) {
-            e.worldAngles = true;
-        } else if (!t.quoted && _stricmp(o, "worldposition") == 0) {
-            e.worldPosition = true;
-        } else if (!t.quoted && _stricmp(o, "transformweights") == 0) {
-            if (!c.Want("a residual bone name", sub, e.residualbone))
-                return false;
-            e.hasMoveWeight = true;
-            optFloat(e.moveWeightFactor);    // ramp band width, default 1.0
-            optFloat(e.moveWeightSmoothing); // S-curve easing, default 0.0
-        } else if (!t.quoted && _stricmp(o, "offset") == 0) {
-            if (!c.WantFloat("an X offset", sub, e.moveWeightOffset.x) ||
-                !c.WantFloat("a Y offset", sub, e.moveWeightOffset.y) ||
-                !c.WantFloat("a Z offset", sub, e.moveWeightOffset.z))
-                return false;
-            e.hasMoveWeightOffset = true;
-        } else if (!t.quoted && _stricmp(o, "transformverts") == 0) {
-            e.transformVerts = true;
-        } else if (!t.quoted && _stricmp(o, "transformchildren") == 0) {
-            e.transformChildren = true;
-        } else if (!t.quoted && _stricmp(o, "ignoreanimation") == 0) {
-            e.ignoreAnimation = true;
-        } else if (!t.quoted && _stricmp(o, "ignorehitbox") == 0) {
-            e.ignoreHitbox = true;
-        } else {
-            return c.Fail(t.line, "$transformbone \"" + e.name +
-                                  "\": expected angles, position, worldangles, "
-                                  "worldposition, transformweights, offset, "
-                                  "transformverts, transformchildren, "
-                                  "ignoreanimation or ignorehitbox, "
-                                  "got \"" + t.text + "\"");
-        }
-    }
-
-    if (e.transformVerts && e.hasMoveWeight)
-        return c.Fail(cmd.line,
-                      "$transformbone: transformverts and transformweights are "
-                      "mutually exclusive");
-    if (e.hasMoveWeightOffset && !e.hasMoveWeight)
-        return c.Fail(cmd.line, "$transformbone: offset requires transformweights");
-    if (!e.hasAngles && !e.hasPosition)
-        return c.Fail(cmd.line, "$transformbone: requires at least one of angles or position");
-
-    c.in.boneTransformEdits.push_back(std::move(e));
-    if (c.in.boneTransformEdits.size() >
-        static_cast<size_t>(pulse::limits::kMaxBoneTransformEdits))
-        return c.Fail(cmd.line, "too many $transformbone entries");
     return true;
 }
 
@@ -9380,7 +9256,6 @@ constexpr Command kCommands[] = {
     {"$realignbones", CmdRealignBones},
     {"$lockbonelengths", CmdLockBoneLengths},
     {"$limitrotation", CmdLimitRotation},
-    {"$transformbone", CmdTransformBone},
     {"$root", CmdRoot},
     {"$definebone", CmdDefineBone},
     {"$unlockdefinebones", CmdUnlockDefineBones},

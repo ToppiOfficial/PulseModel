@@ -385,23 +385,6 @@ const Field kRename[] = {
 };
 const Item kRenameItem = MakeItem("renameBone", kRename).Titled("Rename Bone", "Bones");
 
-const Field kTransformBone[] = {
-    F("bone", Type::String, "Bone to edit.").Ref("bone").Required(),
-    F("angles", Type::Vec3, "Rotate the bind orientation."),
-    F("position", Type::Vec3, "Translate the bind position."),
-    F("worldAngles", Type::Bool, "Angles are in world axes."),
-    F("worldPosition", Type::Bool, "Position is in world axes."),
-    F("transformVerts", Type::Bool, "Carry the rigged vertices."),
-    F("transformChildren", Type::Bool, "Move the whole subtree."),
-    F("ignoreAnimation", Type::Bool, "Never apply to animation."),
-    F("ignoreHitbox", Type::Bool, "Leave this bone's hitbox in place."),
-    F("residualBone", Type::String, "Bone the weights ramp onto.").Ref("bone").Group("Re-skin"),
-    F("weightsFactor", Type::Number, "Ramp band width (0-1).").Group("Re-skin"),
-    F("weightsSmoothing", Type::Number, "S-curve easing (0-1).").Group("Re-skin"),
-    F("offset", Type::Vec3, "Shift the ramp end.").Group("Re-skin"),
-};
-const Item kTransformBoneItem = MakeItem("transformBone", kTransformBone).Titled("Transform Bone", "Bones");
-
 const Field kRealignBone[] = {
     F("bone", Type::String, "Bone to realign; does not prevent collapse.").Ref("bone").Required(),
     F("origin", Type::Vec3, "Origin offset along the starting bone axes."),
@@ -539,7 +522,7 @@ const Field kBoneMarkup[] = {
 };
 const Item kBoneMarkupItem = MakeItem("boneMarkup", kBoneMarkup).Titled("Bone Markup", "Bones");
 
-const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kRenameItem, &kTransformBoneItem,
+const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kRenameItem,
                                   &kRealignBoneItem, &kHierarchyItem, &kJiggleBoneItem, &kDriverBoneItem, &kAimAtItem,
                                   &kDataModelJointsItem, &kVrdFileItem, nullptr};
 const Item kBonesItem = MakeItem("bones", kBones).Titled("Bones", "Bones").Holds(kBonesKids);
@@ -714,8 +697,6 @@ const Field kClip[] = {
     F("angles", Type::Vec3, "Clip rotation in degrees.").Group("Transform"),
     F("scale", Type::Number, "Clip scale.").Group("Transform"),
     F("ignoreScale", Type::Bool, "Ignore the model transform scale.").Group("Transform"),
-    F("ignoreBoneAngles", Type::Bool, "Undo the bone angle transforms here.").Group("Transform"),
-    F("ignoreBonePosition", Type::Bool, "Undo the bone position transforms here.").Group("Transform"),
     F("motionRollback", Type::Number, "Motion rollback in seconds.").Group("Motion"),
     F("noAutoIk", Type::Bool, "No automatic IK release rules."),
     F("noCull", Type::Bool, "Never culled by the animation cull method."),
@@ -1149,7 +1130,7 @@ const Item* const kAllItems[] = {
     &kMaterialCollapseItem, &kMaterialsItem, &kScaleBoneItem, &kMeshItem, &kMeshesItem, &kChoiceItem,
     &kModelGroupItem, &kPresetChoiceItem, &kModelGroupPresetItem, &kModelGroupsItem, &kLodModelItem,
     &kLodDecimateItem, &kLodBoneItem, &kLodMaterialItem, &kLodWordItem, &kLodItem, &kLodsItem,
-    &kDefineBoneItem, &kRenameItem, &kTransformBoneItem, &kRealignBoneItem, &kHierarchyItem, &kJiggleCommonItem,
+    &kDefineBoneItem, &kRenameItem, &kRealignBoneItem, &kHierarchyItem, &kJiggleCommonItem,
     &kJiggleFlexibleItem, &kJiggleRigidItem, &kJiggleBaseSpringItem, &kJiggleBoingItem, &kJiggleBoneItem,
     &kDriverTriggerItem, &kDriverBoneItem, &kAimAtItem, &kDataModelJointsItem, &kBonesItem,
     &kAttachmentItem, &kAttachmentsItem, &kHitboxItem, &kHitboxSetItem, &kHitGroupItem, &kHitboxesItem,
@@ -2627,33 +2608,6 @@ bool LowerBones(Emitter& e, const Json& b) {
             e.Text(Str(r, "to"));
         }
     }
-    if (const Json* list = Get(b, "transforms")) {
-        for (const Json& t : *list) {
-            e.Command("$transformbone", t);
-            e.Text(Str(t, "bone"));
-            EmitClause(e, t, "angles", "angles");
-            EmitClause(e, t, "position", "position");
-            EmitFlag(e, t, "worldAngles", "worldangles");
-            EmitFlag(e, t, "worldPosition", "worldposition");
-            if (const Json* w = Get(t, "transformWeights")) {
-                e.Word("transformweights");
-                e.Text(Str(*w, "residualBone"));
-                if (const Json* factor = Get(*w, "factor")) {
-                    e.Num(*factor);
-                    if (const Json* smoothing = Get(*w, "smoothing")) e.Num(*smoothing);
-                } else if (Get(*w, "smoothing")) {
-                    e.Num(1);
-                    e.Num(w->at("smoothing"));
-                }
-            }
-            EmitClause(e, t, "offset", "offset");
-            EmitFlag(e, t, "transformVerts", "transformverts");
-            EmitFlag(e, t, "transformChildren", "transformchildren");
-            EmitFlag(e, t, "ignoreAnimation", "ignoreanimation");
-            EmitFlag(e, t, "ignoreHitbox", "ignorehitbox");
-        }
-    }
-
     static const struct { const char* key; const char* command; } kLists[] = {
         {"boneMerge", "$bonemerge"},
         {"doNotCollapse", "$donotcollapse"},
@@ -3026,11 +2980,6 @@ bool LowerClip(Emitter& e, const Json& a) {
     EmitControls(e, a, "motion");
     EmitClause(e, a, "motionRollback", "motionrollback");
     EmitFlag(e, a, "ignoreScale", "ignorescale");
-    if (const Json* list = Get(a, "ignoreTransformBone"))
-        for (const Json& which : *list) {
-            e.Word("ignoretransformbone");
-            e.Word(which.get<std::string>());
-        }
     EmitFlag(e, a, "noAutoIk", "noautoik");
     EmitFlag(e, a, "noCull", "nocull");
     EmitFlag(e, a, "noAnimBlock", "noanimblock");
@@ -3307,7 +3256,6 @@ const Move kMoves[] = {
     {"driverBone", "driverTrigger", "triggers"},
     {"bones", "defineBone", "define"},
     {"bones", "renameBone", "renames"},
-    {"bones", "transformBone", "transforms"},
     {"bones", "realignBone", "realignDirectives"},
     {"bones", "reparentBone", "hierarchy"},
     {"bones", "jiggleBone", "jiggle"},
@@ -3392,9 +3340,6 @@ const Flat kFlats[] = {
     {"lod", "removeSmallMeshesIn", "removeSmallMeshes", "meshes"},
     {"defineBone", "realignPosition", "realign", "position", true},
     {"defineBone", "realignAngles", "realign", "angles", true},
-    {"transformBone", "residualBone", "transformWeights", "residualBone", true},
-    {"transformBone", "weightsFactor", "transformWeights", "factor"},
-    {"transformBone", "weightsSmoothing", "transformWeights", "smoothing"},
     {"jiggleCommon", "yawMin", "yawConstraint", "min", true},
     {"jiggleCommon", "yawMax", "yawConstraint", "max", true},
     {"jiggleCommon", "pitchMin", "pitchConstraint", "min", true},
@@ -3469,8 +3414,6 @@ const Word kWords[] = {
     {"animationOperation", "axisX", "axes", "x"},
     {"animationOperation", "axisY", "axes", "y"},
     {"animationOperation", "axisZ", "axes", "z"},
-    {"clip", "ignoreBoneAngles", "ignoreTransformBone", "angles"},
-    {"clip", "ignoreBonePosition", "ignoreTransformBone", "position"},
 };
 
 // The words of the motion controls, the same for a clip's motion and an operation's controls.
