@@ -572,8 +572,9 @@ const Field kBoneMarkup[] = {
 const Item kBoneMarkupItem = MakeItem("boneMarkup", kBoneMarkup).Titled("Bone Markup", "Bones");
 
 const Item kDoNotCollapseItem = MakeItem("doNotCollapse", kBoneRef).Titled("Do Not Collapse", "Bones");
-const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kDoNotCollapseItem, &kRenameItem,
-                                  &kRealignBoneItem, &kHierarchyItem, &kDataModelJointsItem, nullptr};
+const Item kLimitRotationItem = MakeItem("limitRotation", kBoneRef).Titled("Limit Rotation", "Bones");
+const Item* const kBonesKids[] = {&kDefineBoneItem, &kBoneMarkupItem, &kDoNotCollapseItem, &kLimitRotationItem,
+                                  &kRenameItem, &kRealignBoneItem, &kHierarchyItem, &kDataModelJointsItem, nullptr};
 const Item kBonesItem = MakeItem("bones", kBones).Titled("Bones", "Bones").Holds(kBonesKids);
 const Item* const kJiggleBonesKids[] = {&kJiggleBoneItem, nullptr};
 const Item kJiggleBonesItem = MakeItem("jiggleBones").Titled("Jiggle Bones", "Jiggle Bones").Holds(kJiggleBonesKids);
@@ -595,7 +596,12 @@ const Field kAttachment[] = {
 const Item* const kAttachmentKids[] = {&kPlaceFlexGroupItem, &kPlaceMorphItem, &kPlaceMaterialItem, nullptr};
 const Item kAttachmentItem =
     MakeItem("attachment", kAttachment).Titled("Attachment", "Attachments").Holds(kAttachmentKids);
-const Item* const kAttachmentsKids[] = {&kAttachmentItem, nullptr};
+const Field kDeclareAttachment[] = {
+    F("name", Type::String, "Attachment name.").Declares("attachment").Required(),
+};
+const Item kDeclareAttachmentItem =
+    MakeItem("declareAttachment", kDeclareAttachment).Titled("Declare Attachment", "Attachments");
+const Item* const kAttachmentsKids[] = {&kAttachmentItem, &kDeclareAttachmentItem, nullptr};
 const Item kAttachmentsItem = MakeItem("attachments").Titled("Attachments", "Attachments").Holds(kAttachmentsKids);
 
 const Field kHitbox[] = {
@@ -1190,7 +1196,8 @@ const Item* const kAllItems[] = {
     &kDefineBoneItem, &kRenameItem, &kRealignBoneItem, &kHierarchyItem, &kJiggleCommonItem,
     &kJiggleFlexibleItem, &kJiggleRigidItem, &kJiggleBaseSpringItem, &kJiggleBoingItem, &kJiggleBoneItem,
     &kDriverTriggerItem, &kDriverBoneItem, &kAimAtItem, &kDataModelJointsItem, &kBonesItem,
-    &kAttachmentItem, &kAttachmentsItem, &kHitboxItem, &kHitboxSetItem, &kHitGroupItem, &kHitboxesItem,
+    &kAttachmentItem, &kDeclareAttachmentItem, &kAttachmentsItem, &kHitboxItem, &kHitboxSetItem,
+    &kHitGroupItem, &kHitboxesItem,
     &kPoseParameterItem, &kPoseParametersItem, &kIkChainItem, &kIkItem, &kIkRuleItem, &kIkFixupRuleItem,
     &kAnimOpItem, &kClipItem, &kAnimationItem, &kAnimationsItem, &kBlendItem, &kAddLayerItem,
     &kBlendLayerItem, &kIkLockItem, &kEventItem, &kAnimTagItem, &kSequenceItem, &kSequencesItem,
@@ -1207,7 +1214,7 @@ const Item* const kAllItems[] = {
     &kBlendAnimationItem, &kActivityModifierItem, &kLocalVarItem, &kCorrectiveControlItem, &kDominatorItem,
     &kExtraBoneItem, &kExcludeMeshItem, &kTransitionNodeItem, &kAllowedActivityItem,
     &kBBoxItem, &kCBoxItem, &kIllumPositionItem, &kEyePositionItem, &kBlankItem, &kLodOptionsItem, &kShadowLodItem,
-    &kJiggleBonesItem, &kProceduralBonesItem, &kDoNotCollapseItem,
+    &kJiggleBonesItem, &kProceduralBonesItem, &kDoNotCollapseItem, &kLimitRotationItem,
 };
 
 const Field* FindField(const Item& item, const std::string& key) {
@@ -2679,6 +2686,13 @@ bool LowerBones(Emitter& e, const Json& b) {
         EmitNames(e, *names);
     }
 
+    if (const Json* names = Get(b, "limitRotation")) {
+        for (const Json& name : *names) {
+            e.Command("$limitrotation", b, "limitRotation");
+            e.Text(name.get<std::string>());
+        }
+    }
+
     if (const Json* list = Get(b, "realignDirectives")) {
         for (const Json& edit : *list) {
             const bool disable = True(edit, "noRealign");
@@ -2751,6 +2765,12 @@ bool LowerDataModelJoints(Emitter& e, const Json& d) {
 }
 
 void LowerAttachment(Emitter& e, const Json& a) {
+    if (True(a, "declare")) {
+        e.Command("$declareattachment", a);
+        e.Text(Str(a, "name"));
+        return;
+    }
+
     e.Command("$attachment", a);
     e.Text(Str(a, "name"));
     EmitClause(e, a, "bone", "bone");
@@ -3328,6 +3348,7 @@ const Move kMoves[] = {
     {"proceduralBones", "aimAtBone", "aimAt"},
     {"bones", "dataModelJoints", "dataModelJoints", Into::Model},
     {"attachments", "attachment", "attachments", Into::Model},
+    {"attachments", "declareAttachment", "attachments", Into::Model},
     {"hitboxSet", "hitbox", "boxes"},
     {"hitboxes", "hitboxSet", "hitboxSets", Into::Model},
     {"hitboxes", "hitGroup", "hitGroups", Into::Model},
@@ -3507,6 +3528,7 @@ const Gather kGathers[] = {
     {"bones", "boneMarkup", "doNotCollapse", "bone", "doNotCollapse"},
     {"bones", "boneMarkup", "alwaysCollapse", "bone", "alwaysCollapse"},
     {"bones", "doNotCollapse", "doNotCollapse", "bone"},
+    {"bones", "limitRotation", "limitRotation", "bone"},
     {"proceduralBones", "vrdFile", "vrdFiles", "file"},
     {"attachment", "placeOnFlexGroup", "flexGroups", "name"},
     {"attachment", "placeOnMorph", "flexMorphs", "name"},
@@ -3562,6 +3584,7 @@ bool Reshape(Loader& l, const Json& node, const Item& item, Json& model, Json& o
         if (key != "type" && key != "enabled" && key != "children" && key != "editor") out[key] = value;
     if (std::strcmp(item.name, "blank") == 0) out["blank"] = true;
     if (std::strcmp(item.name, "shadowLod") == 0) out["shadow"] = true;
+    if (std::strcmp(item.name, "declareAttachment") == 0) out["declare"] = true;
 
     for (const auto& renamed : kRenamed) {
         if (!IsA(item, renamed.item) || !out.contains(renamed.key)) continue;
