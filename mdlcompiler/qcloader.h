@@ -52,7 +52,7 @@ bool LoadTokenScript(const char* path, const std::vector<ScriptToken>& tokens,
                      compile::CompileInput& out, std::string* err,
                      const SearchDirs& fileDirs = {});
 
-// True when the path's extension selects this front end (.pulseqc / .qc).
+// True when the path selects QC text (.qc / .pulseqc) or a package (.qczip).
 bool IsQcScriptPath(const char* path);
 
 // True for a $command in the kCommands table.

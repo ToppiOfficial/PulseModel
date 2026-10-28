@@ -50,7 +50,7 @@ static void PrintHeader() {
 }
 
 static int Usage() {
-    std::printf("usage: mdlcompiler <file.qc|file.pulseqc|file.pulsemodel> [-game <dir>]\n");
+    std::printf("usage: mdlcompiler <file.qc|file.pulseqc|file.qczip|file.pulsemodel> [-game <dir>]\n");
     std::printf("\n");
     std::printf("  -api          read a versioned integration request from stdin\n");
     std::printf("  -only <id>    the model to compile from a .pulsemodel holding several\n");
@@ -268,7 +268,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     const bool pulseModel = pulse::pulsemodel::IsPulseModelPath(script);
     if (!pulse::loader::IsQcScriptPath(script) && !pulseModel)
         return Fail("unsupported script", std::string(script) +
-                                              ": only .pulseqc/.qc/.pulsemodel files are supported");
+                                              ": only .qc/.pulseqc/.qczip/.pulsemodel files are supported");
     if (!only.empty() && !pulseModel)
         return Fail("bad option", "-only selects a model of a .pulsemodel");
 
@@ -413,7 +413,7 @@ int main(int argc, char** argv) {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
                                                  "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
-                                                 "\"pulseqcPackage\":1,\"rename\":1,\"pulsemodel\":1,\"schema\":1,\"preview\":1}");
+                                                 "\"qczipPackage\":1,\"rename\":1,\"pulsemodel\":1,\"schema\":1,\"preview\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else if (request.at("method") == "schema") {

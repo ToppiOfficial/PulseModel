@@ -9432,9 +9432,11 @@ void PrintCommandNames() {
     }
 }
 
-bool IsQcScriptPath(const char* path) {
+bool IsQcScriptPath(const char* path)
+{
     const std::string ext = pulse::FilePath(path).extension().string();
-    return _stricmp(ext.c_str(), ".pulseqc") == 0 || _stricmp(ext.c_str(), ".qc") == 0;
+    return _stricmp(ext.c_str(), ".qc") == 0 || _stricmp(ext.c_str(), ".pulseqc") == 0 ||
+        _stricmp(ext.c_str(), ".qczip") == 0;
 }
 
 bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,

@@ -58,12 +58,15 @@ that compiles is not guaranteed to load - the engine you ship to decides that.
 ### Usage
 
 ```
-mdlcompiler <file.pulseqc> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
+mdlcompiler <file.qc|file.pulseqc|file.qczip|file.pulsemodel> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
             [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
             [-vtxformat <0|1>] [-nodx80]
             [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
             [-legacysequencebounds] [-perfmetrics] [-pause]
 ```
+
+`.qc` and `.pulseqc` are equivalent plain-text compile scripts. `.qczip` is a
+ZIP package with `model.qc` at its root and optional bundled source files.
 
 | Option | Meaning |
 | --- | --- |

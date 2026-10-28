@@ -32,19 +32,13 @@ bool Inside(const fs::path& path)
 
 bool Package::IsPackage(const fs::path& path)
 {
-    if (Key(path.extension().string()) != ".pulseqc") return false;
-    std::ifstream input(path, std::ios::binary);
-    std::array<unsigned char, 4> magic{};
-    input.read(reinterpret_cast<char*>(magic.data()), magic.size());
-    return input.gcount() == 4 && magic[0] == 'P' && magic[1] == 'K' &&
-        ((magic[2] == 3 && magic[3] == 4) || (magic[2] == 5 && magic[3] == 6) ||
-         (magic[2] == 6 && magic[3] == 6));
+    return Key(path.extension().string()) == ".qczip";
 }
 
 Package::Package(const fs::path& path) : path_(fs::absolute(path).lexically_normal()), input_(path_, std::ios::binary)
 {
-    if (active) throw std::runtime_error("A PulseQC package is already open.");
-    if (!input_) throw std::runtime_error("Cannot open PulseQC package: " + path_.u8string());
+    if (active) throw std::runtime_error("A QCZip package is already open.");
+    if (!input_) throw std::runtime_error("Cannot open QCZip package: " + path_.u8string());
 
     zip_.m_pIO_opaque = &input_;
     zip_.m_pRead = [](void* context, mz_uint64 offset, void* data, size_t size) -> size_t {
@@ -56,33 +50,33 @@ Package::Package(const fs::path& path) : path_(fs::absolute(path).lexically_norm
         return static_cast<size_t>(input.gcount());
     };
     if (!mz_zip_reader_init(&zip_, fs::file_size(path_), 0))
-        throw std::runtime_error("Invalid PulseQC ZIP: " + std::string(mz_zip_get_error_string(mz_zip_get_last_error(&zip_))));
+        throw std::runtime_error("Invalid QCZip: " + std::string(mz_zip_get_error_string(mz_zip_get_last_error(&zip_))));
 
     try {
         const auto count = mz_zip_reader_get_num_files(&zip_);
-        if (count > 100000) throw std::runtime_error("PulseQC package has too many entries.");
+        if (count > 100000) throw std::runtime_error("QCZip package has too many entries.");
         for (unsigned i = 0; i < count; ++i) {
             mz_zip_archive_file_stat stat{};
-            if (!mz_zip_reader_file_stat(&zip_, i, &stat)) throw std::runtime_error("Invalid PulseQC ZIP entry.");
+            if (!mz_zip_reader_file_stat(&zip_, i, &stat)) throw std::runtime_error("Invalid QCZip entry.");
             const auto length = mz_zip_reader_get_filename(&zip_, i, nullptr, 0);
             std::string name(length, '\0');
             if (!length || mz_zip_reader_get_filename(&zip_, i, name.data(), length) != length)
-                throw std::runtime_error("Invalid PulseQC ZIP member name.");
+                throw std::runtime_error("Invalid QCZip member name.");
             name.pop_back();
             std::replace(name.begin(), name.end(), '\\', '/');
             const auto member = pulse::FilePath(name);
             if (name.find('\0') != std::string::npos || name.find(':') != std::string::npos ||
                 !Inside(member) || ((stat.m_external_attr >> 16) & 0170000) == 0120000)
-                throw std::runtime_error("Unsafe PulseQC ZIP member: " + name);
+                throw std::runtime_error("Unsafe QCZip member: " + name);
             if (stat.m_is_encrypted || !stat.m_is_supported)
-                throw std::runtime_error("Unsupported compression or encryption in PulseQC member: " + name);
+                throw std::runtime_error("Unsupported compression or encryption in QCZip member: " + name);
             if (stat.m_is_directory) continue;
 
             name = member.lexically_normal().generic_u8string();
             if (name == "." || !members_.emplace(Key(name), Member{i, name, stat.m_uncomp_size}).second)
-                throw std::runtime_error("Duplicate or invalid PulseQC ZIP member: " + name);
+                throw std::runtime_error("Duplicate or invalid QCZip member: " + name);
         }
-        if (!Contains(Primary())) throw std::runtime_error("PulseQC package requires model.qc at its root.");
+        if (!Contains(Primary())) throw std::runtime_error("QCZip package requires model.qc at its root.");
     } catch (...) {
         mz_zip_reader_end(&zip_);
         throw;
@@ -126,11 +120,11 @@ bool Package::Contains(const fs::path& path) const { return Find(path) != nullpt
 std::string Package::Read(const fs::path& path)
 {
     const auto* member = Find(path);
-    if (!member) throw std::runtime_error("Missing PulseQC member: " + path.u8string());
-    if (member->size > (64u << 20)) throw std::runtime_error("PulseQC script exceeds 64 MiB: " + member->name);
+    if (!member) throw std::runtime_error("Missing QCZip member: " + path.u8string());
+    if (member->size > (64u << 20)) throw std::runtime_error("QCZip script exceeds 64 MiB: " + member->name);
     std::string text(static_cast<size_t>(member->size), '\0');
     if (!mz_zip_reader_extract_to_mem(&zip_, member->index, text.data(), text.size(), 0))
-        throw std::runtime_error("Corrupt PulseQC member: " + member->name);
+        throw std::runtime_error("Corrupt QCZip member: " + member->name);
     return text;
 }
 
@@ -149,21 +143,21 @@ fs::path Package::Materialize(const fs::path& path)
             std::error_code error;
             if (fs::create_directory(candidate, error)) { temporary_ = candidate; break; }
         }
-        if (temporary_.empty()) throw std::runtime_error("Cannot create PulseQC temporary directory.");
+        if (temporary_.empty()) throw std::runtime_error("Cannot create QCZip temporary directory.");
     }
     const auto extension = pulse::FilePath(member->name).extension().string();
     const auto physical = temporary_ / (std::to_string(member->index) + extension);
     std::ofstream output(physical, std::ios::binary);
-    if (!output) throw std::runtime_error("Cannot prepare PulseQC member: " + member->name);
+    if (!output) throw std::runtime_error("Cannot prepare QCZip member: " + member->name);
     const auto write = [](void* context, mz_uint64, const void* data, size_t size) -> size_t {
         auto& stream = *static_cast<std::ofstream*>(context);
         stream.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
         return stream ? size : 0;
     };
     if (!mz_zip_reader_extract_to_callback(&zip_, member->index, write, &output, 0))
-        throw std::runtime_error("Cannot extract PulseQC member: " + member->name);
+        throw std::runtime_error("Cannot extract QCZip member: " + member->name);
     output.close();
-    if (!output) throw std::runtime_error("Cannot finish PulseQC member: " + member->name);
+    if (!output) throw std::runtime_error("Cannot finish QCZip member: " + member->name);
     materialized_.emplace(physical.lexically_normal(), logical);
     assert(Logical(physical) == logical);
     return physical;
@@ -189,7 +183,7 @@ std::uint64_t Package::Hash() const
     auto& input = input_;
     input.clear();
     input.seekg(0);
-    if (!input) throw std::runtime_error("Cannot hash PulseQC package.");
+    if (!input) throw std::runtime_error("Cannot hash QCZip package.");
     std::uint64_t hash = 0xcbf29ce484222325ull;
     std::array<unsigned char, 65536> bytes{};
     while (input) {
@@ -197,7 +191,7 @@ std::uint64_t Package::Hash() const
         for (std::streamsize i = 0; i < input.gcount(); ++i)
             hash = (hash ^ bytes[static_cast<size_t>(i)]) * 0x100000001b3ull;
     }
-    if (input.bad() || !input.eof()) throw std::runtime_error("Cannot finish hashing PulseQC package.");
+    if (input.bad() || !input.eof()) throw std::runtime_error("Cannot finish hashing QCZip package.");
     hash_ = hash;
     return hash;
 }
