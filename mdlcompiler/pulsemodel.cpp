@@ -1929,8 +1929,8 @@ std::string OriginText(const Loader& l, const Json& obj, const std::string& key)
            at[1].get<std::string>();
 }
 
-// Lists append; objects merge key by key; a value set by two contributors is an error.
-bool Merge(Loader& l, const Item& item, Json& dst, const Json& src) {
+// Model fields override shared scalar defaults; other contributor conflicts are errors.
+bool Merge(Loader& l, const Item& item, Json& dst, const Json& src, bool overrideValues) {
     for (const auto& [key, value] : src.items()) {
         if (IsInternal(key)) continue;
         if (!dst.contains(key)) {
@@ -1952,10 +1952,14 @@ bool Merge(Loader& l, const Item& item, Json& dst, const Json& src) {
             for (const Json& entry : value) dst[key].push_back(entry);
             break;
         case Type::Object:
-            if (!Merge(l, *field->item, dst[key], value)) return false;
+            if (!Merge(l, *field->item, dst[key], value, overrideValues)) return false;
             break;
         default:
-            return l.Fail(src, key, "\"" + key + "\" is also set by " + OriginText(l, dst, key));
+            if (!overrideValues)
+                return l.Fail(src, key, "\"" + key + "\" is also set by " + OriginText(l, dst, key));
+            dst[kKeyOrigins][key] = KeyOrigin(src, key);
+            dst[key] = value;
+            break;
         }
     }
     return true;
@@ -3983,6 +3987,7 @@ struct LoadedModel {
     Json merged;  // the node tree, with the internal origin keys
     Json lowered; // the same in the layout the lowering reads
     std::vector<std::string> files;
+    Json sharedValues;
 };
 LoadedModel g_loaded;
 
@@ -4092,8 +4097,21 @@ bool Load(const char* path, const LoadOptions& options, compile::CompileInput& o
 
     Json merged = Json::object();
     merged[kOrigin] = parts[modelPart].at(kOrigin);
-    for (const Json& part : parts)
-        if (!Merge(l, kContentItem, merged, part)) return false;
+    Json sharedValues = Json::array();
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i == modelPart) {
+            for (const auto& [section, fields] : merged.items()) {
+                if (IsInternal(section) || !fields.is_object()) continue;
+                for (const auto& [key, value] : fields.items()) {
+                    if (IsInternal(key) || key == "children" || key == "editor") continue;
+                    const Json origin = KeyOrigin(fields, key);
+                    sharedValues.push_back({{"at", Pointer(Pointer("", section), key)}, {"value", value},
+                        {"file", l.files[origin[0].get<size_t>()].path}, {"path", origin[1]}});
+                }
+            }
+        }
+        if (!Merge(l, kContentItem, merged, parts[i], i == modelPart)) return false;
+    }
 
     const Json* settings = Get(merged, "settings");
     if (out.outname.empty() && (!settings || !Get(*settings, "name")))
@@ -4101,7 +4119,7 @@ bool Load(const char* path, const LoadOptions& options, compile::CompileInput& o
 
     Json lowered;
     if (!ReshapeModel(l, merged, lowered)) return false;
-    g_loaded = {modelId, merged, lowered, {}};
+    g_loaded = {modelId, merged, lowered, {}, std::move(sharedValues)};
     for (const SourceFile& file : l.files) g_loaded.files.push_back(file.path);
 
     Emitter e{l};
@@ -4133,7 +4151,8 @@ void PrintSchema() {
         SchemaFields(*item, entry["fields"]);
         items[item->name] = std::move(entry);
     }
-    const Json schema{{"format", "pulsemodel"}, {"version", kFormatVersion}, {"root", kRootItem.name},
+    const Json schema{{"format", "pulsemodel"}, {"version", kFormatVersion}, {"sharedOverrides", true},
+                      {"root", kRootItem.name},
                       {"items", std::move(items)}};
     pulse::api::Record("schema", schema.dump());
 }
@@ -4143,7 +4162,8 @@ void PrintResolved() {
 
     Json sources = Json::array();
     Json content = Clean(g_loaded.merged, "", sources);
-    const Json record{{"model", g_loaded.id}, {"content", std::move(content)}, {"sources", std::move(sources)}};
+    const Json record{{"model", g_loaded.id}, {"content", std::move(content)},
+                      {"sources", std::move(sources)}, {"sharedValues", g_loaded.sharedValues}};
     pulse::api::Record("resolved", record.dump());
 }
 
