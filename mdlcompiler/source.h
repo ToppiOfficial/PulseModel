@@ -57,6 +57,7 @@ struct LocalBone {
     std::string name;
     int parent = -1;
     bool isNonSkeletal = false; // mesh dag or the synthetic defaultRoot
+    bool isAttachment = false;  // plain dag holding a DmeAttachment shape
 };
 
 struct SrcBonePose {

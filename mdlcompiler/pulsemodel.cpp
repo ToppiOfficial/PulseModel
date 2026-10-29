@@ -2160,15 +2160,6 @@ void LowerMesh(Emitter& e, const Json& mesh) {
 
     if (True(mesh, "noMorph")) { open("noMorph"); e.Word("$nomorph"); }
     if (True(mesh, "flipNormals")) { open("flipNormals"); e.Word("$flipnormals"); }
-    for (const char* key : {"removeMeshes", "removeMeshWords"}) {
-        const Json* list = Get(mesh, key);
-        if (!list) continue;
-        for (const Json& name : *list) {
-            open(key);
-            e.Word(std::string(key) == "removeMeshes" ? "$removemesh" : "$removemeshword");
-            e.Text(name.get<std::string>());
-        }
-    }
     if (const Json* v = Get(mesh, "decimate")) {
         open("decimate");
         e.Word("$decimate");
@@ -2190,6 +2181,30 @@ void LowerMesh(Emitter& e, const Json& mesh) {
             if (const Json* axes = Get(s, "axes"))
                 for (const Json& axis : *axes) e.Word(axis.get<std::string>());
         }
+    }
+    // Drop Material nodes: exact names, then `contains` words, deleted in one $meshedit
+    bool selecting = false;
+    for (const char* key : {"removeMeshes", "removeMeshWords"}) {
+        const Json* list = Get(mesh, key);
+        if (!list || list->empty()) continue;
+        if (!selecting) {
+            open(key);
+            e.Word("$meshedit");
+            e.Word("{");
+            e.Line(mesh, key);
+            e.Word("$selectnone");
+            selecting = true;
+        }
+        e.Line(mesh, key);
+        e.Word("$selectmaterial");
+        if (std::string(key) == "removeMeshWords") e.Word("contains");
+        for (const Json& name : *list) e.Text(name.get<std::string>());
+    }
+    if (selecting) {
+        e.Line(mesh);
+        e.Word("$deleteselection");
+        e.Word("faces");
+        e.Word("}");
     }
     if (body) e.Word("}");
 }
@@ -4195,7 +4210,7 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
     Json collapsedBones = Json::array();
     for (const auto& source : input.sources) {
         for (const source::LocalBone& bone : source->localBone) {
-            if (bone.isNonSkeletal || kept(bone.name)) continue;
+            if (bone.isNonSkeletal || bone.isAttachment || kept(bone.name)) continue;
             const bool listed = std::any_of(collapsedBones.begin(), collapsedBones.end(), [&](const Json& name) {
                 return _stricmp(name.get_ref<const std::string&>().c_str(), bone.name.c_str()) == 0;
             });

@@ -124,6 +124,7 @@ bool AddDagJoint(const std::vector<dmx::ElementPtr>* jointList, const dmx::Eleme
     const dmx::Element* shape = dag->GetElement("shape");
     lb.isNonSkeletal =
         shape && (shape->className == "DmeMesh" || shape->className == "DmePhysicsShape");
+    lb.isAttachment = shape && shape->className == "DmeAttachment" && dag->className == "DmeDag";
     out.localBone.push_back(lb);
 
     if (auto kids = dag->GetElementArray("children"))
@@ -1376,11 +1377,6 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             if (_stricmp(noExt.c_str(), "null") == 0)
                 continue;
         }
-
-        // $removemeshword: drop this material's faces (and, since verts unify off
-        // faces, its geometry and texture) before it reaches the table.
-        if (info.filter && info.filter->MaterialRemoved(textureName))
-            continue;
 
         int texture = info.mats->LookupTexture(textureName.c_str());
         int material = info.mats->UseTextureAsMaterial(texture);

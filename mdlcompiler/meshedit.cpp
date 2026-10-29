@@ -87,30 +87,6 @@ const std::string* MeshFilter::Unmatched() const {
     return nullptr;
 }
 
-bool MeshFilter::MaterialRemoved(const std::string& materialName) const {
-    if (removeWords.empty() && removeNames.empty())
-        return false;
-    std::string hay = materialName;
-    std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
-    std::string base = std::filesystem::path(hay).stem().string();
-    bool hit = false;
-    for (const RemoveEntry& e : removeNames) {
-        std::string n = e.name;
-        std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-        if (n == hay || n == base)
-            hit = e.matched = true;
-    }
-    if (hit)
-        return true;
-    for (const std::string& w : removeWords) {
-        std::string needle = w;
-        std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
-        if (!needle.empty() && hay.find(needle) != std::string::npos)
-            return true;
-    }
-    return false;
-}
-
 namespace {
 
 int FindWeightBone(const Source& src, const std::string& name) {
@@ -204,11 +180,20 @@ WeightEditResult TransferBoneWeight(SrcBoneWeight& weights, int slot, int residu
     return WeightEditResult::Applied;
 }
 
-bool MaterialMatches(const std::string& material, const std::vector<std::string>& names) {
+bool MaterialMatches(const std::string& material, const std::vector<std::string>& names,
+                     bool contains = false) {
     const std::string base = std::filesystem::path(material).stem().string();
-    for (const auto& name : names)
-        if (_stricmp(name.c_str(), material.c_str()) == 0 || _stricmp(name.c_str(), base.c_str()) == 0)
+    std::string hay = material;
+    std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
+    for (const auto& name : names) {
+        if (contains) {
+            std::string needle = name;
+            std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+            if (hay.find(needle) != std::string::npos) return true;
+        } else if (_stricmp(name.c_str(), material.c_str()) == 0 || _stricmp(name.c_str(), base.c_str()) == 0) {
             return true;
+        }
+    }
     return false;
 }
 
@@ -857,7 +842,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                 std::vector<char> matchedMaterials(mats.materialToTexture.size());
                 for (size_t material = 0; material < matchedMaterials.size(); ++material)
                     matchedMaterials[material] = MaterialMatches(
-                        mats.textures[mats.materialToTexture[material]].name, op.materials);
+                        mats.textures[mats.materialToTexture[material]].name, op.materials, op.contains);
                 for (size_t i = 0; i < matches.size(); ++i) {
                     const int material = src.vertex[i].material;
                     matches[i] = material >= 0 && static_cast<size_t>(material) < matchedMaterials.size() &&

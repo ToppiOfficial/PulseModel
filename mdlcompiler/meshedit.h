@@ -29,16 +29,6 @@ struct MeshFilter {
     };
     std::vector<Entry> names;
     bool exclusive = false;
-    // $removemeshword: drop every face whose material name contains one of these
-    // (case-insensitive substring). Repeatable and independent of $exceptionlist.
-    std::vector<std::string> removeWords;
-    // $removemesh: drop every face whose material name equals one of these
-    // (case-insensitive, path and extension ignored). Unmatched is a hard error.
-    struct RemoveEntry {
-        std::string name;
-        mutable bool matched = false;
-    };
-    std::vector<RemoveEntry> removeNames;
 
     bool empty() const { return names.empty(); } // $exceptionlist only
 
@@ -47,9 +37,6 @@ struct MeshFilter {
 
     // First entry that never matched a mesh, or null.
     const std::string* Unmatched() const;
-
-    // True if the material is named by $removemesh or contains a $removemeshword keyword.
-    bool MaterialRemoved(const std::string& materialName) const;
 
     // $decimatemesh: mesh names -> face tag (1-based per command, 0 = untagged).
     struct TagEntry {
@@ -88,6 +75,7 @@ struct EditMeshOperation {
     float value = 0.5f, thicknessClamp = 0.0f;
     bool replaceSelection = false, hull = true, sharpEdges = false;
     bool selectChildren = false;
+    bool contains = false; // $selectmaterial contains: case-insensitive substring match
     bool worldAxes = false;
     int line = 0;
 };

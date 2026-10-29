@@ -635,6 +635,10 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
             }
             if (name == "selectmaterial") {
                 op.kind = MeshOperation::SelectMaterial;
+                if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "contains") {
+                    ++c.pos;
+                    op.contains = true;
+                }
                 while (hasArg()) {
                     std::string material = c.Next()->text;
                     if (material.empty()) return c.Fail(t->line, where + " requires nonempty material names");
@@ -958,13 +962,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
         }
     }
 
-    if (edit)
-        for (const source::MeshFilter::RemoveEntry& e : edit->filter.removeNames)
-            if (!e.matched) {
-                c.Fail(line, "$removemesh names \"" + e.name + "\", which is not a material in \"" +
-                                 filename + "\"");
-                return nullptr;
-            }
     if (edit) {
         for (auto& block : edit->editBlocks) {
             block.erase(std::remove_if(block.begin(), block.end(), [&](const auto& op) {
@@ -982,8 +979,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 return false;
             }), block.end());
         }
-
-        source::CullUnskinnedBones(*src, edit->boneCull);
     }
 
     c.in.sources.push_back(std::move(src));
@@ -1105,24 +1100,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 else
                     return c.Fail(n->line, "$skinnedbonecull expects aggressive or tree, got \"" +
                                                n->text + "\"");
-                continue;
-            }
-
-            if (o == "$removemesh") {
-                std::string name;
-                if (!c.Want("a material name", *t, name))
-                    return false;
-                edit.filter.removeNames.push_back({name});
-                continue;
-            }
-
-            // $removemeshword <keyword> - drop every mesh whose material name
-            // contains the keyword (case-insensitive substring). Repeatable.
-            if (o == "$removemeshword") {
-                std::string word;
-                if (!c.Want("a material keyword", *t, word))
-                    return false;
-                edit.filter.removeWords.push_back(word);
                 continue;
             }
 
@@ -1314,7 +1291,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, $removemesh, $removemeshword, "
+            return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, "
                                            "$meshedit, $skinnedbonecull, $inflate, $flipnormals, $decimate, $decimatemesh, "
                                            "$use_skeletalaware_decimation, $scalebone, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
@@ -1389,6 +1366,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         if (!source::ApplyEditMesh(*src, c.in.mats, block, &editError, &errorLine))
             return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
     }
+    // after $meshedit, so bones skinned only by deleted geometry are culled too
+    source::CullUnskinnedBones(*src, edit.boneCull);
     src->editStreams.clear();
     src->editMeshes.clear();
     src->vertexEditMesh.clear();
