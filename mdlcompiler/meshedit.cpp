@@ -39,16 +39,13 @@ bool MeshFilter::Keep(const std::string& meshName, const std::string& dagName) {
 }
 
 int MeshFilter::Tag(const std::string& meshName, const std::string& dagName) {
-    auto find = [&](std::vector<TagEntry>& list) {
-        for (TagEntry& e : list)
-            if (_stricmp(e.name.c_str(), meshName.c_str()) == 0 ||
-                _stricmp(e.name.c_str(), dagName.c_str()) == 0) {
-                e.matched = true;
-                return e.tag;
-            }
-        return 0;
-    };
-    return find(tags) | (find(inflateTags) << 8);
+    for (TagEntry& e : tags)
+        if (_stricmp(e.name.c_str(), meshName.c_str()) == 0 ||
+            _stricmp(e.name.c_str(), dagName.c_str()) == 0) {
+            e.matched = true;
+            return e.tag;
+        }
+    return 0;
 }
 
 void ApplyWrinkleScales(Source& src, std::vector<WrinkleScaleOption>& opts) {
@@ -728,46 +725,6 @@ void WeldVertices(Source& src, std::vector<char>& selection, float distance, boo
     CalcModelTangentSpaces(src);
 }
 
-bool InflateVertices(Source& src, float amount, int meshTag,
-                     const std::vector<std::string>& materials, const MaterialTable* mats) {
-    std::vector<char> pick(src.vertex.size(), 1);
-    if (meshTag > 0) {
-        std::fill(pick.begin(), pick.end(), 0);
-        for (int m = 0; m < src.nummeshes; ++m) {
-            const SrcMesh& mesh = src.mesh[src.meshindex[m]];
-            for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
-                if (f >= static_cast<int>(src.faceTag.size()) || (src.faceTag[f] >> 8) != meshTag)
-                    continue;
-                const SrcFace& face = src.face[f];
-                pick[mesh.vertexoffset + face.a] = pick[mesh.vertexoffset + face.b] =
-                    pick[mesh.vertexoffset + face.c] = 1;
-            }
-        }
-    }
-    if (!materials.empty() && mats) {
-        for (size_t i = 0; i < src.vertex.size(); ++i) {
-            const int mat = src.vertex[i].material;
-            if (mat < 0 || mat >= static_cast<int>(mats->materialToTexture.size())) {
-                pick[i] = 0;
-                continue;
-            }
-            pick[i] = pick[i] && MaterialMatches(mats->textures[mats->materialToTexture[mat]].name, materials);
-        }
-    }
-    if (std::find(pick.begin(), pick.end(), 1) == pick.end())
-        return src.vertex.empty();
-    if (amount == 0.0f)
-        return true;
-
-    std::vector<Vector3> push(src.vertex.size());
-    for (size_t i = 0; i < push.size(); ++i) {
-        push[i] = src.vertex[i].normal;
-        pm::VectorNormalize(push[i]);
-    }
-    ApplyInflation(src, pick, push, std::vector<float>(push.size(), amount));
-    return true;
-}
-
 void FlipNormals(Source& src) {
     for (SrcVertex& v : src.vertex) {
         v.normal = {-v.normal.x, -v.normal.y, -v.normal.z};
@@ -1196,7 +1153,7 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
         for (int fi = 0; fi < srcMesh.numfaces; fi++) {
             const int f = srcMesh.faceoffset + fi;
             const SrcFace& face = src.face[f];
-            std::vector<unsigned int>& grp = groups[tagged ? (src.faceTag[f] & 0xFF) : 0];
+            std::vector<unsigned int>& grp = groups[tagged ? src.faceTag[f] : 0];
             grp.insert(grp.end(), {face.a, face.b, face.c});
         }
 

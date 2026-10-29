@@ -326,7 +326,6 @@ const Field kMesh[] = {
     F("name", Type::String, "Mesh name model groups refer to.").Declares("mesh").Required(),
     F("file", Type::File, "Source file (.dmx, .smd, .fbx).").Required(),
     F("noMorph", Type::Bool, "Load without morphs."),
-    F("flipNormals", Type::Bool, "Flip normals."),
     F("decimate", Type::Number, "Keep this share of faces (0-1].").Default(1.0),
     F("skinnedBoneCull", Type::Enum, "Drop unweighted bones.").Values(kSkinnedBoneCulls),
 };
@@ -2159,7 +2158,6 @@ void LowerMesh(Emitter& e, const Json& mesh) {
     };
 
     if (True(mesh, "noMorph")) { open("noMorph"); e.Word("$nomorph"); }
-    if (True(mesh, "flipNormals")) { open("flipNormals"); e.Word("$flipnormals"); }
     if (const Json* v = Get(mesh, "decimate")) {
         open("decimate");
         e.Word("$decimate");

@@ -45,7 +45,6 @@ struct MeshFilter {
         bool matched = false;
     };
     std::vector<TagEntry> tags;
-    std::vector<TagEntry> inflateTags; // $inflate mesh: same shape, packed into the high byte
     int Tag(const std::string& meshName, const std::string& dagName);
 
     struct EditStream {
@@ -112,14 +111,6 @@ void CullUnskinnedBones(Source& src, SkinnedBoneCull mode);
 // bone weights. sharpEdges preserves normal splits at each merged centroid.
 void WeldVertices(Source& src, std::vector<char>& selection,
                   float distance = 0.0001f, bool sharpEdges = false);
-
-// Offset vertices and morph targets along their unit normals, in model units.
-// `meshTag` > 0 limits it to faces with that $inflate mesh group, `materials` to
-// vertices of those materials (path and extension ignored); neither = all.
-// False if the selection matched no vertex.
-bool InflateVertices(Source& src, float amount, int meshTag = 0,
-                     const std::vector<std::string>& materials = {},
-                     const MaterialTable* mats = nullptr);
 
 // $scalebone: scale a bone's subtree in its bind-space axes, deforming skinned
 // vertices by their subtree weight and moving descendant bone origins. False if no such bone.

@@ -561,15 +561,6 @@ struct MeshEdit {
     std::vector<std::vector<source::EditMeshOperation>> editBlocks;
     source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
     bool noMorph = false;
-    // $inflate <amount> [material|mesh <name>...] in script order; tag 0 = no mesh scope
-    struct Inflate {
-        float amount = 0.0f;
-        int tag = 0;
-        std::vector<std::string> materials;
-        int line = 0;
-    };
-    std::vector<Inflate> inflates;
-    bool flipNormals = false;
     bool skeletalAwareDecimation = false; // $use_skeletalaware_decimation
     // $decimate / $decimatemesh in script order: (factor, face tag or -1 = all)
     std::vector<std::pair<float, int>> decimates;
@@ -890,10 +881,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "$decimatemesh needs a DMX or FBX source - an SMD has no named meshes");
             return nullptr;
         }
-        if (edit && !edit->filter.inflateTags.empty()) {
-            c.Fail(line, "$inflate mesh needs a DMX or FBX source - an SMD has no named meshes");
-            return nullptr;
-        }
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
                                    morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -913,15 +900,11 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 c.Fail(line, "$exceptionlist names \"" + *miss + "\", which is not a mesh in \"" +
                                  filename + "\"");
                 return nullptr;
-            }            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
+            }
+
+            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
                 if (!e.matched) {
                     c.Fail(line, "$decimatemesh names \"" + e.name +
-                                     "\", which is not a kept mesh in \"" + filename + "\"");
-                    return nullptr;
-                }
-            for (const source::MeshFilter::TagEntry& e : edit->filter.inflateTags)
-                if (!e.matched) {
-                    c.Fail(line, "$inflate mesh names \"" + e.name +
                                      "\", which is not a kept mesh in \"" + filename + "\"");
                     return nullptr;
                 }
@@ -947,15 +930,11 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 c.Fail(line, "$exceptionlist names \"" + *miss + "\", which is not a mesh in \"" +
                                  filename + "\"");
                 return nullptr;
-            }            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
+            }
+
+            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
                 if (!e.matched) {
                     c.Fail(line, "$decimatemesh names \"" + e.name +
-                                     "\", which is not a kept mesh in \"" + filename + "\"");
-                    return nullptr;
-                }
-            for (const source::MeshFilter::TagEntry& e : edit->filter.inflateTags)
-                if (!e.matched) {
-                    c.Fail(line, "$inflate mesh names \"" + e.name +
                                      "\", which is not a kept mesh in \"" + filename + "\"");
                     return nullptr;
                 }
@@ -1103,59 +1082,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            // $inflate <amount> [material <name>... | mesh <name>...] - repeatable;
-            // no scope inflates everything. Names run to the end of the line.
-            if (o == "$inflate") {
-                MeshEdit::Inflate inf;
-                inf.line = t->line;
-                if (!c.WantFloat("an inflation amount", *t, inf.amount))
-                    return false;
-                if (!std::isfinite(inf.amount))
-                    return c.Fail(t->line, where + ": $inflate amount must be finite");
-                auto onLine = [&] {
-                    return !c.AtCommand() && c.Cur().line == t->line &&
-                           !(!c.Cur().quoted && c.Cur().text == "}");
-                };
-                if (onLine()) {
-                    const Token* k = c.Next();
-                    const std::string kind = Lower(k->text);
-                    if (kind == "mesh") {
-                        inf.tag = 1;
-                        for (const auto& e : edit.filter.inflateTags)
-                            if (e.tag >= inf.tag) inf.tag = e.tag + 1;
-                        if (inf.tag > 255)
-                            return c.Fail(t->line, where + ": too many $inflate mesh lines");
-                    } else if (kind != "material") {
-                        return c.Fail(k->line, where + ": $inflate expects material or mesh, got \"" +
-                                                   k->text + "\"");
-                    }
-                    while (onLine()) {
-                        const Token* m = c.Next();
-                        if (inf.tag == 0) {
-                            inf.materials.push_back(m->text);
-                            continue;
-                        }
-                        for (const auto& e : edit.filter.inflateTags)
-                            if (_stricmp(e.name.c_str(), m->text.c_str()) == 0)
-                                return c.Fail(m->line, where + ": mesh \"" + m->text +
-                                                           "\" is in more than one $inflate mesh");
-                        edit.filter.inflateTags.push_back({m->text, inf.tag});
-                    }
-                    if (inf.materials.empty() &&
-                        (edit.filter.inflateTags.empty() || edit.filter.inflateTags.back().tag != inf.tag))
-                        return c.Fail(t->line, where + ": $inflate " + kind + " expects names");
-                }
-                edit.inflates.push_back(std::move(inf));
-                continue;
-            }
-
             if (o == "$use_skeletalaware_decimation") {
                 edit.skeletalAwareDecimation = true;
-                continue;
-            }
-
-            if (o == "$flipnormals") {
-                edit.flipNormals = true;
                 continue;
             }
 
@@ -1292,7 +1220,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, "
-                                           "$meshedit, $skinnedbonecull, $inflate, $flipnormals, $decimate, $decimatemesh, "
+                                           "$meshedit, $skinnedbonecull, $decimate, $decimatemesh, "
                                            "$use_skeletalaware_decimation, $scalebone, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
         }
@@ -1336,12 +1264,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             return c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
     }
 
-    for (const MeshEdit::Inflate& inf : edit.inflates)
-        if (!source::InflateVertices(*src, inf.amount, inf.tag, inf.materials, &c.in.mats))
-            return c.Fail(inf.line, "$rendermesh \"" + name + "\": $inflate material matches no material in \"" +
-                                        file + "\"");
-    if (edit.flipNormals)
-        source::FlipNormals(*src);
     // Deepest bone first, so a parent's scale carries an already-scaled child
     // (the child's factor stays relative to its parent, whatever the script order).
     auto boneIndex = [&](const std::string& n) {
@@ -1795,7 +1717,6 @@ source::Source* LoadStudioSource(Ctx& c, const Token& entry, const std::string& 
                                  bool flip, float importScale, bool importFlexRig) {
     MeshEdit edit;
     edit.name = file;
-    edit.flipNormals = flip;
     const float defaultScale = c.in.scale;
     c.in.scale = importScale;
     source::Source* src = LoadSource(c, file, entry.line, /*morphSource=*/true, &edit);

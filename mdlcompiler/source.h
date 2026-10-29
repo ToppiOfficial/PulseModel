@@ -234,7 +234,7 @@ struct Source {
     std::vector<const Source*> mergedParts;
     std::vector<int> vertexPart; // parallel to vertex; index into mergedParts
     std::vector<SrcFace> face;
-    // parallel to face: low byte $decimatemesh group, high byte $inflate mesh group; empty = none
+    // Parallel to face: $decimatemesh group; empty = none.
     std::vector<uint16_t> faceTag;
     // Indexed by material id, so sized to kMaxSkins by whichever loader fills
     // it. Left empty on a geometry-less Source - at kMaxSkins that is ~655 KB.
