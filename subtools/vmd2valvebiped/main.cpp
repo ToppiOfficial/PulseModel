@@ -27,8 +27,6 @@
 
 #include "apioutput.h"
 #include "dmxwrite.h"
-#include "dr_mp3.h"
-#include "dr_wav.h"
 #include "mdlfile.h"
 #include "pulselimits.h"
 #include "strcompat.h"
@@ -1099,9 +1097,6 @@ int Usage() {
         "                   <name>_src beside the first .vmd)\n"
         "  -game <dir>      mod dir the compiled model installs into, under\n"
         "                   <dir>/models (default: beside the first .vmd)\n"
-        "  -sound           with -compile: play <vmd name>.wav (or .mp3) from beside\n"
-        "                   each .vmd when its sequence starts; converted to a 16-bit\n"
-        "                   44.1 kHz wav in <dir>/sound/mmd/\n"
         "  -start <frame>   first MMD frame (default 0)\n"
         "  -end <frame>     last MMD frame (default the motion's last key)\n"
         "  -walkframe <n>   extract the root's ground travel as sequence movement\n"
@@ -1186,7 +1181,6 @@ std::string CompilerPath(const char* argv0) {
 struct Clip {
     std::string name;
     int fps = 30;
-    std::string sound; // path under sound/, empty for none
     bool camera = false; // an .smd holding only kCameraBone
     std::string walk;    // walkframe options for its $sequence
 };
@@ -1261,95 +1255,6 @@ bool WriteCameraSmd(const std::string& path, const std::vector<AnimPose>& frames
     return std::fclose(f) == 0;
 }
 
-// Decodes a .wav or .mp3 and writes it as the PCM wav the engine plays: 16-bit,
-// mono or stereo, 44100 Hz unless it already sits at 11025/22050. Returns a
-// reason on failure; `note` says what was converted.
-std::string ConvertAudio(const std::string& src, const std::string& dst, std::string& note) {
-    std::vector<char> buf;
-    if (!mdldecompiler::ReadWhole(src, buf))
-        return "cannot be read";
-    unsigned ch = 0, rate = 0;
-    drwav_uint64 frames = 0;
-    int16_t* pcm = nullptr;
-    const bool mp3 = _stricmp(fs::path(src).extension().string().c_str(), ".mp3") == 0;
-    if (mp3) {
-        drmp3_config cfg{};
-        drmp3_uint64 n = 0;
-        pcm = drmp3_open_memory_and_read_pcm_frames_s16(buf.data(), buf.size(), &cfg, &n, nullptr);
-        frames = n;
-        ch = cfg.channels;
-        rate = cfg.sampleRate;
-    } else {
-        pcm = drwav_open_memory_and_read_pcm_frames_s16(buf.data(), buf.size(), &ch, &rate, &frames, nullptr);
-    }
-    if (!pcm || !ch || !rate || !frames) {
-        mp3 ? drmp3_free(pcm, nullptr) : drwav_free(pcm, nullptr);
-        return "could not be decoded";
-    }
-
-    // more than two channels folds down to the first two
-    const unsigned outCh = std::min(ch, 2u);
-    const unsigned outRate = (rate == 11025 || rate == 22050 || rate == 44100) ? rate : 44100;
-    const double step = static_cast<double>(rate) / outRate;
-    const size_t outFrames = static_cast<size_t>(static_cast<double>(frames) / step);
-    std::vector<int16_t> out(outFrames * outCh);
-    if (outRate == rate) {
-        for (size_t i = 0; i < outFrames; ++i)
-            for (unsigned c = 0; c < outCh; ++c)
-                out[i * outCh + c] = pcm[i * ch + c];
-    } else {
-        // Hann-windowed sinc, cut off at the lower Nyquist so a downsample
-        // does not alias. 32 taps a side is plenty for music.
-        const int taps = 32;
-        const double cutoff = std::min(1.0, 1.0 / step);
-        for (size_t i = 0; i < outFrames; ++i) {
-            const double at = i * step;
-            const long centre = static_cast<long>(at);
-            for (unsigned c = 0; c < outCh; ++c) {
-                double sum = 0.0, wsum = 0.0;
-                for (long k = centre - taps + 1; k <= centre + taps; ++k) {
-                    if (k < 0 || k >= static_cast<long>(frames))
-                        continue;
-                    const double x = (at - k) * cutoff;
-                    const double sinc = std::fabs(x) < 1e-9 ? 1.0 : std::sin(pm::kPiF * x) / (pm::kPiF * x);
-                    const double win = 0.5 + 0.5 * std::cos(pm::kPiF * (at - k) / taps);
-                    sum += pcm[k * ch + c] * sinc * win;
-                    wsum += sinc * win;
-                }
-                const double v = wsum != 0.0 ? sum / wsum : 0.0;
-                out[i * outCh + c] = static_cast<int16_t>(std::clamp(v, -32768.0, 32767.0));
-            }
-        }
-    }
-    mp3 ? drmp3_free(pcm, nullptr) : drwav_free(pcm, nullptr);
-
-    std::FILE* f = std::fopen(dst.c_str(), "wb");
-    if (!f)
-        return "cannot write \"" + dst + "\"";
-    const uint32_t bytes = static_cast<uint32_t>(out.size() * 2);
-    const auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
-    const auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
-    std::fwrite("RIFF", 1, 4, f);
-    u32(36 + bytes);
-    std::fwrite("WAVEfmt ", 1, 8, f);
-    u32(16);
-    u16(1);
-    u16(static_cast<uint16_t>(outCh));
-    u32(outRate);
-    u32(outRate * outCh * 2);
-    u16(static_cast<uint16_t>(outCh * 2));
-    u16(16);
-    std::fwrite("data", 1, 4, f);
-    u32(bytes);
-    std::fwrite(out.data(), 2, out.size(), f);
-    const bool ok = std::fclose(f) == 0;
-
-    note = std::string(mp3 ? "mp3" : "wav") + " " + std::to_string(rate) + " Hz " +
-           std::to_string(ch) + "ch -> wav " + std::to_string(outRate) + " Hz 16-bit " +
-           std::to_string(outCh) + "ch";
-    return ok ? std::string() : "cannot write \"" + dst + "\"";
-}
-
 // An animation-only model: the reference skeleton, its bonemerge tags, and one
 // $sequence per clip. Joints go out exactly as the decompiler writes them.
 bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& modelname,
@@ -1357,6 +1262,7 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f)
         return false;
+
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudiobone_t* bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
     const std::vector<std::string> names = mdldecompiler::BoneNames(m);
@@ -1391,13 +1297,10 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
     }
     std::fprintf(f, "\n$animblocksize 64\n\n");
     for (const Clip& c : clips) {
-        std::fprintf(f, "$sequence \"%s\" \"%s.%s\" fps %d%s", c.name.c_str(), c.name.c_str(),
+        std::fprintf(f, "$sequence \"%s\" \"%s.%s\" fps %d%s\n", c.name.c_str(), c.name.c_str(),
                      c.camera ? "smd" : "dmx", c.fps, c.walk.c_str());
-        // client-side, fires at sequence start; a .wav/.mp3 name skips soundscripts
-        if (!c.sound.empty())
-            std::fprintf(f, " {\n    event AE_CL_PLAYSOUND 0 \"%s\"\n}", c.sound.c_str());
-        std::fputc('\n', f);
     }
+
     std::fclose(f);
     return true;
 }
@@ -1415,7 +1318,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     long startArg = -1, endArg = -1;
     long walkEvery = -1;
     float walkTol = 4.0f;
-    bool uncompress = false, sound = false;
+    bool uncompress = false;
     std::string dmxEncoding = "binary";
     int dmxModel = 15;
     for (int i = 1; i < argc; ++i) {
@@ -1439,7 +1342,6 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                 return Fail("-walkframe must be 0 (auto) or more frames");
         }
         else if (!_stricmp(a, "-walktolerance")) walkTol = static_cast<float>(std::atof(next()));
-        else if (!_stricmp(a, "-sound")) sound = true;
         else if (!_stricmp(a, "-dmxencoding")) dmxEncoding = next();
         else if (!_stricmp(a, "-dmxmodel")) dmxModel = std::atoi(next());
         else if (!_stricmp(a, "-facemap")) faceMapPath = next();
@@ -1447,14 +1349,13 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         else if (!_stricmp(a, "-camerafov")) cameraFov = next();
         else return Usage();
     }
+
     if (vmdPaths.empty() || mdlPath.empty())
         return Usage();
     if (!outPath.empty() && (vmdPaths.size() > 1 || !compileName.empty()))
         return Fail("-o names one .dmx; it cannot be used with several -vmd or with -compile");
     if (walkTol <= 0.0f)
         return Fail("-walktolerance must be above 0");
-    if (sound && compileName.empty())
-        return Fail("-sound writes a sequence event, so it needs -compile");
     if (const char* e = mdldecompiler::SetDmxOutput(dmxEncoding, dmxModel))
         return Fail(e);
     if (!cameraFov.empty() && cameraFov != "bone" && cameraFov != "dmx")
@@ -2009,7 +1910,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         while (t.parent[root] >= 0)
             root = t.parent[root];
         const std::string walkOpts = walkEvery >= 0 ? WalkFrames(frames, root, walkEvery, walkTol) : std::string();
-        clips.push_back({clip, fps, std::string(), false, walkOpts});
+        clips.push_back({clip, fps, false, walkOpts});
 
         std::printf("wrote %s\n", path.c_str());
         std::printf("  %ld frame%s at %d fps", count, count == 1 ? "" : "s", fps);
@@ -2036,7 +1937,6 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                 return Fail("cannot write \"" + dataPath + "\"");
             std::printf("wrote %s\n", dataPath.c_str());
         }
-        const size_t body = clips.size() - 1;
 
         // camera: <vmd name>_camera.vmd beside the motion, else the motion's own keys,
         // sampled over the body clip's frames so the two stay in sync
@@ -2073,7 +1973,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
             const std::string camPath = (fs::path(path).parent_path() / (camClip + ".smd")).string();
             if (!WriteCameraSmd(camPath, cf, fovBone ? &fov : nullptr))
                 return Fail("cannot write \"" + camPath + "\"");
-            clips.push_back({camClip, fps, std::string(), true});
+            clips.push_back({camClip, fps, true});
             const auto [fovLo, fovHi] = std::minmax_element(fov.begin(), fov.end());
             std::printf("wrote %s\n  %zu camera keys from %s, fov %g-%g degrees\n", camPath.c_str(),
                         cams.size(), camFile ? camVmd.c_str() : "the motion", *fovLo, *fovHi);
@@ -2094,34 +1994,6 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
             }
         }
 
-        // -sound: <vmd name>.wav (else .mp3) beside the .vmd, converted into
-        // <game>/sound/mmd/<clip>.wav and played from frame 0 of the sequence
-        if (sound) {
-            std::string audio;
-            for (const char* ext : {".wav", ".mp3"})
-                if (fs::exists(mdldecompiler::StripExt(vmdPath) + ext, ec)) {
-                    audio = mdldecompiler::StripExt(vmdPath) + ext;
-                    break;
-                }
-            if (audio.empty()) {
-                std::printf("  no .wav or .mp3 named like the .vmd - no sound\n");
-                continue;
-            }
-            const std::string rel = "mmd/" + clip + ".wav";
-            if (rel.size() > 64)
-                return Fail("sound path \"" + rel + "\" is over the 64-character event limit - "
-                            "rename the .vmd shorter");
-            const fs::path dst = fs::path(gameDir) / "sound" / "mmd" / (clip + ".wav");
-            fs::create_directories(dst.parent_path(), ec);
-            std::string note;
-            const std::string why = ConvertAudio(audio, dst.string(), note);
-            if (!why.empty())
-                return Fail("\"" + audio + "\" " + why);
-            clips[body].sound = rel;
-            std::printf("  sound %s (%s)\n", dst.string().c_str(), note.c_str());
-            if (first > 0)
-                std::printf("  warning: -start trims the motion but not the audio - they will not line up\n");
-        }
         if (srcDir.empty())
             std::printf("  $sequence \"%s\" \"%s\" fps %d%s\n", clip.c_str(),
                         mdldecompiler::BaseName(path).c_str(), fps, walkOpts.c_str());
