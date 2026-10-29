@@ -85,6 +85,7 @@ struct Token {
     // parameter). Only conditions care: an expanded operand is a literal value,
     // never the name of another variable to look up.
     bool expanded = false;
+    bool expression = false; // a $definevariable "( ... )" value, parens included
     int apiSource = -1;
 };
 
@@ -133,6 +134,29 @@ bool Tokenize(const std::string& s, const std::string& file, const std::string& 
             out.push_back({std::string(1, c), line, false});
             variableList = c != ']';
             i++;
+            continue;
+        }
+        if (c == '(' && (variableList || (out.size() >= 2 && !out[out.size() - 2].quoted &&
+            (_stricmp(out[out.size() - 2].text.c_str(), "$definevariable") == 0 ||
+             _stricmp(out[out.size() - 2].text.c_str(), "$redefinevariable") == 0)))) {
+            Token t;
+            t.line = line;
+            t.expression = true;
+            int depth = 0;
+            while (i < s.size()) {
+                const char d = s[i++];
+                if (d == '\n') line++;
+                t.text.push_back(d);
+                if (d == '(') depth++;
+                else if (d == ')' && --depth == 0) break;
+            }
+            if (depth != 0) {
+                if (!err) return false;
+                *err = file + "(" + std::to_string(t.line) + "): unterminated \"(\" expression";
+                pulse::diag::NoteFailure(*err, {path, t.line}, "unterminated \"(\" expression");
+                return false;
+            }
+            out.push_back(std::move(t));
             continue;
         }
         if (c == '"') {
@@ -8502,6 +8526,107 @@ bool PinnedByDefVar(Ctx& c, const Token& cmd, const std::string& name) {
     return true;
 }
 
+bool CondNumeric(const std::string& s);
+
+// "( ... )" arithmetic: + - * / with precedence, unary sign, nested parens.
+// A $name$ operand must hold a single number; anything else is an error.
+struct ArithEval {
+    Ctx& c;
+    const Token& cmd;
+    const std::string& s;
+    size_t i = 0;
+    bool ok = true;
+
+    double Stop(const std::string& msg) {
+        if (ok) c.Fail(cmd.line, cmd.text + ": " + msg + " in " + s);
+        ok = false;
+        return 0.0;
+    }
+    char Peek() {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) i++;
+        return i < s.size() ? s[i] : '\0';
+    }
+
+    double Number() {
+        const size_t start = i;
+        while (i < s.size() && (std::isdigit(static_cast<unsigned char>(s[i])) || s[i] == '.'))
+            i++;
+        const std::string text = s.substr(start, i - start);
+        if (!CondNumeric(text)) return Stop("\"" + text + "\" is not a number");
+        return std::strtod(text.c_str(), nullptr);
+    }
+
+    double Variable() {
+        const size_t e = VarRefEnd(s, i);
+        if (e == std::string::npos) return Stop("unclosed variable reference");
+        const std::string name = s.substr(i + 1, e - i - 1);
+        i = e + 1;
+        const auto it = c.variables.find(name);
+        if (it == c.variables.end())
+            return Stop("unknown variable \"$" + name + "$\"");
+        if (it->second.list || !CondNumeric(it->second.text))
+            return Stop("variable \"$" + name + "$\" is \"" + it->second.text +
+                        "\", not an int or float");
+        return std::strtod(it->second.text.c_str(), nullptr);
+    }
+
+    double Factor() {
+        const char ch = Peek();
+        if (ch == '-' || ch == '+') {
+            i++;
+            const double v = Factor();
+            return ch == '-' ? -v : v;
+        }
+        if (ch == '(') {
+            i++;
+            const double v = Expr();
+            if (Peek() != ')') return Stop("expected \")\"");
+            i++;
+            return v;
+        }
+        if (ch == '$') return Variable();
+        if (std::isdigit(static_cast<unsigned char>(ch)) || ch == '.') return Number();
+        return Stop(ch ? std::string("unexpected \"") + ch + "\"" : "the expression ends early");
+    }
+
+    double Term() {
+        double v = Factor();
+        for (char op = Peek(); ok && (op == '*' || op == '/'); op = Peek()) {
+            i++;
+            const double rhs = Factor();
+            if (op == '/' && rhs == 0.0) return Stop("division by zero");
+            v = op == '*' ? v * rhs : v / rhs;
+        }
+        return v;
+    }
+
+    double Expr() {
+        double v = Term();
+        for (char op = Peek(); ok && (op == '+' || op == '-'); op = Peek()) {
+            i++;
+            const double rhs = Term();
+            v = op == '+' ? v + rhs : v - rhs;
+        }
+        return v;
+    }
+};
+
+// Whole results print without a decimal point, so (2 * 3) can feed an int field.
+bool EvalArithmetic(Ctx& c, const Token& cmd, const std::string& expr, std::string& out) {
+    ArithEval e{c, cmd, expr};
+    const double v = e.Factor(); // the outer "( ... )" is itself one factor
+    if (e.ok && e.Peek() != '\0') e.Stop("unexpected text after the closing \")\"");
+    if (!e.ok) return false;
+
+    char buf[64];
+    if (v == std::floor(v) && std::fabs(v) < 1e15)
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+    else
+        std::snprintf(buf, sizeof(buf), "%.10g", v);
+    out = buf;
+    return true;
+}
+
 bool ReadVariableValue(Ctx& c, const Token& cmd, Ctx::Variable& value) {
     if (c.Eof()) return c.Fail(cmd.line, cmd.text + " expects a value");
 
@@ -8521,7 +8646,15 @@ bool ReadVariableValue(Ctx& c, const Token& cmd, Ctx::Variable& value) {
             }
 
             std::vector<Token> elements;
-            if (!ExpandVarTokens(c, token, elements)) return false;
+            if (token.expression) {
+                std::string result;
+                if (!EvalArithmetic(c, cmd, token.text, result)) return false;
+                token.text = std::move(result);
+                token.expression = false;
+                elements.push_back(std::move(token));
+            } else if (!ExpandVarTokens(c, token, elements)) {
+                return false;
+            }
 
             for (Token& element : elements) {
                 if (!value.tokens.empty()) value.text += ' ';
@@ -8531,6 +8664,8 @@ bool ReadVariableValue(Ctx& c, const Token& cmd, Ctx::Variable& value) {
         }
         return c.Fail(cmd.line, cmd.text + " list expects a closing \"]\"");
     }
+    if (token.expression)
+        return EvalArithmetic(c, cmd, token.text, value.text);
 
     if (!token.quoted && !token.text.empty() && token.text[0] == '$') {
         if (VarRefEnd(token.text, 0) == std::string::npos)
@@ -8571,7 +8706,8 @@ bool SetVariable(Ctx& c, const Token& cmd, bool redefine) {
     return true;
 }
 
-// $definevariable <name> <value> or <name> [<value> ...].
+// $definevariable <name> <value>, <name> [<value> ...] or <name> (<arithmetic>);
+// a list element may also be an (<arithmetic>).
 bool CmdDefineVariable(Ctx& c, const Token& cmd) {
     return SetVariable(c, cmd, false);
 }
