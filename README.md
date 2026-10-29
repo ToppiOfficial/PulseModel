@@ -11,62 +11,41 @@
 <img alt="license" src="https://img.shields.io/badge/license-MIT-success?style=for-the-badge">
 </p>
 
-A Source-engine model toolkit for **studiomdl version 49** (HL2, TF2, L4D2,
-GMod, CS:S, SFM). One build produces two executables:
+A Source engine model toolkit targeting **MDL v49** (HL2, TF2, L4D2, GMod,
+CS:S, SFM), with `mdlcompiler` and `mdldecompiler` for Windows and Linux.
 
-- **`mdlcompiler`** - compile script + DMX/SMD/FBX sources -> `.mdl`, `.vvd`,
-  `.vtx`, `.phy`.
-- **`mdldecompiler`** - an existing `.mdl` -> a compile script with `.dmx`
-  meshes and animations beside it.
-
-> **Beta, Windows and Linux.** It compiles models that load and render in-engine, but
-> expect rough edges and script-command changes between versions.
+> **Beta.** New commands may be experimental and can change or be removed between
+> versions as concepts are tested. Expect rough edges and script compatibility changes.
 
 ## Download
 
-**Stable releases are on the [Releases](https://github.com/ToppiOfficial/PulseModel/releases) tab.**
-
-**dev builds**, straight from the latest CI run (no login needed) -
-expect rough edges:
+[Stable releases](https://github.com/ToppiOfficial/PulseModel/releases) or latest dev builds:
 
 - **[Windows x64 (dev)](https://nightly.link/ToppiOfficial/PulseModel/workflows/dev/main/pulsemodel-win64.zip)**
 - **[Linux x64 (dev)](https://nightly.link/ToppiOfficial/PulseModel/workflows/dev/main/pulsemodel-linux64.zip)**
 
-Unzip anywhere; both `mdlcompiler` and `mdldecompiler` are inside the
-`PulseModel/` folder.
+Both tools are in the archive's `PulseModel/` folder.
 
 ## mdlcompiler
 
-Supports meshes, LODs, bodygroups, materials and skins; skeletons, bone markup,
-collapse rules and bind-pose edits; procedural bones (jiggle, driver, aim-at,
-VRD); animations and sequences, including demand-loaded `.ani`, layering, pose
-parameters, IK chains and weight lists; flex/morph, face markup, eyeballs and
-eyelids; physics hulls, ragdoll joints, hitboxes and convex decomposition; and a
-script preprocessor (`$include`, variables, macros, `$if`/`$ifdef`/`$switch`).
+Compiles DMX, SMD and FBX. Supports DMX up to model format 22 / binary encoding 9,
+plus LODs, bodygroups, flexes, procedural bones, IK, animation layering, physics,
+mesh editing and QC preprocessing.
 
-DMX is the main source format; SMD and FBX also work. DMX files are read up to
-model format 22 / binary encoding 9 (Source 2 ModelDoc), and lower versions still
-work. Both `.vtx` layouts ship: legacy (`-vtxformat 0`, TF2/L4D2/GMod/HL2) and
-full (`-vtxformat 1`, SFM/CS:GO/ASW). At the legacy layout a DirectX 8 `.dx80.vtx`
-is written next to the `.dx90.vtx` by default; skip it with `-nodx80` or `$nodx80`.
-
-**Limits are not Valve's.** The compiler rejects only counts the file format
-cannot express; several limits are uncapped (bones, meshes, attachments,
-materials, animations). Its own ceilings live in `libs/pulselimits.h`. So a model
-that compiles is not guaranteed to load - the engine you ship to decides that.
+Compiler limits are defined in `libs/pulselimits.h` and may exceed engine limits.
+A successful compile does not guarantee the model will load in the target game.
 
 ### Usage
 
 ```
-mdlcompiler <file.qc|file.pulseqc|file.qczip|file.pulsemodel> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
+mdlcompiler <file.qc|file.qczip> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
             [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
             [-vtxformat <0|1>] [-nodx80]
             [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
             [-legacysequencebounds] [-perfmetrics] [-pause]
 ```
 
-`.qc` and `.pulseqc` are equivalent plain-text compile scripts. `.qczip` is a
-ZIP package with `model.qc` at its root and optional bundled source files.
+`.qczip` packages contain `model.qc` at the root and optional bundled source files.
 
 | Option | Meaning |
 | --- | --- |
@@ -87,14 +66,10 @@ ZIP package with `model.qc` at its root and optional bundled source files.
 | `-perfmetrics` | Print wall time in ms for each stage of the compile. |
 | `-pause` | Wait for a keypress before exiting (drag-and-drop runs). |
 
-The QC command `$minlod <lod>` sets the same zero-based minimum LOD. A
-command-line `-minlod` value takes precedence.
-
 ### For external tools
 
-Editors and other integrations use one versioned process interface. Requests
-arrive on stdin; structured JSON records go to stdout and compiler logs go to
-stderr.
+The versioned API reads JSON requests from stdin, writes JSON records to stdout,
+and sends compiler logs to stderr.
 
 | Option | Meaning |
 | --- | --- |
@@ -102,12 +77,8 @@ stderr.
 
 ## mdldecompiler
 
-An `.mdl` plus its sibling `.vvd`/`.vtx`/`.phy`/`.ani` becomes a compile script
-with `meshes/*.dmx` and `anims/*` beside it, ready to feed back into
-`mdlcompiler`. Model versions **44 through 49** are read - static props up to
-full characters with skeletons, animations, flexes, eyeballs, LODs, bodygroups,
-hitboxes and ragdoll constraints. One unreadable mesh or animation does not abort
-the job; it writes what it can parse and tells you what it skipped.
+Reads **MDL v44-49** with sibling `.vvd`/`.vtx`/`.phy`/`.ani` files and writes
+QC, DMX meshes and animations. Unreadable meshes or animations are reported and skipped.
 
 ### Usage
 
@@ -118,14 +89,8 @@ mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
               [-pause] [-perfmetrics]
 ```
 
-Several inputs may be given at once (drag-and-drop works); a folder decompiles
-every `.mdl` under it, recursively. Pass `-pause` to hold the window open before
-exiting so the summary stays on screen.
-
-Each model lands in its own folder under a `decompiled <version>` wrapper beside
-the input. It always writes a `.qc`, using stock-studiomdl commands by default.
-Pass `-newcommands` to use newer `mdlcompiler` commands inside the same `.qc`
-format. Both command styles compile back through `mdlcompiler`.
+Accepts multiple inputs and recursive folder input. Each model gets its own folder
+under `decompiled <version>/` beside the input. QC uses stock studiomdl commands by default.
 
 | Option | Meaning |
 | --- | --- |
@@ -171,7 +136,7 @@ libs/           C++ libraries: DMX reader, math, binary format headers,
                 collision, and vendored third-party code.
                 pulselimits.h holds every hard limit.
 mdlcompiler/    The app: script loader, compile stage, .mdl/.vtx/.phy writers.
-mdldecompiler/  The reverse tool: .mdl -> .pulseqc + .dmx meshes + .smd anims.
+mdldecompiler/  The reverse tool: .mdl -> .qc + .dmx meshes + .smd anims.
 ```
 
 ## Third-party code and references
