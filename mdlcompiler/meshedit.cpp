@@ -821,6 +821,17 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                     matches[vertex] = matches[vertex] || matchedMeshes[mesh];
             }
 
+            if (!op.ignoreSelectWarn && std::find(matches.begin(), matches.end(), 1) == matches.end()) {
+                const char* selector = op.kind == MeshOperation::SelectStream ? "$selectdatastream"
+                    : op.kind == MeshOperation::SelectMaterial ? "$selectmaterial"
+                    : op.kind == MeshOperation::SelectMesh ? "$selectmesh"
+                    : op.kind == MeshOperation::SelectMeshByStream ? "$selectmeshbystream"
+                    : "$selectweights";
+                pulse::diag::Location at = pulse::diag::Current();
+                at.line = op.line;
+                pulse::diag::WarnAtf(at, "$meshedit: %s: no vertices matched", selector);
+            }
+
             for (size_t i = 0; i < selection.size(); ++i) {
                 if (op.combine == SelectionCombine::Add) selection[i] = selection[i] || matches[i];
                 else if (op.combine == SelectionCombine::Subtract) selection[i] = selection[i] && !matches[i];

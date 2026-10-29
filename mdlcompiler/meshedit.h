@@ -76,6 +76,7 @@ struct EditMeshOperation {
     bool selectChildren = false;
     bool contains = false; // $selectmaterial contains: case-insensitive substring match
     bool worldAxes = false;
+    bool ignoreSelectWarn = false;
     int line = 0;
 };
 

@@ -578,6 +578,13 @@ struct MeshEdit {
 };
 
 bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
+    bool ignoreSelectWarn = false;
+    if (!c.Eof() && !c.Cur().quoted && c.Cur().line == cmd.line &&
+        Lower(c.Cur().text) == "ignoreselectwarn") {
+        ignoreSelectWarn = true;
+        ++c.pos;
+    }
+
     if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
         return c.Fail(cmd.line, "$meshedit expects '{'");
     ++c.pos;
@@ -594,6 +601,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         if (!name.empty() && name.front() == '$') name.erase(0, 1);
         source::EditMeshOperation op;
         op.line = t->line;
+        op.ignoreSelectWarn = ignoreSelectWarn;
         const std::string where = "$meshedit: " + t->text;
         auto hasArg = [&] {
             return !c.Eof() && c.Cur().line == t->line &&
@@ -949,9 +957,10 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 for (const auto& stream : edit->filter.editStreams) {
                     if (_stricmp(op.name.c_str(), stream.name.c_str()) != 0 || stream.found) continue;
 
-                    pulse::diag::WarnAt({c.Path(), op.line}, "$rendermesh \"" + edit->name +
-                        "\": $meshedit: no kept mesh has float stream \"" + op.name +
-                        "\"; $selectdatastream skipped");
+                    if (!op.ignoreSelectWarn)
+                        pulse::diag::WarnAt({c.Path(), op.line}, "$rendermesh \"" + edit->name +
+                            "\": $meshedit: no kept mesh has float stream \"" + op.name +
+                            "\"; $selectdatastream skipped");
                     return true;
                 }
 
