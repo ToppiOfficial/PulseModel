@@ -213,9 +213,11 @@ struct Source {
     std::vector<SrcVertex> vertex;
 
     // Requested model 22 float streams, per unified vertex; NaN means absent.
+    // A $switchuv vector2 stream is two entries, component 0 (U) and 1 (V).
     struct EditStream {
         std::string name;
         std::vector<float> values;
+        int component = -1;
     };
     std::vector<EditStream> editStreams;
 

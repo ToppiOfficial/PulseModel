@@ -49,6 +49,7 @@ struct MeshFilter {
 
     struct EditStream {
         std::string name;
+        int component = -1; // -1 float stream; 0/1 = U/V of a $switchuv vector2 stream
         bool found = false;
     };
     std::vector<EditStream> editStreams;
@@ -61,7 +62,7 @@ enum class MeshOperation {
     SelectStream, SelectMaterial, SelectMesh, SelectMeshByStream,
     SelectWeights, SetWeight, ShiftWeights,
     SelectAll, SelectNone, InvertSelection, DeleteFaces,
-    DeleteVertices, Duplicate, ReplaceMaterial, FlipNormals, Weld, Inflate
+    DeleteVertices, Duplicate, ReplaceMaterial, FlipNormals, Weld, Inflate, SwitchUV
 };
 
 struct EditMeshOperation {

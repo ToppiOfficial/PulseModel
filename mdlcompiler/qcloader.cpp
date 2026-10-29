@@ -703,8 +703,22 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
 
                 bool registered = false;
                 for (const auto& stream : edit.filter.editStreams)
-                    registered = registered || _stricmp(stream.name.c_str(), op.name.c_str()) == 0;
+                    registered = registered || (stream.component < 0 &&
+                                                _stricmp(stream.name.c_str(), op.name.c_str()) == 0);
                 if (!registered) edit.filter.editStreams.push_back({op.name});
+            }
+        } else if (name == "switchuv") {
+            op.kind = MeshOperation::SwitchUV;
+            if (!want("a DMX UV stream name", op.name)) return false;
+            if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
+
+            bool registered = false;
+            for (const auto& stream : edit.filter.editStreams)
+                registered = registered || (stream.component >= 0 &&
+                                            _stricmp(stream.name.c_str(), op.name.c_str()) == 0);
+            if (!registered) {
+                edit.filter.editStreams.push_back({op.name, 0});
+                edit.filter.editStreams.push_back({op.name, 1});
             }
         } else if (name == "setweight") {
             op.kind = MeshOperation::SetWeight;
@@ -893,9 +907,11 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             for (const auto& op : block)
                 if (op.kind == source::MeshOperation::SelectStream ||
                     op.kind == source::MeshOperation::SelectMesh ||
-                    op.kind == source::MeshOperation::SelectMeshByStream) {
+                    op.kind == source::MeshOperation::SelectMeshByStream ||
+                    op.kind == source::MeshOperation::SwitchUV) {
                     const char* selector = op.kind == source::MeshOperation::SelectStream ? "$selectdatastream"
-                        : op.kind == source::MeshOperation::SelectMesh ? "$selectmesh" : "$selectmeshbystream";
+                        : op.kind == source::MeshOperation::SelectMesh ? "$selectmesh"
+                        : op.kind == source::MeshOperation::SwitchUV ? "$switchuv" : "$selectmeshbystream";
                     c.Fail(op.line, std::string("$meshedit: ") + selector + " needs a DMX source");
                     return nullptr;
                 }
@@ -974,12 +990,24 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     }
 
     if (edit) {
+        // a missing UV stream is a hard error, unlike $selectdatastream's skip
+        for (const auto& block : edit->editBlocks)
+            for (const auto& op : block)
+                if (op.kind == source::MeshOperation::SwitchUV)
+                    for (const auto& stream : edit->filter.editStreams)
+                        if (stream.component >= 0 && !stream.found &&
+                            _stricmp(op.name.c_str(), stream.name.c_str()) == 0) {
+                            c.Fail(op.line, "$rendermesh \"" + edit->name + "\": $meshedit: no kept mesh has "
+                                            "UV stream \"" + op.name + "\"");
+                            return nullptr;
+                        }
         for (auto& block : edit->editBlocks) {
             block.erase(std::remove_if(block.begin(), block.end(), [&](const auto& op) {
                 if (op.kind != source::MeshOperation::SelectStream) return false;
 
                 for (const auto& stream : edit->filter.editStreams) {
-                    if (_stricmp(op.name.c_str(), stream.name.c_str()) != 0 || stream.found) continue;
+                    if (stream.component >= 0 || _stricmp(op.name.c_str(), stream.name.c_str()) != 0 ||
+                        stream.found) continue;
 
                     if (!op.ignoreSelectWarn)
                         pulse::diag::WarnAt({c.Path(), op.line}, "$rendermesh \"" + edit->name +

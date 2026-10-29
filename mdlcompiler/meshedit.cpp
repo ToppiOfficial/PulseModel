@@ -791,7 +791,8 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             } else if (op.kind == MeshOperation::SelectStream) {
                 const Source::EditStream* stream = nullptr;
                 for (const auto& candidate : src.editStreams)
-                    if (_stricmp(candidate.name.c_str(), op.name.c_str()) == 0) stream = &candidate;
+                    if (candidate.component < 0 && _stricmp(candidate.name.c_str(), op.name.c_str()) == 0)
+                        stream = &candidate;
                 if (!stream) return fail("no kept mesh has float stream \"" + op.name + "\"");
                 for (size_t i = 0; i < matches.size(); ++i)
                     matches[i] = std::isfinite(stream->values[i]) && stream->values[i] >= op.value;
@@ -907,6 +908,21 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             continue;
         }
         if (std::find(selection.begin(), selection.end(), 1) == selection.end()) continue;
+
+        if (op.kind == MeshOperation::SwitchUV) {
+            const Source::EditStream* uv[2] = {};
+            for (const auto& candidate : src.editStreams)
+                if (candidate.component >= 0 && _stricmp(candidate.name.c_str(), op.name.c_str()) == 0)
+                    uv[candidate.component] = &candidate;
+            if (!uv[0] || !uv[1]) return fail("no kept mesh has UV stream \"" + op.name + "\"");
+            for (size_t i = 0; i < selection.size(); ++i)
+                if (selection[i] && (!std::isfinite(uv[0]->values[i]) || !std::isfinite(uv[1]->values[i])))
+                    return fail("selected vertices have no UV stream \"" + op.name + "\"");
+            for (size_t i = 0; i < selection.size(); ++i)
+                if (selection[i]) src.vertex[i].texcoord = {uv[0]->values[i], uv[1]->values[i]};
+            CalcModelTangentSpaces(src);
+            continue;
+        }
 
         if (op.kind == MeshOperation::Weld) {
             WeldVertices(src, selection, op.value, op.sharpEdges);

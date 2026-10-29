@@ -1154,6 +1154,27 @@ FloatVertexStream FindFloatVertexStream(const dmx::Element& state, const std::st
     return stream;
 }
 
+struct Vector2VertexStream {
+    const std::vector<dmx::Vector2>* values = nullptr;
+    const std::vector<int32_t>* indices = nullptr;
+    bool present = false;
+};
+
+Vector2VertexStream FindVector2VertexStream(const dmx::Element& state, const std::string& name) {
+    Vector2VertexStream stream;
+    const std::string indexName = name + "Indices";
+    for (const auto& attribute : state.attributes) {
+        if (_stricmp(attribute.name.c_str(), name.c_str()) == 0) {
+            stream.present = true;
+            stream.values = std::get_if<std::vector<dmx::Vector2>>(&attribute.value);
+        } else if (_stricmp(attribute.name.c_str(), indexName.c_str()) == 0) {
+            stream.present = true;
+            stream.indices = std::get_if<std::vector<int32_t>>(&attribute.value);
+        }
+    }
+    return stream;
+}
+
 bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Element* mesh,
               const dmx::Element* bindState, const pm::matrix3x4& mat, int nBoneAssign) {
     MeshTemp& tmp = *info.tmp;
@@ -1239,7 +1260,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     if (info.filter && !info.filter->editStreams.empty() && positionIndices) {
         if (tmp.editStreams.empty())
             for (const auto& stream : info.filter->editStreams)
-                tmp.editStreams.push_back({stream.name, {}});
+                tmp.editStreams.push_back({stream.name, {}, stream.component});
         streamStart = tmp.editStreams.front().values.size();
         for (size_t si = 0; si < info.filter->editStreams.size(); ++si) {
             auto& request = info.filter->editStreams[si];
@@ -1249,13 +1270,32 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             if (!format || std::none_of(format->begin(), format->end(), [&](const std::string& field) {
                     return _stricmp(field.c_str(), request.name.c_str()) == 0;
                 })) continue;
-            const auto stream = FindFloatVertexStream(*bindState, request.name);
-            if (!stream.present) continue;
             auto invalid = [&] {
-                info.filter->editStreamError = "invalid float stream \"" + request.name +
-                                               "\" on mesh \"" + mesh->name + "\"";
+                info.filter->editStreamError = std::string(request.component < 0 ? "invalid float stream \""
+                                                                                 : "invalid UV stream \"") +
+                                               request.name + "\" on mesh \"" + mesh->name + "\"";
                 return false;
             };
+            if (request.component >= 0) {
+                // a UV stream follows the bind state's flipVCoordinates, as the main UV does
+                const auto uv = FindVector2VertexStream(*bindState, request.name);
+                if (!uv.present) continue;
+                if (!uv.values || !uv.indices || uv.indices->size() != positionIndices->size())
+                    return invalid();
+                const bool flipV = bindState->GetBool("flipVCoordinates", false);
+                for (size_t corner = 0; corner < positionIndices->size(); ++corner) {
+                    const int32_t index = (*uv.indices)[corner];
+                    if (index < 0 || static_cast<size_t>(index) >= uv.values->size()) return invalid();
+                    const dmx::Vector2& t = (*uv.values)[index];
+                    float value = request.component == 0 ? t.x : (flipV ? 1.0f - t.y : t.y);
+                    if (!std::isfinite(value)) return invalid();
+                    values[streamStart + corner] = value;
+                }
+                request.found = true;
+                continue;
+            }
+            const auto stream = FindFloatVertexStream(*bindState, request.name);
+            if (!stream.present) continue;
             if (!stream.values || !stream.indices || stream.indices->size() != positionIndices->size())
                 return invalid();
             for (size_t corner = 0; corner < positionIndices->size(); ++corner) {
@@ -1856,7 +1896,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
     if (!tmp.vertexEditMesh.empty()) out.vertexEditMesh.resize(numvlist);
     out.editStreams.clear();
     for (const auto& stream : tmp.editStreams)
-        out.editStreams.push_back({stream.name, std::vector<float>(numvlist)});
+        out.editStreams.push_back({stream.name, std::vector<float>(numvlist), stream.component});
     for (int i = 0; i < numvlist; i++) {
         const VUnify& u = st.listdata[v_listsort[i]];
         SrcVertex& vertex = out.vertex[i];
@@ -2530,7 +2570,10 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
                    std::string* err, bool morphSource, MeshFilter* filter, bool animOnly,
                    bool physicsShapes) {
     if (filter && (!filter->editStreams.empty() || filter->selectMeshStreams) && dm.format_version != 22) {
-        const char* selector = filter->editStreams.empty() ? "$selectmeshbystream" : "$selectdatastream";
+        const bool uv = std::any_of(filter->editStreams.begin(), filter->editStreams.end(),
+                                    [](const MeshFilter::EditStream& s) { return s.component >= 0; });
+        const char* selector = filter->editStreams.empty() ? "$selectmeshbystream"
+                               : uv ? "$switchuv" : "$selectdatastream";
         if (err) *err = std::string(selector) + " uses model 22 data streams; this file declares model " +
                         std::to_string(dm.format_version);
         return false;
@@ -2600,7 +2643,7 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
             { PULSE_PERF("load", "BuildIndividualMeshes"); BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out); }
         else if (filter)
             for (const auto& stream : filter->editStreams)
-                out.editStreams.push_back({stream.name, {}});
+                out.editStreams.push_back({stream.name, {}, stream.component});
     }
 
     // one flexkey per delta state (reference AddFlexKeys). With no combination
