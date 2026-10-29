@@ -12,6 +12,7 @@
 #include "dependencies.h"
 #include "diagnostic.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -4167,7 +4168,7 @@ void PrintResolved() {
     pulse::api::Record("resolved", record.dump());
 }
 
-void PrintCompiled(const compile::CompiledModel& model) {
+void PrintCompiled(const compile::CompileInput& input, const compile::CompiledModel& model) {
     if (g_loaded.id.empty()) return;
     const Json& m = g_loaded.lowered;
     const Json* bones = Get(m, "bones");
@@ -4182,6 +4183,24 @@ void PrintCompiled(const compile::CompiledModel& model) {
         const Json* define = bones ? FindNamed(Get(*bones, "define"), "name", original) : nullptr;
         Locate(record, define ? define : rename);
         compiledBones.push_back(std::move(record));
+    }
+
+    // source names, so a renamed bone still counts as kept under its old name
+    const auto kept = [&](const std::string& name) {
+        if (model.FindBone(name.c_str()) != -1) return true;
+        for (const auto& [from, to] : input.boneRenames)
+            if (_stricmp(from.c_str(), name.c_str()) == 0 && model.FindBone(to.c_str()) != -1) return true;
+        return false;
+    };
+    Json collapsedBones = Json::array();
+    for (const auto& source : input.sources) {
+        for (const source::LocalBone& bone : source->localBone) {
+            if (bone.isNonSkeletal || kept(bone.name)) continue;
+            const bool listed = std::any_of(collapsedBones.begin(), collapsedBones.end(), [&](const Json& name) {
+                return _stricmp(name.get_ref<const std::string&>().c_str(), bone.name.c_str()) == 0;
+            });
+            if (!listed) collapsedBones.push_back(bone.name);
+        }
     }
 
     Json attachments = Json::array();
@@ -4211,6 +4230,7 @@ void PrintCompiled(const compile::CompiledModel& model) {
     }
 
     const Json record{{"model", g_loaded.id}, {"bones", std::move(compiledBones)},
+                      {"collapsedBones", std::move(collapsedBones)},
                       {"attachments", std::move(attachments)}, {"hitboxSets", std::move(sets)}};
     pulse::api::Record("compiled", record.dump());
 }

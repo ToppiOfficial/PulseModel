@@ -37,8 +37,9 @@ void PrintSchema();
 void PrintResolved();
 
 // After a successful compile of a loaded model: one API "compiled" record mapping
-// each compiled bone, attachment and hitbox to the value that declared it, if any.
-void PrintCompiled(const compile::CompiledModel& model);
+// each compiled bone, attachment and hitbox to the value that declared it, if any,
+// plus the source bones the compile collapsed away.
+void PrintCompiled(const compile::CompileInput& input, const compile::CompiledModel& model);
 
 } // namespace pulse::pulsemodel
 

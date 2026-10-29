@@ -326,7 +326,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     if (!pulse::compile::Compile(input, model, &err))
         return Fail("compile error", err);
     auto tCompile = Clock::now();
-    if (pulseModel && api) pulse::pulsemodel::PrintCompiled(model);
+    if (pulseModel && api) pulse::pulsemodel::PrintCompiled(input, model);
 
     if (dumpMaterials) {
         std::printf("Used materials:\n");
