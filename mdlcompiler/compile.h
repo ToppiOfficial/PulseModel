@@ -117,8 +117,9 @@ struct BoneMarkup {
     bool doNotCollapse = false; // $donotcollapse - force-keep through the cull
     bool isBonemerge = false;   // $bonemerge - BONE_USED_BY_BONE_MERGE
     bool noRealign = false;     // $norealign - disable this bone's realignment
-    bool hasRealign = false;
-    BoneRealignEdit realign;
+    // $realignbone edits applied in script order, each from the previous result.
+    // A bare (automatic) edit is kept alone; it never stacks with manual ones.
+    std::vector<BoneRealignEdit> realigns;
 };
 
 // ---- procedural bones ----------------------------------------------------

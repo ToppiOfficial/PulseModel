@@ -5314,9 +5314,16 @@ bool CmdRealignBone(Ctx& c, const Token& cmd) {
         return c.Fail(cmd.line, "$realignbone: affectchildren requires origin or angles");
 
     cm::BoneMarkup& markup = FindOrAddMarkup(c, name);
+    const bool manual = edit.hasOrigin || edit.hasAngles;
+    if (!markup.realigns.empty()) {
+        const cm::BoneRealignEdit& prev = markup.realigns.back();
+        if (manual != (prev.hasOrigin || prev.hasAngles))
+            return c.Fail(cmd.line, "$realignbone: \"" + name + "\" mixes automatic alignment "
+                          "with origin/angles edits (line " + std::to_string(prev.line) + ")");
+        if (!manual) markup.realigns.clear();
+    }
     markup.noRealign = false;
-    markup.hasRealign = true;
-    markup.realign = edit;
+    markup.realigns.push_back(edit);
     return true;
 }
 
@@ -5328,7 +5335,7 @@ bool CmdNoRealign(Ctx& c, const Token& cmd) {
     for (const std::string& n : names) {
         cm::BoneMarkup& markup = FindOrAddMarkup(c, n);
         markup.noRealign = true;
-        markup.hasRealign = false;
+        markup.realigns.clear();
     }
     return true;
 }

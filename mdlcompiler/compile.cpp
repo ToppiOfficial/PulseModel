@@ -1943,27 +1943,28 @@ bool RealignBones(Ctx& ctx, std::string* err) {
 
     std::vector<int> childbone(numbones, -1);
     std::vector<bool> noRealign(numbones, false);
-    std::vector<const BoneRealignEdit*> edits(numbones, nullptr);
+    std::vector<const std::vector<BoneRealignEdit>*> edits(numbones, nullptr);
     std::vector<bool> manual(numbones, false);
     std::vector<bool> rebuildLocal(numbones, false);
     bool hasRealign = false;
 
     for (const BoneMarkup& bm : ctx.in->bonemarkups) {
-        if (!bm.noRealign && !bm.hasRealign) continue;
+        if (!bm.noRealign && bm.realigns.empty()) continue;
 
         const int k = FindGlobalBone(m, bm.name);
         if (k == -1) {
-            if (bm.hasRealign)
+            if (!bm.realigns.empty())
                 pulse::diag::Warnf("$realignbone: unknown or collapsed bone \"%s\" "
-                                   "(line %d) - skipped\n", bm.name.c_str(), bm.realign.line);
+                                   "(line %d) - skipped\n", bm.name.c_str(),
+                                   bm.realigns.front().line);
             continue;
         }
 
         noRealign[k] = bm.noRealign;
-        if (!bm.hasRealign) continue;
+        if (bm.realigns.empty()) continue;
 
-        edits[k] = &bm.realign;
-        manual[k] = bm.realign.hasOrigin || bm.realign.hasAngles;
+        edits[k] = &bm.realigns;
+        manual[k] = bm.realigns.front().hasOrigin || bm.realigns.front().hasAngles;
         hasRealign = true;
     }
 
@@ -2019,45 +2020,46 @@ bool RealignBones(Ctx& ctx, std::string* err) {
     for (size_t k = 0; k < numbones; k++) {
         if (!edits[k]) continue;
 
-        const BoneRealignEdit& edit = *edits[k];
         if (!manual[k]) {
             if (childbone[k] == -1) {
                 pulse::diag::Warnf("$realignbone: bone \"%s\" (line %d) has no unique "
                                    "child for automatic alignment - skipped\n",
-                                   m.bones[k].name.c_str(), edit.line);
+                                   m.bones[k].name.c_str(), edits[k]->front().line);
                 edits[k] = nullptr;
             }
             continue;
         }
 
-        const matrix3x4& base = m.bones[k].boneToPose;
-        const Vector3 origin = MatrixGetColumn(base, 3);
-        if (edit.hasAngles) {
-            matrix3x4 rotation;
-            pm::AngleMatrixDeg(edit.angles, rotation);
-            boneToPose[k] = edit.absolute ? rotation :
-                (edit.worldAxes ? pm::ConcatTransforms(rotation, base) :
-                                  pm::ConcatTransforms(base, rotation));
-            MatrixSetColumn(origin, 3, boneToPose[k]);
-        }
-        if (edit.hasOrigin) {
-            const Vector3 offset = edit.worldAxes || edit.absolute ? edit.origin :
-                                   pm::VectorRotate(edit.origin, base);
-            MatrixSetColumn(edit.absolute ? offset :
-                            Vector3{origin.x + offset.x, origin.y + offset.y, origin.z + offset.z},
-                            3, boneToPose[k]);
-        }
+        // FoldBoneEditDelta updates boneToPose, so each edit starts from the last.
+        for (const BoneRealignEdit& edit : *edits[k]) {
+            const matrix3x4 base = m.bones[k].boneToPose;
+            const Vector3 origin = MatrixGetColumn(base, 3);
+            if (edit.hasAngles) {
+                matrix3x4 rotation;
+                pm::AngleMatrixDeg(edit.angles, rotation);
+                boneToPose[k] = edit.absolute ? rotation :
+                    (edit.worldAxes ? pm::ConcatTransforms(rotation, base) :
+                                      pm::ConcatTransforms(base, rotation));
+                MatrixSetColumn(origin, 3, boneToPose[k]);
+            }
+            if (edit.hasOrigin) {
+                const Vector3 offset = edit.worldAxes || edit.absolute ? edit.origin :
+                                       pm::VectorRotate(edit.origin, base);
+                MatrixSetColumn(edit.absolute ? offset :
+                                Vector3{origin.x + offset.x, origin.y + offset.y, origin.z + offset.z},
+                                3, boneToPose[k]);
+            }
 
-        const matrix3x4 before = base;
-        FoldBoneEditDelta(ctx, static_cast<int>(k), before, boneToPose[k], edit.ignoreAnimation);
-        rebuildLocal[k] = true;
+            FoldBoneEditDelta(ctx, static_cast<int>(k), base, boneToPose[k], edit.ignoreAnimation);
+            rebuildLocal[k] = true;
 
-        if (edit.affectChildren) {
-            const std::vector<int> children = CollectBoneDescendants(m, static_cast<int>(k));
-            CarryBoneEditToDescendants(ctx, children, before, boneToPose[k], edit.ignoreAnimation);
-            for (int child : children) {
-                boneToPose[child] = m.bones[child].boneToPose;
-                rebuildLocal[child] = true;
+            if (edit.affectChildren) {
+                const std::vector<int> children = CollectBoneDescendants(m, static_cast<int>(k));
+                CarryBoneEditToDescendants(ctx, children, base, boneToPose[k], edit.ignoreAnimation);
+                for (int child : children) {
+                    boneToPose[child] = m.bones[child].boneToPose;
+                    rebuildLocal[child] = true;
+                }
             }
         }
     }
@@ -2128,7 +2130,7 @@ bool RealignBones(Ctx& ctx, std::string* err) {
 
             const matrix3x4 before = m.bones[k].boneToPose;
             FoldBoneEditDelta(ctx, static_cast<int>(k), before, boneToPose[k],
-                              edits[k]->ignoreAnimation);
+                              edits[k]->back().ignoreAnimation);
             rebuildLocal[k] = true;
         }
         for (size_t k = 0; k < numbones; k++)

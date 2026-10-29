@@ -578,7 +578,7 @@ const Field kBoneMarkup[] = {
     F("boneMerge", Type::Bool, "Kept for bonemerge."),
     F("doNotCollapse", Type::Bool, "Never collapsed."),
     F("noRealign", Type::Bool,
-      "Disable realignment; the last per-bone realign or noRealign instruction wins."),
+      "Disable realignment; drops earlier realign edits, later ones stack again."),
     F("alwaysCollapse", Type::Bool, "Always collapsed."),
 };
 const Item kBoneMarkupItem = MakeItem("boneMarkup", kBoneMarkup).Titled("Bone Markup", "Bones");
