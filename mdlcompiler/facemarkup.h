@@ -1,7 +1,6 @@
 // facemarkup.h - PulseMDL
 //
-// Eyeball / mouth / eyelid registration, shared by both front ends:
-// `.pulsemdl`'s facemarkuplist and `.pulseqc`'s $eyeball / $mouth / $eyelid.
+// Eyeball / mouth / eyelid registration for $eyeball / $mouth / $eyelid.
 //
 // These are TOP-LEVEL and GLOBAL in both formats, unlike the QC $model block
 // options they replace. An eyeball binds to EVERY body carrying its material;

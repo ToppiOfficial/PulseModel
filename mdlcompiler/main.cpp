@@ -9,29 +9,43 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <initializer_list>
 #include <new>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "compile.h"
+#include "api.h"
 #include "fatalerror.h"
 #include "dependencies.h"
+#include "diagnostic.h"
+#include "pathcompat.h"
 #include "perf.h"
 #include "pulselimits.h"
+#if PULSEMODEL_ENABLE_PULSEMODEL
+#include "pulsemodel.h"
+#endif
 #include "qcloader.h"
+#include "qcpackage.h"
+#include "rename.h"
 #include "writer.h"
 
-#ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
-#endif
+#include <nlohmann/json.hpp>
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
+#if PULSEMODEL_ENABLE_PULSEMODEL
+static constexpr const char* kScriptFormats = ".qc/.pulseqc/.qczip/.pulsemodel";
+#else
+static constexpr const char* kScriptFormats = ".qc/.pulseqc/.qczip";
+#endif
 
-using pulse::fatal::Fail;
+static int Fail(const char* what, const std::string& detail) {
+    pulse::diag::RecordFatal(detail);
+    const auto* package = pulse::qcpackage::active;
+    return pulse::fatal::Fail(what, package ? package->Describe(detail) : detail);
+}
 static const char*& g_stage = pulse::fatal::g_stage;
 
 static void PrintHeader() {
@@ -43,8 +57,12 @@ static void PrintHeader() {
 }
 
 static int Usage() {
-    std::printf("usage: mdlcompiler <file.qc|file.pulseqc> [-game <dir>]\n");
+    std::printf("usage: mdlcompiler <%s> [-game <dir>]\n", kScriptFormats);
     std::printf("\n");
+    std::printf("  -api          read a versioned integration request from stdin\n");
+#if PULSEMODEL_ENABLE_PULSEMODEL
+    std::printf("  -only <id>    the model to compile from a .pulsemodel holding several\n");
+#endif
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
     std::printf("  -modelname <path>   overrides $modelname\n");
@@ -73,15 +91,6 @@ static int Usage() {
     std::printf("  -verify       compile the model without writing output files\n");
     std::printf("  -legacysequencebounds   calculate sequence bounds by skinning every vertex\n");
     std::printf("  -dumpmaterials print the names of materials used by the model\n");
-    std::printf("  -dumpcommands print every accepted $command, one per line, and exit\n");
-    std::printf("  -dumpprocedural\n");
-    std::printf("                print the final bone names and the jiggle, driver and aim-at\n");
-    std::printf("                bone rules as @proc lines on stdout, then stop; no files written\n");
-    std::printf("  -stdin        read the script's text from stdin; the script path is still\n");
-    std::printf("                given and resolves relative paths as if the text were saved there\n");
-    std::printf("  -dumpdependencies\n");
-    std::printf("                after a successful compile, print every file it read as\n");
-    std::printf("                @dep <script|include|source> <fnv1a-64 hex> <absolute path>\n");
     std::printf("  -pause        wait for a keypress before exiting (drag-and-drop runs)\n");
     std::printf("  -perfmetrics  print wall time in ms for each stage of the compile\n");
     return 1;
@@ -108,90 +117,43 @@ static void DumpDefineBones(const pulse::compile::CompiledModel& model) {
     std::printf("\n------------------------------------------------------------\n");
 }
 
-static void ProcString(const std::string& s) {
-    std::fputs(" \"", stdout);
-    for (const char c : s) {
-        if (c == '"' || c == '\\')
-            std::putchar('\\');
-        std::putchar(c);
+// An -api analyze or compile request as a command line plus unsaved buffers.
+struct ApiCall {
+    std::string method;
+    std::vector<std::string> arguments;
+    pulse::loader::ScriptFiles unsaved;
+};
+
+static ApiCall ParseApiCall(const nlohmann::json& request) {
+    ApiCall call;
+    call.method = request.at("method").get<std::string>();
+    if (call.method == "analyze" || call.method == "preview")
+        pulse::api::CheckMembers(request, {"script", "arguments", "files"});
+    else if (call.method == "compile") pulse::api::CheckMembers(request, {"script", "arguments"});
+    else throw std::runtime_error("Unknown API method \"" + call.method + "\"");
+
+    const std::string script = pulse::api::GetString(request, "script");
+    if (script.empty()) throw std::runtime_error("API member \"script\" is required");
+    call.arguments.push_back(script);
+    for (std::string& argument : pulse::api::GetStrings(request, "arguments")) {
+        if (argument.empty() || argument.find('\0') != std::string::npos)
+            throw std::runtime_error("API arguments must be non-empty and contain no NUL");
+        call.arguments.push_back(std::move(argument));
     }
-    std::putchar('"');
+
+    const auto files = request.find("files");
+    if (files == request.end()) return call;
+    if (!files->is_object()) throw std::runtime_error("API member \"files\" must be an object");
+    for (const auto& file : files->items()) {
+        if (!file.value().is_string()) throw std::runtime_error("API file text must be a string");
+        if (!pulse::FilePath(file.key()).is_absolute())
+            throw std::runtime_error("API file path \"" + file.key() + "\" must be absolute");
+        call.unsaved.emplace_back(file.key(), file.value().get<std::string>());
+    }
+    return call;
 }
 
-static void ProcFloats(std::initializer_list<float> v) {
-    for (const float x : v)
-        std::printf(" %.9g", static_cast<double>(x));
-}
-
-// -dumpprocedural: the procedural bone rules with the values the .mdl stores, bones
-// named rather than indexed, one "@proc <kind>" line each; quoted names escape " and \.
-static void DumpProcedural(const pulse::compile::CompiledModel& m) {
-    auto boneName = [&](int i) -> std::string {
-        return i >= 0 && i < static_cast<int>(m.bones.size()) ? m.bones[i].name : std::string();
-    };
-
-    for (const pulse::compile::Bone& b : m.bones) {
-        std::fputs("@proc bone", stdout);
-        ProcString(b.name);
-        std::putchar('\n');
-    }
-
-    for (const pulse::compile::JiggleBone& j : m.jigglebones) {
-        std::fputs("@proc jiggle", stdout);
-        ProcString(boneName(j.bone));
-        std::printf(" %d", j.flags);
-        ProcFloats({j.length, j.tipMass, j.yawStiffness, j.yawDamping, j.pitchStiffness,
-                       j.pitchDamping, j.alongStiffness, j.alongDamping, j.angleLimit, j.minYaw,
-                       j.maxYaw, j.yawFriction, j.yawBounce, j.minPitch, j.maxPitch,
-                       j.pitchFriction, j.pitchBounce, j.baseMass, j.baseStiffness, j.baseDamping,
-                       j.baseMinLeft, j.baseMaxLeft, j.baseLeftFriction, j.baseMinUp, j.baseMaxUp,
-                       j.baseUpFriction, j.baseMinForward, j.baseMaxForward, j.baseForwardFriction,
-                       j.boingImpactSpeed, j.boingImpactAngle, j.boingDampingRate,
-                       j.boingFrequency, j.boingAmplitude});
-        std::putchar('\n');
-    }
-
-    // 12 floats per trigger, as many triggers as the line holds
-    for (const pulse::compile::ProceduralBone& p : m.proceduralbones) {
-        std::fputs("@proc driver", stdout);
-        ProcString(boneName(p.helper));
-        ProcString(boneName(p.driver));
-        for (const pulse::compile::ProceduralBoneTrigger& tr : p.triggers) {
-            // same double-then-narrow as the writer
-            const float invTolerance = static_cast<float>(1.0 / static_cast<double>(tr.tolerance));
-            ProcFloats({invTolerance, tr.trigger.x, tr.trigger.y, tr.trigger.z, tr.trigger.w,
-                        tr.pos.x, tr.pos.y, tr.pos.z,
-                        tr.quat.x, tr.quat.y, tr.quat.z, tr.quat.w});
-        }
-        std::putchar('\n');
-    }
-
-    for (const pulse::compile::AimAtBone& a : m.aimatbones) {
-        std::fputs("@proc aimat", stdout);
-        ProcString(boneName(a.bone));
-        ProcString(boneName(a.parent));
-        std::fputs(a.aimAttach == -1 ? " bone" : " attachment", stdout);
-        ProcString(a.aimAttach == -1 ? boneName(a.aimBone) : a.aimname);
-        ProcFloats({a.aimvector.x, a.aimvector.y, a.aimvector.z, a.upvector.x, a.upvector.y,
-                    a.upvector.z, a.basepos.x, a.basepos.y, a.basepos.z});
-        std::putchar('\n');
-    }
-    std::fputs("@proc end\n", stdout);
-}
-
-static std::string ReadStdin() {
-#ifdef _WIN32
-    _setmode(_fileno(stdin), _O_BINARY);
-#endif
-    std::string text;
-    char buf[65536];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), stdin)) > 0)
-        text.append(buf, n);
-    return text;
-}
-
-static int RunCompile(int argc, char** argv) {
+static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     if (argc < 2)
         return Usage();
 
@@ -199,6 +161,7 @@ static int RunCompile(int argc, char** argv) {
     const char* script = nullptr;
     std::string outdir;
     std::string modelname; // -modelname: overrides the script's $modelname
+    std::string only;      // -only: a .pulsemodel's model id
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
     bool noDx80 = false; // -nodx80: force-skip .dx80.vtx, overriding the script
     int launchMinLod = -1;
@@ -208,9 +171,11 @@ static int RunCompile(int argc, char** argv) {
     bool definebones = false;
     bool verify = false;
     bool dumpMaterials = false;
-    bool dumpProcedural = false;
-    bool scriptFromStdin = false;
-    bool dumpDependencies = false;
+    const bool dumpDependencies = api && api->method == "compile";
+    const bool analyze = api && api->method == "analyze";
+    const bool preview = api && api->method == "preview"; // compile, files sent back instead of written
+    pulse::dependencies::g_enabled = dumpDependencies || analyze || preview;
+    pulse::dependencies::g_hashes = !analyze && !preview;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
@@ -224,6 +189,14 @@ static int RunCompile(int argc, char** argv) {
             if (i + 1 >= argc)
                 return Fail("bad option", "-modelname needs a model path");
             modelname = argv[++i];
+        } else if (std::strcmp(argv[i], "-only") == 0) {
+#if PULSEMODEL_ENABLE_PULSEMODEL
+            if (i + 1 >= argc)
+                return Fail("bad option", "-only needs a model id");
+            only = argv[++i];
+#else
+            return Fail("bad option", "-only is unavailable in this build");
+#endif
         } else if (std::strcmp(argv[i], "-defvar") == 0) {
             // a .pulseqc $definevariable, set from the launch line and pinned
             if (i + 2 >= argc)
@@ -264,29 +237,31 @@ static int RunCompile(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "-forcewritevertexdata") == 0) {
             forceWriteVertexData = true;
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             definebones = true;
         } else if (std::strcmp(argv[i], "-verify") == 0) {
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             verify = true;
         } else if (std::strcmp(argv[i], "-legacysequencebounds") == 0) {
             legacySequenceBounds = true;
-        } else if (std::strcmp(argv[i], "-dumpprocedural") == 0) {
-            dumpProcedural = true;
-        } else if (std::strcmp(argv[i], "-stdin") == 0) {
-            scriptFromStdin = true;
-        } else if (std::strcmp(argv[i], "-dumpdependencies") == 0) {
-            dumpDependencies = true;
-            pulse::dependencies::g_enabled = true;
         } else if (std::strcmp(argv[i], "-dumpmaterials") == 0) {
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             dumpMaterials = true;
         } else if (std::strcmp(argv[i], "-perfmetrics") == 0) {
             pulse::perf::g_enabled = true;
         } else if (std::strcmp(argv[i], "-pause") == 0) {
+            if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             pulse::fatal::g_pause = true;
         } else if (argv[i][0] == '-') {
+            if (api) return Fail("bad API option", argv[i]);
             // studiomdl GUI front ends pass switches we do not have (-nop4,
             // -verbose, ...). Warn and carry on rather than refusing to run.
-            std::printf("warning: ignoring unknown option: %s\n", argv[i]);
-        } else if (!script || pulse::loader::IsQcScriptPath(argv[i])) {
+            pulse::diag::Warnf("ignoring unknown option: %s\n", argv[i]);
+        } else if (!script || pulse::loader::IsQcScriptPath(argv[i])
+#if PULSEMODEL_ENABLE_PULSEMODEL
+                   || pulse::pulsemodel::IsPulseModelPath(argv[i])
+#endif
+        ) {
             // an ignored option may have eaten a value we now see as
             // positional, so a real script extension always wins
             script = argv[i];
@@ -304,11 +279,20 @@ static int RunCompile(int argc, char** argv) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
 
-    // .pulseqc (keyvalues1) is the only front end. The keyvalues2 .pulsemdl
-    // loader is halted indefinitely - pulseloader.cpp is out of the build.
-    if (!pulse::loader::IsQcScriptPath(script))
-        return Fail("unsupported script",
-                    std::string(script) + ": only .pulseqc/.qc compile scripts are supported");
+#if PULSEMODEL_ENABLE_PULSEMODEL
+    const bool pulseModel = pulse::pulsemodel::IsPulseModelPath(script);
+#else
+    const bool pulseModel = false;
+#endif
+    if (!pulse::loader::IsQcScriptPath(script) && !pulseModel)
+        return Fail("unsupported script", std::string(script) +
+                                              ": only " + kScriptFormats + " files are supported");
+    if (!only.empty() && !pulseModel)
+        return Fail("bad option", "-only selects a model of a .pulsemodel");
+
+    std::unique_ptr<pulse::qcpackage::Package> package;
+    if (!pulseModel && pulse::qcpackage::Package::IsPackage(pulse::FilePath(script)))
+        package = std::make_unique<pulse::qcpackage::Package>(pulse::FilePath(script));
 
     std::string err;
     pulse::compile::CompileInput input;
@@ -316,10 +300,27 @@ static int RunCompile(int argc, char** argv) {
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    const std::string stdinText = scriptFromStdin ? ReadStdin() : std::string();
-    if (!pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
-                                     scriptFromStdin ? &stdinText : nullptr))
+    bool loaded = false;
+#if PULSEMODEL_ENABLE_PULSEMODEL
+    if (pulseModel) {
+        pulse::pulsemodel::LoadOptions options;
+        options.only = only;
+        options.defvars = defvars;
+        options.fileDirs = fileDirs;
+        options.unsaved = api ? &api->unsaved : nullptr;
+        loaded = pulse::pulsemodel::Load(script, options, input, &err);
+        // sent even when a command failed: the merge itself may still have worked
+        if (analyze || preview) pulse::pulsemodel::PrintResolved();
+    } else
+#endif
+    {
+        loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
+                                             api ? &api->unsaved : nullptr);
+    }
+    if (analyze) pulse::dependencies::Print(loaded);
+    if (!loaded)
         return Fail("script error", err);
+    if (analyze) return 0;
     auto tLoad = Clock::now();
     input.legacySequenceBounds = legacySequenceBounds;
     if (forceWriteVertexData)
@@ -340,19 +341,15 @@ static int RunCompile(int argc, char** argv) {
         input.vtxArchetype = vtxFormat;
     if (noDx80)
         input.noDx80 = true;
-    input.stopAfterProcedural = dumpProcedural;
 
     pulse::compile::CompiledModel model;
     g_stage = "compile";
     if (!pulse::compile::Compile(input, model, &err))
         return Fail("compile error", err);
     auto tCompile = Clock::now();
-
-    if (dumpProcedural) {
-        g_stage = "dumpprocedural";
-        DumpProcedural(model);
-        return 0;
-    }
+#if PULSEMODEL_ENABLE_PULSEMODEL
+    if (pulseModel && api) pulse::pulsemodel::PrintCompiled(input, model);
+#endif
 
     if (dumpMaterials) {
         std::printf("Used materials:\n");
@@ -363,6 +360,18 @@ static int RunCompile(int argc, char** argv) {
     if (definebones) {
         g_stage = "definebones";
         DumpDefineBones(model);
+        return 0;
+    }
+
+    // the files a viewer needs; dx80 never reaches one, so it is not built
+    if (preview) {
+        g_stage = "write";
+        std::vector<pulse::writer::OutputFile> files;
+        if (!pulse::writer::WriteModelFiles(model, "", input.vtxArchetype == 0, false, &err, &files))
+            return Fail("write error", err);
+        for (const pulse::writer::OutputFile& file : files)
+            pulse::api::RecordFile(file.path, file.bytes.data(), file.bytes.size());
+        pulse::dependencies::Print();
         return 0;
     }
 
@@ -407,27 +416,53 @@ static int RunCompile(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    const bool api = argc == 2 && std::strcmp(argv[1], "-api") == 0;
     // progress lines are useless if they sit in the CRT buffer until exit -
     // MSVC has no line buffering (_IOLBF == _IOFBF), so go unbuffered
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     pulse::fatal::Install();
 
-    // -dumpcommands takes no script and runs before the banner: the output is
-    // read by tools, so stdout carries the command list and nothing else.
-    for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "-dumpcommands") == 0) {
-            pulse::loader::PrintCommandNames();
-            return 0;
-        }
-    }
-
-    PrintHeader();
+    if (!api) PrintHeader();
 
     // a leak past a stage's own error path still gets named in the footer
     int rc;
     try {
-        rc = RunCompile(argc, argv);
+        if (api) {
+            pulse::api::Begin();
+            const nlohmann::json request = pulse::api::ReadRequest();
+
+            if (request.at("method") == "catalog") {
+                pulse::api::CheckMembers(request, {});
+                pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
+                                                 "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
+                                                 "\"qczipPackage\":1,\"rename\":1,\"preview\":1"
+#if PULSEMODEL_ENABLE_PULSEMODEL
+                                                 ",\"pulsemodel\":1,\"schema\":1"
+#endif
+                                                 "}");
+                pulse::loader::PrintCommandNames();
+                rc = 0;
+            } else if (request.at("method") == "schema") {
+                pulse::api::CheckMembers(request, {});
+#if PULSEMODEL_ENABLE_PULSEMODEL
+                pulse::pulsemodel::PrintSchema();
+                rc = 0;
+#else
+                rc = Fail("unsupported API method", ".pulsemodel schema is unavailable in this build");
+#endif
+            } else if (request.at("method") == "rename") {
+                pulse::api::CheckMembers(request, {"arguments"});
+                std::string err;
+                rc = pulse::rename::Run(pulse::api::GetStrings(request, "arguments"), &err)
+                         ? 0 : Fail("rename error", err);
+            } else {
+                ApiCall call = ParseApiCall(request);
+                std::vector<char*> arguments{argv[0]};
+                for (std::string& value : call.arguments) arguments.push_back(value.data());
+                rc = RunCompile(static_cast<int>(arguments.size()), arguments.data(), &call);
+            }
+        } else rc = RunCompile(argc, argv);
     } catch (const std::bad_alloc&) {
         rc = Fail("out of memory", "an allocation failed - the model may exceed available RAM");
     } catch (const std::exception& e) {
@@ -435,6 +470,9 @@ int main(int argc, char** argv) {
     } catch (...) {
         rc = Fail("internal error", "unknown C++ exception");
     }
+
+    if (api && pulse::api::Active()) pulse::api::Finish(rc);
+
     pulse::fatal::PauseIfAsked();
     return rc;
 }

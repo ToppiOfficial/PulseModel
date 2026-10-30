@@ -26,14 +26,13 @@
 
 namespace pulse::source {
 
-struct MeshFilter; // meshedit.h - $removemeshword material keywords
+struct MeshFilter; // meshedit.h
 
 // Load one .smd from `path` into `out`. `mats` is the compile-wide material
 // registry (unused until `triangles` lands). `scale` is the per-source import
 // scale (reference g_currentscale, applied to every position). `morphSource` is
 // accepted for signature parity with LoadDmxSource; SMD carries no flex rig.
-// `filter` supplies $removemeshword keywords ($exceptionlist needs named meshes
-// an SMD lacks, so only the material keywords apply here).
+// `filter` is accepted for the same parity; an SMD has no named meshes to filter.
 // `animOnly` = loaded as an animation source ($animation / $sequence): `nodes`
 // and `skeleton` only, so a `triangles` block contributes no geometry and no
 // materials (same rule as LoadDmxSource).

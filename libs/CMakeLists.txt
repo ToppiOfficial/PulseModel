@@ -57,13 +57,6 @@ add_library(pulse_dmx STATIC
 target_include_directories(pulse_dmx PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pulse_dmx PUBLIC pulse_libs)
 
-# dr_wav / dr_mp3 (mackron/dr_libs, public domain or MIT-0) - vendored
-# single-header decoders, dr_wav v0.14.6 and dr_mp3 v0.7.4.
-add_library(pulse_drlibs STATIC
-    drlibs/drlibs_impl.c
-)
-target_include_directories(pulse_drlibs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/drlibs)
-
 # Zstandard decompression, used under its BSD-3-Clause license.
 add_library(pulse_zstd STATIC
     zstd/common/debug.c zstd/common/entropy_common.c zstd/common/error_private.c
@@ -77,3 +70,12 @@ target_include_directories(pulse_zstd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/zstd)
 add_library(pulse_keyvalues3 STATIC keyvalues3/kv3.cpp keyvalues3/kv3_binary.cpp)
 target_include_directories(pulse_keyvalues3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pulse_keyvalues3 PRIVATE pulse_zstd PUBLIC pulse_libs)
+
+# nlohmann/json (Niels Lohmann, MIT) - vendored v3.12.0 single header, API requests and .pulsemodel.
+add_library(pulse_api STATIC apiprotocol.cpp apiprotocol.h)
+target_link_libraries(pulse_api PUBLIC pulse_libs)
+
+# miniz 3.1.2 (MIT) - standalone QCZip package reading.
+add_library(pulse_miniz STATIC miniz/miniz.c miniz/miniz_tinfl.c miniz/miniz_zip.c)
+target_include_directories(pulse_miniz PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/miniz)
+target_compile_definitions(pulse_miniz PUBLIC MINIZ_NO_DEFLATE_APIS MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

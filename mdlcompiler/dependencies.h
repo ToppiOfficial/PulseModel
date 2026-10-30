@@ -1,12 +1,15 @@
 // dependencies.h - PulseModel
 //
-// -dumpdependencies: every file the compile read (the script, its includes and each
-// source) with a hash of its content, so a tool can tell when the model is out of date.
+// API compile and analyze: every file the script read (the script, its includes and each
+// source). Compile adds a content hash so a tool can tell when the model is out of date.
 
 #ifndef PULSEMDL_DEPENDENCIES_H
 #define PULSEMDL_DEPENDENCIES_H
 
 #include <cinttypes>
+#include "api.h"
+#include "qcpackage.h"
+#include "pathcompat.h"
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -17,12 +20,23 @@ namespace pulse::dependencies {
 
 enum class Kind { Script, Include, Source };
 
+// Model format version, DME bone markup and physics shape counts of a DMX source.
+struct Markup {
+    int modelVersion = 0;
+    int jiggleBones = 0;
+    int proceduralBones = 0;
+    int physicsShapes = 0;
+};
+
 struct Entry {
     Kind kind;
     uint64_t hash;
+    bool dmx = false;
+    Markup markup;
 };
 
 inline bool g_enabled = false;
+inline bool g_hashes = true; // analyze skips them; it already reads every source once
 
 inline std::map<std::string, Entry>& Files() {
     static std::map<std::string, Entry> files;
@@ -49,28 +63,68 @@ inline uint64_t HashFile(const std::string& path) {
     return h;
 }
 
-// `text` stands in for the file's content (a -stdin script).
+inline std::string Key(const std::string& path) {
+    std::error_code ec;
+    const auto full = std::filesystem::absolute(pulse::qcpackage::Logical(path), ec);
+    return ec ? path : full.lexically_normal().string();
+}
+
+// `text` stands in for the file's content (an unsaved API buffer).
 inline void Note(const std::string& path, Kind kind = Kind::Source,
                  const std::string* text = nullptr) {
     if (!g_enabled || path.empty())
         return;
-    std::error_code ec;
-    const auto full = std::filesystem::absolute(path, ec);
-    const std::string key = ec ? path : full.lexically_normal().string();
+    const std::string key = Key(path);
     if (Files().count(key))
         return;
-    const uint64_t hash = text ? Hash(reinterpret_cast<const unsigned char*>(text->data()), text->size())
-                               : HashFile(key);
+
+    uint64_t hash = 0;
+    const auto* package = pulse::qcpackage::active;
+    const bool member = package && package->Contains(pulse::FilePath(key));
+    if (g_hashes)
+        hash = member ? package->Hash()
+             : text ? Hash(reinterpret_cast<const unsigned char*>(text->data()), text->size())
+                    : HashFile(key);
     Files().emplace(key, Entry{kind, hash});
 }
 
+inline void NoteMarkup(const std::string& path, const Markup& markup) {
+    if (!g_enabled || path.empty())
+        return;
+    const auto it = Files().find(Key(path));
+    if (it == Files().end())
+        return;
+    it->second.dmx = true;
+    it->second.markup = markup;
+}
+
 // "@dep <script|include|source> <16 hex digit hash> <absolute path>" per file, then "@dep end".
-inline void Print() {
+// API records add the DMX model version and markup counts; `complete` is false when the load stopped early.
+inline void Print(bool complete = true) {
     for (const auto& [path, e] : Files()) {
         const char* name = e.kind == Kind::Script ? "script" : e.kind == Kind::Include ? "include" : "source";
-        std::printf("@dep %s %016" PRIx64 " %s\n", name, e.hash, path.c_str());
+        char hash[17]; std::snprintf(hash, sizeof(hash), "%016" PRIx64, e.hash);
+        if (!pulse::api::Active()) {
+            std::printf("@dep %s %s %s\n", name, hash, path.c_str());
+            continue;
+        }
+
+        std::string record = "{\"kind\":" + pulse::api::String(name);
+        if (g_hashes) record += ",\"hash\":" + pulse::api::String(hash);
+        record += ",\"path\":" + pulse::api::String(path);
+        const auto* package = pulse::qcpackage::active;
+        if (package && package->Contains(pulse::FilePath(path)))
+            record += ",\"archive\":" + pulse::api::String(package->Path().u8string());
+        if (e.dmx)
+            record += ",\"modelVersion\":" + std::to_string(e.markup.modelVersion) +
+                      ",\"jiggleBones\":" + std::to_string(e.markup.jiggleBones) +
+                      ",\"proceduralBones\":" + std::to_string(e.markup.proceduralBones) +
+                      ",\"physicsShapes\":" + std::to_string(e.markup.physicsShapes);
+        pulse::api::Record("dependency", record + "}");
     }
-    std::printf("@dep end\n");
+    if (pulse::api::Active())
+        pulse::api::Record("dependencies", std::string("{\"complete\":") + (complete ? "true" : "false") + "}");
+    else std::printf("@dep end\n");
 }
 
 } // namespace pulse::dependencies

@@ -1,6 +1,7 @@
 // dmxloader.cpp - DMX document -> per-file Source. See dmxloader.h.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "perf.h"
 #include "dmxloader.h"
@@ -11,7 +12,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -43,20 +46,6 @@ const std::vector<dmx::Quaternion>* DmxQuatArray(const dmx::Element* e, const ch
     if (!e) return nullptr;
     const dmx::Attribute* a = e->Get(n);
     return a ? std::get_if<std::vector<dmx::Quaternion>>(&a->value) : nullptr;
-}
-
-// model-version field-name split (model 22 uses position$0 etc.)
-const std::vector<dmx::Vector3>* PickV3Array(const dmx::Element* e, const char* a, const char* b) {
-    auto v = e->GetVector3Array(a);
-    return v ? v : e->GetVector3Array(b);
-}
-const std::vector<int32_t>* PickIntArray(const dmx::Element* e, const char* a, const char* b) {
-    auto v = e->GetIntArray(a);
-    return v ? v : e->GetIntArray(b);
-}
-const std::vector<float>* PickFloatArray(const dmx::Element* e, const char* a, const char* b) {
-    auto v = e->GetFloatArray(a);
-    return v ? v : e->GetFloatArray(b);
 }
 
 // DmeTransform -> matrix (reference CDmeTransform::GetTransform =
@@ -135,6 +124,7 @@ bool AddDagJoint(const std::vector<dmx::ElementPtr>* jointList, const dmx::Eleme
     const dmx::Element* shape = dag->GetElement("shape");
     lb.isNonSkeletal =
         shape && (shape->className == "DmeMesh" || shape->className == "DmePhysicsShape");
+    lb.isAttachment = shape && shape->className == "DmeAttachment" && dag->className == "DmeDag";
     out.localBone.push_back(lb);
 
     if (auto kids = dag->GetElementArray("children"))
@@ -451,15 +441,17 @@ struct TmpFace {
     uint32_t a, na, ta;
     uint32_t b, nb, tb;
     uint32_t c, nc, tc;
+    uint32_t sa = UINT32_MAX, sb = UINT32_MAX, sc = UINT32_MAX;
 };
 
 struct MeshTemp {
     std::vector<pm::Vector3> vertex;   // transformed positions
     std::vector<SrcBoneWeight> bone;   // per position
-    std::vector<float> outline;        // per position, toonoutline_weight$0
     std::vector<pm::Vector3> normal;   // rotated normals
     std::vector<pm::Vector2> texcoord;
     std::vector<TmpFace> face;
+    std::vector<Source::EditStream> editStreams;
+    std::vector<int> vertexEditMesh;
 };
 
 // ---------------------------------------------------------------------------
@@ -838,6 +830,7 @@ void ComputeTriangulatedIndices(const std::vector<dmx::Vector3>& positions,
 }
 
 struct LoadMeshInfo {
+    int modelVersion = 0;
     Source* source = nullptr;
     const dmx::Element* model = nullptr;
     const std::vector<dmx::ElementPtr>* jointList = nullptr;
@@ -849,6 +842,10 @@ struct LoadMeshInfo {
     MeshFilter* filter = nullptr; // $exceptionlist, null when unfiltered
     std::vector<pm::matrix3x4> bindPose; // per jointList entry
     bool physics = false; // read DmePhysicsShape dags, not DmeMesh
+
+    std::string Stream(const dmx::Element& e, const char* legacyName) const {
+        return DmxStreamName(e, modelVersion, legacyName);
+    }
 };
 
 // reference DefineUniqueVertices: register this mesh's
@@ -923,20 +920,21 @@ void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::
 
     pm::matrix3x4 normalMat = pm::MatrixInverseTranspose(mat);
 
-    const std::vector<dmx::Vector3>* positions = PickV3Array(bindState, "position$0", "positions");
-    const std::vector<dmx::Vector2>* texcoords = bindState->GetVector2Array("texcoord$0");
-    if (!texcoords) texcoords = bindState->GetVector2Array("textureCoordinates");
+    const std::vector<dmx::Vector3>* positions = 
+        bindState->GetVector3Array(info.Stream(*bindState, "positions"));
+    const std::vector<dmx::Vector2>* texcoords = 
+        bindState->GetVector2Array(info.Stream(*bindState, "textureCoordinates"));
     if (!positions) return;
 
     int nCount = static_cast<int>(positions->size());
 
     // skinning
-    const std::vector<float>* jw = PickFloatArray(bindState, "jointWeights", "blendweights$0");
-    const std::vector<int32_t>* ji = PickIntArray(bindState, "jointIndices", "blendindices$0");
+    const std::vector<float>* jw = bindState->GetFloatArray(info.Stream(*bindState, "jointWeights"));
+    const std::vector<int32_t>* ji = bindState->GetIntArray(info.Stream(*bindState, "jointIndices"));
     int nJointCount = bindState->GetInt("jointCount", 0);
     if (!(jw && ji) || nJointCount <= 0) nJointCount = 0;
     if (nJointCount > lim::kMaxSrcBoneWeights) {
-        std::fprintf(stderr, "warning: mesh \"%s\" has %d bone influences per vertex (max %d)\n",
+        pulse::diag::Warnf("mesh \"%s\" has %d bone influences per vertex (max %d)\n",
                      dag->name.c_str(), nJointCount, lim::kMaxSrcBoneWeights);
     }
 
@@ -1003,17 +1001,6 @@ void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::
             tmp.texcoord.push_back(uv);
         }
     }
-}
-
-// find the vertex-data bind state of a mesh
-const dmx::Element* MeshBindState(const dmx::Element* mesh) {
-    if (const dmx::Element* bs = mesh->GetElement("bindState")) return bs;
-    if (auto states = mesh->GetElementArray("baseStates")) {
-        for (const dmx::Element* s : *states)
-            if (s && s->name == "bind") return s;
-        if (!states->empty()) return (*states)[0];
-    }
-    return mesh->GetElement("currentState");
 }
 
 // Valve Vector::Length (float accumulate + sqrtf)
@@ -1138,6 +1125,56 @@ void LoadDeltaState(FlexTemp& flex, const std::string& deltaName,
     }
 }
 
+struct FloatVertexStream {
+    const std::vector<float>* values = nullptr;
+    const std::vector<int32_t>* indices = nullptr;
+    bool present = false;
+
+    bool Read(size_t corner, float& value) const {
+        if (!values || !indices || corner >= indices->size()) return false;
+        const int32_t index = (*indices)[corner];
+        if (index < 0 || static_cast<size_t>(index) >= values->size()) return false;
+        value = (*values)[index];
+        return true;
+    }
+};
+
+FloatVertexStream FindFloatVertexStream(const dmx::Element& state, const std::string& name) {
+    FloatVertexStream stream;
+    const std::string indexName = name + "Indices";
+    for (const auto& attribute : state.attributes) {
+        if (_stricmp(attribute.name.c_str(), name.c_str()) == 0) {
+            stream.present = true;
+            stream.values = std::get_if<std::vector<float>>(&attribute.value);
+        } else if (_stricmp(attribute.name.c_str(), indexName.c_str()) == 0) {
+            stream.present = true;
+            stream.indices = std::get_if<std::vector<int32_t>>(&attribute.value);
+        }
+    }
+    return stream;
+}
+
+struct Vector2VertexStream {
+    const std::vector<dmx::Vector2>* values = nullptr;
+    const std::vector<int32_t>* indices = nullptr;
+    bool present = false;
+};
+
+Vector2VertexStream FindVector2VertexStream(const dmx::Element& state, const std::string& name) {
+    Vector2VertexStream stream;
+    const std::string indexName = name + "Indices";
+    for (const auto& attribute : state.attributes) {
+        if (_stricmp(attribute.name.c_str(), name.c_str()) == 0) {
+            stream.present = true;
+            stream.values = std::get_if<std::vector<dmx::Vector2>>(&attribute.value);
+        } else if (_stricmp(attribute.name.c_str(), indexName.c_str()) == 0) {
+            stream.present = true;
+            stream.indices = std::get_if<std::vector<int32_t>>(&attribute.value);
+        }
+    }
+    return stream;
+}
+
 bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Element* mesh,
               const dmx::Element* bindState, const pm::matrix3x4& mat, int nBoneAssign) {
     MeshTemp& tmp = *info.tmp;
@@ -1147,24 +1184,22 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     int nStartingNormal = static_cast<int>(tmp.normal.size());
     int nStartingTexCoord = static_cast<int>(tmp.texcoord.size());
 
-    const std::vector<dmx::Vector3>* positions = PickV3Array(bindState, "position$0", "positions");
+    const std::vector<dmx::Vector3>* positions = 
+        bindState->GetVector3Array(info.Stream(*bindState, "positions"));
     const std::vector<int32_t>* positionIndices =
-        PickIntArray(bindState, "position$0Indices", "positionsIndices");
+        bindState->GetIntArray(info.Stream(*bindState, "positionsIndices"));
     const std::vector<int32_t>* texcoordIndices =
-        PickIntArray(bindState, "texcoord$0Indices", "textureCoordinatesIndices");
+        bindState->GetIntArray(info.Stream(*bindState, "textureCoordinatesIndices"));
 
     // CollapseRedundantNormals mutates the (copied) normal stream + indices.
     // Meshes with delta states take the per-position variant that yields a
     // normalMap for remapping the delta states' normal entries.
     std::vector<dmx::Vector3> normals;
     std::vector<int32_t> normalIndices;
-    {
-    if (auto n = PickV3Array(bindState, "normal$0", "normals"))
+    if (auto n = bindState->GetVector3Array(info.Stream(*bindState, "normals")))
         normals = *n;
-    if (auto ni = PickIntArray(bindState, "normal$0Indices", "normalsIndices"))
+    if (auto ni = bindState->GetIntArray(info.Stream(*bindState, "normalsIndices")))
         normalIndices = *ni;
-    }
-
 
     const std::vector<dmx::ElementPtr>* deltaStates = mesh->GetElementArray("deltaStates");
     bool hasDeltas = deltaStates && !deltaStates->empty();
@@ -1194,9 +1229,9 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     int nStartingUniqueVertexMap = flex ? static_cast<int>(flex->uniqueVerticesMap.size()) : 0;
     if (flex && positionIndices) {
         const std::vector<int32_t>* balanceIndices =
-            PickIntArray(bindState, "balance$0Indices", "balanceIndices");
+            bindState->GetIntArray(info.Stream(*bindState, "balanceIndices"));
         const std::vector<int32_t>* speedIndices =
-            PickIntArray(bindState, "speed$0Indices", "speedIndices");
+            bindState->GetIntArray(info.Stream(*bindState, "speedIndices"));
         PULSE_PERF("mesh", "DefineUniqueVertices");
         DefineUniqueVertices(*flex, *positionIndices, normalIndices, texcoordIndices,
                              balanceIndices, speedIndices, nStartingVertex, nStartingNormal,
@@ -1206,59 +1241,78 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     { PULSE_PERF("mesh", "LoadVertices");
       LoadVertices(info, dag, bindState, mat, nBoneAssign, normals); }
 
-    // $toonoutline's per-corner float stream (a Blender vertex group), -1 when absent
-    tmp.outline.resize(tmp.vertex.size(), -1.0f);
-    const std::vector<float>* ow = nullptr;
-    const std::vector<int32_t>* owi = nullptr;
-    if (info.filter && !info.filter->outlineStream.empty()) {
-        const std::string idxName = info.filter->outlineStream + "Indices";
-        for (const dmx::Attribute& a : bindState->attributes) {
-            if (_stricmp(a.name.c_str(), info.filter->outlineStream.c_str()) == 0)
-                ow = std::get_if<std::vector<float>>(&a.value);
-            else if (_stricmp(a.name.c_str(), idxName.c_str()) == 0)
-                owi = std::get_if<std::vector<int32_t>>(&a.value);
+    if (info.filter && info.filter->keepMeshIdentity) {
+        const int meshIndex = static_cast<int>(info.source->editMeshes.size());
+        Source::EditMeshInfo identity{mesh->name, dag->name, {}};
+        const auto* format = bindState->GetStringArray("vertexFormat");
+        if (info.filter->selectMeshStreams && format) {
+            for (const auto& name : *format) {
+                const bool encoded = std::any_of(bindState->attributes.begin(), bindState->attributes.end(),
+                    [&](const dmx::Attribute& a) { return _stricmp(a.name.c_str(), name.c_str()) == 0; });
+                if (encoded) identity.streams.push_back(name);
+            }
         }
-        if (ow && owi)
-            info.filter->outlineStreamFound = true;
+        info.source->editMeshes.push_back(std::move(identity));
+        tmp.vertexEditMesh.resize(tmp.vertex.size(), meshIndex);
     }
-    if (ow && owi && positionIndices)
-        for (size_t i = 0; i < owi->size() && i < positionIndices->size(); ++i) {
-            const size_t p = nStartingVertex + static_cast<size_t>((*positionIndices)[i]);
-            const int32_t w = (*owi)[i];
-            if (p < tmp.outline.size() && w >= 0 && w < static_cast<int32_t>(ow->size()))
-                tmp.outline[p] = (*ow)[w];
-        }
 
-    // $cullvertex: flag corners over threshold in the named weight stream
-    std::vector<char> cullCorner;
-    if (info.filter && !info.filter->cullGroups.empty() && positionIndices) {
-        cullCorner.assign(positionIndices->size(), 0);
-        for (MeshFilter::CullEntry& e : info.filter->cullGroups) {
-            const std::vector<float>* cw = nullptr;
-            const std::vector<int32_t>* cwi = nullptr;
-            const std::string idxName = e.group + "Indices";
-            for (const dmx::Attribute& a : bindState->attributes) {
-                if (_stricmp(a.name.c_str(), e.group.c_str()) == 0)
-                    cw = std::get_if<std::vector<float>>(&a.value);
-                else if (_stricmp(a.name.c_str(), idxName.c_str()) == 0)
-                    cwi = std::get_if<std::vector<int32_t>>(&a.value);
-            }
-            if (cw && cwi) {
-                e.matched = true;
-                for (size_t i = 0; i < cwi->size() && i < cullCorner.size(); ++i) {
-                    const int32_t w = (*cwi)[i];
-                    if (w >= 0 && w < static_cast<int32_t>(cw->size()) && (*cw)[w] > e.threshold)
-                        cullCorner[i] = 1;
+    size_t streamStart = 0;
+    if (info.filter && !info.filter->editStreams.empty() && positionIndices) {
+        if (tmp.editStreams.empty())
+            for (const auto& stream : info.filter->editStreams)
+                tmp.editStreams.push_back({stream.name, {}, stream.component});
+        streamStart = tmp.editStreams.front().values.size();
+        for (size_t si = 0; si < info.filter->editStreams.size(); ++si) {
+            auto& request = info.filter->editStreams[si];
+            auto& values = tmp.editStreams[si].values;
+            values.resize(streamStart + positionIndices->size(), std::numeric_limits<float>::quiet_NaN());
+            const auto* format = bindState->GetStringArray("vertexFormat");
+            if (!format || std::none_of(format->begin(), format->end(), [&](const std::string& field) {
+                    return _stricmp(field.c_str(), request.name.c_str()) == 0;
+                })) continue;
+            auto invalid = [&] {
+                info.filter->editStreamError = std::string(request.component < 0 ? "invalid float stream \""
+                                                                                 : "invalid UV stream \"") +
+                                               request.name + "\" on mesh \"" + mesh->name + "\"";
+                return false;
+            };
+            if (request.component >= 0) {
+                // a UV stream follows the bind state's flipVCoordinates, as the main UV does
+                const auto uv = FindVector2VertexStream(*bindState, request.name);
+                if (!uv.present) continue;
+                if (!uv.values || !uv.indices || uv.indices->size() != positionIndices->size())
+                    return invalid();
+                const bool flipV = bindState->GetBool("flipVCoordinates", false);
+                for (size_t corner = 0; corner < positionIndices->size(); ++corner) {
+                    const int32_t index = (*uv.indices)[corner];
+                    if (index < 0 || static_cast<size_t>(index) >= uv.values->size()) return invalid();
+                    const dmx::Vector2& t = (*uv.values)[index];
+                    float value = request.component == 0 ? t.x : (flipV ? 1.0f - t.y : t.y);
+                    if (!std::isfinite(value)) return invalid();
+                    values[streamStart + corner] = value;
                 }
+                request.found = true;
+                continue;
             }
+            const auto stream = FindFloatVertexStream(*bindState, request.name);
+            if (!stream.present) continue;
+            if (!stream.values || !stream.indices || stream.indices->size() != positionIndices->size())
+                return invalid();
+            for (size_t corner = 0; corner < positionIndices->size(); ++corner) {
+                float weight;
+                if (!stream.Read(corner, weight) || !std::isfinite(weight)) return invalid();
+                values[streamStart + corner] = weight;
+            }
+            request.found = true;
         }
     }
 
     // balance/speed data follows the mesh's vertices (reference LoadVertices
     // tail: whole array, or a single 1.0f so the 0-index default hits it)
     if (flex) {
-        const std::vector<float>* balances = PickFloatArray(bindState, "balance$0", "balance");
-        const std::vector<float>* speeds = PickFloatArray(bindState, "speed$0", "speed");
+        const std::vector<float>* balances = 
+            bindState->GetFloatArray(info.Stream(*bindState, "balance"));
+        const std::vector<float>* speeds = bindState->GetFloatArray(info.Stream(*bindState, "speed"));
         if (balances && !balances->empty())
             flex->balance.insert(flex->balance.end(), balances->begin(), balances->end());
         else
@@ -1277,8 +1331,8 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             BuildInverseMap(normalIndices, static_cast<int>(normals.size()));
         int nTexcoordDataCount = 0;
         {
-            const std::vector<dmx::Vector2>* tex = bindState->GetVector2Array("texcoord$0");
-            if (!tex) tex = bindState->GetVector2Array("textureCoordinates");
+            const std::vector<dmx::Vector2>* tex = 
+                bindState->GetVector2Array(info.Stream(*bindState, "textureCoordinates"));
             if (tex) nTexcoordDataCount = static_cast<int>(tex->size());
         }
         std::vector<std::vector<int>> texcoordInverse;
@@ -1289,17 +1343,17 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             if (!delta) continue;
 
             std::vector<dmx::Vector3> dPos;
-            if (auto p = PickV3Array(delta, "position$0", "positions"))
+            if (auto p = delta->GetVector3Array(info.Stream(*delta, "positions")))
                 dPos = *p;
             std::vector<int32_t> dPosIdx;
-            if (auto pi = PickIntArray(delta, "position$0Indices", "positionsIndices"))
+            if (auto pi = delta->GetIntArray(info.Stream(*delta, "positionsIndices")))
                 dPosIdx = *pi;
 
             std::vector<dmx::Vector3> dNormals;
-            if (auto n = PickV3Array(delta, "normal$0", "normals"))
+            if (auto n = delta->GetVector3Array(info.Stream(*delta, "normals")))
                 dNormals = *n;
             std::vector<int32_t> dNormalIdx;
-            if (auto ni = PickIntArray(delta, "normal$0Indices", "normalsIndices"))
+            if (auto ni = delta->GetIntArray(info.Stream(*delta, "normalsIndices")))
                 dNormalIdx = *ni;
             if (bNormalsCollapsed)
                 CollapseDeltaNormals(normalMap, dNormals, dNormalIdx);
@@ -1316,10 +1370,10 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                     break;
                 }
             }
-            const std::vector<float>* aw = PickFloatArray(delta, "wrinkle$0", "wrinkle");
+            const std::vector<float>* aw = delta->GetFloatArray(info.Stream(*delta, "wrinkle"));
             if (aw) {
                 dWrinkle = *aw;
-                if (auto wi = PickIntArray(delta, "wrinkle$0Indices", "wrinkleIndices"))
+                if (auto wi = delta->GetIntArray(info.Stream(*delta, "wrinkleIndices")))
                     dWrinkleIdx = *wi;
             } else if (ws) {
                 GenerateWrinkleDelta(dPos, dPosIdx, ws->scale, posInverse,
@@ -1364,11 +1418,6 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                 continue;
         }
 
-        // $removemeshword: drop this material's faces (and, since verts unify off
-        // faces, its geometry and texture) before it reaches the table.
-        if (info.filter && info.filter->MaterialRemoved(textureName))
-            continue;
-
         int texture = info.mats->LookupTexture(textureName.c_str());
         int material = info.mats->UseTextureAsMaterial(texture);
 
@@ -1383,15 +1432,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                    (*faces)[nFirstIndex + nVertexCount] != -1)
                 ++nVertexCount;
 
-            bool culled = false;
-            if (!cullCorner.empty())
-                for (int k = 0; k < nVertexCount && !culled; ++k) {
-                    const int32_t corner = (*faces)[nFirstIndex + k];
-                    culled = corner >= 0 && corner < static_cast<int32_t>(cullCorner.size()) &&
-                             cullCorner[corner];
-                }
-
-            if (nVertexCount >= 3 && !culled) {
+            if (nVertexCount >= 3) {
                 ComputeTriangulatedIndices(*positions, *positionIndices, *faces, nFirstIndex,
                                            nVertexCount, triangulated);
                 for (size_t ii = 0; ii + 2 < triangulated.size() + 1 && ii < triangulated.size();
@@ -1404,6 +1445,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                     uint32_t* fv[3] = {&f.a, &f.b, &f.c};
                     uint32_t* fn[3] = {&f.na, &f.nb, &f.nc};
                     uint32_t* ft[3] = {&f.ta, &f.tb, &f.tc};
+                    uint32_t* fs[3] = {&f.sa, &f.sb, &f.sc};
                     for (int cix = 0; cix < 3; ++cix) {
                         int corner = corners[cix];
                         int p = (corner < static_cast<int>(positionIndices->size()))
@@ -1415,6 +1457,8 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                         *fv[cix] = (p >= 0) ? static_cast<uint32_t>(nStartingVertex + p) : 0;
                         *fn[cix] = (n >= 0) ? static_cast<uint32_t>(nStartingNormal + n) : 0;
                         *ft[cix] = (t >= 0) ? static_cast<uint32_t>(nStartingTexCoord + t) : 0;
+                        if (!tmp.editStreams.empty())
+                            *fs[cix] = static_cast<uint32_t>(streamStart + corner);
                     }
                     tmp.face.push_back(f);
                 }
@@ -1498,7 +1542,7 @@ bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
     // localBone, exactly as it would for a dag carrying no mesh at all
     if (shape && shape->className == (info.physics ? "DmePhysicsShape" : "DmeMesh") &&
         (!info.filter || info.filter->Keep(shape->name, dag->name))) {
-        const dmx::Element* bindState = MeshBindState(shape);
+        const dmx::Element* bindState = DmxMeshBindState(shape);
         if (!bindState)
             return false;
         const size_t firstVertex = info.tmp->bone.size();
@@ -1516,10 +1560,11 @@ bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
     return true;
 }
 
-bool LoadMeshes(const dmx::Element* model, float flScale, const BoneMap& boneMap,
+bool LoadMeshes(const dmx::Element* model, int modelVersion, float flScale, const BoneMap& boneMap,
                 MaterialTable& mats, MeshTemp& tmp, FlexTemp* flex, MeshFilter* filter,
                 bool physics, Source& out) {
     LoadMeshInfo info;
+    info.modelVersion = modelVersion;
     info.physics = physics;
     info.filter = filter;
     info.source = &out;
@@ -1564,6 +1609,7 @@ struct VUnify {
     int lastref = -1;
     int v = 0, m = 0, n = 0;
     uint32_t t = 0;
+    uint32_t stream = UINT32_MAX;
     int next = -1; // chained per position
 };
 
@@ -1572,12 +1618,24 @@ struct UnifyState {
     std::vector<int> vlist; // per position: head of chain, -1 none
 };
 
-int AddToVlist(UnifyState& st, int v, int m, int n, uint32_t t) {
+int AddToVlist(UnifyState& st, int v, int m, int n, uint32_t t,
+               uint32_t stream, const MeshTemp& tmp) {
     int prev = -1;
     int cur = st.vlist[v];
     while (cur != -1) {
         VUnify& u = st.listdata[cur];
-        if (u.m == m && u.n == n && u.t == t) {
+        bool sameStreams = true;
+        for (const auto& data : tmp.editStreams) {
+            const float a = u.stream < data.values.size() ? data.values[u.stream]
+                                                         : std::numeric_limits<float>::quiet_NaN();
+            const float b = stream < data.values.size() ? data.values[stream]
+                                                      : std::numeric_limits<float>::quiet_NaN();
+            if (a != b && !(std::isnan(a) && std::isnan(b))) {
+                sameStreams = false;
+                break;
+            }
+        }
+        if (u.m == m && u.n == n && u.t == t && sameStreams) {
             u.refcount++;
             return cur;
         }
@@ -1591,6 +1649,7 @@ int AddToVlist(UnifyState& st, int v, int m, int n, uint32_t t) {
     u.m = m;
     u.n = n;
     u.t = t;
+    u.stream = stream;
     st.listdata.push_back(u);
     if (prev != -1)
         st.listdata[prev].next = idx;
@@ -1805,9 +1864,9 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
     { PULSE_PERF("build", "UnifyIndices");
     for (size_t i = 0; i < tmp.face.size(); ++i) {
         const TmpFace& f = tmp.face[i];
-        ufaces[i].a = AddToVlist(st, f.a, f.material, f.na, f.ta);
-        ufaces[i].b = AddToVlist(st, f.b, f.material, f.nb, f.tb);
-        ufaces[i].c = AddToVlist(st, f.c, f.material, f.nc, f.tc);
+        ufaces[i].a = AddToVlist(st, f.a, f.material, f.na, f.ta, f.sa, tmp);
+        ufaces[i].b = AddToVlist(st, f.b, f.material, f.nb, f.tb, f.sb, tmp);
+        ufaces[i].c = AddToVlist(st, f.c, f.material, f.nc, f.tc, f.sc, tmp);
     } }
 
     // reference order: UnifyIndices -> BuildVertexAnimations -> sort/remap
@@ -1834,6 +1893,10 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
 
     // BuildUniqueVertexList
     out.vertex.resize(numvlist);
+    if (!tmp.vertexEditMesh.empty()) out.vertexEditMesh.resize(numvlist);
+    out.editStreams.clear();
+    for (const auto& stream : tmp.editStreams)
+        out.editStreams.push_back({stream.name, std::vector<float>(numvlist), stream.component});
     for (int i = 0; i < numvlist; i++) {
         const VUnify& u = st.listdata[v_listsort[i]];
         SrcVertex& vertex = out.vertex[i];
@@ -1841,9 +1904,14 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         vertex.normal = (u.n >= 0 && u.n < static_cast<int>(tmp.normal.size()))
                             ? tmp.normal[u.n] : pm::Vector3{};
         vertex.boneweight = tmp.bone[u.v];
-        vertex.outline = static_cast<size_t>(u.v) < tmp.outline.size() ? tmp.outline[u.v] : -1.0f;
         vertex.texcoord = (u.t < tmp.texcoord.size()) ? tmp.texcoord[u.t] : pm::Vector2{};
         vertex.material = u.m;
+        if (!tmp.vertexEditMesh.empty()) out.vertexEditMesh[i] = tmp.vertexEditMesh[u.v];
+        for (size_t si = 0; si < tmp.editStreams.size(); ++si) {
+            const auto& values = tmp.editStreams[si].values;
+            out.editStreams[si].values[i] = u.stream < values.size() ? values[u.stream]
+                                                                  : std::numeric_limits<float>::quiet_NaN();
+        }
     }
 
     // PointMeshesToVertexAndFaceData
@@ -2189,7 +2257,7 @@ void CaptureFlexRig(const dmx::Element* comboOp, const ComboTemp& combo, FlexRig
                 } else if (rule->className == "DmeFlexRuleLocalVar") {
                     fr.isLocalVar = true;
                 } else {
-                    std::fprintf(stderr, "warning: unknown DmeDeltaRule: %s of type %s\n",
+                    pulse::diag::Warnf("unknown DmeDeltaRule: %s of type %s\n",
                                  rule->name.c_str(), rule->className.c_str());
                     continue;
                 }
@@ -2221,7 +2289,13 @@ int MaterialTable::LookupTexture(const char* name, bool relative) {
         if (dot != std::string::npos) b.resize(dot);
         return b;
     };
-    const std::string base = fileBase(name);
+    std::string base = fileBase(name);
+    for (const auto& [from, to] : collapse) {
+        if (_stricmp(from.c_str(), noExt.c_str()) == 0 || _stricmp(from.c_str(), base.c_str()) == 0) {
+            noExt = to;
+            base = fileBase(to);
+        }
+    }
 
     for (size_t i = 0; i < textures.size(); ++i) {
         const Texture& tex = textures[i];
@@ -2350,7 +2424,7 @@ bool SphereFromElement(const dmx::Element* e, std::vector<pm::Vector3>& pts) {
     const float r = e->GetFloat("radius");
     if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) ||
         !std::isfinite(r) || r <= 0.0f) {
-        std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid position or "
+        pulse::diag::Warnf("DmePhysicsSphere on bone \"%s\" has invalid position or "
                              "nonpositive/non-finite radius, skipped\n",
                      e->GetString("boneName") ? e->GetString("boneName")->c_str() : "");
         return false;
@@ -2400,7 +2474,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
                 break;
             }
         if (bone < 0) {
-            std::fprintf(stderr, "warning: %s on unknown bone \"%s\", skipped\n",
+            pulse::diag::Warnf("%s on unknown bone \"%s\", skipped\n",
                          e->className.c_str(), boneName ? boneName->c_str() : "");
             continue;
         }
@@ -2416,7 +2490,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
                     return std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z);
                 });
             if (!std::isfinite(radius) || radius <= 0.0f || !finitePoints) {
-                std::fprintf(stderr, "warning: DmePhysicsSphere on bone \"%s\" has invalid "
+                pulse::diag::Warnf("DmePhysicsSphere on bone \"%s\" has invalid "
                                      "converted position or radius, skipped\n", boneName->c_str());
                 continue;
             }
@@ -2449,7 +2523,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
         phys::ConvexHullResult hull =
             phys::BuildConvexHull(xyz.data(), static_cast<int>(g.pts.size()));
         if (hull.degenerate || hull.indices.empty()) {
-            std::fprintf(stderr, "warning: flat physics primitive on bone \"%s\", skipped\n",
+            pulse::diag::Warnf("flat physics primitive on bone \"%s\", skipped\n",
                          out.localBone[g.bone].name.c_str());
             continue;
         }
@@ -2473,7 +2547,6 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
             w.bone[0] = g.bone;
             w.weight[0] = 1.0f;
             tmp.bone.push_back(w);
-            tmp.outline.push_back(-1.0f);
             pm::Vector3 n{hv.x - mid.x, hv.y - mid.y, hv.z - mid.z};
             const float nl = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             tmp.normal.push_back(nl > 0.0f ? pm::Vector3{n.x / nl, n.y / nl, n.z / nl}
@@ -2496,6 +2569,16 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
 bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, float scale,
                    std::string* err, bool morphSource, MeshFilter* filter, bool animOnly,
                    bool physicsShapes) {
+    if (filter && (!filter->editStreams.empty() || filter->selectMeshStreams) && dm.format_version != 22) {
+        const bool uv = std::any_of(filter->editStreams.begin(), filter->editStreams.end(),
+                                    [](const MeshFilter::EditStream& s) { return s.component >= 0; });
+        const char* selector = filter->editStreams.empty() ? "$selectmeshbystream"
+                               : uv ? "$switchuv" : "$selectdatastream";
+        if (err) *err = std::string(selector) + " uses model 22 data streams; this file declares model " +
+                        std::to_string(dm.format_version);
+        return false;
+    }
+
     const dmx::Element* root = dm.root;
     if (!root) {
         if (err) *err = "DMX has no root element";
@@ -2548,15 +2631,19 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
     MeshTemp tmp;
     if (!animOnly) {
         PULSE_PERF("load", "LoadMeshes");
-        if (!LoadMeshes(model, scale, boneMap, mats, tmp, flexTemp.enabled ? &flexTemp : nullptr,
-                        filter, physicsShapes, out)) {
-            if (err) *err = "failed to load meshes";
+        if (!LoadMeshes(model, dm.format_version, scale, boneMap, mats, tmp,
+                        flexTemp.enabled ? &flexTemp : nullptr, filter, physicsShapes, out)) {
+            if (err) *err = filter && !filter->editStreamError.empty()
+                               ? filter->editStreamError : "failed to load meshes";
             return false;
         }
         if (physicsShapes)
             LoadPhysicsPrimitives(root, scale, mats, tmp, out);
         if (!tmp.face.empty())
             { PULSE_PERF("load", "BuildIndividualMeshes"); BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out); }
+        else if (filter)
+            for (const auto& stream : filter->editStreams)
+                out.editStreams.push_back({stream.name, {}, stream.component});
     }
 
     // one flexkey per delta state (reference AddFlexKeys). With no combination

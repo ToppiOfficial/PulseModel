@@ -102,42 +102,24 @@ struct ImportBone {
     bool bUnlocked = false;   // unlocked bones are appended AFTER the source union
 };
 
-// one bonemarkuplist entry: per-bone flags that used to be separate QC
-// commands ($bonemerge, $donotcollapse). Both can be set on the same bone.
+struct BoneRealignEdit {
+    Vector3 origin{}, angles{};
+    bool hasOrigin = false, hasAngles = false;
+    bool worldAxes = false, absolute = false;
+    bool ignoreAnimation = false;
+    bool affectChildren = false;
+    int line = 0;
+};
+
+// Per-bone markup flags can be combined on the same bone.
 struct BoneMarkup {
     std::string name;
     bool doNotCollapse = false; // $donotcollapse - force-keep through the cull
     bool isBonemerge = false;   // $bonemerge - BONE_USED_BY_BONE_MERGE
-};
-
-// $transformbone <bone> [options]: a late bind-pose edit, applied by
-// ApplyBoneTransformEdits after the global bone table is built and just before
-// RealignBones. The default edit is pivot-only - the delta is folded into
-// srcRealign, so neither the rest mesh nor any animation moves; only the bone's
-// frame does. See compile.cpp for the mechanism
-struct BoneTransformEdit {
-    std::string name;
-    bool hasAngles = false;     // `angles <p y r>`
-    bool worldAngles = false;   // `worldangles` - rotate about world axes
-    Vector3 angles{};           // euler DEGREES (pitch, yaw, roll)
-    bool hasPosition = false;   // `position <x y z>`
-    bool worldPosition = false; // `worldposition` - translate along world axes
-    Vector3 pos{};
-    // `transformweights <residualbone> [factor] [smoothing]`: hand this bone's
-    // vertex weight to residualbone as a spatial ramp along the move axis
-    bool hasMoveWeight = false;
-    std::string residualbone;
-    float moveWeightFactor = 1.0f;    // [0,1] band width (1 = whole span, 0 = hard cut)
-    float moveWeightSmoothing = 0.0f; // [0,1] S-curve easing inside the band
-    bool hasMoveWeightOffset = false; // `offset <x y z>` - shifts the ramp END only
-    Vector3 moveWeightOffset{};
-    bool transformVerts = false;  // carry the rigged verts instead of pivoting
-    // `transformchildren`: move the bone's whole subtree rigidly with it, instead
-    // of recompensating the children to stay where they were
-    bool transformChildren = false;
-    bool ignoreAnimation = false; // the edit never reaches any animation frame
-    bool ignoreHitbox = false;    // keep this bone's authored $hbox where it was
-    int line = 0;                 // script line, for diagnostics
+    bool noRealign = false;     // $norealign - disable this bone's realignment
+    // $realignbone edits applied in script order, each from the previous result.
+    // A bare (automatic) edit is kept alone; it never stacks with manual ones.
+    std::vector<BoneRealignEdit> realigns;
 };
 
 // ---- procedural bones ----------------------------------------------------
@@ -563,10 +545,6 @@ struct Anim {
     bool isBindPose = false;  // sanim comes from the bone table, not from src
     bool noAutoIK = false;
     bool nocull = false;      // `nocull`: exempt from $animationcullmethod
-    // `ignoretransformbone <angles|position>`: convert this clip with that
-    // category of $transformbone bind-pose edits rolled back
-    bool ignoreTransformAngles = false;
-    bool ignoreTransformPosition = false;
     // motion extraction output (piecewisemove); motionrollback is how far back
     // a non-looping clip starts its extraction, in seconds
     std::vector<LinearMove> piecewisemove;
@@ -732,10 +710,8 @@ struct BoneFlexDriver {
 };
 
 // ---- physics -------------------------------------------------------------
-// The .pulsemdl schema drops QC's $collisionmodel / $collisionjoints split.
-// There is one set of lists, and the compile stage auto-detects: collision
-// geometry resolving to a single physics bone is a single body, more than one
-// is a ragdoll.
+// Collision geometry resolving to one physics bone forms a single body;
+// geometry spanning multiple physics bones forms a ragdoll.
 
 // How a shape gets its geometry. Both kinds live in the same
 // `physicsshapelist`; the element's class name picks the kind.
@@ -924,8 +900,8 @@ struct ScriptLod {
     std::vector<LodReplacement> materialReplacements;
     std::vector<LodReplacement> materialWordReplacements;
     std::vector<LodReplacement> meshRemovals;
-    // removemeshword: drop any mesh whose material base name CONTAINS the
-    // stored word, case-insensitively
+    // removemeshsubstring: drop any mesh whose material base name CONTAINS the
+    // stored substring, case-insensitively
     std::vector<LodReplacement> meshWordRemovals;
     float smallMeshLimit = 0.0f;
     std::vector<source::Source*> smallMeshSources;
@@ -1108,16 +1084,13 @@ enum class Archetype {
     Simple,  // "simple" - $simpleprop: single "prop_root" bone, verts NOT baked
 };
 
-// Script-level inputs the compile stage needs (filled by the .pulsemdl loader).
+// Script-level inputs consumed by the compile stage.
 struct CompileInput {
     std::string outname;
     Archetype archetype = Archetype::General;
     bool autoCenter = false; // $autocenter
     bool forceWriteVertexData = false; // $forcewritevertexdata
     bool legacySequenceBounds = false; // -legacysequencebounds: skin vertices per frame
-    // -dumpprocedural: Compile() returns once the procedural bones are final,
-    // before any geometry, animation or physics work
-    bool stopAfterProcedural = false;
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.
     int vtxArchetype = 0;
@@ -1186,7 +1159,7 @@ struct CompileInput {
     float maxEyeDeflection = 0.0f;
 
     std::vector<Attachment> attachments;   // script order
-    // $hitboxset / $hbox, script order. Empty = the compile stage generates the
+    // $hboxset / $hbox, script order. Empty = the compile stage generates the
     // one "default" set from the bone-weighted vertex bounds and sets
     // STUDIOHDR_FLAGS_AUTOGENERATED_HITBOX.
     std::vector<HitboxSet> hitboxsets;
@@ -1206,9 +1179,6 @@ struct CompileInput {
     // the very end of the compile, so every other command still names the
     // source bone.
     std::vector<std::pair<std::string, std::string>> boneRenames;
-    // $transformbone, script order. Applied as one batch after the bone table
-    // is built, so the command is position-independent.
-    std::vector<BoneTransformEdit> boneTransformEdits;
     // $hierarchy: reparent a bone once the global bone table exists. An empty
     // parent makes the child a root.
     struct ForcedHierarchy { std::string child, parent; };
@@ -1473,9 +1443,6 @@ struct CompileInput {
         // routes it to blend anim 0 like every other animation token.
         std::vector<InIkRule> ikrules;
         bool nocull = false;   // `nocull`: exempt from $animationcullmethod
-        // `ignoretransformbone <angles|position>`, see Anim
-        bool ignoreTransformAngles = false;
-        bool ignoreTransformPosition = false;
         int motiontype = 0;    // motion controls (LX/LY/LZ/LXR/.../LM/LQ)
         float motionrollback = 0.3f; // `motionrollback`, see Anim
         int looprestart = 0;

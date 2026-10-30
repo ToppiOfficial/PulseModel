@@ -45,7 +45,10 @@ jobs:
 
       - name: Configure
         # no -G: use whatever toolchain the runner image ships
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist" -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="${{ github.workspace }}/dist"
+        run: >-
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DPULSEMODEL_ENABLE_PULSEMODEL=OFF
+          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ github.workspace }}/dist"
+          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="${{ github.workspace }}/dist"
 
       - name: Build
         run: cmake --build build --config Release
@@ -59,6 +62,7 @@ jobs:
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE PulseModel/
           cp -r dist/subtools PulseModel/
+          mv PulseModel/subtools/licenses PulseModel/licenses
           7z a -tzip "pulsemodel-${{ needs.prepare.outputs.tag }}-${{ matrix.plat }}.zip" PulseModel/
 
       - uses: actions/upload-artifact@v7
