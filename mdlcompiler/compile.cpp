@@ -2299,6 +2299,9 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
 
     matrix3x4 vtmp;
     pm::AngleMatrix(ctx.defaultRotation, vtmp);
+    matrix3x4 scaled;
+    for (int axis = 0; axis < 3; ++axis) scaled.m[axis][axis] = ctx.in->scale;
+    m.eyeballFrame = pm::ConcatTransforms(vtmp, scaled);
 
     for (Eyeball& eye : m.eyeballs) {
         source::Source* psource = m.models[eye.model].source;

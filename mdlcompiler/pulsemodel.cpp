@@ -4268,7 +4268,7 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
     const Json record{{"model", g_loaded.id}, {"bones", std::move(compiledBones)},
                       {"collapsedBones", std::move(collapsedBones)},
                       {"attachments", std::move(attachments)}, {"hitboxSets", std::move(sets)},
-                      {"eyeballs", std::move(eyeballs)}};
+                      {"eyeballs", std::move(eyeballs)}, {"eyeballFrame", flatten(model.eyeballFrame)}};
     pulse::api::Record("compiled", record.dump());
 }
 

@@ -974,6 +974,7 @@ struct BoneSaveFrame {
 
 struct CompiledModel {
     std::string outname; // e.g. "testmodel/testcube" (no extension)
+    matrix3x4 eyeballFrame; // authored eyeball origin -> final axes, reported for eyeballs not compiled yet
     bool forceWriteVertexData = false; // $forcewritevertexdata - save the empty .vvd/.vtx when there is no geometry
     int gflags = 0;
     uint8_t constDirectionalLightDot = 0;
