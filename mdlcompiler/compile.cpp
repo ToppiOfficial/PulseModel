@@ -2299,9 +2299,6 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
 
     matrix3x4 vtmp;
     pm::AngleMatrix(ctx.defaultRotation, vtmp);
-    matrix3x4 scaled;
-    for (int axis = 0; axis < 3; ++axis) scaled.m[axis][axis] = ctx.in->scale;
-    m.eyeballFrame = pm::ConcatTransforms(vtmp, scaled);
 
     for (Eyeball& eye : m.eyeballs) {
         source::Source* psource = m.models[eye.model].source;
@@ -2323,8 +2320,6 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
 
         const float scale = ctx.in->scale;
         Vector3 tmp = {eye.org.x * scale, eye.org.y * scale, eye.org.z * scale};
-        matrix3x4 originToPose;
-        for (int axis = 0; axis < 3; ++axis) originToPose.m[axis][axis] = scale;
 
         // `center`: sit on the bbox center of the verts wearing the eyeball's
         // material (source verts are already $scale'd), with org as an offset in
@@ -2342,10 +2337,6 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
                 const Vector3 off = pm::VectorIRotate(tmp, vtmp);
                 tmp = {(lo.x + hi.x) * 0.5f + off.x, (lo.y + hi.y) * 0.5f + off.y,
                        (lo.z + hi.z) * 0.5f + off.z};
-                originToPose = pm::ConcatTransforms(pm::MatrixInvert(vtmp), originToPose);
-                originToPose.m[0][3] = (lo.x + hi.x) * 0.5f;
-                originToPose.m[1][3] = (lo.y + hi.y) * 0.5f;
-                originToPose.m[2][3] = (lo.z + hi.z) * 0.5f;
                 std::printf("eyeball \"%s\" center %.3f %.3f %.3f + offset %.3f %.3f %.3f "
                             "-> %.3f %.3f %.3f\n",
                             eye.name.c_str(), (lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f,
@@ -2364,7 +2355,6 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
         // the world axes through defaultrotation and the same bone transform
         const matrix3x4& boneToPose = psource->boneToPose[eye.bone];
         eye.org = pm::VectorITransform(tmp, boneToPose);
-        eye.originToBone = pm::ConcatTransforms(pm::MatrixInvert(boneToPose), originToPose);
 
         eye.up = pm::VectorIRotate(pm::VectorIRotate(Vector3{0, 0, 1}, vtmp), boneToPose);
         eye.forward = pm::VectorIRotate(pm::VectorIRotate(Vector3{1, 0, 0}, vtmp), boneToPose);

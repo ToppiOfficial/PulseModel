@@ -4259,16 +4259,39 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
     }
 
     // Per eyeball name, one authored origin -> model space matrix for each body it was bound to, in body order.
+    // The poses give the axes (a centered origin is an offset in final axes); the compiled eye anchors the translation.
     Json eyeballs = Json::object();
-    for (const compile::Eyeball& eye : model.eyeballs)
-        if (eye.bone >= 0)
-            eyeballs[eye.name].push_back(flatten(
-                pulse::math::ConcatTransforms(model.bones[eye.bone].boneToPose, eye.originToBone)));
+    for (const compile::Eyeball& eye : model.eyeballs) {
+        const auto authored = std::find_if(input.eyeballs.begin(), input.eyeballs.end(),
+            [&](const compile::Eyeball& candidate) { return candidate.name == eye.name; });
+        const auto* source = eye.model >= 0 ? model.models[eye.model].source : nullptr;
+        if (eye.bone < 0 || authored == input.eyeballs.end() || !source) continue;
+
+        int sourceBone = -1;
+        for (int i = 0; i < source->numbones && sourceBone < 0; ++i)
+            if (_stricmp(source->localBone[i].name.c_str(), eye.bonename.c_str()) == 0) sourceBone = i;
+        if (sourceBone < 0) continue;
+
+        const auto& pose = model.bones[eye.bone].boneToPose;
+        pulse::math::matrix3x4 frame;
+        for (int axis = 0; axis < 3; ++axis) frame.m[axis][axis] = input.scale;
+        if (!authored->center)
+            frame = pulse::math::ConcatTransforms(
+                pulse::math::ConcatTransforms(pose, pulse::math::MatrixInvert(source->boneToPose[sourceBone])), frame);
+        for (int axis = 0; axis < 3; ++axis) frame.m[axis][3] = 0.0f;
+
+        const auto compiled = pulse::math::VectorTransform(eye.org, pose);
+        const auto placed = pulse::math::VectorTransform(authored->org, frame);
+        frame.m[0][3] = compiled.x - placed.x;
+        frame.m[1][3] = compiled.y - placed.y;
+        frame.m[2][3] = compiled.z - placed.z;
+        eyeballs[eye.name].push_back(flatten(frame));
+    }
 
     const Json record{{"model", g_loaded.id}, {"bones", std::move(compiledBones)},
                       {"collapsedBones", std::move(collapsedBones)},
                       {"attachments", std::move(attachments)}, {"hitboxSets", std::move(sets)},
-                      {"eyeballs", std::move(eyeballs)}, {"eyeballFrame", flatten(model.eyeballFrame)}};
+                      {"eyeballs", std::move(eyeballs)}};
     pulse::api::Record("compiled", record.dump());
 }
 

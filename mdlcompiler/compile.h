@@ -73,7 +73,6 @@ struct Eyeball {
     float iris_scale = 0.0f;
     Vector3 up{};
     Vector3 forward{};
-    matrix3x4 originToBone; // authored origin -> org, reported for edits placed without a compile
 
     // lid data; -1 until an Eyelid binds them (or the dummy-desc fallback runs)
     int upperflexdesc[3] = {-1, -1, -1};
@@ -974,7 +973,6 @@ struct BoneSaveFrame {
 
 struct CompiledModel {
     std::string outname; // e.g. "testmodel/testcube" (no extension)
-    matrix3x4 eyeballFrame; // authored eyeball origin -> final axes, reported for eyeballs not compiled yet
     bool forceWriteVertexData = false; // $forcewritevertexdata - save the empty .vvd/.vtx when there is no geometry
     int gflags = 0;
     uint8_t constDirectionalLightDot = 0;
