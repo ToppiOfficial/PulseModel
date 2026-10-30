@@ -73,6 +73,7 @@ struct Eyeball {
     float iris_scale = 0.0f;
     Vector3 up{};
     Vector3 forward{};
+    matrix3x4 originToBone; // authored origin -> org, reported for edits placed without a compile
 
     // lid data; -1 until an Eyelid binds them (or the dummy-desc fallback runs)
     int upperflexdesc[3] = {-1, -1, -1};

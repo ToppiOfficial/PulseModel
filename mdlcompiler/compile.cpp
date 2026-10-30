@@ -2320,6 +2320,8 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
 
         const float scale = ctx.in->scale;
         Vector3 tmp = {eye.org.x * scale, eye.org.y * scale, eye.org.z * scale};
+        matrix3x4 originToPose;
+        for (int axis = 0; axis < 3; ++axis) originToPose.m[axis][axis] = scale;
 
         // `center`: sit on the bbox center of the verts wearing the eyeball's
         // material (source verts are already $scale'd), with org as an offset in
@@ -2337,6 +2339,10 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
                 const Vector3 off = pm::VectorIRotate(tmp, vtmp);
                 tmp = {(lo.x + hi.x) * 0.5f + off.x, (lo.y + hi.y) * 0.5f + off.y,
                        (lo.z + hi.z) * 0.5f + off.z};
+                originToPose = pm::ConcatTransforms(pm::MatrixInvert(vtmp), originToPose);
+                originToPose.m[0][3] = (lo.x + hi.x) * 0.5f;
+                originToPose.m[1][3] = (lo.y + hi.y) * 0.5f;
+                originToPose.m[2][3] = (lo.z + hi.z) * 0.5f;
                 std::printf("eyeball \"%s\" center %.3f %.3f %.3f + offset %.3f %.3f %.3f "
                             "-> %.3f %.3f %.3f\n",
                             eye.name.c_str(), (lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f,
@@ -2355,6 +2361,7 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
         // the world axes through defaultrotation and the same bone transform
         const matrix3x4& boneToPose = psource->boneToPose[eye.bone];
         eye.org = pm::VectorITransform(tmp, boneToPose);
+        eye.originToBone = pm::ConcatTransforms(pm::MatrixInvert(boneToPose), originToPose);
 
         eye.up = pm::VectorIRotate(pm::VectorIRotate(Vector3{0, 0, 1}, vtmp), boneToPose);
         eye.forward = pm::VectorIRotate(pm::VectorIRotate(Vector3{1, 0, 0}, vtmp), boneToPose);
@@ -10106,6 +10113,20 @@ bool ConvertIkRule(const CompileInput& input, const CompileInput::InIkRule& ir,
     return true;
 }
 
+// Drops leading and repeated separators; the engine joins these names onto
+// $cdmaterials and cannot resolve a doubled slash.
+static std::string CleanMaterialPath(const std::string& path) {
+    std::string clean;
+    for (const char ch : path) {
+        const bool separator = ch == '/' || ch == '\\';
+        const bool afterSeparator = !clean.empty() && (clean.back() == '/' || clean.back() == '\\');
+        if (separator && (clean.empty() || afterSeparator))
+            continue;
+        clean.push_back(ch);
+    }
+    return clean;
+}
+
 bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     Ctx ctx;
     ctx.in = &input;
@@ -11361,6 +11382,36 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                     p.first = remap[p.first];
                     p.second = remap[p.second];
                 }
+        }
+    }
+
+    // Every material path as it ships, whichever command produced it. A $lod
+    // source is cleaned too so the .vtx exact-name lookup still finds its texture.
+    {
+        std::unordered_set<std::string> reported;
+        auto cleanPath = [&reported](std::string& path, bool report) {
+            const std::string clean = CleanMaterialPath(path);
+            if (report && clean != path && reported.insert(path).second)
+                pulse::diag::Warnf("material path \"%s\" has stray slashes, using \"%s\"\n",
+                                   path.c_str(), clean.c_str());
+            path = clean;
+        };
+        auto cleanName = [&](std::string& name, bool report) {
+            cleanPath(name, report);
+            const bool noFileName = name.empty() || name.back() == '/' || name.back() == '\\';
+            if (report && noFileName && reported.insert(name).second)
+                pulse::diag::Warnf("material \"%s\" has no file name\n", name.c_str());
+        };
+
+        for (auto& tex : input.mats.textures)
+            cleanName(tex.name, tex.material >= 0);
+        for (std::string& cd : out.cdtextures)
+            cleanPath(cd, true);
+        for (ScriptLod& lod : out.scriptLods) {
+            for (LodReplacement& r : lod.materialReplacements) {
+                cleanName(r.src, false);
+                cleanName(r.dst, true);
+            }
         }
     }
 

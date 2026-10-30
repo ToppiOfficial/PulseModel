@@ -4258,9 +4258,17 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
         sets.push_back(std::move(record));
     }
 
+    // Per eyeball name, one authored origin -> model space matrix for each body it was bound to, in body order.
+    Json eyeballs = Json::object();
+    for (const compile::Eyeball& eye : model.eyeballs)
+        if (eye.bone >= 0)
+            eyeballs[eye.name].push_back(flatten(
+                pulse::math::ConcatTransforms(model.bones[eye.bone].boneToPose, eye.originToBone)));
+
     const Json record{{"model", g_loaded.id}, {"bones", std::move(compiledBones)},
                       {"collapsedBones", std::move(collapsedBones)},
-                      {"attachments", std::move(attachments)}, {"hitboxSets", std::move(sets)}};
+                      {"attachments", std::move(attachments)}, {"hitboxSets", std::move(sets)},
+                      {"eyeballs", std::move(eyeballs)}};
     pulse::api::Record("compiled", record.dump());
 }
 
