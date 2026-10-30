@@ -846,7 +846,8 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& ful
             const std::string& name = element->className;
             markup.jiggleBones += name == "DmeJiggleBone";
             markup.proceduralBones += name == "DmeQuatInterpBone" || name == "DmeAimAtBone";
-            markup.physicsShapes += name == "DmePhysicsShape";
+            markup.physicsShapes += name == "DmePhysicsShape" || name == "DmePhysicsBox" ||
+                                    name == "DmePhysicsSphere" || name == "DmePhysicsCapsule";
         }
         pulse::dependencies::NoteMarkup(full.string(), markup);
     }
