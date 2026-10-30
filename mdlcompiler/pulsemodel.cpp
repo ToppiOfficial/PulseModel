@@ -4259,7 +4259,14 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
     }
 
     // Per eyeball name, one authored origin -> model space matrix for each body it was bound to, in body order.
-    // The poses give the axes (a centered origin is an offset in final axes); the compiled eye anchors the translation.
+    // The linear part follows SetupEyeballs: scale, un-rotated for a centered origin, then source pose -> final pose.
+    // The compiled eye gives the translation, which holds the centered eyeball's vertex centre.
+    const pulse::math::RadianEuler defaultRotation = input.rotationSet ? input.rotation
+        : input.upAxisY ? pulse::math::RadianEuler{pulse::math::kPiF / 2.0f, 0.0f, pulse::math::kPiF / 2.0f}
+                        : pulse::math::RadianEuler{0.0f, 0.0f, pulse::math::kPiF / 2.0f};
+    pulse::math::matrix3x4 rotated;
+    pulse::math::AngleMatrix(defaultRotation, rotated);
+
     Json eyeballs = Json::object();
     for (const compile::Eyeball& eye : model.eyeballs) {
         const auto authored = std::find_if(input.eyeballs.begin(), input.eyeballs.end(),
@@ -4275,9 +4282,9 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
         const auto& pose = model.bones[eye.bone].boneToPose;
         pulse::math::matrix3x4 frame;
         for (int axis = 0; axis < 3; ++axis) frame.m[axis][axis] = input.scale;
-        if (!authored->center)
-            frame = pulse::math::ConcatTransforms(
-                pulse::math::ConcatTransforms(pose, pulse::math::MatrixInvert(source->boneToPose[sourceBone])), frame);
+        if (authored->center) frame = pulse::math::ConcatTransforms(pulse::math::MatrixInvert(rotated), frame);
+        frame = pulse::math::ConcatTransforms(
+            pulse::math::ConcatTransforms(pose, pulse::math::MatrixInvert(source->boneToPose[sourceBone])), frame);
         for (int axis = 0; axis < 3; ++axis) frame.m[axis][3] = 0.0f;
 
         const auto compiled = pulse::math::VectorTransform(eye.org, pose);

@@ -10,7 +10,7 @@ if(PULSEMODEL_ENABLE_PULSEMODEL)
 endif()
 
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 1.6.1)
+set(TOOL_VERSION 1.0.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(mdlcompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}"
     PULSEMODEL_ENABLE_PULSEMODEL=$<BOOL:${PULSEMODEL_ENABLE_PULSEMODEL}>)
