@@ -2182,7 +2182,7 @@ void LowerMesh(Emitter& e, const Json& mesh) {
     }
     // Drop Material nodes: exact names, then `contains` words, deleted in one $meshedit
     bool selecting = false;
-    for (const char* key : {"removeMeshes", "removeMeshWords"}) {
+    for (const char* key : {"removeMeshes", "removeMeshSubstring"}) {
         const Json* list = Get(mesh, key);
         if (!list || list->empty()) continue;
         if (!selecting) {
@@ -2195,7 +2195,7 @@ void LowerMesh(Emitter& e, const Json& mesh) {
         }
         e.Line(mesh, key);
         e.Word("$selectmaterial");
-        if (std::string(key) == "removeMeshWords") e.Word("contains");
+        if (std::string(key) == "removeMeshSubstring") e.Word("contains");
         for (const Json& name : *list) e.Text(name.get<std::string>());
     }
     if (selecting) {
@@ -2505,12 +2505,12 @@ bool LowerLod(Emitter& e, const Json& lod) {
             e.Text(Str(r, "with"));
         }
     }
-    for (const char* key : {"removeMeshes", "removeMeshWords"}) {
+    for (const char* key : {"removeMeshes", "removeMeshSubstring"}) {
         const Json* list = Get(lod, key);
         if (!list) continue;
         for (const Json& name : *list) {
             e.Line(lod, key);
-            e.Word(std::string(key) == "removeMeshes" ? "removemesh" : "removemeshword");
+            e.Word(std::string(key) == "removeMeshes" ? "removemesh" : "removemeshsubstring");
             e.Text(name.get<std::string>());
         }
     }
@@ -3646,12 +3646,12 @@ const Gather kGathers[] = {
     {"materials", "materialFolder", "paths", "folder"},
     {"materials", "drawOrder", "sortOrder", "material"},
     {"mesh", "dropMaterial", "removeMeshes", "material"},
-    {"mesh", "dropMaterialWord", "removeMeshWords", "word"},
+    {"mesh", "dropMaterialWord", "removeMeshSubstring", "word"},
     {"choice", "choiceMesh", "meshes", "mesh"},
     {"lodOptions", "lodRemoveMesh", "removeModels", "mesh"},
     {"lodOptions", "lodCollapseTree", "collapseBoneTrees", "bone"},
     {"lodOptions", "dropMaterial", "removeMeshes", "material"},
-    {"lodOptions", "dropMaterialWord", "removeMeshWords", "word"},
+    {"lodOptions", "dropMaterialWord", "removeMeshSubstring", "word"},
     {"lodOptions", "lodSmallMesh", "removeSmallMeshesIn", "mesh"},
     {"bones", "boneMarkup", "boneMerge", "bone", "boneMerge"},
     {"bones", "boneMarkup", "doNotCollapse", "bone", "doNotCollapse"},

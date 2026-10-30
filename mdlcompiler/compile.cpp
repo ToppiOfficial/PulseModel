@@ -2691,7 +2691,7 @@ bool ContainsNoCase(const std::string& haystack, const std::string& needle) {
     return false;
 }
 
-// FindOrCullMesh's removemesh / removemeshword tests, both
+// FindOrCullMesh's removemesh / removemeshsubstring tests, both
 // matched on the path-stripped material base name so DMX pathing is ignored
 bool IsMeshRemoved(const Ctx& ctx, const ScriptLod& lod, int nMaterialID) {
     if (lod.meshRemovals.empty() && lod.meshWordRemovals.empty())

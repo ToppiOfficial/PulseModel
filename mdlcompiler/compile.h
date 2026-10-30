@@ -900,8 +900,8 @@ struct ScriptLod {
     std::vector<LodReplacement> materialReplacements;
     std::vector<LodReplacement> materialWordReplacements;
     std::vector<LodReplacement> meshRemovals;
-    // removemeshword: drop any mesh whose material base name CONTAINS the
-    // stored word, case-insensitively
+    // removemeshsubstring: drop any mesh whose material base name CONTAINS the
+    // stored substring, case-insensitively
     std::vector<LodReplacement> meshWordRemovals;
     float smallMeshLimit = 0.0f;
     std::vector<source::Source*> smallMeshSources;

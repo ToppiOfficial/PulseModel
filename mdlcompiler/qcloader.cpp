@@ -6543,9 +6543,9 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             if (!c.Want("a material name", t, r.src))
                 return false;
             lod.meshRemovals.push_back(std::move(r));
-        } else if (opt == "removemeshword") {
+        } else if (opt == "removemeshsubstring") {
             cm::LodReplacement r;
-            if (!c.Want("a word to match", t, r.src))
+            if (!c.Want("a substring to match", t, r.src))
                 return false;
             lod.meshWordRemovals.push_back(std::move(r));
         } else if (opt == "nomorphs" || opt == "nofacial") {
