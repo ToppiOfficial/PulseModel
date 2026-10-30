@@ -4216,6 +4216,12 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
         }
     }
 
+    const auto flatten = [](const pulse::math::matrix3x4& matrix) {
+        Json values = Json::array();
+        for (const auto& row : matrix.m) for (const float value : row) values.push_back(value);
+        return values;
+    };
+
     Json attachments = Json::array();
     for (const compile::Attachment& attachment : model.attachments) {
         Json record{{"name", attachment.name}};
@@ -4223,6 +4229,16 @@ void PrintCompiled(const compile::CompileInput& input, const compile::CompiledMo
             Locate(record, Get(*settings, "illumPosition"));
         else
             Locate(record, FindNamed(Get(m, "attachments"), "name", attachment.name));
+
+        // final local = toCompiled * authored local, so a tool can place an edit without compiling.
+        // Vertex selectors resolve from the mesh, so those attachments report no conversion.
+        const auto authored = std::find_if(input.attachments.begin(), input.attachments.end(),
+            [&](const compile::Attachment& candidate) { return candidate.name == attachment.name; });
+        if (authored != input.attachments.end() && authored->flexgroups.empty() &&
+            authored->flexmorphs.empty() && authored->materials.empty()) {
+            record["authored"] = flatten(authored->local);
+            record["toCompiled"] = flatten(pulse::math::ConcatTransforms(attachment.local, pulse::math::MatrixInvert(authored->local)));
+        }
         attachments.push_back(std::move(record));
     }
 
