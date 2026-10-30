@@ -20,8 +20,9 @@ namespace pulse::dependencies {
 
 enum class Kind { Script, Include, Source };
 
-// DME bone markup and physics shape counts of a DMX source.
+// Model format version, DME bone markup and physics shape counts of a DMX source.
 struct Markup {
+    int modelVersion = 0;
     int jiggleBones = 0;
     int proceduralBones = 0;
     int physicsShapes = 0;
@@ -98,7 +99,7 @@ inline void NoteMarkup(const std::string& path, const Markup& markup) {
 }
 
 // "@dep <script|include|source> <16 hex digit hash> <absolute path>" per file, then "@dep end".
-// API records add the DMX markup counts; `complete` is false when the load stopped early.
+// API records add the DMX model version and markup counts; `complete` is false when the load stopped early.
 inline void Print(bool complete = true) {
     for (const auto& [path, e] : Files()) {
         const char* name = e.kind == Kind::Script ? "script" : e.kind == Kind::Include ? "include" : "source";
@@ -115,7 +116,8 @@ inline void Print(bool complete = true) {
         if (package && package->Contains(pulse::FilePath(path)))
             record += ",\"archive\":" + pulse::api::String(package->Path().u8string());
         if (e.dmx)
-            record += ",\"jiggleBones\":" + std::to_string(e.markup.jiggleBones) +
+            record += ",\"modelVersion\":" + std::to_string(e.markup.modelVersion) +
+                      ",\"jiggleBones\":" + std::to_string(e.markup.jiggleBones) +
                       ",\"proceduralBones\":" + std::to_string(e.markup.proceduralBones) +
                       ",\"physicsShapes\":" + std::to_string(e.markup.physicsShapes);
         pulse::api::Record("dependency", record + "}");

@@ -841,6 +841,7 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& ful
       dm = pulse::dmx::Datamodel::Load(full.string().c_str(), err); }
     if (dm && pulse::dependencies::g_enabled) {
         pulse::dependencies::Markup markup;
+        markup.modelVersion = dm->format_version;
         for (const auto& element : dm->elements) {
             const std::string& name = element->className;
             markup.jiggleBones += name == "DmeJiggleBone";
