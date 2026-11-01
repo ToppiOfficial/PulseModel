@@ -1699,7 +1699,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         }
         std::vector<std::vector<AnimPose>> frames;
         frames.reserve(static_cast<size_t>(count));
-        Vector3 lastBend[2];
+        Vector3 lastBend[2], lastArmBend[2];
         const matrix3x4 spin = AxisRot(2, api ? static_cast<float>(api->rotation) * pm::kDeg2Rad : 0.0f);
         for (long k = 0; k < count; ++k) {
             if (api && k % 100 == 0) pulse::api::Record("progress", "{\"value\":" + Number(double(k)/double(count)) + "}");
@@ -1765,13 +1765,33 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                                                     Origin(W[arms[1].upper])), 0.5f);
                 for (int side = 0; side < 2; ++side) {
                     const Arm& arm = arms[side];
-                    const Vector3 wristOffset = Sub(Origin(G[mmd.Find("wrist", side)]), sourceCenter);
-                    const Vector3 elbowOffset = Sub(Origin(G[mmd.Find("elbow", side)]),
-                                                    Origin(G[mmd.Find("arm", side)]));
-                    const Vector3 goal = Add(targetCenter, Mul(pm::VectorRotate(wristOffset, M), armScale));
-                    const Vector3 hint = pm::VectorRotate(elbowOffset, M);
+                    const Vector3 sourceShoulder = Origin(G[mmd.Find("arm", side)]);
+                    const Vector3 sourceWrist = Origin(G[mmd.Find("wrist", side)]);
+                    const Vector3 goal = Add(targetCenter, Mul(pm::VectorRotate(Sub(sourceWrist, sourceCenter), M), armScale));
+
+                    // The elbow's side comes from the source's own limb line, as the target's shoulder offset would
+                    // swing it near full reach. A nearly straight arm holds the previous side, chest-back at first.
+                    Vector3 limb = pm::VectorRotate(Sub(sourceWrist, sourceShoulder), M);
+                    pm::VectorNormalize(limb);
+                    const Vector3 upperArm = pm::VectorRotate(Sub(Origin(G[mmd.Find("elbow", side)]), sourceShoulder), M);
+                    Vector3 bend = Sub(upperArm, Mul(limb, Dot(upperArm, limb)));
+                    const float offset = pm::VectorNormalize(bend);
+
+                    Vector3 previous = Len(lastArmBend[side]) > 0.0f
+                        ? lastArmBend[side]
+                        : pm::VectorRotate(Mul(fwd, -1.0f), toTarget(G[mmd.Find("upper2")]));
+                    previous = Sub(previous, Mul(limb, Dot(previous, limb)));
+                    if (pm::VectorNormalize(previous) > 1e-5f) {
+                        const float bent = std::clamp((offset / std::max(Len(upperArm), 1e-5f) - kStraightSine) / kStraightSine,
+                                                      0.0f, 1.0f);
+                        const float weight = bent * bent * (3.0f - 2.0f * bent);
+                        bend = Add(Mul(bend, weight), Mul(previous, 1.0f - weight));
+                        if (pm::VectorNormalize(bend) < 1e-5f) bend = previous;
+                    }
+                    lastArmBend[side] = bend;
+
                     const matrix3x4 handRotation = RotOnly(W[arm.hand]);
-                    SolveTwoBoneIK(arm.upper, arm.elbow, arm.hand, goal, hint, W);
+                    SolveTwoBoneIK(arm.upper, arm.elbow, arm.hand, goal, bend, W);
                     const Vector3 handPosition = Origin(W[arm.hand]);
                     W[arm.hand] = handRotation;
                     SetOrigin(W[arm.hand], handPosition);

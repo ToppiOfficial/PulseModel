@@ -81,9 +81,10 @@ std::vector<Vector3> ContinuousAngles(const std::vector<matrix3x4>& frames)
     return result;
 }
 
-void EmitCurve(const char* property, const std::string& control, int component,
-               const std::vector<float>& sourceTimes, std::vector<double> values, double tolerance,
-               bool discrete = false, const std::set<size_t>& cuts = {})
+// Returns what the emitted curve evaluates to at each sample.
+std::vector<double> EmitCurve(const char* property, const std::string& control, int component,
+                              const std::vector<float>& sourceTimes, std::vector<double> values, double tolerance,
+                              bool discrete = false, const std::set<size_t>& cuts = {})
 {
     if (values.empty() || values.size() != sourceTimes.size()) throw std::runtime_error("Invalid converted curve");
 
@@ -146,6 +147,7 @@ void EmitCurve(const char* property, const std::string& control, int component,
     }
 
     std::vector<size_t> keys(keep.begin(), keep.end());
+    std::vector<double> fitted = values;
     std::string json = "{\"property\":" + pulse::api::String(property) + ",\"control\":" + pulse::api::String(control)
         + ",\"component\":" + std::to_string(component) + ",\"base\":" + Number(values[0])
         + ",\"discrete\":" + (discrete ? "true" : "false") + ",\"keys\":[";
@@ -159,10 +161,14 @@ void EmitCurve(const char* property, const std::string& control, int component,
             + ",\"left\":{\"time\":" + Number(times[i] - left) + ",\"value\":" + Number(values[i] - slopes[i]*left) + ",\"type\":4}"
             + ",\"right\":{\"time\":" + Number(times[i] + right) + ",\"value\":" + Number(values[i] + slopes[i]*right) + ",\"type\":4}}";
         if (k + 1 < keys.size())
-            for (size_t at = i + 1; at < next; ++at) assert(std::abs(sample(i, next, at) - values[at]) <= tolerance + 1e-8);
+            for (size_t at = i + 1; at < next; ++at) {
+                fitted[at] = sample(i, next, at);
+                assert(std::abs(fitted[at] - values[at]) <= tolerance + 1e-8);
+            }
     }
 
     pulse::api::Record("channel", json + "]}");
+    return fitted;
 }
 
 // MMD frames over which a boundary correction eases in and out, on each side of the overshoot.
@@ -339,9 +345,13 @@ int EmitCameraApi(const ApiOptions& api, const std::string& path, const matrix3x
     return 0;
 }
 
-// Sine of the root joint's bend below which an IK pole holds its previous direction; it is fully
-// free at twice this value.
+// Sine of the root joint's bend below which a limb's bend direction holds its previous value; it is
+// fully free at twice this value.
 constexpr float kStraightSine = 0.1f;
+
+// A limb near full reach turns any gap between its IK target and its bones into elbow or knee
+// movement, so targets follow the fitted bones far closer than other curves follow their samples.
+constexpr double kIkTargetTolerance = 0.003;
 
 void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<float>& times,
                    const std::vector<std::vector<AnimPose>>& frames,
@@ -349,6 +359,9 @@ void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<flo
 {
     pulse::api::Record("clip", "{\"duration\":" + Number(double(times.back())/30) + ",\"sourceFps\":30}");
     const auto* bones = model.At<fm::mstudiobone_t>(model.buf.data(), model.hdr->boneindex, model.hdr->numbones);
+
+    // The pose the emitted bone curves play back, which the IK curves below must agree with.
+    std::vector<std::vector<AnimPose>> fitted = frames;
 
     if (body) for (int bone = 0; bone < target.n; ++bone)
     {
@@ -370,8 +383,13 @@ void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<flo
                 position.push_back((&frames[i][bone].pos.x)[axis]);
                 rotation.push_back((&angles[i].x)[axis]);
             }
-            EmitCurve("Bone position", target.names[bone], axis, times, position, 0.05);
-            EmitCurve("Bone rotation", target.names[bone], axis, times, rotation, 0.1);
+            const auto fittedPosition = EmitCurve("Bone position", target.names[bone], axis, times, position, 0.05);
+            const auto fittedRotation = EmitCurve("Bone rotation", target.names[bone], axis, times, rotation, 0.1);
+            for (size_t i = 0; i < frames.size(); ++i)
+            {
+                (&fitted[i][bone].pos.x)[axis] = float(fittedPosition[i]);
+                (&fitted[i][bone].rot.x)[axis] = float(fittedRotation[i]) * pm::kDeg2Rad;
+            }
         }
     }
 
@@ -392,7 +410,7 @@ void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<flo
             std::array<std::vector<double>, 3> endpoints, poles;
             Vector3 held{};
             bool holding = false;
-            for (const auto& frame : frames)
+            for (const auto& frame : fitted)
             {
                 std::vector<matrix3x4> world(target.n);
                 for (int b = 0; b < target.n; ++b)
@@ -438,7 +456,7 @@ void EmitMotionApi(const Mdl& model, const Target& target, const std::vector<flo
             const auto name = model.Str(&chains[c], chains[c].sznameindex);
             for (int a = 0; a < 3; ++a)
             {
-                EmitCurve("IK target", name, a, times, endpoints[a], 0.05);
+                EmitCurve("IK target", name, a, times, endpoints[a], kIkTargetTolerance);
                 EmitCurve("IK pole", name, a, times, poles[a], 0.05);
             }
         }

@@ -2,6 +2,7 @@
 //
 // Usage:
 //   mdlcompiler <file.pulseqc> [-game <dir>] [-pause]
+//   mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move]
 
 #include <cctype>
 #include <chrono>
@@ -9,10 +10,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <new>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "compile.h"
@@ -51,7 +54,12 @@ static void PrintHeader() {
 
 static int Usage() {
     std::printf("usage: mdlcompiler <%s> [-game <dir>]\n", kScriptFormats);
+    std::printf("       mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move]\n");
     std::printf("\n");
+    std::printf("  -renamemdl <file.mdl> <new $modelname>\n");
+    std::printf("                write a compiled model under a new name, without a script.\n");
+    std::printf("                The name is relative to models/; -game picks that folder.\n");
+    std::printf("                Existing files are replaced; -move removes the originals\n");
     std::printf("  -api          read a versioned integration request from stdin\n");
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
@@ -355,6 +363,34 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     return 0;
 }
 
+static int FindRenameFlag(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "-renamemdl") == 0) return i;
+    return 0;
+}
+
+static int RunRenameModel(int argc, char** argv, int flag) {
+    g_stage = "command line";
+    if (flag + 2 >= argc)
+        return Fail("bad option", "-renamemdl needs a .mdl file and a new model name");
+
+    std::error_code ec;
+    const std::filesystem::path source = std::filesystem::absolute(pulse::FilePath(argv[flag + 1]), ec);
+    if (ec) return Fail("bad option", std::string("cannot resolve ") + argv[flag + 1] + ": " + ec.message());
+
+    std::vector<std::string> arguments{source.generic_string(), argv[flag + 2], "-overwrite"};
+    for (int i = 1; i < argc; ++i) {
+        if (i >= flag && i <= flag + 2) continue;
+
+        if (std::strcmp(argv[i], "-pause") == 0) pulse::fatal::g_pause = true;
+        else arguments.emplace_back(argv[i]);
+    }
+
+    g_stage = "rename";
+    std::string err;
+    return pulse::rename::Run(arguments, &err) ? 0 : Fail("rename error", err);
+}
+
 int main(int argc, char** argv) {
     const bool api = argc == 2 && std::strcmp(argv[1], "-api") == 0;
     // progress lines are useless if they sit in the CRT buffer until exit -
@@ -390,6 +426,8 @@ int main(int argc, char** argv) {
                 for (std::string& value : call.arguments) arguments.push_back(value.data());
                 rc = RunCompile(static_cast<int>(arguments.size()), arguments.data(), &call);
             }
+        } else if (const int renameFlag = FindRenameFlag(argc, argv)) {
+            rc = RunRenameModel(argc, argv, renameFlag);
         } else rc = RunCompile(argc, argv);
     } catch (const std::bad_alloc&) {
         rc = Fail("out of memory", "an allocation failed - the model may exceed available RAM");

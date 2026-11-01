@@ -43,6 +43,7 @@ mdlcompiler <file.qc|file.qczip> [-game <dir>] [-modelname <path>] [-defvar <nam
             [-vtxformat <0|1>] [-nodx80]
             [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
             [-legacysequencebounds] [-perfmetrics] [-pause]
+mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move] [-pause]
 ```
 
 `.qczip` packages contain `model.qc` at the root and optional bundled source files.
@@ -51,6 +52,7 @@ mdlcompiler <file.qc|file.qczip> [-game <dir>] [-modelname <path>] [-defvar <nam
 | --- | --- |
 | `-game <dir>` | Mod directory to install into; output lands in `<dir>/models/<modelname>.mdl`. `-outdir` is a synonym. |
 | `-modelname <path>` | Overrides the script's `$modelname`. |
+| `-renamemdl <file.mdl> <new $modelname>` | Write a compiled model and its sibling files under a new name, with no script or recompile. The name is relative to `models/`; `-game` picks that folder. Existing files are replaced; `-move` removes the originals. |
 | `-defvar <name> <value>` | Define a script variable (`$name$`) before the script runs. Repeatable; the script cannot override it. |
 | `-includesearchdir <dir>` | Extra fallback directory for `$include`, searched after any `$addincludesearchdir`. Repeatable. |
 | `-filesearchdir <dir>` | Extra fallback directory for source files, searched after any `$addsearchdir`. Repeatable. |

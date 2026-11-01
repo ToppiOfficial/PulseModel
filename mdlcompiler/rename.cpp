@@ -1,7 +1,7 @@
 // rename.cpp - PulseModel
 //
-// -api rename: writes a compiled model under a new $modelname without a
-// decompile/compile round trip. Only the .mdl carries names; the rest is copied.
+// -renamemdl and -api rename: writes a compiled model under a new $modelname without
+// a decompile/compile round trip. Only the .mdl carries names; the rest is copied.
 
 #include "rename.h"
 
