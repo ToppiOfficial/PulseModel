@@ -87,6 +87,7 @@ struct Token {
     bool expanded = false;
     bool expression = false; // a $definevariable "( ... )" value, parens included
     int apiSource = -1;
+    int column = 0; // 0-based byte offset in its line, for bare words
 };
 
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
@@ -186,6 +187,8 @@ bool Tokenize(const std::string& s, const std::string& file, const std::string& 
         }
         Token t;
         t.line = line;
+        const size_t lineEnd = i ? s.rfind('\n', i - 1) : std::string::npos;
+        t.column = static_cast<int>(lineEnd == std::string::npos ? i : i - lineEnd - 1);
         while (i < s.size()) {
             const char d = s[i];
             if (std::isspace(static_cast<unsigned char>(d)) || d == '{' || d == '}' ||
@@ -229,6 +232,7 @@ struct Ctx {
     bool abortErr = false;        // a hard $include error; stops parsing at the next read
     bool keepGoing = false;       // analyze: skip a failed command and read on
     bool hadError = false;        // keepGoing skipped something; the script cannot compile
+    std::vector<Token> options;   // option words of the running command, see MarkOption
     bool resolvingInclude = false; // reentrancy guard for ResolveIncludes
     // set while a block is captured raw ($if/$switch branch, macro or cmdlist
     // body): a $include there is stored verbatim and resolved when executed, not
@@ -360,6 +364,34 @@ struct Ctx {
     // Absolute path of the file being parsed.
     std::string Path() const { return fs::absolute(curDir / file).lexically_normal().u8string(); }
 
+    // Analyze: the token at `at` is an option word of the running command, so it can be told
+    // apart from values. Sent when the command ends; DropOption undoes a mark that turned out a value.
+    void MarkOption(size_t at) {
+        if (!keepGoing || at >= toks.size()) return;
+        const Token& t = toks[at];
+        if (t.quoted || t.expanded || t.apiSource < 0 || t.text.empty()) return;
+        const unsigned char first = static_cast<unsigned char>(t.text[0]);
+        const bool negated = first == '-' && t.text.size() > 1 &&
+            std::isalpha(static_cast<unsigned char>(t.text[1]));
+        if (std::isalpha(first) || first == '_' || negated)
+            options.push_back(t);
+    }
+    void MarkOption() { MarkOption(pos - 1); }
+    void DropOption(const Token& t) {
+        if (!options.empty() && options.back().line == t.line && options.back().column == t.column)
+            options.pop_back();
+    }
+
+    // A failed command's last option word may be the one it rejected, so that one is left out.
+    void ReportOptions(bool succeeded) {
+        if (!succeeded && !options.empty()) options.pop_back();
+        for (const Token& t : options)
+            pulse::api::Record("option", "{\"file\":" + pulse::api::String(apiSources[static_cast<size_t>(t.apiSource)]) +
+                ",\"line\":" + std::to_string(t.line) + ",\"column\":" + std::to_string(t.column) +
+                ",\"text\":" + pulse::api::String(t.text) + "}");
+        options.clear();
+    }
+
     // Next token, or null at end of file.
     const Token* Next() { return Eof() ? nullptr : &toks[pos++]; }
 
@@ -389,6 +421,13 @@ struct Ctx {
         } catch (const std::exception&) {
             return Fail(cmd.line, cmd.text + " expects " + what + ", got \"" + s + "\"");
         }
+        return true;
+    }
+
+    // A required word from a fixed set, such as a mode name.
+    bool WantOption(const char* what, const Token& cmd, std::string& value) {
+        if (!Want(what, cmd, value)) return false;
+        MarkOption();
         return true;
     }
 
@@ -634,6 +673,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         const Token* t = c.Next();
         if (!t)
             return c.Fail(cmd.line, "$meshedit is missing '}'");
+        c.MarkOption();
         if (!t->quoted && t->text == "}")
             break;
 
@@ -811,6 +851,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
             bool modeSeen = false, clampSeen = false;
             while (hasArg()) {
                 const std::string option = Lower(c.Next()->text);
+                c.MarkOption();
                 if ((option == "normals" || option == "hull") && !modeSeen) {
                     op.hull = option == "hull";
                     modeSeen = true;
@@ -1098,6 +1139,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             const Token* t = c.Next();
             if (!t)
                 return c.Fail(cmd.line, where + " is missing '}'");
+            c.MarkOption();
             if (t->text == "}")
                 break;
             const std::string o = Lower(t->text);
@@ -1126,9 +1168,11 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 if (!n)
                     return c.Fail(t->line, "$exceptionlist expects '{'");
                 if (!n->quoted && Lower(n->text) == "exclusive") {
+                    c.MarkOption();
                     edit.filter.exclusive = true;
                     n = c.Next();
                 } else if (!n->quoted && Lower(n->text) == "inclusive") {
+                    c.MarkOption();
                     n = c.Next();
                 }
                 if (!n || n->text != "{")
@@ -1150,6 +1194,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 const Token* n = c.Next();
                 if (!n)
                     return c.Fail(t->line, "$skinnedbonecull expects aggressive or tree");
+                c.MarkOption();
                 const std::string m = Lower(n->text);
                 if (m == "aggressive")
                     edit.boneCull = source::SkinnedBoneCull::Aggressive;
@@ -1213,6 +1258,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 while (!c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
                        !(!c.Cur().quoted && c.Cur().text == "}")) {
                     const Token* a = c.Next();
+                    c.MarkOption();
                     const std::string k = Lower(a->text);
                     if (k != "x" && k != "y" && k != "z")
                         return c.Fail(a->line, where + ": $scalebone axis must be x, y or z, got \"" +
@@ -1246,6 +1292,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                     const Token* m = c.Next();
                     if (!m)
                         return c.Fail(t->line, where + ": $vta is missing '}'");
+                    c.MarkOption();
                     if (m->text == "}")
                         break;
                     if (m->quoted || Lower(m->text) != "flex")
@@ -1514,6 +1561,7 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
         const Token* t = c.Next();
         if (!t)
             return c.Fail(cmd.line, where + " is missing '}'");
+        c.MarkOption();
         if (t->text == "}")
             break;
 
@@ -1635,6 +1683,7 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     bool jiggle = false, procedural = false, hitboxes = false, attachments = false;
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "jigglebones")
             jiggle = true;
@@ -1747,6 +1796,7 @@ bool CmdDataModelFlexes(Ctx& c, const Token& cmd) {
     bool controllers = false, correctives = false, dominators = false, rules = false;
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "flexcontroller")
             controllers = true;
@@ -1843,6 +1893,7 @@ bool CmdLegacyBody(Ctx& c, const Token& cmd) {
         float importScale = c.in.scale;
         while (inlineBody && !c.AtCommand() && (c.Cur().quoted || c.Cur().text != "}")) {
             const Token option = *c.Next();
+            c.MarkOption();
             const std::string o = Lower(option.text);
             if (!option.quoted && o == "reverse") {
                 flip = true;
@@ -1878,6 +1929,7 @@ bool CmdLegacyBody(Ctx& c, const Token& cmd) {
             const Token* t = c.Next();
             if (!t)
                 return c.Fail(cmd.line, where + " is missing '}'");
+            c.MarkOption();
             if (!t->quoted && t->text == "}")
                 break;
             if (!t->quoted && _stricmp(t->text.c_str(), "studio") == 0) {
@@ -1927,6 +1979,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
     float importScale = c.in.scale;
     while (!c.AtCommand() && (c.Cur().quoted || c.Cur().text != "{")) {
         const Token option = *c.Next();
+        c.MarkOption();
         const std::string o = Lower(option.text);
         if (option.quoted) {
             return c.Fail(option.line, where + ": expected reverse/scale/subd/faces/bias or '{'");
@@ -2019,6 +2072,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         const Token* tp = c.Next();
         if (!tp)
             return c.Fail(cmd.line, where + " is missing '}'");
+        c.MarkOption();
         if (!tp->quoted && tp->text == "{") { depth++; continue; }
         if (!tp->quoted && tp->text == "}") { if (--depth == 0) break; continue; }
         const Token t = *tp;
@@ -2086,6 +2140,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             while (sameLine(t.line)) {
                 const Token& n = *c.Next();
                 if (!n.quoted && _stricmp(n.text.c_str(), "range") == 0) {
+                    c.MarkOption();
                     if (!c.WantFloat("a range min", t, rMin) ||
                         !c.WantFloat("a range max", t, rMax))
                         return false;
@@ -2226,6 +2281,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             bool haveSlot[3] = {false, false, false};
             while (sameLine(t.line)) {
                 const Token& k = *c.Next();
+                c.MarkOption();
                 const std::string ko = Lower(k.text);
                 int slot = -1;
                 for (int i = 0; i < 3; ++i)
@@ -2285,6 +2341,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             bool haveSlot[3] = {false, false, false};
             while (sameLine(t.line)) {
                 const Token& k = *c.Next();
+                c.MarkOption();
                 const std::string ko = Lower(k.text);
                 int slot = -1;
                 for (int i = 0; i < 3; ++i)
@@ -3050,7 +3107,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             _stricmp(c.Cur().text.c_str(), "axis") == 0) {
             c.pos++;
             std::string axis;
-            if (!c.Want("an axis (x/y/z)", t, axis))
+            if (!c.WantOption("an axis (x/y/z)", t, axis))
                 return -1;
             if (_stricmp(axis.c_str(), "x") == 0) cmd.driverAxis = 0;
             else if (_stricmp(axis.c_str(), "y") == 0) cmd.driverAxis = 1;
@@ -3171,6 +3228,7 @@ bool ParseAnimBody(Ctx& c, const Token& cmd, const std::string& name,
             break;
         }
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const int r = ApplyAnimOption(c, t, a);
         if (r < 0)
             return false;
@@ -3282,7 +3340,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         return false;
 
     std::string type;
-    if (!c.Want("an ik rule type", cmd, type))
+    if (!c.WantOption("an ik rule type", cmd, type))
         return false;
     if (_stricmp(type.c_str(), "touch") == 0) {
         rule.type = "touch";
@@ -3319,6 +3377,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         if (c.Cur().quoted)
             break;
         const std::string o = c.Cur().text;
+        const size_t option = c.pos;
         if (_stricmp(o.c_str(), "height") == 0) {
             c.pos++;
             if (!c.WantFloat("a height", cmd, rule.height)) return false;
@@ -3376,6 +3435,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         } else {
             break; // an unrecognized token belongs to the enclosing sequence
         }
+        c.MarkOption(option);
     }
 
     out.push_back(std::move(rule));
@@ -3590,6 +3650,7 @@ bool CmdFlexController(Ctx& c, const Token& cmd) {
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
         if (!t.quoted && _stricmp(t.text.c_str(), "range") == 0) {
+            c.MarkOption();
             if (!c.WantFloat("a range min", cmd, rangeMin) ||
                 !c.WantFloat("a range max", cmd, rangeMax))
                 return false;
@@ -3689,6 +3750,7 @@ bool CmdEyeball(Ctx& c, const Token& cmd) {
     bool haveBone = false, haveMaterial = false, haveOrigin = false;
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "bone") {
             if (!c.Want("a bone name", cmd, entry.eyeball.bonename)) return false;
@@ -3777,6 +3839,7 @@ bool CmdEyelid(Ctx& c, const Token& cmd) {
     bool haveSlot[3] = {false, false, false};
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
+        c.MarkOption();
         const std::string o = Lower(t.text);
         int slot = -1;
         for (int i = 0; i < 3; ++i)
@@ -3895,6 +3958,7 @@ bool CmdMorphSplitStereo(Ctx& c, const Token& cmd) {
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
         if (!t.quoted && _stricmp(t.text.c_str(), "splitfactor") == 0) {
+            c.MarkOption();
             if (!c.WantFloat("a split factor", cmd, factor))
                 return false;
             continue;
@@ -4027,7 +4091,7 @@ bool ApplyMorphRenames(Ctx& c) {
 // which are both folded into "aggressive". See CullFlex() in compile.cpp.
 bool CmdFlexCullMethod(Ctx& c, const Token& cmd) {
     std::string m;
-    if (!c.Want("a cull method name", cmd, m))
+    if (!c.WantOption("a cull method name", cmd, m))
         return false;
     if (_stricmp(m.c_str(), "aggressive") == 0)
         c.in.flexCullMethod = cm::FlexCullMethod::Aggressive;
@@ -4048,7 +4112,7 @@ bool CmdFlexCullMethod(Ctx& c, const Token& cmd) {
 // removes anything but an animation. See CullAnimations() in compile.cpp.
 bool CmdAnimationCullMethod(Ctx& c, const Token& cmd) {
     std::string m;
-    if (!c.Want("a cull method name", cmd, m))
+    if (!c.WantOption("a cull method name", cmd, m))
         return false;
     if (_stricmp(m.c_str(), "aggressive") == 0)
         c.in.animCullMethod = cm::AnimCullMethod::Aggressive;
@@ -4105,6 +4169,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
         }
 
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string& o = t.text;
 
         if (!t.quoted && o == "{") { depth++; continue; }
@@ -4125,6 +4190,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     if (!c.Want("an activity name", t, seq.activityname))
                         return false;
                 } else {
+                    c.DropOption(t);
                     seq.activityname = o; // ACT_* shorthand: the token is the name
                 }
                 // $allowactivityname whitelist, checked where stock checks it
@@ -4397,6 +4463,8 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
             return c.Fail(t.line, cmd.text + " \"" + seq.name +
                                   "\": unknown option \"" + t.text + "\"");
 
+        c.DropOption(t);
+
         // --- otherwise an animation reference: a named $animation, else a
         //     filename loaded as an implied "@<seq>" animation ---
         auto named = c.namedAnims.find(o);
@@ -4551,7 +4619,7 @@ bool CmdContinue(Ctx& c, const Token& cmd) { return CmdAppendCommon(c, cmd, Appe
 // $modelarchetype <name> - replaces QC's $staticprop / $simpleprop flags.
 bool CmdModelArchetype(Ctx& c, const Token& cmd) {
     std::string a;
-    if (!c.Want("an archetype name", cmd, a))
+    if (!c.WantOption("an archetype name", cmd, a))
         return false;
     if (_stricmp(a.c_str(), "character") == 0 || _stricmp(a.c_str(), "general") == 0)
         c.in.archetype = cm::Archetype::General;
@@ -4600,6 +4668,7 @@ bool CmdModelBudget(Ctx& c, const Token& cmd) {
             return c.Fail(cmd.line, cmd.text + (braced ? ": missing '}'"
                                                        : ": expects a budget name"));
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (braced && !t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -4632,7 +4701,7 @@ bool CmdModelBudget(Ctx& c, const Token& cmd) {
 // "none" makes the no-flag default authorable.
 bool CmdRenderPass(Ctx& c, const Token& cmd) {
     std::string p;
-    if (!c.Want("a render pass name", cmd, p))
+    if (!c.WantOption("a render pass name", cmd, p))
         return false;
     if (_stricmp(p.c_str(), "none") == 0)
         c.in.renderPass = 0;
@@ -4713,6 +4782,7 @@ bool ParseContentsTokens(Ctx& c, const Token& cmd, int& add, int& remove) {
     add = 0;
     remove = 0;
     for (;;) {
+        c.MarkOption();
         if (_stricmp(tok.c_str(), "solid") == 0) {
             add |= kContentsSolid;
         } else if (_stricmp(tok.c_str(), "grate") == 0) {
@@ -4801,6 +4871,7 @@ bool CmdTransformModel(Ctx& c, const Token& cmd) {
     bool any = false;
     while (!c.AtCommand()) {
         const Token& t = c.toks[c.pos++];
+        c.MarkOption();
         // errors read "$transformmodel origin expects ..."
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
@@ -4882,7 +4953,7 @@ bool CmdScale(Ctx& c, const Token& cmd) {
 // leave the built-in +90 yaw.
 bool CmdUpAxis(Ctx& c, const Token& cmd) {
     std::string axis;
-    if (!c.Want("an axis", cmd, axis))
+    if (!c.WantOption("an axis", cmd, axis))
         return false;
 
     pm::RadianEuler r{0.0f, 0.0f, pm::kPiF / 2.0f};
@@ -4959,6 +5030,7 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const Token& t = c.toks[c.pos++];
+        c.MarkOption();
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
         if (!t.quoted && _stricmp(t.text.c_str(), "inherit") == 0) {
@@ -5171,7 +5243,7 @@ void FinishAttachments(Ctx& c) {
 // written down explicitly. $alwayscollapse overrules "none" per bone.
 bool CmdBoneCullMethod(Ctx& c, const Token& cmd) {
     std::string m;
-    if (!c.Want("a cull method name", cmd, m))
+    if (!c.WantOption("a cull method name", cmd, m))
         return false;
     if (_stricmp(m.c_str(), "aggressive") == 0)
         c.in.boneCullType = cm::BoneCullType::Aggressive;
@@ -5241,9 +5313,11 @@ bool CmdDefineBone(Ctx& c, const Token& cmd) {
         if (_stricmp(c.Cur().text.c_str(), "unlocked") == 0) {
             ib.bUnlocked = true;
             c.pos++;
+            c.MarkOption();
         } else if (_stricmp(c.Cur().text.c_str(), "locked") == 0) {
             ib.bUnlocked = false;
             c.pos++;
+            c.MarkOption();
         }
     }
 
@@ -5329,6 +5403,7 @@ bool CmdRealignBone(Ctx& c, const Token& cmd) {
     edit.line = cmd.line;
     while (!c.AtCommand()) {
         const Token option = c.toks[c.pos++];
+        c.MarkOption();
         const std::string word = Lower(option.text);
         if (!option.quoted && (word == "origin" || word == "angles")) {
             const bool origin = word == "origin";
@@ -5512,6 +5587,7 @@ bool ParseJiggleSection(Ctx& c, const Token& cmd, const std::string& sect, cm::J
         if (c.AtCommand())
             return c.Fail(cmd.line, where + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             return true;
         const std::string o = Lower(t.text);
@@ -5587,6 +5663,7 @@ bool CmdJiggleBone(Ctx& c, const Token& cmd) {
         if (c.AtCommand())
             return c.Fail(cmd.line, "$jigglebone: missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string sect = Lower(t.text);
@@ -5693,6 +5770,7 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
     // <file>` - a typo would otherwise surface as a confusing "missing '{'"
     while (!c.AtCommand() && !c.Cur().quoted && c.Cur().text != "{") {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "poseanim") {
             const Token sub{"$driverbone poseanim", t.line, false};
@@ -5723,6 +5801,7 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
         if (c.AtCommand())
             return c.Fail(cmd.line, "$driverbone: missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -6219,6 +6298,7 @@ bool CmdEyePosition(Ctx& c, const Token& cmd) {
     if (!c.AtCommand() && !c.Cur().quoted &&
         _stricmp(c.Cur().text.c_str(), "autoheight") == 0) {
         c.pos++;
+        c.MarkOption();
         c.in.eyepositionAutoHeight = true;
     }
     return true;
@@ -6325,6 +6405,7 @@ bool ParseTextureSet(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::Ski
         if (t.quoted || _stricmp(t.text.c_str(), "material") != 0)
             return c.Fail(t.line, "$texturegroup $set: expected material or '}', got \"" +
                                   t.text + "\"");
+        c.MarkOption();
 
         const Token sub{"$texturegroup $set material", t.line, false};
         // a brace is not a material name - Want would happily eat the '}' and
@@ -6484,6 +6565,7 @@ bool CmdLod(Ctx& c, const Token& cmd) {
         if (c.Eof())
             return c.Fail(cmd.line, cmd.text + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
 
@@ -6847,6 +6929,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
     // a clause list ends at '}' or the next $hbox
     while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "}")) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
@@ -6987,6 +7070,7 @@ bool CmdPoseParameter(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && _stricmp(t.text.c_str(), "wrap") == 0) {
             pp->flags |= kStudioLooping;
             pp->loop = pp->max - pp->min;
@@ -7030,6 +7114,7 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const Token sub{cmd.text + " " + t.text, t.line, false};
         if (LookupControl(t.text) != -1) {
             float unused = 0.0f;
@@ -7098,6 +7183,7 @@ bool ParseWeightEntries(Ctx& c, const Token& cmd, const std::string& listname,
 
         const Token t = c.toks[c.pos++];
         if (!t.quoted && _stricmp(t.text.c_str(), "posweight") == 0) {
+            c.MarkOption();
             if (entries.empty())
                 return c.Fail(t.line, "weightlist \"" + listname +
                                       "\": posweight before any bone");
@@ -7238,6 +7324,7 @@ bool CmdAnimBlockSize(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const std::string o = c.Next()->text;
+        c.MarkOption();
         if (_stricmp(o.c_str(), "nostall") == 0) {
             c.in.noAnimblockStall = true;
         } else if (_stricmp(o.c_str(), "highres") == 0) {
@@ -7274,6 +7361,7 @@ bool CmdBoneSaveFrame(Ctx& c, const Token& cmd) {
         return false;
     while (!c.AtCommand()) {
         const std::string o = c.Next()->text;
+        c.MarkOption();
         if (_stricmp(o.c_str(), "position") == 0)
             bsf.savePos = true;
         else if (_stricmp(o.c_str(), "rotation") == 0)
@@ -7334,6 +7422,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         if (c.Eof())
             return c.Fail(cmd.line, where + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7352,7 +7441,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         } else if (o == "maxconvex") {
             if (!c.WantInt("a piece count", sub, sh.maxConvex)) return false;
         } else if (!fromRender && o == "importtype") {
-            if (!c.Want("perjoint, singlejoint or singlehull", sub, importType))
+            if (!c.WantOption("perjoint, singlejoint or singlehull", sub, importType))
                 return false;
             importType = Lower(importType);
         } else if (!fromRender && o == "concave") {
@@ -7470,7 +7559,7 @@ bool AtNumber(Ctx& c) {
 //   capsule <point0 xyz> <point1 xyz> <radius0> <radius1> [segments]
 bool ParsePhysPrimitive(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
     std::string type;
-    if (!c.Want("box, sphere or capsule", cmd, type) ||
+    if (!c.WantOption("box, sphere or capsule", cmd, type) ||
         !c.Want("a bone name", cmd, sh.parentBone))
         return false;
     type = Lower(type);
@@ -7541,6 +7630,7 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
             return c.Fail(cmd.line, where + (braced ? ": missing '}'"
                                                     : ": expected x, y or z"));
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (braced && !t.quoted && t.text == "}")
             break;
 
@@ -7558,7 +7648,7 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
 
         const Token sub{where + " " + t.text, t.line, false};
         std::string type;
-        if (!c.Want("free, limit or fixed", sub, type))
+        if (!c.WantOption("free, limit or fixed", sub, type))
             return false;
         type = Lower(type);
         if      (type == "free")  a.type = 0;
@@ -7599,6 +7689,7 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
             return c.Fail(cmd.line, where + (braced ? ": missing '}'"
                                                     : ": expects a field name"));
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (braced && !t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7649,6 +7740,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
         if (c.Eof())
             return c.Fail(cmd.line, "$physicsmodel: missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7656,7 +7748,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
 
         if (o == "$physicsshape") {
             std::string mode;
-            if (!c.Want("fromfile, fromrendermesh, fromrender or primitive", sub, mode))
+            if (!c.WantOption("fromfile, fromrendermesh, fromrender or primitive", sub, mode))
                 return false;
             mode = Lower(mode);
             if (mode == "primitive") {
@@ -7861,6 +7953,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
         if (c.Eof())
             return c.Fail(cmd.line, cmd.text + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7916,8 +8009,8 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
         } else if (o == "$jointconstrain") {
             std::string bone, axis, type;
             cm::PhysicsJointAxis a;
-            if (!c.Want("a bone name", sub, bone) || !c.Want("an axis", sub, axis) ||
-                !c.Want("free, fixed or limit", sub, type) ||
+            if (!c.Want("a bone name", sub, bone) || !c.WantOption("an axis", sub, axis) ||
+                !c.WantOption("free, fixed or limit", sub, type) ||
                 !c.WantFloat("a minimum angle", sub, a.min) ||
                 !c.WantFloat("a maximum angle", sub, a.max)) return false;
             axis = Lower(axis);
@@ -8156,7 +8249,7 @@ bool CmdAssert(Ctx& c, const Token& cmd) {
 // $qcassert <boneexists|importboneexists> <bone> [source] <true|false>
 bool CmdQcAssert(Ctx& c, const Token& cmd) {
     std::string type, bone;
-    if (!c.Want("boneexists or importboneexists", cmd, type) ||
+    if (!c.WantOption("boneexists or importboneexists", cmd, type) ||
         !c.Want("a bone name", cmd, bone))
         return false;
 
@@ -8185,7 +8278,7 @@ bool CmdQcAssert(Ctx& c, const Token& cmd) {
     }
 
     std::string expectedText;
-    if (!c.Want("true or false", cmd, expectedText))
+    if (!c.WantOption("true or false", cmd, expectedText))
         return false;
     bool expected = false;
     if (_stricmp(expectedText.c_str(), "true") == 0)
@@ -9472,7 +9565,9 @@ bool RunCommands(Ctx& c) {
                                     "\" - supported: " + SupportedList());
         }
         pulse::diag::Current() = {c.Path(), cmd.line};
-        if (!found->fn(c, cmd) && !SkipFailedCommand(c, start))
+        const bool succeeded = found->fn(c, cmd);
+        c.ReportOptions(succeeded);
+        if (!succeeded && !SkipFailedCommand(c, start))
             return false;
     }
     return !c.abortErr; // a hard $include error surfaces as Eof
