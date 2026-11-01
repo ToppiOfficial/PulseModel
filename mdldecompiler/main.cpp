@@ -2627,14 +2627,11 @@ void WriteSequences(Qc& q, const Mdl& m) {
             opt("worldrelative");
         else if (f & fm::STUDIO_WORLD)
             opt("worldspace");
-        // `delta` is DELTA|POST and `predelta` is DELTA alone, so the delta bit
-        // is read off the sequence even when its animation is what carries it -
-        // spelling it `post` would recompile to the same flags but hide why
+        // `delta` is DELTA|POST and `predelta` is DELTA alone. Read off the full
+        // flags: `subtract` sets the clip's DELTA after the sequence ORs in clip
+        // flags, so only these options can put the bit back on the sequence.
         if (s.flags & fm::STUDIO_DELTA) {
-            if (f & fm::STUDIO_POST)
-                opt("delta");
-            else if (f & fm::STUDIO_DELTA)
-                opt("predelta");
+            opt((s.flags & fm::STUDIO_POST) ? "delta" : "predelta");
         } else if ((f & fm::STUDIO_POST) &&
                    !(f & (fm::STUDIO_WORLD | fm::STUDIO_WORLD_AND_RELATIVE))) {
             opt("post");
