@@ -662,11 +662,13 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         Lower(c.Cur().text) == "ignoreselectwarn") {
         ignoreSelectWarn = true;
         ++c.pos;
+        c.MarkOption();
     }
 
     if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
         return c.Fail(cmd.line, "$meshedit expects '{'");
     ++c.pos;
+    c.MarkOption();
 
     std::vector<source::EditMeshOperation> operations;
     for (;;) {
@@ -708,6 +710,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 const std::string mode = Lower(c.Cur().text);
                 if (mode == "add" || mode == "subtract" || mode == "intersect") {
                     ++c.pos;
+                    c.MarkOption();
                     if (mode == "subtract") op.combine = source::SelectionCombine::Subtract;
                     if (mode == "intersect") op.combine = source::SelectionCombine::Intersect;
                 }
@@ -716,6 +719,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 op.kind = MeshOperation::SelectMaterial;
                 if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "contains") {
                     ++c.pos;
+                    c.MarkOption();
                     op.contains = true;
                 }
                 while (hasArg()) {
@@ -742,6 +746,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                         if (op.selectChildren)
                             return c.Fail(t->line, where + ": selectchildren written twice");
                         ++c.pos;
+                        c.MarkOption();
                         op.selectChildren = true;
                     } else if (!thresholdSeen) {
                         if (!number("a selection threshold", op.value)) return false;
@@ -797,6 +802,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 if (!c.Cur().quoted && Lower(c.Cur().text) == "worldaxes") {
                     if (op.worldAxes) return c.Fail(t->line, where + ": worldaxes written twice");
                     ++c.pos;
+                    c.MarkOption();
                     op.worldAxes = true;
                 } else if (op.residualBone.empty()) {
                     if (!want("a residual bone name", op.residualBone)) return false;
@@ -815,6 +821,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         } else if (name == "deleteselection") {
             std::string mode;
             if (!want("faces or vertices", mode)) return false;
+            c.MarkOption();
             mode = Lower(mode);
             if (mode == "faces") op.kind = MeshOperation::DeleteFaces;
             else if (mode == "vertices") op.kind = MeshOperation::DeleteVertices;
@@ -825,6 +832,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
             op.kind = MeshOperation::Duplicate;
             if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "replaceselection") {
                 ++c.pos;
+                c.MarkOption();
                 op.replaceSelection = true;
             }
         } else if (name == "replacematerial") {
@@ -843,6 +851,7 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
             }
             if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "sharpedges") {
                 ++c.pos;
+                c.MarkOption();
                 op.sharpEdges = true;
             }
         } else if (name == "inflate") {
@@ -1306,11 +1315,13 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                         const std::string k = Lower(c.Cur().text);
                         if (k == "frame") {
                             ++c.pos;
+                            c.MarkOption();
                             if (!c.WantInt("a frame index", *m, fo.frame))
                                 return false;
                             sawFrame = true;
                         } else if (k == "position" || k == "decay") {
                             ++c.pos;
+                            c.MarkOption();
                             if (!c.WantFloat(k == "position" ? "a position" : "a decay", *m,
                                              k == "position" ? fo.position : fo.decay))
                                 return false;
@@ -2218,19 +2229,23 @@ bool CmdModel(Ctx& c, const Token& cmd) {
                 const std::string k = Lower(c.Cur().text);
                 if (k == "frame") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantInt("a frame index", t, fo.frame))
                         return false;
                     sawFrame = true;
                 } else if (k == "position") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantFloat("a position", t, fo.position))
                         return false;
                 } else if (k == "decay") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantFloat("a decay", t, fo.decay))
                         return false;
                 } else if (k == "split") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantFloat("a split", t, split))
                         return false;
                     hasSplit = true;
@@ -2525,6 +2540,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "range") == 0) {
             c.Next();
+            c.MarkOption();
             if (!c.WantFrame("a start frame", t, cmd.driverStart) ||
                 !c.WantFrame("a peak frame", t, cmd.driverPeak) ||
                 !c.WantFrame("a tail frame", t, cmd.driverTail) ||
@@ -2606,6 +2622,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "pos") == 0) {
             c.Next();
+            c.MarkOption();
             cmd.forceDoPos = true;
             if (!c.WantFloat("pos x", t, cmd.forcePos.x) ||
                 !c.WantFloat("pos y", t, cmd.forcePos.y) ||
@@ -2615,6 +2632,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "rot") == 0) {
             c.Next();
+            c.MarkOption();
             cmd.forceDoRot = true;
             if (!c.WantFloat("rot x", t, cmd.forceRot.x) ||
                 !c.WantFloat("rot y", t, cmd.forceRot.y) ||
@@ -2623,6 +2641,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             if (!c.AtCommand() && !c.Cur().quoted &&
                 _stricmp(c.Cur().text.c_str(), "local") == 0) {
                 c.Next();
+                c.MarkOption();
                 cmd.forceRotLocal = true;
             }
         }
@@ -2805,6 +2824,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 break;
             cmd.motiontype |= ctrl;
             c.pos++;
+            c.MarkOption();
         }
         if (cmd.motiontype == 0) {
             c.Fail(t.line, "\"" + o + "\": missing motion controls");
@@ -2881,6 +2901,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 if (!c.WantFloat("an X offset", t, bt.origin.x) ||
                     !c.WantFloat("a Y offset", t, bt.origin.y) ||
                     !c.WantFloat("a Z offset", t, bt.origin.z))
@@ -2892,6 +2913,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 float p = 0.0f, y = 0.0f, r = 0.0f;
                 if (!c.WantFloat("a pitch", t, p) || !c.WantFloat("a yaw", t, y) ||
                     !c.WantFloat("a roll", t, r))
@@ -2935,6 +2957,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 break;
             cmd.motiontype |= bits;
             c.pos++;
+            c.MarkOption();
         }
         if (!cmd.motiontype)
             cmd.motiontype = 0x0001 | 0x0002 | 0x0004;
@@ -2990,6 +3013,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 if (!c.WantFloat("a fade-in length in frames", t, cmd.fadeIn))
                     return -1;
                 fin = true;
@@ -2999,14 +3023,17 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 if (!c.WantFloat("a fade-out length in frames", t, cmd.fadeOut))
                     return -1;
                 fout = true;
             } else if (_stricmp(n.c_str(), "position") == 0) {
                 c.pos++;
+                c.MarkOption();
                 pos = true;
             } else if (_stricmp(n.c_str(), "rotation") == 0) {
                 c.pos++;
+                c.MarkOption();
                 rot = true;
             } else {
                 break;
@@ -3070,6 +3097,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     break;
                 cmd.motiontype |= ctrl;
                 c.pos++;
+                c.MarkOption();
             }
             if (cmd.motiontype == 0) {
                 c.Fail(t.line, "\"" + o + "\": missing motion controls "
@@ -3106,6 +3134,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "axis") == 0) {
             c.pos++;
+            c.MarkOption();
             std::string axis;
             if (!c.WantOption("an axis (x/y/z)", t, axis))
                 return -1;
@@ -3120,12 +3149,14 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "value") == 0) {
             c.pos++;
+            c.MarkOption();
             if (!c.WantFloat("a value", t, cmd.driverValue))
                 return -1;
         }
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "range") == 0) {
             c.pos++;
+            c.MarkOption();
             cmd.driverAll = false;
             if (!c.WantInt("a start frame", t, cmd.driverStart) ||
                 !c.WantInt("a peak frame", t, cmd.driverPeak) ||
@@ -4319,6 +4350,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     al.flags |= kStudioAlLocal;
                     seq.flags |= kStudioLocal;
                     c.pos++;
+                    c.MarkOption();
                 }
                 seq.autolayers.push_back(std::move(al));
                 continue;
@@ -4335,15 +4367,17 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     if (c.AtCommand() || c.Cur().quoted || c.Cur().text == "}")
                         break;
                     const std::string f = c.Cur().text;
-                    if (_stricmp(f.c_str(), "xfade") == 0) { al.flags |= kStudioAlXfade; c.pos++; }
-                    else if (_stricmp(f.c_str(), "spline") == 0) { al.flags |= kStudioAlSpline; c.pos++; }
-                    else if (_stricmp(f.c_str(), "noblend") == 0) { al.flags |= kStudioAlNoblend; c.pos++; }
+                    if (_stricmp(f.c_str(), "xfade") == 0) { al.flags |= kStudioAlXfade; c.pos++; c.MarkOption(); }
+                    else if (_stricmp(f.c_str(), "spline") == 0) { al.flags |= kStudioAlSpline; c.pos++; c.MarkOption(); }
+                    else if (_stricmp(f.c_str(), "noblend") == 0) { al.flags |= kStudioAlNoblend; c.pos++; c.MarkOption(); }
                     else if (_stricmp(f.c_str(), "local") == 0) {
                         al.flags |= kStudioAlLocal;
                         seq.flags |= kStudioLocal;
                         c.pos++;
+                        c.MarkOption();
                     } else if (_stricmp(f.c_str(), "poseparameter") == 0) {
                         c.pos++;
+                        c.MarkOption();
                         al.flags |= kStudioAlPose;
                         if (!c.Want("a pose parameter name", t, al.poseparameter))
                             return false;
@@ -4742,8 +4776,10 @@ bool CmdSetBindPose(Ctx& c, const Token& cmd) {
         if (_stricmp(o.c_str(), "meshonly") == 0) {
             c.in.bindPoseMeshOnly = true;
             ++c.pos;
+            c.MarkOption();
         } else if (_stricmp(o.c_str(), "blockname") == 0) {
             ++c.pos;
+            c.MarkOption();
             if (!c.Want("a source clip name", cmd, c.in.bindPoseClip))
                 return false;
         } else {
@@ -6462,8 +6498,10 @@ bool ParseReplaceModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
 
     // "blank" means the LOD system was told to replace nothing - forget the
     // entry entirely (reference Cmd_ReplaceModel)
-    if (_stricmp(r.src.c_str(), "blank") == 0)
+    if (_stricmp(r.src.c_str(), "blank") == 0) {
+        c.MarkOption(c.pos - 2);
         return true;
+    }
 
     r.srcSource = FindModelSource(c, r.src);
     if (!r.srcSource)
@@ -6486,8 +6524,10 @@ bool ParseRemoveModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
     cm::LodReplacement r;
     if (!c.Want("a model name", cmd, r.src))
         return false;
-    if (_stricmp(r.src.c_str(), "blank") == 0)
+    if (_stricmp(r.src.c_str(), "blank") == 0) {
+        c.MarkOption(c.pos - 1);
         return true;
+    }
 
     r.srcSource = FindModelSource(c, r.src);
     if (!r.srcSource)
