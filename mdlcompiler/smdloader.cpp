@@ -16,13 +16,13 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "math/math.h"
 #include "meshedit.h"
+#include "perf.h"
 #include "pulselimits.h"
 
 namespace pm = pulse::math;
@@ -42,49 +42,56 @@ namespace {
 // advances on skipped comment lines too, so error line numbers match.
 // ---------------------------------------------------------------------------
 struct LineReader {
-    std::vector<std::string> lines;
-    size_t idx = 0;
+    std::string text;
+    size_t pos = 0;
     int lineNo = 0;
+    std::string current;
 
-    // Next non-comment line, or nullptr at EOF. Returns a pointer stable until
-    // the next call is irrelevant - we return by value-ish const ref into the
-    // vector, which never reallocates after load.
+    // Next non-comment line without its line ending, or nullptr at EOF.
+    // The pointer is only valid until the next call.
     const std::string* Next() {
-        while (idx < lines.size()) {
-            const std::string& l = lines[idx++];
+        while (pos < text.size()) {
+            const char* start = text.data() + pos;
+            const size_t remaining = text.size() - pos;
+            const void* newline = std::memchr(start, '\n', remaining);
+            size_t length = newline ? static_cast<const char*>(newline) - start : remaining;
+            pos += length + (newline ? 1 : 0);
             ++lineNo;
-            if (l.size() >= 2 && l[0] == '/' && l[1] == '/')
+            if (length > 0 && start[length - 1] == '\r')
+                --length;
+            if (length >= 2 && start[0] == '/' && start[1] == '/')
                 continue; // reference GetLineInput skips "//" lines
-            return &l;
+            current.assign(start, length);
+            return &current;
         }
         return nullptr;
     }
 };
 
-bool ReadAllLines(const std::string& path, LineReader& r, std::string* err) {
+bool OpenLines(const std::string& path, LineReader& r, std::string* err) {
     pulse::dependencies::Note(path);
-    std::ifstream f(path, std::ios::binary);
+    PULSE_PERF("smd", "read file");
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) {
         if (err) *err = "cannot open \"" + path + "\"";
         return false;
     }
-    std::stringstream ss;
-    ss << f.rdbuf();
-    std::string all = ss.str();
-
-    // strip a leading UTF-8 BOM if present
-    if (all.size() >= 3 && static_cast<unsigned char>(all[0]) == 0xEF &&
-        static_cast<unsigned char>(all[1]) == 0xBB && static_cast<unsigned char>(all[2]) == 0xBF)
-        all.erase(0, 3);
-
-    std::string line;
-    std::istringstream ls(all);
-    while (std::getline(ls, line)) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-        r.lines.push_back(std::move(line));
-        line.clear();
+    const std::streamoff size = f.tellg();
+    f.seekg(0);
+    if (size < 0 || !f) {
+        if (err) *err = "cannot read \"" + path + "\"";
+        return false;
     }
+    r.text.resize(static_cast<size_t>(size));
+    f.read(r.text.data(), size);
+    if (f.gcount() != size) {
+        if (err) *err = "cannot read \"" + path + "\"";
+        return false;
+    }
+
+    // skip a leading UTF-8 BOM if present
+    if (r.text.compare(0, 3, "\xEF\xBB\xBF") == 0)
+        r.pos = 3;
     return true;
 }
 
@@ -492,6 +499,7 @@ bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
                    Source& out, std::string* err) {
     std::vector<TriInput> tris;
 
+    PULSE_PERF("smd", "triangles total");
     for (;;) {
         const std::string* line = r.Next();
         if (!line)
@@ -521,7 +529,7 @@ bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
         tris.push_back(f);
     }
 
-    BuildUnifiedMeshes(tris, out);
+    { PULSE_PERF("smd", "BuildUnifiedMeshes"); BuildUnifiedMeshes(tris, out); }
     return true;
 }
 
@@ -632,14 +640,14 @@ void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
         }
     }
 
-    CalcModelTangentSpaces(out);
+    { PULSE_PERF("smd", "CalcModelTangentSpaces"); CalcModelTangentSpaces(out); }
 }
 
 bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, float scale,
                    std::string* err, bool /*morphSource*/, const MeshFilter* /*filter*/,
                    bool animOnly) {
     LineReader r;
-    if (!ReadAllLines(path, r, err))
+    if (!OpenLines(path, r, err))
         return false;
 
     bool sawNodes = false;
@@ -671,6 +679,7 @@ bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, fl
                 if (err) *err = "`skeleton` before `nodes` in SMD";
                 return false;
             }
+            PULSE_PERF("smd", "skeleton");
             if (!GrabAnimation(r, scale, out, err))
                 return false;
         } else if (_stricmp(cmd, "triangles") == 0) {
@@ -737,6 +746,7 @@ std::string FrameComment(const std::string& line) {
 }
 
 bool GrabVertexAnimation(LineReader& r, float scale, std::vector<VtaFrame>& out, std::string* err) {
+    PULSE_PERF("vta", "parse frames");
     for (;;) {
         const std::string* line = r.Next();
         if (!line) {
@@ -787,6 +797,7 @@ bool GrabVertexAnimation(LineReader& r, float scale, std::vector<VtaFrame>& out,
 // vertex list is the same answer without the shrink's order sensitivity.
 void BuildModelToVAnim(const Source& src, const std::vector<VtaVert>& base,
                        std::vector<int>& modelToVAnim) {
+    PULSE_PERF("vta", "match basis verts");
     modelToVAnim.assign(src.vertex.size(), -1);
     std::vector<float> bestDist(src.vertex.size(), 1e30f);
     std::vector<float> bestDot(src.vertex.size(), -1.0f);
@@ -875,7 +886,7 @@ struct VtaBind {
 bool BindVta(const std::string& path, const Source& mesh, float scale, VtaBind& bind,
              std::string* err) {
     LineReader r;
-    if (!ReadAllLines(path, r, err))
+    if (!OpenLines(path, r, err))
         return false;
 
     bool sawBlock = false;

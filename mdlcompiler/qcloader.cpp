@@ -997,6 +997,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "$decimatemesh needs a DMX or FBX source - an SMD has no named meshes");
             return nullptr;
         }
+        PULSE_PERF("load", "smd -> source");
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
                                    morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -1394,6 +1395,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         if (full.empty())
             return FailMissing(c, line, "cannot find \"" + file + "\"", tried);
         std::string loadErr;
+        PULSE_PERF("load", "vta -> morphs");
         const bool ok =
             isVca ? source::LoadVcaMorphs(full.string(), *src, c.in.scale, edit.vcaName, &loadErr)
                   : source::LoadVtaMorphs(full.string(), *src, c.in.scale, edit.vtaFlexes, &loadErr);
@@ -2429,6 +2431,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         if (full.empty())
             return FailMissing(c, vtaLine, "cannot find \"" + kv.first + "\"", tried);
         std::string err;
+        PULSE_PERF("load", "vta -> morphs");
         if (!source::LoadVtaMorphs(full.string(), *src, importScale, kv.second, &err))
             return c.Fail(vtaLine, "cannot load \"" + full.string() + "\": " + err);
     }
@@ -9758,8 +9761,9 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     seedDirs(includeDirs, c.launchIncludeDirs, c.packageIncludeDirs);
     seedDirs(fileDirs, c.launchSearchDirs, c.packageSearchDirs);
 
-    if (!Tokenize(text, c.file, c.Path(), c.toks, err))
-        return false;
+    { PULSE_PERF("load", "tokenize");
+      if (!Tokenize(text, c.file, c.Path(), c.toks, err))
+          return false; }
     if (pulse::api::Active()) {
         c.apiSources.push_back(fs::absolute(pulse::FilePath(path)).lexically_normal().u8string());
         for (auto& token : c.toks) token.apiSource = 0;
@@ -9772,7 +9776,8 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
 
     out.mdlPath = rawPath;
 
-    const bool ran = RunCommands(c);
+    bool ran;
+    { PULSE_PERF("load", "run commands"); ran = RunCommands(c); }
     pulse::diag::Current() = {};
     if (!ran)
         return false;
@@ -9781,6 +9786,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
         if (err) *err = pulse::diag::LastFailure().message;
         return false;
     }
+    PULSE_PERF("load", "finish script");
     return FinishScript(c, out, err);
 }
 
