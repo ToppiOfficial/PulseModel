@@ -227,6 +227,8 @@ struct Ctx {
     struct IncludeFrame { size_t endPos; std::string savedFile; fs::path savedDir; };
     std::vector<IncludeFrame> includeFrames;
     bool abortErr = false;        // a hard $include error; stops parsing at the next read
+    bool keepGoing = false;       // analyze: skip a failed command and read on
+    bool hadError = false;        // keepGoing skipped something; the script cannot compile
     bool resolvingInclude = false; // reentrancy guard for ResolveIncludes
     // set while a block is captured raw ($if/$switch branch, macro or cmdlist
     // body): a $include there is stored verbatim and resolved when executed, not
@@ -450,6 +452,20 @@ std::string LookedIn(const std::vector<fs::path>& tried) {
     for (const fs::path& p : tried)
         s += "\n    " + p.string();
     return s;
+}
+
+// Under keepGoing every missing file is reported and listed as a dependency,
+// at its first candidate path, since each one is independent of the others.
+bool FailMissing(Ctx& c, int line, const std::string& what, const std::vector<fs::path>& tried,
+                 pulse::dependencies::Kind kind = pulse::dependencies::Kind::Source) {
+    c.Fail(line, what + " - looked in:" + LookedIn(tried));
+    if (!c.keepGoing)
+        return false;
+    if (!tried.empty())
+        pulse::dependencies::NoteMissing(tried.front().string(), kind);
+    pulse::diag::RecordLastFailure();
+    c.hadError = true;
+    return false;
 }
 
 // Where a source file (.dmx/.smd/.vrd) actually is: the current $pushd
@@ -879,7 +895,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     std::vector<fs::path> tried;
     const fs::path full = FindSourceFile(c, filename, &tried);
     if (full.empty()) {
-        c.Fail(line, "cannot find \"" + filename + "\" - looked in:" + LookedIn(tried));
+        FailMissing(c, line, "cannot find \"" + filename + "\"", tried);
         return nullptr;
     }
     std::string loadErr;
@@ -1318,7 +1334,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         std::vector<fs::path> tried;
         const fs::path full = FindSourceFile(c, file, &tried);
         if (full.empty())
-            return c.Fail(line, "cannot find \"" + file + "\" - looked in:" + LookedIn(tried));
+            return FailMissing(c, line, "cannot find \"" + file + "\"", tried);
         std::string loadErr;
         const bool ok =
             isVca ? source::LoadVcaMorphs(full.string(), *src, c.in.scale, edit.vcaName, &loadErr)
@@ -1585,7 +1601,7 @@ fs::path FindRigFile(Ctx& c, const Token& cmd, const std::string& filename) {
     std::vector<fs::path> tried;
     const fs::path full = FindSourceFile(c, filename, &tried);
     if (full.empty())
-        c.Fail(cmd.line, "cannot find \"" + filename + "\" - looked in:" + LookedIn(tried));
+        FailMissing(c, cmd.line, "cannot find \"" + filename + "\"", tried);
     return full;
 }
 
@@ -2339,7 +2355,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         std::vector<fs::path> tried;
         const fs::path full = FindSourceFile(c, kv.first, &tried);
         if (full.empty())
-            return c.Fail(vtaLine, "cannot find \"" + kv.first + "\" - looked in:" + LookedIn(tried));
+            return FailMissing(c, vtaLine, "cannot find \"" + kv.first + "\"", tried);
         std::string err;
         if (!source::LoadVtaMorphs(full.string(), *src, importScale, kv.second, &err))
             return c.Fail(vtaLine, "cannot load \"" + full.string() + "\": " + err);
@@ -2348,7 +2364,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         std::vector<fs::path> tried;
         const fs::path full = FindSourceFile(c, vcaFile, &tried);
         if (full.empty())
-            return c.Fail(vcaLine, "cannot find \"" + vcaFile + "\" - looked in:" + LookedIn(tried));
+            return FailMissing(c, vcaLine, "cannot find \"" + vcaFile + "\"", tried);
         std::string err;
         if (!source::LoadVcaMorphs(full.string(), *src, importScale, vcaName, &err))
             return c.Fail(vcaLine, "cannot load \"" + full.string() + "\": " + err);
@@ -5890,8 +5906,7 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
     std::vector<fs::path> tried;
     const fs::path full = FindSourceFile(c, filename, &tried);
     if (full.empty())
-        return c.Fail(cmd.line, "cannot find \"" + filename + "\" - looked in:" +
-                                LookedIn(tried));
+        return FailMissing(c, cmd.line, "cannot find \"" + filename + "\"", tried);
     pulse::dependencies::Note(full.string());
     std::ifstream f(full.string(), std::ios::binary);
     if (!f)
@@ -8348,8 +8363,9 @@ bool SpliceInclude(Ctx& c) {
                 f.endPos -= (directiveEnd - c.pos);
         if (optional)
             return true;
-        return c.Fail(cmd.line, "$include: cannot find \"" + rel +
-                                "\" - looked in:" + LookedIn(tries));
+        FailMissing(c, cmd.line, "$include: cannot find \"" + rel + "\"", tries,
+                    pulse::dependencies::Kind::Include);
+        return c.keepGoing; // the directive is gone, so reading can carry on past it
     }
 
     std::error_code ec;
@@ -9384,6 +9400,33 @@ bool IsCommandName(const std::string& name) {
     return false;
 }
 
+// keepGoing: moves past the failed command at `start`. Only the first error is reported
+// (missing files report themselves); later ones may only follow from what was skipped.
+// A command whose { never closes has no end to skip to, so that stops the read.
+bool SkipFailedCommand(Ctx& c, size_t start) {
+    if (!c.keepGoing || c.abortErr)
+        return false;
+
+    c.pos = start;
+    const size_t end = CommandExtent(c);
+    int depth = 0;
+    for (size_t i = start; i < end && i < c.toks.size(); i++) {
+        if (c.toks[i].quoted) continue;
+        if (c.toks[i].text == "{") depth++;
+        else if (c.toks[i].text == "}" && depth > 0) depth--;
+    }
+    if (depth > 0) {
+        if (c.hadError) c.Fail(c.toks[start].line, c.toks[start].text + ": missing closing \"}\"");
+        return false;
+    }
+
+    if (!c.hadError)
+        pulse::diag::RecordLastFailure();
+    c.hadError = true;
+    c.pos = end;
+    return true;
+}
+
 bool RunCommands(Ctx& c) {
     while (!c.Eof()) {
         if (c.scriptBreak) // $break, here or in a file this one $included
@@ -9394,8 +9437,12 @@ bool RunCommands(Ctx& c) {
             c.pos = CommandExtent(c);
             continue;
         }
-        if (!c.generated && !ExpandCommandVars(c))
-            return false;
+        const size_t start = c.pos;
+        if (!c.generated && !ExpandCommandVars(c)) {
+            if (!SkipFailedCommand(c, start))
+                return false;
+            continue;
+        }
 
         const Token cmd = c.toks[c.pos];
         if (cmd.quoted || cmd.text[0] != '$')
@@ -9417,7 +9464,7 @@ bool RunCommands(Ctx& c) {
                 ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             auto m = c.macros.find(key);
             if (m != c.macros.end()) {
-                if (!ExpandMacro(c, cmd, m->second))
+                if (!ExpandMacro(c, cmd, m->second) && !SkipFailedCommand(c, start))
                     return false;
                 continue;
             }
@@ -9425,7 +9472,7 @@ bool RunCommands(Ctx& c) {
                                     "\" - supported: " + SupportedList());
         }
         pulse::diag::Current() = {c.Path(), cmd.line};
-        if (!found->fn(c, cmd))
+        if (!found->fn(c, cmd) && !SkipFailedCommand(c, start))
             return false;
     }
     return !c.abortErr; // a hard $include error surfaces as Eof
@@ -9529,6 +9576,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     const char* path = normalizedPath.c_str();
     Ctx c{out};
     c.unsaved = unsaved;
+    c.keepGoing = pulse::dependencies::g_keepGoing;
 
     const std::string* unsavedText = UnsavedText(c, normalizedPath);
     pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script, unsavedText);
@@ -9593,6 +9641,11 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     pulse::diag::Current() = {};
     if (!ran)
         return false;
+    if (c.hadError) { // already reported; the end-of-script passes would only add noise
+        pulse::diag::LastFailure().recorded = true;
+        if (err) *err = pulse::diag::LastFailure().message;
+        return false;
+    }
     return FinishScript(c, out, err);
 }
 

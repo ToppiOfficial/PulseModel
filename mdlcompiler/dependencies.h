@@ -33,10 +33,12 @@ struct Entry {
     uint64_t hash;
     bool dmx = false;
     Markup markup;
+    bool missing = false; // referenced by the script, but not found on disk
 };
 
 inline bool g_enabled = false;
 inline bool g_hashes = true; // analyze skips them; it already reads every source once
+inline bool g_keepGoing = false; // analyze: a failed command is skipped, not fatal
 
 inline std::map<std::string, Entry>& Files() {
     static std::map<std::string, Entry> files;
@@ -88,6 +90,14 @@ inline void Note(const std::string& path, Kind kind = Kind::Source,
     Files().emplace(key, Entry{kind, hash});
 }
 
+inline void NoteMissing(const std::string& path, Kind kind) {
+    if (!g_enabled || path.empty())
+        return;
+    Entry entry{kind, 0};
+    entry.missing = true;
+    Files().emplace(Key(path), entry);
+}
+
 inline void NoteMarkup(const std::string& path, const Markup& markup) {
     if (!g_enabled || path.empty())
         return;
@@ -115,6 +125,7 @@ inline void Print(bool complete = true) {
         const auto* package = pulse::qcpackage::active;
         if (package && package->Contains(pulse::FilePath(path)))
             record += ",\"archive\":" + pulse::api::String(package->Path().u8string());
+        if (e.missing) record += ",\"missing\":true";
         if (e.dmx)
             record += ",\"modelVersion\":" + std::to_string(e.markup.modelVersion) +
                       ",\"jiggleBones\":" + std::to_string(e.markup.jiggleBones) +

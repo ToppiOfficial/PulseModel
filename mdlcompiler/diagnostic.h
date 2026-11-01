@@ -105,6 +105,7 @@ inline void Warnf(const char* format, ...) {
 struct Failure {
     std::string message, text;
     Location at;
+    bool recorded = false; // already sent as a diagnostic
 };
 
 inline Failure& LastFailure() {
@@ -116,10 +117,17 @@ inline void NoteFailure(const std::string& message, const Location& at, const st
     LastFailure() = {message, text, Resolve(at)};
 }
 
+// Sends the last failure now, for a loader that carries on after it.
+inline void RecordLastFailure() {
+    Failure& failure = LastFailure();
+    Record("error", failure.at, failure.text);
+    failure.recorded = true;
+}
+
 inline void RecordFatal(const std::string& message) {
     const Failure& failure = LastFailure();
-    if (failure.message == message) Record("error", failure.at, failure.text);
-    else Record("error", {}, message);
+    if (failure.message != message) Record("error", {}, message);
+    else if (!failure.recorded) Record("error", failure.at, failure.text);
 }
 
 } // namespace pulse::diag

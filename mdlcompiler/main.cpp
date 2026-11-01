@@ -176,6 +176,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     const bool preview = api && api->method == "preview"; // compile, files sent back instead of written
     pulse::dependencies::g_enabled = dumpDependencies || analyze || preview;
     pulse::dependencies::g_hashes = !analyze && !preview;
+    pulse::dependencies::g_keepGoing = analyze;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
     for (int i = 1; i < argc; ++i) {
