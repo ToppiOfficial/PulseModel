@@ -5,6 +5,12 @@
 // follow the MMD foot IK through the target model's own $ikchain data.
 
 #include <algorithm>
+#include <apiprotocol.h>
+#include <array>
+#include <cassert>
+#include <iomanip>
+#include <limits>
+#include <stdexcept>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,12 +25,13 @@
 #include <string>
 #include <vector>
 
+#include "apioutput.h"
 #include "dmxwrite.h"
-#include "dr_mp3.h"
-#include "dr_wav.h"
 #include "mdlfile.h"
 #include "pulselimits.h"
 #include "strcompat.h"
+
+#include <nlohmann/json.hpp>
 
 namespace fm = pulse::format;
 namespace fs = std::filesystem;
@@ -34,7 +41,44 @@ using mdldecompiler::Mdl;
 using pm::matrix3x4;
 using pm::Vector3;
 
+// The shared DMX writer reports decompile outputs; this tool's API sends curves, not files.
+void mdldecompiler::RecordOutput(const std::string&) {}
+
 namespace {
+
+bool ReadInput(const std::string& path, std::vector<char>& bytes)
+{
+    std::ifstream file(fs::u8path(path), std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    const auto length = file.tellg();
+    if (length < 0 || length > 128 * 1024 * 1024) return false;
+    bytes.resize(static_cast<size_t>(length));
+    file.seekg(0);
+    return bool(file.read(bytes.data(), static_cast<std::streamsize>(bytes.size())));
+}
+
+// Standard base64 with optional "=" padding.
+bool DecodeBase64(const std::string& text, std::vector<char>& bytes)
+{
+    if (text.size() % 4) return false;
+
+    bytes.clear();
+    bytes.reserve(text.size() / 4 * 3);
+    uint32_t bits = 0;
+    int count = 0;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        const char ch = text[i];
+        if (ch == '=') { if (i + 2 < text.size() || (i + 1 < text.size() && text[i + 1] != '=')) return false; break; }
+
+        const char* digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const char* at = ch ? std::strchr(digits, ch) : nullptr;
+        if (!at) return false;
+        bits = (bits << 6) | uint32_t(at - digits);
+        if ((count += 6) >= 8) { count -= 8; bytes.push_back(char((bits >> count) & 0xFF)); }
+    }
+    return true;
+}
 
 // ------------------------------------------------------------------ vector ops
 
@@ -129,6 +173,8 @@ void SolveTwoBoneIK(int iThigh, int iKnee, int iFoot, const Vector3& target, Vec
 
     SwingAbout(w, thigh, Sub(knee, thigh), Sub(newKnee, thigh), {iThigh, iKnee, iFoot});
     SwingAbout(w, newKnee, Sub(Origin(w[iFoot]), newKnee), Sub(newFoot, newKnee), {iKnee, iFoot});
+
+    assert(Len(Sub(Origin(w[iFoot]), newFoot)) < (l1 + l2) * 1e-4f);
 }
 
 // --------------------------------------------------------------- byte reading
@@ -197,6 +243,7 @@ struct CamKey {
     Vector3 at, rot;
     uint8_t interp[24] = {};
     uint32_t fov = 30;
+    bool orthographic = false;
 };
 
 float Curve(float x1, float y1, float x2, float y2, float x) {
@@ -229,10 +276,21 @@ matrix3x4 AxisRot(int axis, float a) {
     return r;
 }
 
+// Hand roll from rest that ValveBiped forearm twist helpers are rigged to follow.
+constexpr float kHandRoll = 90.0f * pm::kDeg2Rad;
+
+// Twist of rotation `m` about X, in radians within [-pi, pi].
+float RollAboutX(const matrix3x4& m) {
+    pm::Quaternion q;
+    Vector3 position;
+    pm::MatrixAngles(RotOnly(m), q, position);
+    return std::remainder(2.0f * std::atan2(q.x, q.w), 2.0f * pm::kPiF);
+}
+
 // Camera eye, view axes and vertical fov (degrees) at MMD frame f, in MMD space. Keys
 // one frame apart are a cut and hold the earlier key. Orbit is yaw, then roll, then pitch.
 void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector3& fwd, Vector3& up,
-                  float& fov) {
+                  float& fov, float* distance = nullptr) {
     const CamKey* a = &keys.front();
     const CamKey* b = a;
     float x = 0.0f;
@@ -256,6 +314,7 @@ void SampleCamera(const std::vector<CamKey>& keys, float f, Vector3& eye, Vector
     const float wr = w(3);
     const Vector3 rot{lerp(a->rot.x, b->rot.x, wr), lerp(a->rot.y, b->rot.y, wr), lerp(a->rot.z, b->rot.z, wr)};
     const float dist = std::fabs(lerp(a->dist, b->dist, w(4)));
+    if (distance) *distance = dist;
     fov = lerp(static_cast<float>(a->fov), static_cast<float>(b->fov), w(5));
 
     // MMD is left-handed, so every angle turns the opposite way to the RH formulas
@@ -272,6 +331,41 @@ struct MorphKey {
     float weight = 0.0f;
 };
 using Morphs = std::map<std::string, std::vector<MorphKey>>;
+
+// IK on/off key: the state holds until the next key; bones with no key keep IK on.
+struct IkKey {
+    uint32_t frame = 0;
+    bool on = true;
+};
+using IkSwitches = std::map<std::string, std::vector<IkKey>>;
+
+bool IkOn(const IkSwitches& switches, const std::string& name, float f) {
+    const auto it = switches.find(name);
+    if (it == switches.end())
+        return true;
+    bool on = true;
+    for (const IkKey& k : it->second) {
+        if (static_cast<float>(k.frame) > f)
+            break;
+        on = k.on;
+    }
+    return on;
+}
+
+// Rest-only layer tracks never replace the track below: face VMDs often key every
+// bone, morph and IK switch at rest on frame 0, which would flatten the motion.
+bool AtRest(const std::vector<Key>& keys) {
+    return std::all_of(keys.begin(), keys.end(), [](const Key& k) {
+        return std::fabs(k.pos.x) < 1e-4f && std::fabs(k.pos.y) < 1e-4f && std::fabs(k.pos.z) < 1e-4f
+            && std::fabs(k.rot.x) < 1e-5f && std::fabs(k.rot.y) < 1e-5f && std::fabs(k.rot.z) < 1e-5f;
+    });
+}
+bool AtRest(const std::vector<MorphKey>& keys) {
+    return std::all_of(keys.begin(), keys.end(), [](const MorphKey& k) { return k.weight == 0.0f; });
+}
+bool AtRest(const std::vector<IkKey>& keys) {
+    return std::all_of(keys.begin(), keys.end(), [](const IkKey& k) { return k.on; });
+}
 
 float SampleMorph(const std::vector<MorphKey>& keys, float f) {
     if (f <= keys.front().frame)
@@ -323,11 +417,13 @@ void Sample(const std::vector<Key>& keys, float f, Vector3& pos, pm::Quaternion&
     pm::QuaternionSlerp(a.rot, b.rot, Bezier(b.interp, 3, x), rot);
 }
 
-// Bone and morph keys by raw Shift-JIS name, and the camera keys if the file has any.
+// Bone and morph keys by raw Shift-JIS name, the camera keys if the file has any,
+// and the IK switches when `ik` is given.
 bool LoadVmd(const std::string& path, std::map<std::string, std::vector<Key>>& out,
-             Morphs& morphs, std::vector<CamKey>& cams, uint32_t& lastFrame, std::string& err) {
+             Morphs& morphs, std::vector<CamKey>& cams, uint32_t& lastFrame, std::string& err,
+             IkSwitches* ik = nullptr) {
     std::vector<char> buf;
-    if (!mdldecompiler::ReadWhole(path, buf)) {
+    if (!ReadInput(path, buf)) {
         err = "cannot read \"" + path + "\"";
         return false;
     }
@@ -390,7 +486,7 @@ bool LoadVmd(const std::string& path, std::map<std::string, std::vector<Key>>& o
             std::memcpy(c.interp, buf.data() + r.at, 24);
         r.Skip(24);
         c.fov = r.Get<uint32_t>();
-        r.Skip(1); // perspective flag
+        c.orthographic = r.Get<uint8_t>() != 0;
         if (r.ok)
             cams.push_back(c);
     }
@@ -401,6 +497,29 @@ bool LoadVmd(const std::string& path, std::map<std::string, std::vector<Key>>& o
     SortKeys(cams);
     for (auto& [name, keys] : morphs)
         SortKeys(keys);
+
+    // light, self shadow, then IK switch sections; a missing or cut tail leaves IK on
+    if (ik && r.at < buf.size()) {
+        r.Skip(static_cast<size_t>(r.Get<uint32_t>()) * 28);
+        if (r.ok && r.at < buf.size())
+            r.Skip(static_cast<size_t>(r.Get<uint32_t>()) * 9);
+        const uint32_t nik = r.ok && r.at < buf.size() ? r.Get<uint32_t>() : 0;
+        for (uint32_t i = 0; i < nik && r.ok; ++i) {
+            const uint32_t frame = r.Get<uint32_t>();
+            r.Skip(1);
+            const uint32_t n = r.Get<uint32_t>();
+            for (uint32_t j = 0; j < n && r.ok; ++j) {
+                const std::string name = r.Fixed(20);
+                const bool on = r.Get<uint8_t>() != 0;
+                if (r.ok)
+                    (*ik)[name].push_back({frame, on});
+            }
+        }
+        if (!r.ok)
+            ik->clear();
+        for (auto& [name, keys] : *ik)
+            SortKeys(keys);
+    }
     return true;
 }
 
@@ -451,8 +570,10 @@ const MmdDef kMmd[] = {
     {"leg", "\x91\xab", "\xe8\xb6\xb3", true, "lower", {0.9f, 10.9f, 0.1f}},
     {"knee", "\x82\xd0\x82\xb4", "\xe3\x81\xb2\xe3\x81\x96", true, "leg", {0.9f, 6.0f, -0.1f}},
     {"ankle", "\x91\xab\x8e\xf1", "\xe8\xb6\xb3\xe9\xa6\x96", true, "knee", {0.9f, 1.1f, 0.4f}},
+    {"toe", "\x82\xc2\x82\xdc\x90\xe6", "\xe3\x81\xa4\xe3\x81\xbe\xe5\x85\x88", true, "ankle", {0.9f, 0.2f, -1.0f}},
     {"ikparent", "\x91\xab\x49\x4b\x90\x65", "\xe8\xb6\xb3\x49\x4b\xe8\xa6\xaa", true, "all", {0.9f, 0, 0.4f}},
     {"legik", "\x91\xab\x82\x68\x82\x6a", "\xe8\xb6\xb3\xef\xbc\xa9\xef\xbc\xab", true, "ikparent", {0.9f, 1.1f, 0.4f}},
+    {"toeik", "\x82\xc2\x82\xdc\x90\xe6\x82\x68\x82\x6a", "\xe3\x81\xa4\xe3\x81\xbe\xe5\x85\x88\xef\xbc\xa9\xef\xbc\xab", true, "legik", {0.9f, 0.2f, -1.0f}},
 };
 const char* const kSideSj[2] = {"\x8d\xb6", "\x89\x45"}; // left, right
 const char* const kSideU8[2] = {"\xe5\xb7\xa6", "\xe5\x8f\xb3"};
@@ -537,7 +658,7 @@ std::string Utf16ToUtf8(const char* p, size_t bytes) {
 // lacks sits on its parent, which keeps it inert for rotation.
 bool LoadPmxRest(const std::string& path, MmdSkel& s, std::string& err) {
     std::vector<char> buf;
-    if (!mdldecompiler::ReadWhole(path, buf)) {
+    if (!ReadInput(path, buf)) {
         err = "cannot read \"" + path + "\"";
         return false;
     }
@@ -656,14 +777,23 @@ struct Target {
     }
 };
 
-bool LoadMdl(const std::string& path, Mdl& m, std::string& err) {
-    if (!mdldecompiler::ReadWhole(path, m.buf) || m.buf.size() < sizeof(fm::studiohdr_t)) {
+// `bytes` stands in for the file's content; `path` then only names it in errors.
+bool LoadMdl(const std::string& path, Mdl& m, std::string& err, const std::vector<char>* bytes = nullptr) {
+    if (bytes) m.buf = *bytes;
+    if ((!bytes && !ReadInput(path, m.buf)) || m.buf.size() < sizeof(fm::studiohdr_t)) {
         err = "cannot read \"" + path + "\"";
         return false;
     }
     m.hdr = reinterpret_cast<const fm::studiohdr_t*>(m.buf.data());
     if (m.hdr->id != fm::kIdStudioHeader) {
         err = "\"" + path + "\" is not a studio model (bad id)";
+        return false;
+    }
+    if (m.hdr->length < int(sizeof(fm::studiohdr_t)) || size_t(m.hdr->length) > m.buf.size()
+        || m.hdr->numbones <= 0 || m.hdr->numbones > 16384 || m.hdr->numikchains < 0 || m.hdr->numikchains > 1024
+        || m.hdr->numflexcontrollers < 0 || m.hdr->numflexcontrollers > 65536)
+    {
+        err = "Invalid target model header";
         return false;
     }
     return true;
@@ -737,6 +867,35 @@ const FaceDef kFace[] = {
     {"browdown", "\x89\xba", "\xe4\xb8\x8b", "right_lowerer=0.6 left_lowerer=0.6"},
 };
 
+// Direct morph controllers by kFace id. The scaled layout uses lower vowel weights.
+struct DirectFaceDef {
+    const char* id;
+    const char* direct;
+    const char* scaled;
+};
+const DirectFaceDef kFaceDirect[] = {
+    {"a", "mouth_a=1", "mouth_a=0.6"},
+    {"i", "mouth_ch_1=1", "mouth_i=0.7"},
+    {"u", "mouth_u=1", "mouth_kiss=0.7"},
+    {"e", "mouth_e=1", "mouth_e=0.7"},
+    {"o", "mouth_o=1", "mouth_o=0.7"},
+    {"blink", "blink=1", "blink=1"},
+    {"wink", "eye_blink_happy_left=1", "eye_wink_left=1"},
+    {"winkright", "eye_blink_happy_right=1", "eye_wink_right=1"},
+    {"wink2", "eye_blink_left=1", "eye_blink_left=1"},
+    {"wink2right", "eye_blink_right=1", "eye_blink_right=1"},
+    {"laugh", "eye_blink_happy=1", "eye_wink_left=1 eye_wink_right=1"},
+    {"jitome", "blink=0.4", "blink=0.4"},
+    {"surprised", "eyes_suprised=1", "eyes_surprised=1"},
+    {"smile", "mouth_smile=1", "mouth_smile=1"},
+    {"frown", "mouth_sad=1", "mouth_sad=1"},
+    {"troubled", "brows_worry=1", "brows_worry=1"},
+    {"angry", "brows_angry=1", "brows_serious=1"},
+    {"serious", "brows_lower=0.5", "brows_down=0.5"},
+    {"browup", "brows_up=1", "brows_up=1"},
+    {"browdown", "brows_lower=1", "brows_down=1"},
+};
+
 using FaceOps = std::vector<std::pair<std::string, float>>;
 using FaceMap = std::map<std::string, FaceOps>; // by raw VMD morph name
 
@@ -755,17 +914,40 @@ bool ParseFaceOps(const std::string& text, FaceOps& ops) {
     return true;
 }
 
-FaceMap BuiltinFaceMap(bool visemes) {
+FaceMap BuiltinFaceMap(const std::string& set) {
     FaceMap map;
+    if (set == "direct" || set == "direct-scaled") {
+        for (const DirectFaceDef& g : kFaceDirect)
+            for (const FaceDef& d : kFace)
+                if (!std::strcmp(d.id, g.id))
+                    ParseFaceOps(set == "direct" ? g.direct : g.scaled, map[d.sj]);
+        return map;
+    }
+    const bool visemes = set == "visemes";
     for (const FaceDef& d : kFace)
         ParseFaceOps(visemes && d.visemes ? d.visemes : d.ops, map[d.sj]);
     return map;
 }
 
+// "auto": a direct morph layout by its signature mouth controllers, else facs.
+std::string ResolveFaceSet(const std::string& set, const std::vector<mdldecompiler::FlexTrack>& ctrls) {
+    if (set != "auto")
+        return set;
+    const auto has = [&](const char* n) {
+        return std::any_of(ctrls.begin(), ctrls.end(),
+                           [&](const mdldecompiler::FlexTrack& c) { return !_stricmp(c.name.c_str(), n); });
+    };
+    if (has("mouth_ch_1"))
+        return "direct";
+    if (has("mouth_kiss") && has("mouth_i"))
+        return "direct-scaled";
+    return "facs";
+}
+
 // One "<morph> <controller>=<weight>..." per line, # comments. <morph> is a kFace
 // id, its UTF-8 name, or the raw VMD bytes (a Shift-JIS file names any morph).
 bool LoadFaceMap(const std::string& path, FaceMap& map, std::string& err) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(fs::u8path(path), std::ios::binary);
     if (!f) {
         err = "cannot read \"" + path + "\"";
         return false;
@@ -892,7 +1074,7 @@ void PrintHeader() {
     std::printf("-------------------------------\n");
     std::printf("PulseModel [VMD to ValveBiped]\n");
     std::printf("version:   %s\n", PULSEMODEL_VERSION);
-    std::printf("developer: Toppi\n");
+    std::printf("developer: ToppiOfficial\n");
     std::printf("-------------------------------\n");
 }
 
@@ -915,9 +1097,6 @@ int Usage() {
         "                   <name>_src beside the first .vmd)\n"
         "  -game <dir>      mod dir the compiled model installs into, under\n"
         "                   <dir>/models (default: beside the first .vmd)\n"
-        "  -sound           with -compile: play <vmd name>.wav (or .mp3) from beside\n"
-        "                   each .vmd when its sequence starts; converted to a 16-bit\n"
-        "                   44.1 kHz wav in <dir>/sound/mmd/\n"
         "  -start <frame>   first MMD frame (default 0)\n"
         "  -end <frame>     last MMD frame (default the motion's last key)\n"
         "  -walkframe <n>   extract the root's ground travel as sequence movement\n"
@@ -934,10 +1113,13 @@ int Usage() {
         "                   binary (default) or keyvalues2 text\n"
         "  -dmxmodel <n>    the `format model` version: 15 (default), 1, 18, or 22\n"
         "                   for Source 2 modeldoc\n"
-        "  -faceset <name>  built-in face map on Valve controller names: facs (default;\n"
-        "                   survivors, HL2 citizens - vowels as Valve phonemes) or\n"
-        "                   visemes (one controller per vowel, for rigs whose mouth\n"
-        "                   shapes each normalise by the sum of all mouth controls)\n"
+        "  -faceset <name>  built-in face map: auto (default; direct/direct-scaled\n"
+        "                   when the model has their controllers, else facs),\n"
+        "                   facs (Valve phoneme combinations), visemes (one\n"
+        "                   controller per vowel, for rigs whose mouth shapes each\n"
+        "                   normalise by the sum of all mouth controls), direct\n"
+        "                   (mouth_ch_1, mouth_u) or direct-scaled (mouth_i,\n"
+        "                   mouth_kiss, with lower vowel weights)\n"
         "  -eyerange <deg>  MMD eye-bone angle written as full gaze deflection\n"
         "                   (default 30), mapped onto the model's gaze range\n"
         "  -facemap <file>  MMD morph -> flex controller map replacing the built-in\n"
@@ -962,6 +1144,7 @@ int Usage() {
 }
 
 int Fail(const std::string& err) {
+    if (pulse::api::Active()) pulse::api::Record("diagnostic", "{\"text\":" + pulse::api::String(err) + "}");
     std::fprintf(stderr, "error: %s\n", err.c_str());
     return 1;
 }
@@ -998,7 +1181,6 @@ std::string CompilerPath(const char* argv0) {
 struct Clip {
     std::string name;
     int fps = 30;
-    std::string sound; // path under sound/, empty for none
     bool camera = false; // an .smd holding only kCameraBone
     std::string walk;    // walkframe options for its $sequence
 };
@@ -1073,95 +1255,6 @@ bool WriteCameraSmd(const std::string& path, const std::vector<AnimPose>& frames
     return std::fclose(f) == 0;
 }
 
-// Decodes a .wav or .mp3 and writes it as the PCM wav the engine plays: 16-bit,
-// mono or stereo, 44100 Hz unless it already sits at 11025/22050. Returns a
-// reason on failure; `note` says what was converted.
-std::string ConvertAudio(const std::string& src, const std::string& dst, std::string& note) {
-    std::vector<char> buf;
-    if (!mdldecompiler::ReadWhole(src, buf))
-        return "cannot be read";
-    unsigned ch = 0, rate = 0;
-    drwav_uint64 frames = 0;
-    int16_t* pcm = nullptr;
-    const bool mp3 = _stricmp(fs::path(src).extension().string().c_str(), ".mp3") == 0;
-    if (mp3) {
-        drmp3_config cfg{};
-        drmp3_uint64 n = 0;
-        pcm = drmp3_open_memory_and_read_pcm_frames_s16(buf.data(), buf.size(), &cfg, &n, nullptr);
-        frames = n;
-        ch = cfg.channels;
-        rate = cfg.sampleRate;
-    } else {
-        pcm = drwav_open_memory_and_read_pcm_frames_s16(buf.data(), buf.size(), &ch, &rate, &frames, nullptr);
-    }
-    if (!pcm || !ch || !rate || !frames) {
-        mp3 ? drmp3_free(pcm, nullptr) : drwav_free(pcm, nullptr);
-        return "could not be decoded";
-    }
-
-    // more than two channels folds down to the first two
-    const unsigned outCh = std::min(ch, 2u);
-    const unsigned outRate = (rate == 11025 || rate == 22050 || rate == 44100) ? rate : 44100;
-    const double step = static_cast<double>(rate) / outRate;
-    const size_t outFrames = static_cast<size_t>(static_cast<double>(frames) / step);
-    std::vector<int16_t> out(outFrames * outCh);
-    if (outRate == rate) {
-        for (size_t i = 0; i < outFrames; ++i)
-            for (unsigned c = 0; c < outCh; ++c)
-                out[i * outCh + c] = pcm[i * ch + c];
-    } else {
-        // Hann-windowed sinc, cut off at the lower Nyquist so a downsample
-        // does not alias. 32 taps a side is plenty for music.
-        const int taps = 32;
-        const double cutoff = std::min(1.0, 1.0 / step);
-        for (size_t i = 0; i < outFrames; ++i) {
-            const double at = i * step;
-            const long centre = static_cast<long>(at);
-            for (unsigned c = 0; c < outCh; ++c) {
-                double sum = 0.0, wsum = 0.0;
-                for (long k = centre - taps + 1; k <= centre + taps; ++k) {
-                    if (k < 0 || k >= static_cast<long>(frames))
-                        continue;
-                    const double x = (at - k) * cutoff;
-                    const double sinc = std::fabs(x) < 1e-9 ? 1.0 : std::sin(pm::kPiF * x) / (pm::kPiF * x);
-                    const double win = 0.5 + 0.5 * std::cos(pm::kPiF * (at - k) / taps);
-                    sum += pcm[k * ch + c] * sinc * win;
-                    wsum += sinc * win;
-                }
-                const double v = wsum != 0.0 ? sum / wsum : 0.0;
-                out[i * outCh + c] = static_cast<int16_t>(std::clamp(v, -32768.0, 32767.0));
-            }
-        }
-    }
-    mp3 ? drmp3_free(pcm, nullptr) : drwav_free(pcm, nullptr);
-
-    std::FILE* f = std::fopen(dst.c_str(), "wb");
-    if (!f)
-        return "cannot write \"" + dst + "\"";
-    const uint32_t bytes = static_cast<uint32_t>(out.size() * 2);
-    const auto u32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
-    const auto u16 = [&](uint16_t v) { std::fwrite(&v, 2, 1, f); };
-    std::fwrite("RIFF", 1, 4, f);
-    u32(36 + bytes);
-    std::fwrite("WAVEfmt ", 1, 8, f);
-    u32(16);
-    u16(1);
-    u16(static_cast<uint16_t>(outCh));
-    u32(outRate);
-    u32(outRate * outCh * 2);
-    u16(static_cast<uint16_t>(outCh * 2));
-    u16(16);
-    std::fwrite("data", 1, 4, f);
-    u32(bytes);
-    std::fwrite(out.data(), 2, out.size(), f);
-    const bool ok = std::fclose(f) == 0;
-
-    note = std::string(mp3 ? "mp3" : "wav") + " " + std::to_string(rate) + " Hz " +
-           std::to_string(ch) + "ch -> wav " + std::to_string(outRate) + " Hz 16-bit " +
-           std::to_string(outCh) + "ch";
-    return ok ? std::string() : "cannot write \"" + dst + "\"";
-}
-
 // An animation-only model: the reference skeleton, its bonemerge tags, and one
 // $sequence per clip. Joints go out exactly as the decompiler writes them.
 bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& modelname,
@@ -1169,6 +1262,7 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f)
         return false;
+
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudiobone_t* bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
     const std::vector<std::string> names = mdldecompiler::BoneNames(m);
@@ -1203,29 +1297,28 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
     }
     std::fprintf(f, "\n$animblocksize 64\n\n");
     for (const Clip& c : clips) {
-        std::fprintf(f, "$sequence \"%s\" \"%s.%s\" fps %d%s", c.name.c_str(), c.name.c_str(),
+        std::fprintf(f, "$sequence \"%s\" \"%s.%s\" fps %d%s\n", c.name.c_str(), c.name.c_str(),
                      c.camera ? "smd" : "dmx", c.fps, c.walk.c_str());
-        // client-side, fires at sequence start; a .wav/.mp3 name skips soundscripts
-        if (!c.sound.empty())
-            std::fprintf(f, " {\n    event AE_CL_PLAYSOUND 0 \"%s\"\n}", c.sound.c_str());
-        std::fputc('\n', f);
     }
+
     std::fclose(f);
     return true;
 }
 
+#include "curveapi.h"
+
 } // namespace
 
-int main(int argc, char** argv) {
-    PrintHeader();
+int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
+    if (!api) PrintHeader();
     std::vector<std::string> vmdPaths;
     std::string mdlPath, pmxPath, outPath, compileName, gameDir, srcArg, faceMapPath;
-    std::string faceSet = "facs", cameraFov;
+    std::string faceSet = "auto", cameraFov;
     float armAngle = 35.0f, eyeRange = 30.0f;
     long startArg = -1, endArg = -1;
     long walkEvery = -1;
     float walkTol = 4.0f;
-    bool uncompress = false, sound = false;
+    bool uncompress = false;
     std::string dmxEncoding = "binary";
     int dmxModel = 15;
     for (int i = 1; i < argc; ++i) {
@@ -1249,7 +1342,6 @@ int main(int argc, char** argv) {
                 return Fail("-walkframe must be 0 (auto) or more frames");
         }
         else if (!_stricmp(a, "-walktolerance")) walkTol = static_cast<float>(std::atof(next()));
-        else if (!_stricmp(a, "-sound")) sound = true;
         else if (!_stricmp(a, "-dmxencoding")) dmxEncoding = next();
         else if (!_stricmp(a, "-dmxmodel")) dmxModel = std::atoi(next());
         else if (!_stricmp(a, "-facemap")) faceMapPath = next();
@@ -1257,14 +1349,13 @@ int main(int argc, char** argv) {
         else if (!_stricmp(a, "-camerafov")) cameraFov = next();
         else return Usage();
     }
+
     if (vmdPaths.empty() || mdlPath.empty())
         return Usage();
     if (!outPath.empty() && (vmdPaths.size() > 1 || !compileName.empty()))
         return Fail("-o names one .dmx; it cannot be used with several -vmd or with -compile");
     if (walkTol <= 0.0f)
         return Fail("-walktolerance must be above 0");
-    if (sound && compileName.empty())
-        return Fail("-sound writes a sequence event, so it needs -compile");
     if (const char* e = mdldecompiler::SetDmxOutput(dmxEncoding, dmxModel))
         return Fail(e);
     if (!cameraFov.empty() && cameraFov != "bone" && cameraFov != "dmx")
@@ -1276,16 +1367,16 @@ int main(int argc, char** argv) {
     BuiltinArms(mmd, armAngle);
     if (!pmxPath.empty() && !LoadPmxRest(pmxPath, mmd, err))
         return Fail(err);
-    if (faceSet != "facs" && faceSet != "visemes")
-        return Fail("unknown -faceset \"" + faceSet + "\" (facs or visemes)");
+    if (faceSet == "gf2") faceSet = "direct";
+    else if (faceSet == "gf2legacy") faceSet = "direct-scaled";
+    if (faceSet != "auto" && faceSet != "facs" && faceSet != "visemes" && faceSet != "direct"
+        && faceSet != "direct-scaled")
+        return Fail("unknown -faceset \"" + faceSet + "\" (auto, facs, visemes, direct or direct-scaled)");
     if (eyeRange <= 0.0f)
         return Fail("-eyerange must be above 0 degrees");
-    FaceMap faceMap = BuiltinFaceMap(faceSet == "visemes");
-    if (!faceMapPath.empty() && !LoadFaceMap(faceMapPath, faceMap, err))
-        return Fail(err);
 
     Mdl m;
-    if (!LoadMdl(mdlPath, m, err))
+    if (!LoadMdl(mdlPath, m, err, api && !api->modelData.empty() ? &api->modelData : nullptr))
         return Fail(err);
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudiobone_t* bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
@@ -1296,6 +1387,11 @@ int main(int argc, char** argv) {
         m.At<fm::mstudioflexcontroller_t>(m.buf.data(), h.flexcontrollerindex, h.numflexcontrollers);
     for (int i = 0; fcs && i < h.numflexcontrollers; ++i)
         ctrls.push_back({m.Str(&fcs[i], fcs[i].sznameindex), fcs[i].min, fcs[i].max, {}});
+
+    faceSet = ResolveFaceSet(faceSet, ctrls);
+    FaceMap faceMap = BuiltinFaceMap(faceSet);
+    if (!faceMapPath.empty() && !LoadFaceMap(faceMapPath, faceMap, err))
+        return Fail(err);
 
     Target t;
     t.n = h.numbones;
@@ -1385,10 +1481,9 @@ int main(int argc, char** argv) {
         return Fail("\"" + mdlPath + "\" has no $ikchain ending at ValveBiped.Bip01_L_Foot and "
                     "_R_Foot - leg IK needs both");
 
-    // MMD -> target basis from each rig's own left/up/forward. MMD is left-handed
-    // Y-up facing -Z, so this is a reflection and M*R*Mt stays a proper rotation.
-    Vector3 up = Sub(Origin(t.world[top]), Origin(t.world[pelvis]));
-    pm::VectorNormalize(up);
+    // Keep the motion's floor horizontal even when the bind torso leans.
+    // MMD is left-handed Y-up facing -Z; M*R*Mt stays a proper rotation.
+    const Vector3 up{0, 0, 1};
     Vector3 left = Sub(Origin(t.world[lThigh]), Origin(t.world[rThigh]));
     left = Sub(left, Mul(up, Dot(left, up)));
     pm::VectorNormalize(left);
@@ -1421,6 +1516,18 @@ int main(int argc, char** argv) {
     if (mmdLeg < 1e-4f || tgtLeg < 1e-4f)
         return Fail("zero-length leg, cannot derive the motion scale");
     const float scale = tgtLeg / mmdLeg;
+
+    if (pmxPath.empty()) {
+        for (int side = 0; side < 2; ++side) {
+            const int toe = t.Find(side ? "R_Toe0" : "L_Toe0");
+            if (toe < 0) continue;
+
+            const auto offset = Mul(pm::VectorRotate(
+                Sub(Origin(t.world[toe]), Origin(t.world[legs[side].foot])), Mt), 1.0f / scale);
+            mmd.bones[mmd.Find("toe", side)].rest = Add(restOf("ankle", side), offset);
+            mmd.bones[mmd.Find("toeik", side)].rest = Add(restOf("legik", side), offset);
+        }
+    }
 
     // Per target bone: its MMD source and the rest alignment O that poses the
     // target's arms into the MMD rest pose. Fingers take the hand's O.
@@ -1470,6 +1577,33 @@ int main(int argc, char** argv) {
                     align[i] = align[hand];
     }
 
+    struct Arm {
+        int upper, elbow, hand;
+    };
+    const Arm arms[2] = {
+        {t.Find("L_UpperArm"), t.Find("L_Forearm"), t.Find("L_Hand")},
+        {t.Find("R_UpperArm"), t.Find("R_Forearm"), t.Find("R_Hand")}
+    };
+    float sourceArms = 0.0f, targetArms = 0.0f;
+    bool reachArms = true;
+    for (int side = 0; side < 2; ++side) {
+        const Arm& arm = arms[side];
+        if (arm.upper < 0 || arm.elbow < 0 || arm.hand < 0 ||
+            t.parent[arm.elbow] != arm.upper || t.parent[arm.hand] != arm.elbow) {
+            reachArms = false;
+            break;
+        }
+
+        const float sourceLength = Len(Sub(restOf("elbow", side), restOf("arm", side))) +
+                                   Len(Sub(restOf("wrist", side), restOf("elbow", side)));
+        const float targetLength = Len(Sub(Origin(t.world[arm.elbow]), Origin(t.world[arm.upper]))) +
+                                   Len(Sub(Origin(t.world[arm.hand]), Origin(t.world[arm.elbow])));
+        reachArms &= sourceLength > 1e-4f && targetLength > 1e-4f;
+        sourceArms += sourceLength;
+        targetArms += targetLength;
+    }
+    const float armScale = reachArms ? targetArms / sourceArms : 0.0f;
+
     const auto toTarget = [&](const matrix3x4& g) {
         return pm::ConcatTransforms(M, pm::ConcatTransforms(RotOnly(g), Mt));
     };
@@ -1494,6 +1628,7 @@ int main(int argc, char** argv) {
     const long limit = pulse::limits::kMaxAnimFrames;
     // MMD space -> target: the MMD lower-body rest lands on the bind Pelvis
     const Vector3 camAnchor = Sub(Origin(t.world[pelvis]), Mul(pm::VectorRotate(lowerRest, M), scale));
+    if (api && api->method == "camera") return EmitCameraApi(*api, vmdPaths.front(), M, camAnchor, scale);
     std::vector<Clip> clips;
     std::vector<matrix3x4> G(mmd.bones.size()), W(t.n), L(t.n);
 
@@ -1502,8 +1637,27 @@ int main(int argc, char** argv) {
         Morphs morphs;
         std::vector<CamKey> cams;
         uint32_t lastFrame = 0;
-        if (!LoadVmd(vmdPath, keys, morphs, cams, lastFrame, err))
+        IkSwitches ikSwitches;
+        if (!LoadVmd(vmdPath, keys, morphs, cams, lastFrame, err, &ikSwitches))
             return Fail(err);
+        if (api)
+        {
+            lastFrame = 0;
+            for (const std::string& layer : api->layers)
+            {
+                std::map<std::string, std::vector<Key>> layerBones;
+                Morphs layerMorphs;
+                IkSwitches layerSwitches;
+                std::vector<CamKey> ignoredCameras;
+                uint32_t ignoredLast = 0;
+                if (!LoadVmd(layer, layerBones, layerMorphs, ignoredCameras, ignoredLast, err, &layerSwitches)) return Fail(err);
+                for (auto& track : layerBones) if (!AtRest(track.second)) keys[track.first] = std::move(track.second);
+                for (auto& track : layerMorphs) if (!AtRest(track.second)) morphs[track.first] = std::move(track.second);
+                for (auto& track : layerSwitches) if (!AtRest(track.second)) ikSwitches[track.first] = std::move(track.second);
+            }
+            for (const auto& track : keys) if (!track.second.empty()) lastFrame = std::max(lastFrame, track.second.back().frame);
+            for (const auto& track : morphs) if (!track.second.empty()) lastFrame = std::max(lastFrame, track.second.back().frame);
+        }
         std::vector<const std::vector<Key>*> mmdKeys(mmd.bones.size(), nullptr);
         int keyed = 0;
         for (size_t b = 0; b < mmd.bones.size(); ++b) {
@@ -1514,7 +1668,7 @@ int main(int argc, char** argv) {
             }
         }
         // camera/light/morph-only motions carry no body keys
-        if (!keyed) {
+        if (!keyed && !api) {
             std::printf("skipped %s - no standard MMD bone is keyed\n", vmdPath.c_str());
             continue;
         }
@@ -1528,19 +1682,27 @@ int main(int argc, char** argv) {
         const long span = last - first;
         int fps = 30;
         long count = span + 1;
-        if (count > limit && !uncompress) {
+        if (!api && count > limit && !uncompress) {
             fps = std::max(1, static_cast<int>(30 * (limit - 1) / span));
             count = span * fps / 30 + 1;
         }
 
         std::vector<float> times;
-        for (long k = 0; k < count; ++k)
+        if (!api) for (long k = 0; k < count; ++k)
             times.push_back(static_cast<float>(first) + static_cast<float>(k) * 30.0f / fps);
 
+        if (api)
+        {
+            times = ApiTimes(lastFrame, api->fps);
+            count = long(times.size());
+            if (size_t(count) * size_t(t.n) > 4000000) return Fail("Motion exceeds the conversion pose budget");
+        }
         std::vector<std::vector<AnimPose>> frames;
         frames.reserve(static_cast<size_t>(count));
         Vector3 lastBend[2];
+        const matrix3x4 spin = AxisRot(2, api ? static_cast<float>(api->rotation) * pm::kDeg2Rad : 0.0f);
         for (long k = 0; k < count; ++k) {
+            if (api && k % 100 == 0) pulse::api::Record("progress", "{\"value\":" + Number(double(k)/double(count)) + "}");
             const float f = times[static_cast<size_t>(k)];
             for (size_t b = 0; b < mmd.bones.size(); ++b) {
                 Vector3 pos;
@@ -1551,6 +1713,31 @@ int main(int argc, char** argv) {
                 const Vector3 off = mb.parent >= 0 ? Sub(mb.rest, mmd.bones[mb.parent].rest) : mb.rest;
                 const matrix3x4 lm = pm::QuaternionMatrix(rot, Add(off, pos));
                 G[b] = mb.parent >= 0 ? pm::ConcatTransforms(G[mb.parent], lm) : lm;
+            }
+
+            // Toe IK aims the ankle without replacing its authored twist. A switched-off
+            // IK keeps the authored FK leg, as baked motions expect.
+            bool legIkOn[2];
+            for (int side = 0; side < 2; ++side) {
+                const int thigh = mmd.Find("leg", side), knee = mmd.Find("knee", side);
+                const int ankle = mmd.Find("ankle", side), toe = mmd.Find("toe", side);
+                const int toeIk = mmd.Find("toeik", side);
+                legIkOn[side] = IkOn(ikSwitches, mmd.bones[legs[side].ik].sj, f);
+                if (legIkOn[side]) {
+                    const auto toeLocal = pm::ConcatTransforms(pm::MatrixInvert(G[ankle]), G[toe]);
+                    const auto hint = Sub(Origin(G[knee]), Origin(G[thigh]));
+                    SolveTwoBoneIK(thigh, knee, ankle, Origin(G[legs[side].ik]), hint, G);
+                    G[toe] = pm::ConcatTransforms(G[ankle], toeLocal);
+                }
+                if (!IkOn(ikSwitches, mmd.bones[toeIk].sj, f))
+                    continue;
+
+                const auto pivot = Origin(G[ankle]);
+                const auto direction = Sub(Origin(G[toeIk]), pivot);
+                SwingAbout(G, pivot, Sub(Origin(G[toe]), pivot), direction, {ankle, toe});
+                assert(Len(Sub(Origin(G[toe]), pivot)) < 1e-6f || Len(direction) < 1e-6f ||
+                       Dot(Sub(Origin(G[toe]), pivot), direction) >
+                           0.999f * Len(Sub(Origin(G[toe]), pivot)) * Len(direction));
             }
 
             for (int i = 0; i < t.n; ++i) {
@@ -1570,23 +1757,87 @@ int main(int argc, char** argv) {
                 L[i] = p >= 0 ? pm::ConcatTransforms(pm::MatrixInvert(W[p]), W[i]) : W[i];
             }
 
+            // A shared anchor and scale keep the wrists together across different proportions.
+            if (reachArms) {
+                const Vector3 sourceCenter = Mul(Add(Origin(G[mmd.Find("arm", 0)]),
+                                                    Origin(G[mmd.Find("arm", 1)])), 0.5f);
+                const Vector3 targetCenter = Mul(Add(Origin(W[arms[0].upper]),
+                                                    Origin(W[arms[1].upper])), 0.5f);
+                for (int side = 0; side < 2; ++side) {
+                    const Arm& arm = arms[side];
+                    const Vector3 wristOffset = Sub(Origin(G[mmd.Find("wrist", side)]), sourceCenter);
+                    const Vector3 elbowOffset = Sub(Origin(G[mmd.Find("elbow", side)]),
+                                                    Origin(G[mmd.Find("arm", side)]));
+                    const Vector3 goal = Add(targetCenter, Mul(pm::VectorRotate(wristOffset, M), armScale));
+                    const Vector3 hint = pm::VectorRotate(elbowOffset, M);
+                    const matrix3x4 handRotation = RotOnly(W[arm.hand]);
+                    SolveTwoBoneIK(arm.upper, arm.elbow, arm.hand, goal, hint, W);
+                    const Vector3 handPosition = Origin(W[arm.hand]);
+                    W[arm.hand] = handRotation;
+                    SetOrigin(W[arm.hand], handPosition);
+
+                    for (int bone : {arm.upper, arm.elbow, arm.hand}) {
+                        const int parent = t.parent[bone];
+                        L[bone] = parent >= 0 ? pm::ConcatTransforms(pm::MatrixInvert(W[parent]), W[bone]) : W[bone];
+                    }
+                }
+
+                for (int bone = 0; bone < t.n; ++bone)
+                    W[bone] = t.parent[bone] >= 0 ? pm::ConcatTransforms(W[t.parent[bone]], L[bone]) : L[bone];
+            }
+
+            // Valve forearms bend as hinges and their twist helpers follow the hand, so forearm
+            // roll moves into the hand as far as the hand stays within kHandRoll of its rest.
+            for (const Arm& arm : arms) {
+                if (arm.upper < 0 || arm.elbow < 0 || arm.hand < 0 ||
+                    t.parent[arm.elbow] != arm.upper || t.parent[arm.hand] != arm.elbow)
+                    continue;
+                const float forearm = RollAboutX(pm::ConcatTransforms(Transpose(t.local[arm.elbow]), L[arm.elbow]));
+                const float hand = RollAboutX(pm::ConcatTransforms(L[arm.hand], Transpose(t.local[arm.hand])));
+                const float moved = std::clamp(forearm + hand, -kHandRoll, kHandRoll) - hand;
+
+                L[arm.elbow] = pm::ConcatTransforms(L[arm.elbow], AxisRot(0, -moved));
+                const Vector3 handPosition = Origin(L[arm.hand]);
+                L[arm.hand] = pm::ConcatTransforms(AxisRot(0, moved), L[arm.hand]);
+                SetOrigin(L[arm.hand], handPosition);
+            }
+            for (int bone = 0; bone < t.n; ++bone)
+                W[bone] = t.parent[bone] >= 0 ? pm::ConcatTransforms(W[t.parent[bone]], L[bone]) : L[bone];
+
             for (int side = 0; side < 2; ++side) {
                 const Leg& g = legs[side];
-                const Vector3 ikRest = mmd.bones[g.ik].rest;
+                const int mmdLegBone = mmd.Find("leg", side), mmdAnkle = mmd.Find("ankle", side);
+                // Baked motions still key the leg IK bone where the source foot touched down
+                const bool ikKeyed = mmdKeys[g.ik] && mmdKeys[g.ik]->size() > 1;
+                const int effector = legIkOn[side] || ikKeyed ? g.ik : mmdAnkle;
                 const Vector3 goal = Add(Origin(t.world[g.foot]),
-                                         Mul(pm::VectorRotate(Sub(Origin(G[g.ik]), ikRest), M), scale));
+                                         Mul(pm::VectorRotate(Sub(Origin(G[effector]), mmd.bones[effector].rest), M), scale));
                 // The knee hinges on the hip's side axis, as MMD's leg IK does - foot
                 // yaw never swings it. A leg lying along that axis keeps last frame's.
                 Vector3 dir = Sub(goal, Origin(W[g.thigh]));
                 pm::VectorNormalize(dir);
                 Vector3 bend = Mul(Cross(dir, pm::VectorRotate(left, toTarget(G[lower]))), g.bendSign);
+
+                // FK legs keep the authored knee direction while the knee is bent
+                if (!legIkOn[side]) {
+                    const Vector3 hip = Origin(G[mmdLegBone]);
+                    Vector3 line = Sub(Origin(G[mmdAnkle]), hip);
+                    pm::VectorNormalize(line);
+                    const Vector3 knee = Sub(Origin(G[mmd.Find("knee", side)]), hip);
+                    Vector3 offset = Sub(knee, Mul(line, Dot(knee, line)));
+                    if (Len(offset) > 0.05f * Len(knee)) {
+                        pm::VectorNormalize(offset);
+                        bend = pm::VectorRotate(offset, M);
+                    }
+                }
                 if (Len(bend) < 0.3f && Len(lastBend[side]) > 0.0f)
                     bend = lastBend[side];
                 pm::VectorNormalize(bend);
                 lastBend[side] = bend;
                 SolveTwoBoneIK(g.thigh, g.knee, g.foot, goal, bend, W);
                 const Vector3 footPos = Origin(W[g.foot]);
-                W[g.foot] = pm::ConcatTransforms(toTarget(G[g.ik]), RotOnly(t.world[g.foot]));
+                W[g.foot] = pm::ConcatTransforms(toTarget(G[mmd.Find("ankle", side)]),
+                                                RotOnly(t.world[g.foot]));
                 SetOrigin(W[g.foot], footPos);
                 for (int b : {g.thigh, g.knee, g.foot}) {
                     const int p = t.parent[b];
@@ -1596,6 +1847,10 @@ int main(int argc, char** argv) {
 
             // Roots stay in the stored bind space, the frame the model's own
             // decompiled clips use - no inverse compile yaw.
+            if (api && api->rotation != 0)
+                for (int i = 0; i < t.n; ++i)
+                    if (t.parent[i] < 0)
+                        L[i] = pm::ConcatTransforms(spin, L[i]);
             std::vector<AnimPose> fr(static_cast<size_t>(t.n));
             for (int i = 0; i < t.n; ++i)
                 pm::MatrixAngles(L[i], fr[i].rot, fr[i].pos);
@@ -1618,7 +1873,7 @@ int main(int argc, char** argv) {
 
         // face: the motion's own morphs, each one <vmd name>_face.vmd also keys taken from there
         const std::string faceVmd = mdldecompiler::StripExt(vmdPath) + "_face.vmd";
-        const bool faceFile = fs::exists(faceVmd, ec);
+        const bool faceFile = !api && fs::exists(faceVmd, ec);
         if (faceFile) {
             std::map<std::string, std::vector<Key>> unusedKeys;
             std::vector<CamKey> unusedCams;
@@ -1639,6 +1894,15 @@ int main(int argc, char** argv) {
         AddEyeTracks(keys, ctrls, times, eyeRange, face);
         const std::vector<mdldecompiler::FlexTrack>* flex = face.empty() ? nullptr : &face;
 
+        if (api)
+        {
+            EmitMotionApi(m, t, times, frames, face, keyed != 0);
+            for (const auto& missing : faceMissing)
+                pulse::api::Record("diagnostic", "{\"warning\":true,\"text\":" + pulse::api::String("Missing facial controller: " + missing) + "}");
+            if (unmapped) pulse::api::Record("diagnostic", "{\"warning\":true,\"text\":\"Some VMD facial morphs have no built-in mapping\"}");
+            if (!keyed && face.empty()) return Fail("The VMD has no supported body or facial animation");
+            return 0;
+        }
         if (!mdldecompiler::WriteAnimationDmx(m, path, clip, fps, frames,
                                               dmxModel == 22 && srcDir.empty() ? flex : nullptr))
             return Fail("cannot write \"" + path + "\"");
@@ -1646,7 +1910,7 @@ int main(int argc, char** argv) {
         while (t.parent[root] >= 0)
             root = t.parent[root];
         const std::string walkOpts = walkEvery >= 0 ? WalkFrames(frames, root, walkEvery, walkTol) : std::string();
-        clips.push_back({clip, fps, std::string(), false, walkOpts});
+        clips.push_back({clip, fps, false, walkOpts});
 
         std::printf("wrote %s\n", path.c_str());
         std::printf("  %ld frame%s at %d fps", count, count == 1 ? "" : "s", fps);
@@ -1654,9 +1918,9 @@ int main(int argc, char** argv) {
             std::printf(" (resampled from %ld MMD frames to fit the %ld-frame limit)", span + 1, limit);
         std::printf("\n  %d MMD bones keyed, %d target bones mapped, legs by $ikchain\n", keyed, mapped);
         if (!morphs.empty())
-            std::printf("  %zu MMD morphs from %s -> %zu flex controllers, %d morphs unmapped\n",
+            std::printf("  %zu MMD morphs from %s -> %zu flex controllers (%s), %d morphs unmapped\n",
                         morphs.size(), faceFile ? "the motion + _face.vmd" : "the motion", face.size(),
-                        unmapped);
+                        faceMapPath.empty() ? faceSet.c_str() : "-facemap", unmapped);
         if (face.size() > faceCount)
             std::printf("  eye bones -> %zu gaze controllers (-1..1 of %g degrees)\n",
                         face.size() - faceCount, eyeRange);
@@ -1673,7 +1937,6 @@ int main(int argc, char** argv) {
                 return Fail("cannot write \"" + dataPath + "\"");
             std::printf("wrote %s\n", dataPath.c_str());
         }
-        const size_t body = clips.size() - 1;
 
         // camera: <vmd name>_camera.vmd beside the motion, else the motion's own keys,
         // sampled over the body clip's frames so the two stay in sync
@@ -1710,7 +1973,7 @@ int main(int argc, char** argv) {
             const std::string camPath = (fs::path(path).parent_path() / (camClip + ".smd")).string();
             if (!WriteCameraSmd(camPath, cf, fovBone ? &fov : nullptr))
                 return Fail("cannot write \"" + camPath + "\"");
-            clips.push_back({camClip, fps, std::string(), true});
+            clips.push_back({camClip, fps, true});
             const auto [fovLo, fovHi] = std::minmax_element(fov.begin(), fov.end());
             std::printf("wrote %s\n  %zu camera keys from %s, fov %g-%g degrees\n", camPath.c_str(),
                         cams.size(), camFile ? camVmd.c_str() : "the motion", *fovLo, *fovHi);
@@ -1731,34 +1994,6 @@ int main(int argc, char** argv) {
             }
         }
 
-        // -sound: <vmd name>.wav (else .mp3) beside the .vmd, converted into
-        // <game>/sound/mmd/<clip>.wav and played from frame 0 of the sequence
-        if (sound) {
-            std::string audio;
-            for (const char* ext : {".wav", ".mp3"})
-                if (fs::exists(mdldecompiler::StripExt(vmdPath) + ext, ec)) {
-                    audio = mdldecompiler::StripExt(vmdPath) + ext;
-                    break;
-                }
-            if (audio.empty()) {
-                std::printf("  no .wav or .mp3 named like the .vmd - no sound\n");
-                continue;
-            }
-            const std::string rel = "mmd/" + clip + ".wav";
-            if (rel.size() > 64)
-                return Fail("sound path \"" + rel + "\" is over the 64-character event limit - "
-                            "rename the .vmd shorter");
-            const fs::path dst = fs::path(gameDir) / "sound" / "mmd" / (clip + ".wav");
-            fs::create_directories(dst.parent_path(), ec);
-            std::string note;
-            const std::string why = ConvertAudio(audio, dst.string(), note);
-            if (!why.empty())
-                return Fail("\"" + audio + "\" " + why);
-            clips[body].sound = rel;
-            std::printf("  sound %s (%s)\n", dst.string().c_str(), note.c_str());
-            if (first > 0)
-                std::printf("  warning: -start trims the motion but not the audio - they will not line up\n");
-        }
         if (srcDir.empty())
             std::printf("  $sequence \"%s\" \"%s\" fps %d%s\n", clip.c_str(),
                         mdldecompiler::BaseName(path).c_str(), fps, walkOpts.c_str());
@@ -1789,4 +2024,136 @@ int main(int argc, char** argv) {
     if (std::system(cmd.c_str()) != 0)
         return Fail("mdlcompiler failed on \"" + qc + "\" - the .qc and clips are kept for a rerun");
     return 0;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc != 2 || std::strcmp(argv[1], "-api") != 0) return RunConversion(argc, argv);
+
+    int result = 1;
+    try
+    {
+        pulse::api::Begin("vmd2valvebiped");
+        const nlohmann::json request = pulse::api::ReadRequest(256u << 20); // room for a base64 .mdl
+        const std::string method = request.at("method").get<std::string>();
+
+        ApiCapabilities();
+        if (method == "capabilities")
+        {
+            pulse::api::CheckMembers(request, {});
+            result = 0;
+        }
+        else
+        {
+            if (method == "motion") pulse::api::CheckMembers(request, {"motions", "model", "modelData", "fps", "rotation", "faceSet"});
+            else if (method == "camera")
+                pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
+                                                   "transform", "orientation", "distanceTransform",
+                                                   "boundaryMin", "boundaryMax", "boundaryTransform"});
+            else throw std::runtime_error("Unknown conversion method \"" + method + "\"");
+
+            ApiOptions options;
+            options.method = method;
+            // "motions" lists the top layer first; the last one is the base the others stack over
+            std::string motion;
+            if (method == "motion")
+            {
+                const auto motions = request.find("motions");
+                if (motions == request.end() || !motions->is_array() || motions->empty() || motions->size() > 32)
+                    throw std::runtime_error("API member \"motions\" must list 1 to 32 VMD paths");
+                for (const auto& path : *motions)
+                    if (!path.is_string() || path.get<std::string>().empty())
+                        throw std::runtime_error("API member \"motions\" must list VMD paths");
+                motion = motions->back().get<std::string>();
+                for (size_t i = motions->size() - 1; i-- > 0;) options.layers.push_back((*motions)[i].get<std::string>());
+            }
+            else motion = pulse::api::GetString(request, "motion");
+            std::string model = pulse::api::GetString(request, "model");
+            const std::string modelData = pulse::api::GetString(request, "modelData");
+            if (motion.empty()) throw std::runtime_error("API member \"motion\" is required");
+            if (model.empty() == modelData.empty())
+                throw std::runtime_error("Give the target as exactly one of \"model\" or \"modelData\"");
+
+            // base64 .mdl bytes, for a model that only exists in a mounted archive
+            if (!modelData.empty())
+            {
+                if (!DecodeBase64(modelData, options.modelData) || options.modelData.empty())
+                    throw std::runtime_error("API member \"modelData\" is not valid base64");
+                model = "target model";
+            }
+
+            if (const auto fps = request.find("fps"); fps != request.end())
+            {
+                if (!fps->is_number()) throw std::runtime_error("API member \"fps\" must be a number");
+                options.fps = fps->get<double>();
+                if (!std::isfinite(options.fps) || options.fps < 1 || options.fps > 1000)
+                    throw std::runtime_error("Conversion FPS must be between 1 and 1000");
+            }
+
+            if (const auto rotation = request.find("rotation"); rotation != request.end())
+            {
+                if (!rotation->is_number() || !std::isfinite(rotation->get<double>()) || std::fabs(rotation->get<double>()) > 360)
+                    throw std::runtime_error("API member \"rotation\" must be degrees from -360 to 360");
+                options.rotation = rotation->get<double>();
+            }
+
+            // 3x4 matrices are 12 numbers, row-major
+            const auto readMatrix = [&](const char* name, matrix3x4& matrix)
+            {
+                const auto value = request.find(name);
+                if (value == request.end()) return;
+                if (!value->is_array() || value->size() != 12)
+                    throw std::runtime_error(std::string("API member \"") + name + "\" must be 12 numbers");
+                for (int i = 0; i < 12; ++i)
+                {
+                    const auto& number = (*value)[size_t(i)];
+                    if (!number.is_number() || !std::isfinite(number.get<double>()))
+                        throw std::runtime_error(std::string("API member \"") + name + "\" must be 12 numbers");
+                    matrix.m[i / 4][i % 4] = number.get<float>();
+                }
+            };
+            readMatrix("transform", options.transform);
+            readMatrix("orientation", options.orientation);
+            readMatrix("distanceTransform", options.distanceTransform);
+            readMatrix("boundaryTransform", options.boundaryTransform);
+
+            const auto readPoint = [&](const char* name, Vector3& point)
+            {
+                const auto value = request.find(name);
+                if (value == request.end()) return false;
+                if (!value->is_array() || value->size() != 3)
+                    throw std::runtime_error(std::string("API member \"") + name + "\" must be 3 numbers");
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const auto& number = (*value)[size_t(axis)];
+                    if (!number.is_number() || !std::isfinite(number.get<double>()))
+                        throw std::runtime_error(std::string("API member \"") + name + "\" must be 3 numbers");
+                    (&point.x)[axis] = number.get<float>();
+                }
+                return true;
+            };
+            const bool boundaryMin = readPoint("boundaryMin", options.boundaryMin);
+            const bool boundaryMax = readPoint("boundaryMax", options.boundaryMax);
+            if (boundaryMin != boundaryMax) throw std::runtime_error("Give both \"boundaryMin\" and \"boundaryMax\"");
+            options.boundary = boundaryMin;
+            for (int axis = 0; options.boundary && axis < 3; ++axis)
+                if ((&options.boundaryMax.x)[axis] - (&options.boundaryMin.x)[axis] < 1)
+                    throw std::runtime_error("The camera boundary must be at least 1 unit on every axis");
+
+            const std::string faceSet = request.value("faceSet", std::string("auto"));
+            std::array<std::string, 7> arguments{"vmd2valvebiped", "-vmd", motion, "-mdl", model, "-faceset", faceSet};
+            std::array<char*, 7> argv2;
+            for (size_t i = 0; i < argv2.size(); ++i) argv2[i] = arguments[i].data();
+
+            result = RunConversion(int(argv2.size()), argv2.data(), &options);
+        }
+    }
+    catch (const std::exception& error)
+    {
+        if (pulse::api::Active()) pulse::api::Record("diagnostic", "{\"text\":" + pulse::api::String(error.what()) + "}");
+        else std::fprintf(stderr, "%s\n", error.what());
+    }
+
+    if (pulse::api::Active()) pulse::api::Finish(result);
+    return result;
 }

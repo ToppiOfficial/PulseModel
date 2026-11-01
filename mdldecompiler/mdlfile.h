@@ -20,8 +20,8 @@ namespace pm = pulse::math;
 
 namespace mdldecompiler {
 
-// Emit the stock studiomdl spellings; the default. -pulseqc clears it to emit
-// the .pulseqc form. Set once from the command line; the mesh writer reads it too.
+// Emit stock studiomdl spellings by default; -newcommands selects newer commands.
+// Set once from the command line; the mesh writer reads it too.
 inline bool g_studiomdl = true;
 
 // Launch-option gates. -nomesh/-noanimation suppress side-file writing only; the

@@ -316,6 +316,7 @@ FlexRig BuildFlexRig(const Mdl& m) {
 
         RigControl c;
         c.name = u.name;
+        c.flexgroup = m.Str(&fc[u.slot0], fc[u.slot0].sztypeindex);
         c.stereo = u.stereo;
         if (u.remaptype == fm::FLEXCONTROLLER_REMAP_EYELID) {
             c.eyelid = true;

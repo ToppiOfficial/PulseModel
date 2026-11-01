@@ -77,7 +77,6 @@ inline constexpr int kMaxProceduralBones = kMaxBones; // one per bone
 // [tool] s_quatinterpbone_t trigger arrays are [32] and the .mdl reader walks
 // exactly numtriggers entries - authored ceiling, not a soft budget.
 inline constexpr int kMaxProceduralTriggers = 32;
-inline constexpr int kMaxBoneTransformEdits = kUncapped; // [file] 100 bytes each
 
 // --- Textures / materials -------------------------------------------------
 // [format] vtx::MaterialReplacementHeader_t::materialID and the .mdl skin ref

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "math/math.h"
@@ -35,7 +36,6 @@ struct SrcVertex {
     Vector4 tangentS; // built by CalcModelTangentSpaces; w = +/-1
     SrcBoneWeight boneweight;
     int material = 0; // GLOBAL material index (MaterialTable)
-    float outline = -1.0f; // $toonoutline's DMX vertex stream, -1 = not encoded
 };
 
 // Indices are relative to the owning mesh's vertexoffset.
@@ -57,6 +57,7 @@ struct LocalBone {
     std::string name;
     int parent = -1;
     bool isNonSkeletal = false; // mesh dag or the synthetic defaultRoot
+    bool isAttachment = false;  // plain dag holding a DmeAttachment shape
 };
 
 struct SrcBonePose {
@@ -172,6 +173,8 @@ struct MaterialTable {
     };
     std::vector<Texture> textures;
     std::vector<int> materialToTexture;
+    // $collapsematerial from -> to, in script order; LookupTexture applies them
+    std::vector<std::pair<std::string, std::string>> collapse;
 
     // Find-or-add; a query matches an entry of the other `relative` class only
     // on its base name.
@@ -208,13 +211,32 @@ struct Source {
     // first-seen order, then material-sorted with C qsort (unstable sort; same
     // comparator + same libc = same order).
     std::vector<SrcVertex> vertex;
+
+    // Requested model 22 float streams, per unified vertex; NaN means absent.
+    // A $switchuv vector2 stream is two entries, component 0 (U) and 1 (V).
+    struct EditStream {
+        std::string name;
+        std::vector<float> values;
+        int component = -1;
+    };
+    std::vector<EditStream> editStreams;
+
+    // Original DMX membership retained while mesh selectors execute.
+    struct EditMeshInfo {
+        std::string name, dagName;
+        std::vector<std::string> streams;
+    };
+    std::vector<EditMeshInfo> editMeshes;
+    std::vector<int> vertexEditMesh;
+    std::vector<std::pair<int, int>> extraEditMeshes; // (vertex, mesh) after cross-mesh welding
+
     // A $modelgroup `mesh a b` fused several $rendermesh sources into this one,
     // interleaved by material - so which part a vertex came from is the only
     // surviving identity. Empty when this Source is not a fusion.
     std::vector<const Source*> mergedParts;
     std::vector<int> vertexPart; // parallel to vertex; index into mergedParts
     std::vector<SrcFace> face;
-    // parallel to face: low byte $decimatemesh group, high byte $inflate mesh group; empty = none
+    // Parallel to face: $decimatemesh group; empty = none.
     std::vector<uint16_t> faceTag;
     // Indexed by material id, so sized to kMaxSkins by whichever loader fills
     // it. Left empty on a geometry-less Source - at kMaxSkins that is ~655 KB.

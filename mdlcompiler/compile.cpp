@@ -1,6 +1,7 @@
 // compile.cpp - the SimplifyModel pipeline. See compile.h.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "compile.h"
 #include "perf.h"
@@ -149,32 +150,19 @@ void TransformAABB(const matrix3x4& t, const Vector3& minsIn, const Vector3& max
                worldCenter.z + worldExtents.z};
 }
 
-// What ApplyBoneTransformEdits leaves behind for the later passes that have to
-// compensate for a moved bind pose: the animation converter, the collision
-// builder and the authored-hitbox resolver. Empty unless a script has a
-// $transformbone, which keeps every other model bit-identical.
+// Bind-pose realignment deltas shared by animation and collision compensation.
 struct BoneEditState {
-    // one applied delta. An edit with both `angles` and `position` records two,
-    // so a per-animation opt-out can roll back just one category.
     struct Applied {
         int bone = 0;
-        bool isRotate = false;       // false = the position half
         bool ignoreAnim = false;     // `ignoreanimation` - excluded from every clip
-        bool transformVerts = false; // never folded into srcRealign
         matrix3x4 D;                 // local-frame delta, boneToPose_new = old * D
     };
     std::vector<Applied> applied;
     // per global bone, sized to the bone table on first edit
     std::vector<matrix3x4> origSrcRealign; // srcRealign before this bone's first edit
+    std::vector<matrix3x4> origBoneToPose;
+    std::vector<matrix3x4> postEditRealign;
     std::vector<char> hasOrigSrcRealign;
-    std::vector<char> ignoreHitbox;
-    // `transformweights` re-skin requests, run after RemapVertices
-    struct MoveWeight {
-        int target = -1, residual = -1;
-        float factor = 1.0f, smoothing = 0.0f;
-        Vector3 oldPos, newPos; // ramp start/end, pose space
-    };
-    std::vector<MoveWeight> moveWeights;
 };
 
 // ---------------------------------------------------------------------------
@@ -184,7 +172,7 @@ struct Ctx {
     CompileInput* in = nullptr;
     CompiledModel* out = nullptr;
     RadianEuler defaultRotation; // (0,0,pi/2) or (pi/2,0,pi/2) for Y-up
-    BoneEditState boneEdits;     // $transformbone
+    BoneEditState boneEdits;
     int rootIndex = 0;           // $root, resolved in ProcessAnimations
     // running mean of |z| over the eyeballs, in scaled model space, for
     // $eyeposition autoheight - collected in SetupEyeballs before org goes
@@ -494,7 +482,7 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
         }
         poseFrame = in.bindPoseFrame;
         if (poseFrame < 0 || poseFrame > poseClip->numframes - 1) {
-            std::printf("WARNING: $setbindpose: frame %d out of range [0, %d], clamped\n",
+            pulse::diag::Warnf("$setbindpose: frame %d out of range [0, %d], clamped\n",
                         poseFrame, poseClip->numframes - 1);
             poseFrame = poseFrame < 0 ? 0 : poseClip->numframes - 1;
         }
@@ -612,7 +600,7 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
 
     for (size_t f = 0; f < in.fixedFlexes.size(); f++)
         if (!flexFound[f])
-            std::printf("WARNING: $setflex: no source has a morph named \"%s\" (line %d)\n",
+            pulse::diag::Warnf("$setflex: no source has a morph named \"%s\" (line %d)\n",
                         in.fixedFlexes[f].name.c_str(), in.fixedFlexes[f].line);
     return true;
 }
@@ -1163,7 +1151,7 @@ bool RemapProceduralBones(Ctx& ctx, std::string* err) {
             return false;
         }
 
-        // a $transformbone on the helper moves every pose with it
+        // Carry helper poses through its bind-frame realignment.
         matrix3x4 helperEdit;
         const bool hasHelperEdit = GetAccumulatedBoneEditDelta(ctx, pb.helper, helperEdit);
 
@@ -1410,7 +1398,7 @@ void InsertPredefinedBones(Ctx& ctx, bool bUnlocked) {
                 // later import bone is not found yet
                 b.parent = FindGlobalBone(m, ib.parent);
                 if (b.parent == -1) {
-                    fprintf(stderr, "WARNING: Imported bone %s tried to access parent bone %s and failed!\n",
+                    pulse::diag::Warnf("Imported bone %s tried to access parent bone %s and failed!\n",
                             ib.name.c_str(), ib.parent.c_str());
                 }
             }
@@ -1797,103 +1785,27 @@ void RebuildLocalPose(Ctx& ctx) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// $transformbone - late bind-pose edits
-//
-// These relocate a bone's bind pose after the global bone table is built and
-// just before RealignBones. The default (pivot-only) edit does NOT deform the
-// rest mesh and does NOT change how animations look: express it as a change of
-// bind frame, delta D = boneToPose^-1 * newBoneToPose, and fold D into
-// srcRealign. TranslateAnimations applies srcRealign to BOTH the vertex binding
-// (RemapVertices) and every animation frame (ConvertAnimation), so
-//   destBoneToWorld_new = destBoneToWorld_old * D,  boneToPose_new = boneToPose_old * D
-// and the rest vertex boneToPose * destBoneToWorld^-1 * v is unchanged (the
-// D / D^-1 cancel). Same mechanism RealignBones already relies on.
-//
-// `transformverts` opts into rigidly CARRYING the bone's rigged verts instead:
-// boneToPose moves but D is NOT folded into srcRealign, so the cancellation is
-// gone and the mesh follows the bone.
-//
-// An edit can carry both an `angles` and a `position` part; each is recorded as
-// its own delta so a per-animation `ignoretransformbone angles|position` can
-// drop one category on its own.
-//
-// `transformchildren` carries the bone's whole subtree: every descendant gets the
-// same world-space motion as its own edit, so the subtree moves rigidly and the
-// children keep their local pos/rot. Without it only the named bone's frame moves
-// and RebuildLocalPose recompensates the direct children to stay where they were.
-// ---------------------------------------------------------------------------
-
-// I don't what else to do here...
-// The rotation (angles) half of an edit, bind frame B -> Bnew.
-void ApplyBoneEditAngles(const BoneTransformEdit& ed, const matrix3x4& B, matrix3x4& Bnew) {
-    Vector3 O = MatrixGetColumn(B, 3);
-
-    // degrees as (pitch, yaw, roll) - the $definebone angle convention
-    matrix3x4 R;
-    pm::AngleMatrixDeg(ed.angles, R); // rotation only, no translation
-
-    if (!ed.worldAngles) {
-        // rotate about the bone's own local axes; origin preserved
-        Bnew = pm::ConcatTransforms(B, R);
-    } else {
-        // rotate the orientation by world axes, pin the origin to O
-        Bnew = pm::ConcatTransforms(R, B);
-        MatrixSetColumn(O, 3, Bnew);
-    }
-}
-
-// The translation (position) half of an edit, bind frame B -> Bnew.
-void ApplyBoneEditPosition(const BoneTransformEdit& ed, const matrix3x4& B, matrix3x4& Bnew) {
-    Vector3 O = MatrixGetColumn(B, 3);
-
-    Vector3 delta;
-    if (!ed.worldPosition) {
-        // translate along the bone's own axes
-        Vector3 fwd = MatrixGetColumn(B, 0);
-        Vector3 left = MatrixGetColumn(B, 1);
-        Vector3 up = MatrixGetColumn(B, 2);
-        delta = {fwd.x * ed.pos.x + left.x * ed.pos.y + up.x * ed.pos.z,
-                 fwd.y * ed.pos.x + left.y * ed.pos.y + up.y * ed.pos.z,
-                 fwd.z * ed.pos.x + left.z * ed.pos.y + up.z * ed.pos.z};
-    } else {
-        delta = ed.pos; // world/model axes
-    }
-    Bnew = B;
-    MatrixSetColumn({O.x + delta.x, O.y + delta.y, O.z + delta.z}, 3, Bnew);
-}
-
-// Fold one per-category delta into bone t: update boneToPose, record the applied
-// edit, and (unless transformverts) fold D into srcRealign so the rest mesh and
-// the animations stay consistent.
-void FoldBoneEditDelta(Ctx& ctx, int t, bool isRotate, const matrix3x4& Bold,
-                       const matrix3x4& Bnew, const BoneTransformEdit& ed) {
+void FoldBoneEditDelta(Ctx& ctx, int t, const matrix3x4& Bold,
+                       const matrix3x4& Bnew, bool ignoreAnimation) {
     CompiledModel& m = *ctx.out;
     BoneEditState& st = ctx.boneEdits;
 
     // local-frame delta D = Bold^-1 * Bnew
     matrix3x4 D = pm::ConcatTransforms(pm::MatrixInvert(Bold), Bnew);
 
-    // snapshot the pre-edit srcRealign once per bone, so a per-animation opt-out
-    // can replay only the deltas it keeps
+    // Save the starting frame so ignoreanimation can omit selected realignments.
     if (!st.hasOrigSrcRealign[t]) {
         st.origSrcRealign[t] = m.bones[t].srcRealign;
+        st.origBoneToPose[t] = Bold;
         st.hasOrigSrcRealign[t] = 1;
     }
 
-    if (!ed.transformVerts) {
-        // both vertices and animation frames consume srcRealign, so folding the
-        // delta in there keeps them consistent with the moved frame
-        m.bones[t].srcRealign = pm::ConcatTransforms(m.bones[t].srcRealign, D);
-    }
-    // transformverts: skip the fold so the rest verts follow boneToPose instead
+    m.bones[t].srcRealign = pm::ConcatTransforms(m.bones[t].srcRealign, D);
     m.bones[t].boneToPose = Bnew;
 
     BoneEditState::Applied ae;
     ae.bone = t;
-    ae.isRotate = isRotate;
-    ae.ignoreAnim = ed.ignoreAnimation;
-    ae.transformVerts = ed.transformVerts;
+    ae.ignoreAnim = ignoreAnimation;
     ae.D = D;
     st.applied.push_back(ae);
 }
@@ -1914,136 +1826,24 @@ std::vector<int> CollectBoneDescendants(const CompiledModel& m, int t) {
     return out;
 }
 
-// `transformchildren`: give each descendant the target's world-space motion
-// W = Bnew * Bold^-1, i.e. Bnew_c = W * Bold_c. Recorded through
-// FoldBoneEditDelta like any other edit, so the per-clip rollback, the srcRealign
-// fold and the hull/hitbox compensation all cover the subtree too.
-void CarryBoneEditToDescendants(Ctx& ctx, const std::vector<int>& kids, bool isRotate,
+// Carry descendant frames through the target's world-space motion.
+void CarryBoneEditToDescendants(Ctx& ctx, const std::vector<int>& kids,
                                 const matrix3x4& Bold, const matrix3x4& Bnew,
-                                const BoneTransformEdit& ed) {
+                                bool ignoreAnimation) {
     CompiledModel& m = *ctx.out;
     const matrix3x4 W = pm::ConcatTransforms(Bnew, pm::MatrixInvert(Bold));
     for (int c : kids) {
         const matrix3x4 BoldC = m.bones[c].boneToPose;
-        FoldBoneEditDelta(ctx, c, isRotate, BoldC, pm::ConcatTransforms(W, BoldC), ed);
+        FoldBoneEditDelta(ctx, c, BoldC, pm::ConcatTransforms(W, BoldC), ignoreAnimation);
     }
 }
 
-bool ApplyBoneTransformEdits(Ctx& ctx, std::string* err) {
-    CompiledModel& m = *ctx.out;
-    BoneEditState& st = ctx.boneEdits;
-    if (ctx.in->boneTransformEdits.empty())
-        return true;
-
-    st.origSrcRealign.assign(m.bones.size(), matrix3x4{});
-    st.hasOrigSrcRealign.assign(m.bones.size(), 0);
-    st.ignoreHitbox.assign(m.bones.size(), 0);
-
-    // an aim-at bone's origin comes from basepos at runtime, so it follows the
-    // edit by how far the bone moved in its aim parent's frame
-    auto aimLocalOrigin = [&](const AimAtBone& ab) {
-        const Vector3 o = MatrixGetColumn(m.bones[ab.bone].boneToPose, 3);
-        return ab.parent >= 0 ? pm::VectorITransform(o, m.bones[ab.parent].boneToPose) : o;
-    };
-    std::vector<Vector3> aimBefore;
-    for (const AimAtBone& ab : m.aimatbones)
-        aimBefore.push_back(aimLocalOrigin(ab));
-
-    bool changed = false;
-    for (const BoneTransformEdit& ed : ctx.in->boneTransformEdits) {
-        const int t = FindGlobalBone(m, ed.name);
-        if (t == -1) {
-            std::printf("WARNING: $transformbone: unknown bone \"%s\" (line %d) - skipped\n",
-                        ed.name.c_str(), ed.line);
-            continue;
-        }
-
-        // bind position before the edit - the transformweights ramp start
-        const Vector3 preEditPos = MatrixGetColumn(m.bones[t].boneToPose, 3);
-
-        const std::vector<int> kids =
-            ed.transformChildren ? CollectBoneDescendants(m, t) : std::vector<int>{};
-
-        // angle part first, then position, each as its own delta. The position
-        // part is computed on the post-rotation frame so the two compose in a
-        // stable order.
-        if (ed.hasAngles) {
-            matrix3x4 Bold = m.bones[t].boneToPose, Bnew;
-            ApplyBoneEditAngles(ed, Bold, Bnew);
-            FoldBoneEditDelta(ctx, t, /*isRotate=*/true, Bold, Bnew, ed);
-            CarryBoneEditToDescendants(ctx, kids, /*isRotate=*/true, Bold, Bnew, ed);
-            changed = true;
-        }
-        if (ed.hasPosition) {
-            matrix3x4 Bold = m.bones[t].boneToPose, Bnew;
-            ApplyBoneEditPosition(ed, Bold, Bnew);
-            FoldBoneEditDelta(ctx, t, /*isRotate=*/false, Bold, Bnew, ed);
-            CarryBoneEditToDescendants(ctx, kids, /*isRotate=*/false, Bold, Bnew, ed);
-            changed = true;
-        }
-
-        if (ed.ignoreHitbox) {
-            st.ignoreHitbox[t] = 1;
-            for (int c : kids)
-                st.ignoreHitbox[c] = 1;
-        }
-
-        if (ed.hasMoveWeight) {
-            const int r = FindGlobalBone(m, ed.residualbone);
-            if (r == -1) {
-                if (err)
-                    *err = "$transformbone transformweights: residual bone \"" +
-                           ed.residualbone + "\" (line " + std::to_string(ed.line) +
-                           ") not found";
-                return false;
-            }
-            // the ramp runs from the pre-edit to the post-edit bind position;
-            // `offset` shifts the end point only - the bone itself stays put
-            Vector3 postEditPos = MatrixGetColumn(m.bones[t].boneToPose, 3);
-            postEditPos = {postEditPos.x + ed.moveWeightOffset.x,
-                           postEditPos.y + ed.moveWeightOffset.y,
-                           postEditPos.z + ed.moveWeightOffset.z};
-            const Vector3 span{postEditPos.x - preEditPos.x, postEditPos.y - preEditPos.y,
-                               postEditPos.z - preEditPos.z};
-            if (DotProduct(span, span) < 1.0e-8f) {
-                std::printf("WARNING: $transformbone transformweights: bone \"%s\" (line %d) "
-                            "ramp start and end coincide (position change plus offset is "
-                            "zero) - skipped\n", ed.name.c_str(), ed.line);
-            } else {
-                BoneEditState::MoveWeight req;
-                req.target = t;
-                req.residual = r;
-                req.factor = ed.moveWeightFactor;
-                req.smoothing = ed.moveWeightSmoothing;
-                req.oldPos = preEditPos;
-                req.newPos = postEditPos;
-                st.moveWeights.push_back(req);
-            }
-        }
-    }
-
-    if (changed) {
-        // only the edited bones' boneToPose moved; an unedited child stays
-        // world-fixed at rest. Rebuilding rawLocal/pos/rot from boneToPose
-        // recompensates the direct children against their new parent frame and
-        // leaves the rest - and for a `transformchildren` subtree, where every
-        // descendant moved by the same world delta, it reproduces their original
-        // local pos/rot.
-        RebuildLocalPose(ctx);
-        for (size_t i = 0; i < m.aimatbones.size(); i++) {
-            AimAtBone& ab = m.aimatbones[i];
-            const Vector3 after = aimLocalOrigin(ab);
-            ab.basepos = {ab.basepos.x + after.x - aimBefore[i].x,
-                          ab.basepos.y + after.y - aimBefore[i].y,
-                          ab.basepos.z + after.z - aimBefore[i].z};
-        }
-    }
-    return true;
+Vector3 AimLocalOrigin(const CompiledModel& m, const AimAtBone& ab) {
+    const Vector3 origin = MatrixGetColumn(m.bones[ab.bone].boneToPose, 3);
+    return ab.parent >= 0 ? pm::VectorITransform(origin, m.bones[ab.parent].boneToPose) : origin;
 }
 
-// The accumulated bind-pose edit delta for a global bone (the ordered product of
-// its $transformbone deltas, so boneToPose_final = boneToPose_orig * D_total).
-// False when the bone had no edits.
+// Accumulate the bind-frame deltas recorded for this bone.
 bool GetAccumulatedBoneEditDelta(const Ctx& ctx, int globalBone, matrix3x4& outD) {
     const BoneEditState& st = ctx.boneEdits;
     if (globalBone < 0 || globalBone >= static_cast<int>(st.hasOrigSrcRealign.size()) ||
@@ -2058,23 +1858,6 @@ bool GetAccumulatedBoneEditDelta(const Ctx& ctx, int globalBone, matrix3x4& outD
     return true;
 }
 
-// True when the bone had a $transformbone with `ignorehitbox`; outputs the
-// inverse accumulated delta to pre-apply to its authored hitboxes so they keep
-// their original world position despite the bind-pose edit.
-bool GetBoneHitboxCompensation(const Ctx& ctx, int globalBone, matrix3x4& outInvDelta) {
-    const BoneEditState& st = ctx.boneEdits;
-    if (globalBone < 0 || globalBone >= static_cast<int>(st.ignoreHitbox.size()) ||
-        !st.ignoreHitbox[globalBone])
-        return false;
-    matrix3x4 Dtot;
-    if (!GetAccumulatedBoneEditDelta(ctx, globalBone, Dtot))
-        return false;
-    outInvDelta = pm::MatrixInvert(Dtot);
-    return true;
-}
-
-// Any edit flagged `ignoreanimation` (rolled back for every clip regardless of
-// what that clip asked for).
 bool HasGlobalIgnoreAnimEdit(const Ctx& ctx) {
     for (const BoneEditState::Applied& ae : ctx.boneEdits.applied)
         if (ae.ignoreAnim)
@@ -2085,47 +1868,50 @@ bool HasGlobalIgnoreAnimEdit(const Ctx& ctx) {
 struct SrcRealignSave {
     int bone;
     matrix3x4 saved;
+    Vector3 pos, rot;
 };
 
-// For a clip flagged `ignoretransformbone angles|position` - or whenever an edit
-// carries `ignoreanimation` - temporarily rewrite the affected bones' srcRealign
-// to exclude the ignored category, so the clip converts as if those edits never
-// happened. A no-op (returns false) when nothing opted out, keeping the common
-// case byte-identical.
-bool PushAnimSrcRealignOverride(Ctx& ctx, const Anim& panim, std::vector<SrcRealignSave>& saved) {
+// Exclude ignored edits from source conversion and file-less bone fallbacks.
+bool PushAnimSrcRealignOverride(Ctx& ctx, std::vector<SrcRealignSave>& saved) {
     CompiledModel& m = *ctx.out;
     BoneEditState& st = ctx.boneEdits;
     saved.clear();
 
-    if (st.applied.empty())
-        return false;
-    if (!panim.ignoreTransformPosition && !panim.ignoreTransformAngles &&
-        !HasGlobalIgnoreAnimEdit(ctx))
+    if (!HasGlobalIgnoreAnimEdit(ctx))
         return false;
 
-    for (size_t b = 0; b < m.bones.size() && b < st.hasOrigSrcRealign.size(); b++) {
-        if (!st.hasOrigSrcRealign[b])
-            continue;
+    std::vector<matrix3x4> fallback;
+    for (size_t b = 0; b < m.bones.size(); b++) {
+        matrix3x4 pose = m.bones[b].boneToPose;
+        if (st.hasOrigSrcRealign[b]) {
+            pose = st.origBoneToPose[b];
+            for (const BoneEditState::Applied& ae : st.applied)
+                if (ae.bone == static_cast<int>(b) && !ae.ignoreAnim)
+                    pose = pm::ConcatTransforms(pose, ae.D);
+            pose = pm::ConcatTransforms(pose, st.postEditRealign[b]);
+        }
+        fallback.push_back(pose);
+    }
 
-        // replay only the non-ignored deltas on top of the original srcRealign
+    for (size_t b = 0; b < m.bones.size(); b++) {
+        saved.push_back({static_cast<int>(b), m.bones[b].srcRealign,
+                         m.bones[b].pos, m.bones[b].rot});
+        const int parent = m.bones[b].parent;
+        const matrix3x4 local = parent < 0 ? fallback[b] :
+            pm::ConcatTransforms(pm::MatrixInvert(fallback[parent]), fallback[b]);
+        pm::MatrixAngles(local, m.bones[b].rot, m.bones[b].pos);
+        if (!st.hasOrigSrcRealign[b]) continue;
+
         matrix3x4 M = st.origSrcRealign[b];
         for (const BoneEditState::Applied& ae : st.applied) {
             if (ae.bone != static_cast<int>(b))
                 continue;
-            // transformverts edits were never folded into srcRealign, so they
-            // are not part of the animation path - never replay them here
-            if (ae.transformVerts)
-                continue;
             if (ae.ignoreAnim)
-                continue;
-            if (!ae.isRotate && panim.ignoreTransformPosition)
-                continue;
-            if (ae.isRotate && panim.ignoreTransformAngles)
                 continue;
             M = pm::ConcatTransforms(M, ae.D);
         }
+        M = pm::ConcatTransforms(M, st.postEditRealign[b]);
 
-        saved.push_back({static_cast<int>(b), m.bones[b].srcRealign});
         m.bones[b].srcRealign = M;
     }
 
@@ -2133,48 +1919,73 @@ bool PushAnimSrcRealignOverride(Ctx& ctx, const Anim& panim, std::vector<SrcReal
 }
 
 void PopAnimSrcRealignOverride(Ctx& ctx, const std::vector<SrcRealignSave>& saved) {
-    for (const SrcRealignSave& s : saved)
+    for (const SrcRealignSave& s : saved) {
         ctx.out->bones[s.bone].srcRealign = s.saved;
+        ctx.out->bones[s.bone].pos = s.pos;
+        ctx.out->bones[s.bone].rot = s.rot;
+    }
 }
 
-// TODO: why tf it runs unconditionally?
-// RealignBones - runs UNCONDITIONALLY. With no $realignbones or IK
-// chains it still (a) builds srcRealign = Invert(boneToPose)*boneToPose (a
-// float-noise near-identity), (b) re-derives rot/pos from boneToPose, and
-// (c) REBUILDS boneToPose = AngleMatrix(rot,pos) - one extra euler round-trip
-// that every downstream matrix inherits. Parity-critical.
-//
-// With realign_bones set, every bone whose parent has exactly one child is
-// additionally rotated so its X axis aims at that child.
-// $definebone pre-aligned bones are skipped everywhere: their script-provided
-// srcRealign survives verbatim.
+void TranslateAnimationSource(Ctx& ctx, const src::Source* source,
+                              const std::vector<matrix3x4>& sourcePose,
+                              std::vector<matrix3x4>& pose) {
+    std::vector<SrcRealignSave> saved;
+    PushAnimSrcRealignOverride(ctx, saved);
+    TranslateAnimations(ctx, source, sourcePose, pose);
+    PopAnimSrcRealignOverride(ctx, saved);
+}
+
+// Align selected axes, preserve bind-pose compensation, then rebuild locals.
+// Unselected pre-aligned bones retain their supplied realignment transforms.
 bool RealignBones(Ctx& ctx, std::string* err) {
     CompiledModel& m = *ctx.out;
     size_t numbones = m.bones.size();
 
     std::vector<int> childbone(numbones, -1);
+    std::vector<bool> noRealign(numbones, false);
+    std::vector<const std::vector<BoneRealignEdit>*> edits(numbones, nullptr);
+    std::vector<bool> manual(numbones, false);
+    std::vector<bool> rebuildLocal(numbones, false);
+    bool hasRealign = false;
+
+    for (const BoneMarkup& bm : ctx.in->bonemarkups) {
+        if (!bm.noRealign && bm.realigns.empty()) continue;
+
+        const int k = FindGlobalBone(m, bm.name);
+        if (k == -1) {
+            if (!bm.realigns.empty())
+                pulse::diag::Warnf("$realignbone: unknown or collapsed bone \"%s\" "
+                                   "(line %d) - skipped\n", bm.name.c_str(),
+                                   bm.realigns.front().line);
+            continue;
+        }
+
+        noRealign[k] = bm.noRealign;
+        if (bm.realigns.empty()) continue;
+
+        edits[k] = &bm.realigns;
+        manual[k] = bm.realigns.front().hasOrigin || bm.realigns.front().hasAngles;
+        hasRealign = true;
+    }
 
     // force bones with IK rules to realign themselves
     for (const IkChain& chain : m.ikchains) {
-        int k = chain.link[0].bone;
-        if (childbone[k] == -1 || childbone[k] == chain.link[1].bone) {
-            childbone[k] = chain.link[1].bone;
-        } else {
-            if (err) *err = "Trying to realign bone \"" + m.bones[k].name +
-                            "\" with two children";
-            return false;
-        }
-        k = chain.link[1].bone;
-        if (childbone[k] == -1 || childbone[k] == chain.link[2].bone) {
-            childbone[k] = chain.link[2].bone;
-        } else {
-            if (err) *err = "Trying to realign bone \"" + m.bones[k].name +
-                            "\" with two children";
-            return false;
+        for (int link = 0; link < 2; link++) {
+            const int k = chain.link[link].bone;
+            if (noRealign[k] || manual[k]) continue;
+
+            const int child = chain.link[link + 1].bone;
+            if (childbone[k] == -1 || childbone[k] == child) {
+                childbone[k] = child;
+            } else {
+                if (err) *err = "Trying to realign bone \"" + m.bones[k].name +
+                                "\" with two children";
+                return false;
+            }
         }
     }
 
-    if (ctx.in->realignBones) {
+    if (ctx.in->realignBones || hasRealign) {
         // count children
         std::vector<int> children(numbones, 0);
         for (size_t k = 0; k < numbones; k++)
@@ -2183,7 +1994,8 @@ bool RealignBones(Ctx& ctx, std::string* err) {
 
         // if my parent bone only has one child, then tell it to align to me
         for (size_t k = 0; k < numbones; k++)
-            if (m.bones[k].parent != -1 && children[m.bones[k].parent] == 1)
+            if (m.bones[k].parent != -1 && children[m.bones[k].parent] == 1 &&
+                (ctx.in->realignBones || edits[m.bones[k].parent]))
                 childbone[m.bones[k].parent] = static_cast<int>(k);
     }
 
@@ -2192,17 +2004,81 @@ bool RealignBones(Ctx& ctx, std::string* err) {
     for (size_t k = 0; k < numbones; k++)
         boneToPose[k] = m.bones[k].boneToPose;
 
+    if (hasRealign) {
+        BoneEditState& st = ctx.boneEdits;
+        st.origSrcRealign.assign(numbones, matrix3x4{});
+        st.origBoneToPose.assign(numbones, matrix3x4{});
+        st.postEditRealign.assign(numbones, matrix3x4{});
+        st.hasOrigSrcRealign.assign(numbones, 0);
+    }
+
+    std::vector<Vector3> aimBefore;
+    if (hasRealign)
+        for (const AimAtBone& ab : m.aimatbones)
+            aimBefore.push_back(AimLocalOrigin(m, ab));
+
+    for (size_t k = 0; k < numbones; k++) {
+        if (!edits[k]) continue;
+
+        if (!manual[k]) {
+            if (childbone[k] == -1) {
+                pulse::diag::Warnf("$realignbone: bone \"%s\" (line %d) has no unique "
+                                   "child for automatic alignment - skipped\n",
+                                   m.bones[k].name.c_str(), edits[k]->front().line);
+                edits[k] = nullptr;
+            }
+            continue;
+        }
+
+        // FoldBoneEditDelta updates boneToPose, so each edit starts from the last.
+        for (const BoneRealignEdit& edit : *edits[k]) {
+            const matrix3x4 base = m.bones[k].boneToPose;
+            const Vector3 origin = MatrixGetColumn(base, 3);
+            if (edit.hasAngles) {
+                matrix3x4 rotation;
+                pm::AngleMatrixDeg(edit.angles, rotation);
+                boneToPose[k] = edit.absolute ? rotation :
+                    (edit.worldAxes ? pm::ConcatTransforms(rotation, base) :
+                                      pm::ConcatTransforms(base, rotation));
+                MatrixSetColumn(origin, 3, boneToPose[k]);
+            }
+            if (edit.hasOrigin) {
+                const Vector3 offset = edit.worldAxes || edit.absolute ? edit.origin :
+                                       pm::VectorRotate(edit.origin, base);
+                MatrixSetColumn(edit.absolute ? offset :
+                                Vector3{origin.x + offset.x, origin.y + offset.y, origin.z + offset.z},
+                                3, boneToPose[k]);
+            }
+
+            FoldBoneEditDelta(ctx, static_cast<int>(k), base, boneToPose[k], edit.ignoreAnimation);
+            rebuildLocal[k] = true;
+
+            if (edit.affectChildren) {
+                const std::vector<int> children = CollectBoneDescendants(m, static_cast<int>(k));
+                CarryBoneEditToDescendants(ctx, children, base, boneToPose[k], edit.ignoreAnimation);
+                for (int child : children) {
+                    boneToPose[child] = m.bones[child].boneToPose;
+                    rebuildLocal[child] = true;
+                }
+            }
+        }
+    }
+
     // look for bones that aren't on a primary X axis
     for (size_t k = 0; k < numbones; k++) {
-        if (!m.bones[k].bPreAligned && childbone[k] != -1) {
+        if ((!m.bones[k].bPreAligned || edits[k]) && !noRealign[k] &&
+            !manual[k] && childbone[k] != -1) {
             int cb = childbone[k];
-            float d = VectorLength(m.bones[cb].pos);
+            const Vector3 childPosition = hasRealign ?
+                pm::VectorITransform(MatrixGetColumn(boneToPose[cb], 3), boneToPose[k]) :
+                m.bones[cb].pos;
+            float d = VectorLength(childPosition);
 
             // check to see that it's on positive X
-            if (d - m.bones[cb].pos.x > 0.01) {
+            if (d - childPosition.x > 0.01) {
                 // calc X axis
-                Vector3 v2 = MatrixGetColumn(m.bones[cb].boneToPose, 3);
-                Vector3 v3 = MatrixGetColumn(m.bones[k].boneToPose, 3);
+                Vector3 v2 = MatrixGetColumn(boneToPose[cb], 3);
+                Vector3 v3 = MatrixGetColumn(boneToPose[k], 3);
                 Vector3 forward{v2.x - v3.x, v2.y - v3.y, v2.z - v3.z};
                 pm::VectorNormalize(forward);
 
@@ -2248,20 +2124,47 @@ bool RealignBones(Ctx& ctx, std::string* err) {
         }
     }
 
-    // ($forcedrealign: not in the schema yet)
+    if (hasRealign) {
+        for (size_t k = 0; k < numbones; k++) {
+            if (!edits[k] || manual[k]) continue;
+
+            const matrix3x4 before = m.bones[k].boneToPose;
+            FoldBoneEditDelta(ctx, static_cast<int>(k), before, boneToPose[k],
+                              edits[k]->back().ignoreAnimation);
+            rebuildLocal[k] = true;
+        }
+        for (size_t k = 0; k < numbones; k++)
+            if (m.bones[k].parent >= 0 && rebuildLocal[m.bones[k].parent])
+                rebuildLocal[k] = true;
+
+        for (size_t i = 0; i < m.aimatbones.size(); i++) {
+            AimAtBone& ab = m.aimatbones[i];
+            const Vector3 after = AimLocalOrigin(m, ab);
+            ab.basepos = {ab.basepos.x + after.x - aimBefore[i].x,
+                          ab.basepos.y + after.y - aimBefore[i].y,
+                          ab.basepos.z + after.z - aimBefore[i].z};
+        }
+    }
 
     // build realignment transforms
     for (size_t k = 0; k < numbones; k++) {
         if (!m.bones[k].bPreAligned) {
             matrix3x4 poseToBone = pm::MatrixInvert(m.bones[k].boneToPose);
-            m.bones[k].srcRealign = pm::ConcatTransforms(poseToBone, boneToPose[k]);
+            const matrix3x4 realign = pm::ConcatTransforms(poseToBone, boneToPose[k]);
+            if (k < ctx.boneEdits.hasOrigSrcRealign.size() &&
+                ctx.boneEdits.hasOrigSrcRealign[k]) {
+                ctx.boneEdits.postEditRealign[k] = realign;
+                m.bones[k].srcRealign = pm::ConcatTransforms(m.bones[k].srcRealign, realign);
+            } else {
+                m.bones[k].srcRealign = realign;
+            }
             m.bones[k].boneToPose = boneToPose[k];
         }
     }
 
     // rebuild default angles, position
     for (size_t k = 0; k < numbones; k++) {
-        if (!m.bones[k].bPreAligned) {
+        if (!m.bones[k].bPreAligned || rebuildLocal[k]) {
             matrix3x4 bonematrix;
             if (m.bones[k].parent == -1) {
                 bonematrix = m.bones[k].boneToPose;
@@ -2517,10 +2420,7 @@ bool LinkAttachments(Ctx& ctx, std::string* err) {
         matrix3x4 boneToPose;
         matrix3x4 poseToBone;
 
-        // no bone named at all: the attachment is tied to model space, so
-        // anchor it to the model root (keyvalues1 $attachment with no `bone`
-        // clause). The .pulsemdl loader rejects an empty parent_bone before
-        // reaching here, so this only fires for a deliberately bone-less one.
+        // Anchor model-space attachments to the model root.
         if (att.bonename.empty()) {
             int root = 0;
             for (size_t b = 0; b < m.bones.size(); ++b) {
@@ -2716,125 +2616,7 @@ void RemapVertices(Ctx& ctx) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The re-skin half of `$transformbone ... transformweights <residualbone>`
-// (reference ApplyMoveWeightQueue).
-//
-// The bind-pose edit itself is weight-preserving - it only relocates
-// srcRealign/boneToPose and leaves the rest mesh and animations visually
-// identical - so it never drops any weight. transformweights is the explicit ask
-// to hand the moved bone's influence to a residual bone, as a spatial ramp along
-// the move axis: project each vertex weighted to the moved bone onto the
-// old->new bind-position axis. The transferred fraction is 1 at the original
-// location and 0 at the new one, so the vertices the bone moved AWAY from hand
-// off and the ones it moved toward stay. `factor` is the width of the transition
-// band around the midpoint (1 = linear across the whole span, 0 = a hard cut);
-// `smoothing` eases that band with a smoothstep. Weights are renormalized after
-// the transfer. The rest position was already baked from the original weights in
-// RemapVertices, so the rest mesh is unchanged - only animated deformation of
-// the re-skinned fraction now follows the residual bone.
-// ---------------------------------------------------------------------------
-void ApplyMoveWeightQueue(Ctx& ctx) {
-    for (const BoneEditState::MoveWeight& req : ctx.boneEdits.moveWeights) {
-        const int t = req.target;
-        const int r = req.residual;
-        const Vector3 rampAxis{req.newPos.x - req.oldPos.x, req.newPos.y - req.oldPos.y,
-                               req.newPos.z - req.oldPos.z};
-        const float rampLenSqr = DotProduct(rampAxis, rampAxis);
-
-        // a self-transfer is a no-op; a degenerate axis was rejected at queue time
-        if (r < 0 || r == t || rampLenSqr < 1.0e-8f)
-            continue;
-
-        for (auto& sp : ctx.in->sources) {
-            for (src::SrcVertex& gv : sp->globalVertices) {
-                src::SrcBoneWeight& bw = gv.boneweight;
-                if (bw.numbones < 0 || bw.numbones > lim::kMaxSrcBoneWeights)
-                    continue;
-
-                // only touch vertices influenced by the moved bone
-                int slot = -1;
-                for (int n = 0; n < bw.numbones; n++) {
-                    if (bw.bone[n] == t) { slot = n; break; }
-                }
-                if (slot == -1)
-                    continue;
-
-                const float wTarget = bw.weight[slot];
-                if (wTarget <= 1.0e-6f)
-                    continue;
-
-                // 0 at the bone's original bind position, 1 at its new one
-                const Vector3 rel{gv.position.x - req.oldPos.x, gv.position.y - req.oldPos.y,
-                                  gv.position.z - req.oldPos.z};
-                const float along = DotProduct(rel, rampAxis) / rampLenSqr;
-
-                float blend;
-                if (req.factor <= 1.0e-6f)
-                    blend = (along <= 0.5f) ? 1.0f : 0.0f;
-                else
-                    blend = std::min(std::max(0.5f - (along - 0.5f) / req.factor, 0.0f), 1.0f);
-
-                // ease the band without moving its edges (a hard cut has no band)
-                if (req.smoothing > 1.0e-6f) {
-                    const float eased = blend * blend * (3.0f - 2.0f * blend);
-                    blend += (eased - blend) * req.smoothing;
-                }
-
-                if (blend <= 1.0e-6f)
-                    continue;
-
-                const float wMove = wTarget * blend; // handed to the residual
-                const float wKeep = wTarget - wMove; // stays on the moved bone
-
-                int rs = -1;
-                for (int n = 0; n < bw.numbones; n++) {
-                    if (bw.bone[n] == r) { rs = n; break; }
-                }
-
-                if (rs >= 0) {
-                    // residual already present: add the transferred share to it
-                    bw.weight[rs] += wMove;
-                    if (wKeep > 1.0e-6f) {
-                        bw.weight[slot] = wKeep;
-                    } else {
-                        // full transfer: drop the now-empty target slot
-                        for (int n = slot; n < bw.numbones - 1; n++) {
-                            bw.bone[n] = bw.bone[n + 1];
-                            bw.weight[n] = bw.weight[n + 1];
-                        }
-                        bw.numbones--;
-                    }
-                } else if (wKeep <= 1.0e-6f) {
-                    // full transfer, residual absent: it inherits the slot
-                    bw.bone[slot] = r;
-                } else if (bw.numbones < lim::kMaxSrcBoneWeights) {
-                    // partial transfer, residual absent: split off a new slot
-                    bw.weight[slot] = wKeep;
-                    bw.bone[bw.numbones] = r;
-                    bw.weight[bw.numbones] = wMove;
-                    bw.numbones++;
-                } else {
-                    // budget full: hand the whole influence over rather than
-                    // dropping the transferred weight
-                    bw.bone[slot] = r;
-                }
-
-                // renormalize to guard against FP drift
-                float sum = 0.0f;
-                for (int n = 0; n < bw.numbones; n++)
-                    sum += bw.weight[n];
-                if (sum > 1.0e-6f)
-                    for (int n = 0; n < bw.numbones; n++)
-                        bw.weight[n] /= sum;
-            }
-        }
-    }
-}
-
-// BalanceGlobalBoneWeights: collapsed-bone weights are merged and any
-// $transformbone transfer has been applied - clip each vertex to the hardware
-// limit and renormalize.
+// Clip merged, collapsed-bone influences to the hardware limit and normalize.
 void BalanceGlobalBoneWeights(Ctx& ctx) {
     for (auto& sp : ctx.in->sources) {
         for (auto& v : sp->globalVertices) {
@@ -2909,7 +2691,7 @@ bool ContainsNoCase(const std::string& haystack, const std::string& needle) {
     return false;
 }
 
-// FindOrCullMesh's removemesh / removemeshword tests, both
+// FindOrCullMesh's removemesh / removemeshsubstring tests, both
 // matched on the path-stripped material base name so DMX pathing is ignored
 bool IsMeshRemoved(const Ctx& ctx, const ScriptLod& lod, int nMaterialID) {
     if (lod.meshRemovals.empty() && lod.meshWordRemovals.empty())
@@ -4003,7 +3785,7 @@ bool BuildConvexesForGroups(const std::vector<std::vector<int>>& groups,
         if (IsApproximatelyPlanar(pieceVerts, kPlanarEpsilon)) {
             if (remove2d)
                 continue;
-            std::printf("WARNING: physics shape \"%s\" has 2-dimensional geometry "
+            pulse::diag::Warnf("physics shape \"%s\" has 2-dimensional geometry "
                         "(less than %.3f inches thick)\n",
                         shapeName, kPlanarEpsilon);
         }
@@ -4100,7 +3882,7 @@ void ApplyMarkupsToSolid(const CompiledModel& m, const CompileInput& in, Physics
 void WarnUnknownMarkupBones(const CompiledModel& m, const CompileInput& in) {
     for (const PhysicsMarkup& mk : in.physMarkups) {
         if (FindGlobalBone(m, mk.bonename) < 0) {
-            std::printf("WARNING: physics markup \"%s\" names unknown bone \"%s\" - ignored\n",
+            pulse::diag::Warnf("physics markup \"%s\" names unknown bone \"%s\" - ignored\n",
                         mk.name.c_str(), mk.bonename.c_str());
         }
     }
@@ -4191,7 +3973,7 @@ void SortRagdollBodies(std::vector<RagdollBody>& bodies) {
     int passes = 0;
     while (swapped) {
         if (++passes > count * count + 10) {
-            std::printf("WARNING: physics body hierarchy has a cycle - stopping sort "
+            pulse::diag::Warnf("physics body hierarchy has a cycle - stopping sort "
                         "after %d passes\n", passes);
             break;
         }
@@ -4431,7 +4213,7 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
                 break;
             int gb = FindGlobalBone(m, extra);
             if (gb < 0) {
-                std::printf("WARNING: PhysicsShapeFromRender \"%s\" lists unknown "
+                pulse::diag::Warnf("PhysicsShapeFromRender \"%s\" lists unknown "
                             "extrabone \"%s\" - ignored\n",
                             shape.name.c_str(), extra.c_str());
                 continue;
@@ -4649,7 +4431,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             }
             int parent = FindLocalBoneNamed(ps, mk.mergeInto.c_str());
             if (parent < 0) {
-                std::printf("WARNING: physics markup \"%s\" merges into unknown bone "
+                pulse::diag::Warnf("physics markup \"%s\" merges into unknown bone "
                             "\"%s\" - ignored\n", mk.name.c_str(), mk.mergeInto.c_str());
                 continue;
             }
@@ -4773,7 +4555,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             int node = b;
             int globalBone = ResolveLocalBoneToGlobal(ps, b, &node);
             if (globalBone < 0) {
-                std::printf("WARNING: physics geometry on bone \"%s\" resolves to no "
+                pulse::diag::Warnf("physics geometry on bone \"%s\" resolves to no "
                             "compiled bone - ignored\n", ps->localBone[b].name.c_str());
                 continue;
             }
@@ -4784,11 +4566,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             const matrix3x4& boneToPose = ps->boneToPose[node];
             const ShapeFraming framing = MakeShapeFraming(shape);
 
-            // If $transformbone edited this bone's bind pose, the hull is placed
-            // at runtime by the edited bone transform (boneToPose_orig *
-            // D_total), so pre-multiply by Inverse(D_total) to land it back at
-            // its pre-edit position while still tracking the bone. Identity for
-            // an unedited bone.
+            // Keep the hull in place through bind-frame realignment.
             matrix3x4 boneEditDeltaInv;
             const bool compensate =
                 GetAccumulatedBoneEditDelta(ctx, globalBone, boneEditDeltaInv);
@@ -4827,7 +4605,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             }
             if (in.physBuildMode == PhysicsBuildMode::Ragdoll &&
                 static_cast<int>(convexes.size()) > shape.maxConvex) {
-                std::printf("WARNING: costly collision body \"%s\" (%zu convex pieces, "
+                pulse::diag::Warnf("costly collision body \"%s\" (%zu convex pieces, "
                             "%d allowed); building one hull\n",
                             m.bones[globalBone].name.c_str(), convexes.size(), shape.maxConvex);
                 for (phys::Convex* convex : convexes)
@@ -4902,7 +4680,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             solid.surfaceArea += phys::ConvexSurfaceArea(c);
         }
         if (static_cast<int>(body.convexes.size()) > maxConvexPieces) {
-            std::printf("WARNING: costly collision body \"%s\" (%zu convex pieces, "
+            pulse::diag::Warnf("costly collision body \"%s\" (%zu convex pieces, "
                         "%d allowed)\n", solid.name.c_str(), body.convexes.size(),
                         maxConvexPieces);
         }
@@ -4958,13 +4736,13 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
     // ---- constraints (BuildRagdollConstraint) -------------------------
     m.physRootName = in.physRootBone.empty() ? m.physSolids[0].name : in.physRootBone;
     if (!in.physRootBone.empty() && FindSolidByName(m.physSolids, in.physRootBone) < 0) {
-        std::printf("WARNING: $rootbone \"%s\" has no collision body - the hull meant for it "
+        pulse::diag::Warnf("$rootbone \"%s\" has no collision body - the hull meant for it "
                     "is weighted to some other bone\n", in.physRootBone.c_str());
     }
     for (const PhysicsJoint& j : in.physJoints) {
         int gb = FindGlobalBone(m, j.bonename);
         if (gb < 0) {
-            std::printf("WARNING: physicsjointlist names unknown bone \"%s\" - ignored\n",
+            pulse::diag::Warnf("physicsjointlist names unknown bone \"%s\" - ignored\n",
                         j.bonename.c_str());
             continue;
         }
@@ -4976,7 +4754,7 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             std::string fixed = FixParentSolid(m, name);
             idx = fixed.empty() ? -1 : FindSolidByName(m.physSolids, fixed);
             if (idx >= 0) {
-                std::printf("WARNING: constraint on bone \"%s\" moved to \"%s\" - that bone "
+                pulse::diag::Warnf("constraint on bone \"%s\" moved to \"%s\" - that bone "
                             "has no collision body of its own\n",
                             j.bonename.c_str(), fixed.c_str());
             }
@@ -5221,11 +4999,11 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     if (static_cast<int>(convexes.size()) > maxConvexPieces) {
         if (in.physBuildMode == PhysicsBuildMode::Single &&
             !in.physConvexHullCountOverride) {
-            std::printf("WARNING: costly collision model (%zu convex pieces, %d allowed); "
+            pulse::diag::Warnf("costly collision model (%zu convex pieces, %d allowed); "
                         "building one hull\n", convexes.size(), maxConvexPieces);
             freeConvexes();
         } else {
-            std::printf("WARNING: costly collision model (%zu convex pieces, %d allowed)\n",
+            pulse::diag::Warnf("costly collision model (%zu convex pieces, %d allowed)\n",
                         convexes.size(), maxConvexPieces);
         }
     }
@@ -5438,10 +5216,9 @@ bool RemapAnimations(Ctx& ctx, std::string* err) {
             continue;
         }
 
-        // if this clip opts out of $transformbone edits, roll the relevant
-        // srcRealign deltas back for the affected bones while it converts
+        // Exclude realignments marked ignoreanimation during source conversion.
         std::vector<SrcRealignSave> savedRealign;
-        const bool overrode = PushAnimSrcRealignOverride(ctx, panim, savedRealign);
+        const bool overrode = PushAnimSrcRealignOverride(ctx, savedRealign);
 
         int n = panim.startframe - pSourceAnim->startframe;
         for (int j = 0; j < panim.numframes; j++) {
@@ -5506,7 +5283,7 @@ void BuildAnimationWeights(Ctx& ctx, std::vector<WeightList>& lists) {
         for (const WeightList::Entry& e : lists[i].entries) {
             int k = FindGlobalBone(m, e.bone);
             if (k == -1) {
-                fprintf(stderr, "WARNING: unknown bone reference '%s' in weightlist '%s'\n",
+                pulse::diag::Warnf("unknown bone reference '%s' in weightlist '%s'\n",
                         e.bone.c_str(), lists[i].name.c_str());
             } else {
                 lists[i].weight[k] = e.weight;
@@ -5613,7 +5390,7 @@ bool ExtractLinearMotion(Ctx& ctx, Anim& panim, int motiontype, int iStartFrame,
     if (iEndFrame > panim.numframes - 1) iEndFrame = panim.numframes - 1;
     if (iSrcFrame > panim.numframes - 1) iSrcFrame = panim.numframes - 1;
     if (iStartFrame >= iEndFrame) {
-        std::fprintf(stderr, "warning: motion extraction ignored, no frames "
+        pulse::diag::Warnf("motion extraction ignored, no frames "
                              "remaining in %s\n", panim.name.c_str());
         return true;
     }
@@ -6036,7 +5813,7 @@ void FixupIkErrors(Ctx& ctx, Anim& panim, IkRule rule) {
 
     // a miss under a few units is the normal edge-of-stride reach limit
     if (worstMiss > 4.0f)
-        std::printf("WARNING: ikfixup \"%s\" chain \"%s\": target out of reach by %.1f units "
+        pulse::diag::Warnf("ikfixup \"%s\" chain \"%s\": target out of reach by %.1f units "
                     "at frame %d - the range is longer than the chain can hold\n",
                     panim.name.c_str(), chain.name.c_str(), worstMiss, worstFrame);
 }
@@ -6062,7 +5839,7 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
     if (!ctx.in->primaryRootBone.empty()) {
         ctx.rootIndex = FindGlobalBone(m, ctx.in->primaryRootBone);
         if (ctx.rootIndex == -1) {
-            std::fprintf(stderr, "warning: $root bone \"%s\" not found, using bone 0\n",
+            pulse::diag::Warnf("$root bone \"%s\" not found, using bone 0\n",
                          ctx.in->primaryRootBone.c_str());
             ctx.rootIndex = 0;
         }
@@ -6947,7 +6724,7 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                                        panim.ignorescale ? panim.scale / ctx.in->scale
                                                          : panim.scale,
                                        panim.adjust, panim.rotation, srcBoneToWorld);
-                    TranslateAnimations(ctx, panim.src, srcBoneToWorld, boneToWorld);
+                    TranslateAnimationSource(ctx, panim.src, srcBoneToWorld, boneToWorld);
 
                     matrix3x4 local;
                     if (rule.newparent != -1) {
@@ -7400,7 +7177,7 @@ void CompressAnimations(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// SetupHitBoxes - authored $hitboxset sets, or one auto-generated set
+// SetupHitBoxes - authored $hboxset sets, or one auto-generated set
 // ---------------------------------------------------------------------------
 
 // flag all bones used by hitboxes (up the ancestry)
@@ -7450,23 +7227,6 @@ bool SetupHitBoxes(Ctx& ctx, std::string* err) {
                     return false;
                 }
 
-                // $transformbone ... ignorehitbox: compensate this hitbox by the
-                // inverse bind-pose edit so it stays put in world space. The
-                // hitbox is an OBB whose bone-space transform is Rot(angOffset)
-                // about the bone origin.
-                matrix3x4 invDelta;
-                if (GetBoneHitboxCompensation(ctx, hb.bone, invDelta)) {
-                    matrix3x4 boxRot;
-                    pm::AngleMatrixDeg(hb.angOffset, boxRot);
-                    const matrix3x4 M = pm::ConcatTransforms(invDelta, boxRot);
-
-                    // VectorIRotate uses the rotation part only, so the box
-                    // shift is Rot(M)^T * translation(M)
-                    const Vector3 shift = pm::VectorIRotate(MatrixGetColumn(M, 3), M);
-                    hb.bmin = {hb.bmin.x + shift.x, hb.bmin.y + shift.y, hb.bmin.z + shift.z};
-                    hb.bmax = {hb.bmax.x + shift.x, hb.bmax.y + shift.y, hb.bmax.z + shift.z};
-                    hb.angOffset = pm::MatrixAnglesDeg(M);
-                }
                 // The engine's ray-vs-box test does not reorder min/max, so an
                 // inverted axis turns the box inside out and bullets miss or hit wrong.
                 if (hb.capsuleRadius <= 0.0f) {
@@ -7488,7 +7248,7 @@ bool SetupHitBoxes(Ctx& ctx, std::string* err) {
                     }
                     if (hb.bmin.x == hb.bmax.x || hb.bmin.y == hb.bmax.y ||
                         hb.bmin.z == hb.bmax.z)
-                        std::fprintf(stderr, "WARNING: %s has zero thickness: %s\n",
+                        pulse::diag::Warnf("%s has zero thickness: %s\n",
                                      where.c_str(), bounds);
                 }
             }
@@ -7826,7 +7586,7 @@ void LimitIKChainLength(Ctx& ctx) {
         if (!needsFixup)
             continue;
         if (!hasKnees) {
-            fprintf(stderr, "WARNING: ik rules for %s but no clear knee direction\n",
+            pulse::diag::Warnf("ik rules for %s but no clear knee direction\n",
                     chain.name.c_str());
             continue;
         }
@@ -8350,7 +8110,7 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
                                        panim.ignorescale ? panim.scale / ctx.in->scale
                                                          : panim.scale,
                                        panim.adjust, panim.rotation, srcBoneToWorld);
-                    TranslateAnimations(ctx, panim.src, srcBoneToWorld, boneToWorld);
+                    TranslateAnimationSource(ctx, panim.src, srcBoneToWorld, boneToWorld);
                 } else {
                     CalcBoneTransforms(ctx, panim, t, boneToWorld);
                 }
@@ -8415,7 +8175,7 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
                         BuildRawTransforms(panim.src, pSourceAnim,
                                            t + panim.startframe - pSourceAnim->startframe, 1.0f,
                                            Vector3{0, 0, 0}, RadianEuler{0, 0, 0}, srcBoneToWorld);
-                        TranslateAnimations(ctx, panim.src, srcBoneToWorld, boneToWorld);
+                        TranslateAnimationSource(ctx, panim.src, srcBoneToWorld, boneToWorld);
                     } else {
                         CalcBoneTransforms(ctx, panim, t, boneToWorld);
                     }
@@ -8464,7 +8224,7 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
                                            panim.ignorescale ? panim.scale / ctx.in->scale
                                                              : panim.scale,
                                            panim.adjust, panim.rotation, srcBoneToWorld);
-                        TranslateAnimations(ctx, panim.src, srcBoneToWorld, boneToWorld);
+                        TranslateAnimationSource(ctx, panim.src, srcBoneToWorld, boneToWorld);
                     } else {
                         CalcBoneTransforms(ctx, panim, t, boneToWorld);
                     }
@@ -8554,7 +8314,7 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
             if (a < 0) continue;
             Anim& panim2 = m.anims[a];
             if (panim1.ikrules.size() != panim2.ikrules.size()) {
-                fprintf(stderr, "WARNING: %s - mismatched number of IK rules: \"%s\" \"%s\"\n",
+                pulse::diag::Warnf("%s - mismatched number of IK rules: \"%s\" \"%s\"\n",
                         seq.name.c_str(), panim1.name.c_str(), panim2.name.c_str());
                 Anim& from = (panim1.ikrules.size() > panim2.ikrules.size()) ? panim1 : panim2;
                 Anim& to = (panim1.ikrules.size() > panim2.ikrules.size()) ? panim2 : panim1;
@@ -9091,7 +8851,7 @@ void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
     }
 
     if (nError) {
-        std::fprintf(stderr, "warning: unmatched vertex anims %d (%.2f)\n", nError,
+        pulse::diag::Warnf("unmatched vertex anims %d (%.2f)\n", nError,
                      flErrorDist / nError);
     }
 }
@@ -9424,7 +9184,7 @@ void CullDuplicateFlex(Ctx& ctx) {
                 break;
             }
         if (!ok) {
-            std::fprintf(stderr, "warning: $flexcullmethod: unexpected flexrule op layout; "
+            pulse::diag::Warnf("$flexcullmethod: unexpected flexrule op layout; "
                                  "keeping duplicate flex controllers\n");
         } else {
             for (FlexRule& rule : m.flexrules) {
@@ -9591,7 +9351,7 @@ void CullOrphanRulesAndControllers(Ctx& ctx, bool keepControllers) {
                     ctrlLive[c] = 1;
                 return c;
             })) {
-            std::fprintf(stderr, "warning: $flexcullmethod: unexpected flexrule op layout; "
+            pulse::diag::Warnf("$flexcullmethod: unexpected flexrule op layout; "
                                  "skipping the orphan flex cull\n");
             return;
         }
@@ -9845,8 +9605,6 @@ static std::string AnimSignature(const Anim& a) {
     SigVal(s, a.looprestartpercent);
     SigVal(s, a.isBindPose);
     SigVal(s, a.noAutoIK);
-    SigVal(s, a.ignoreTransformAngles);
-    SigVal(s, a.ignoreTransformPosition);
     SigVal(s, a.motionrollback);
     SigVal(s, a.adjust);
     SigVal(s, a.rotation);
@@ -10348,6 +10106,20 @@ bool ConvertIkRule(const CompileInput& input, const CompileInput::InIkRule& ir,
     return true;
 }
 
+// Drops leading and repeated separators; the engine joins these names onto
+// $cdmaterials and cannot resolve a doubled slash.
+static std::string CleanMaterialPath(const std::string& path) {
+    std::string clean;
+    for (const char ch : path) {
+        const bool separator = ch == '/' || ch == '\\';
+        const bool afterSeparator = !clean.empty() && (clean.back() == '/' || clean.back() == '\\');
+        if (separator && (clean.empty() || afterSeparator))
+            continue;
+        clean.push_back(ch);
+    }
+    return clean;
+}
+
 bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     Ctx ctx;
     ctx.in = &input;
@@ -10520,8 +10292,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         a.fudgeloop = ia.fudgeloop;
         a.noAutoIK = ia.noAutoIK;
         a.nocull = ia.nocull;
-        a.ignoreTransformAngles = ia.ignoreTransformAngles;
-        a.ignoreTransformPosition = ia.ignoreTransformPosition;
         a.motiontype = ia.motiontype;
         a.motionrollback = ia.motionrollback;
         a.looprestart = ia.looprestart;
@@ -10708,7 +10478,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 // source declared later is copied before its own commands ran.
                 // A bindpose clip is filled before any of that, so it is exempt.
                 if (ref > static_cast<int>(i) && !out.anims[ref].isBindPose)
-                    std::printf("WARNING: copypose \"%s\" in %s: source is declared after "
+                    pulse::diag::Warnf("copypose \"%s\" in %s: source is declared after "
                                 "this animation, so its own commands have not run yet - "
                                 "move it above to copy the finished clip\n",
                                 ic.name.c_str(), a.name.c_str());
@@ -11188,11 +10958,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     if (!LinkIKLocks(ctx, err))
         return false;
 
-    // $transformbone edits land before $realignbones, so a realign is computed
-    // on the edited skeleton
-    if (!ApplyBoneTransformEdits(ctx, err))
-        return false;
-
     { PULSE_TIME_PASS("RealignBones"); // unconditional; rebuilds boneToPose + srcRealign
       if (!RealignBones(ctx, err)) return false; }
 
@@ -11202,8 +10967,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // straight after the realign that produced them.
     if (!RemapProceduralBones(ctx, err))
         return false;
-    if (input.stopAfterProcedural)
-        return true;
 
     // per-bone contents, now that the bone table is final
     ApplyJointContents(ctx);
@@ -11230,9 +10993,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         }
         out.bboxset = true;
     }
-    // reassign vertex weight off moved bones onto their residual bone, then clip
-    // every vertex to the hardware influence limit
-    ApplyMoveWeightQueue(ctx);
     BalanceGlobalBoneWeights(ctx);
     { PULSE_TIME_PASS("UnifyLods"); UnifyLods(ctx); }
 
@@ -11433,7 +11193,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                out.eyeposition.y == 0.0f && out.eyeposition.z == 0.0f) {
         // an unset $eyeposition is indistinguishable from "0 0 0" on disk, and
         // on a face model that puts the engine's eye point at the origin
-        std::printf("WARNING: model has eyeballs but $eyeposition is 0 0 0 - the "
+        pulse::diag::Warnf("model has eyeballs but $eyeposition is 0 0 0 - the "
                     "engine eye point sits at the model origin. Use "
                     "\"$eyeposition 0 0 0 autoheight\" to derive it.\n");
     }
@@ -11618,6 +11378,36 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         }
     }
 
+    // Every material path as it ships, whichever command produced it. A $lod
+    // source is cleaned too so the .vtx exact-name lookup still finds its texture.
+    {
+        std::unordered_set<std::string> reported;
+        auto cleanPath = [&reported](std::string& path, bool report) {
+            const std::string clean = CleanMaterialPath(path);
+            if (report && clean != path && reported.insert(path).second)
+                pulse::diag::Warnf("material path \"%s\" has stray slashes, using \"%s\"\n",
+                                   path.c_str(), clean.c_str());
+            path = clean;
+        };
+        auto cleanName = [&](std::string& name, bool report) {
+            cleanPath(name, report);
+            const bool noFileName = name.empty() || name.back() == '/' || name.back() == '\\';
+            if (report && noFileName && reported.insert(name).second)
+                pulse::diag::Warnf("material \"%s\" has no file name\n", name.c_str());
+        };
+
+        for (auto& tex : input.mats.textures)
+            cleanName(tex.name, tex.material >= 0);
+        for (std::string& cd : out.cdtextures)
+            cleanPath(cd, true);
+        for (ScriptLod& lod : out.scriptLods) {
+            for (LodReplacement& r : lod.materialReplacements) {
+                cleanName(r.src, false);
+                cleanName(r.dst, true);
+            }
+        }
+    }
+
     // reference SetSkinValues: the row is one entry per MATERIAL, and every
     // family starts as the identity so an unlisted material keeps its own.
     const int nummaterials = static_cast<int>(input.mats.materialToTexture.size());
@@ -11643,7 +11433,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     for (const auto& rename : input.boneRenames) {
         const int b = out.FindBone(rename.first.c_str());
         if (b == -1) {
-            std::printf("WARNING: $renamebone \"%s\" - no such bone (collapsed?)\n",
+            pulse::diag::Warnf("$renamebone \"%s\" - no such bone (collapsed?)\n",
                         rename.first.c_str());
             continue;
         }

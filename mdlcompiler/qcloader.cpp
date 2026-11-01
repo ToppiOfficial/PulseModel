@@ -5,9 +5,13 @@
 
 #include "perf.h"
 #include "qcloader.h"
+#include "qcpackage.h"
+#include "api.h"
+#include "diagnostic.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -41,7 +45,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// animation/sequence flags (format/mdl.h, mirrored like pulseloader.cpp does)
+// Animation/sequence flags mirrored from format/mdl.h.
 constexpr int kStudioLooping = 0x0001;
 constexpr int kStudioSnap = 0x0002;
 constexpr int kStudioDelta = 0x0004;
@@ -81,15 +85,20 @@ struct Token {
     // parameter). Only conditions care: an expanded operand is a literal value,
     // never the name of another variable to look up.
     bool expanded = false;
+    bool expression = false; // a $definevariable "( ... )" value, parens included
+    int apiSource = -1;
+    int column = 0; // 0-based byte offset in its line, for bare words
 };
 
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
 // line comments (the latter two only at a token start, and `;` also ends a word,
 // as stock does), `/* */` blocks, and braces as standalone tokens.
-bool Tokenize(const std::string& s, const std::string& file,
+// `path` is the file's absolute path for diagnostics; `file` names it in err.
+bool Tokenize(const std::string& s, const std::string& file, const std::string& path,
               std::vector<Token>& out, std::string* err) {
     int line = 1;
     size_t i = 0;
+    bool variableList = false;
     while (i < s.size()) {
         const char c = s[i];
         if (c == '\n') {
@@ -116,6 +125,41 @@ bool Tokenize(const std::string& s, const std::string& file,
             i = i + 1 < s.size() ? i + 2 : s.size();
             continue;
         }
+        if (c == '[' && !variableList && out.size() >= 2) {
+            const Token& directive = out[out.size() - 2];
+            variableList = !directive.quoted &&
+                (_stricmp(directive.text.c_str(), "$definevariable") == 0 ||
+                 _stricmp(directive.text.c_str(), "$redefinevariable") == 0);
+        }
+        if (variableList && (c == '[' || c == ']')) {
+            out.push_back({std::string(1, c), line, false});
+            variableList = c != ']';
+            i++;
+            continue;
+        }
+        if (c == '(' && (variableList || (out.size() >= 2 && !out[out.size() - 2].quoted &&
+            (_stricmp(out[out.size() - 2].text.c_str(), "$definevariable") == 0 ||
+             _stricmp(out[out.size() - 2].text.c_str(), "$redefinevariable") == 0)))) {
+            Token t;
+            t.line = line;
+            t.expression = true;
+            int depth = 0;
+            while (i < s.size()) {
+                const char d = s[i++];
+                if (d == '\n') line++;
+                t.text.push_back(d);
+                if (d == '(') depth++;
+                else if (d == ')' && --depth == 0) break;
+            }
+            if (depth != 0) {
+                if (!err) return false;
+                *err = file + "(" + std::to_string(t.line) + "): unterminated \"(\" expression";
+                pulse::diag::NoteFailure(*err, {path, t.line}, "unterminated \"(\" expression");
+                return false;
+            }
+            out.push_back(std::move(t));
+            continue;
+        }
         if (c == '"') {
             Token t;
             t.line = line;
@@ -127,8 +171,9 @@ bool Tokenize(const std::string& s, const std::string& file,
                 t.text.push_back(s[i++]);
             }
             if (i >= s.size()) {
-                if (err) *err = file + "(" + std::to_string(t.line) +
-                                "): unterminated string";
+                if (!err) return false;
+                *err = file + "(" + std::to_string(t.line) + "): unterminated string";
+                pulse::diag::NoteFailure(*err, {path, t.line}, "unterminated string");
                 return false;
             }
             i++; // closing quote
@@ -142,10 +187,12 @@ bool Tokenize(const std::string& s, const std::string& file,
         }
         Token t;
         t.line = line;
+        const size_t lineEnd = i ? s.rfind('\n', i - 1) : std::string::npos;
+        t.column = static_cast<int>(lineEnd == std::string::npos ? i : i - lineEnd - 1);
         while (i < s.size()) {
             const char d = s[i];
             if (std::isspace(static_cast<unsigned char>(d)) || d == '{' || d == '}' ||
-                d == '"' || d == ';' ||
+                d == '"' || d == ';' || (variableList && (d == '[' || d == ']')) ||
                 (d == '/' && i + 1 < s.size() && (s[i + 1] == '/' || s[i + 1] == '*')))
                 break;
             t.text.push_back(d);
@@ -170,6 +217,8 @@ struct Ctx {
     cm::CompileInput& in;
     fs::path scriptDir; // root script's directory
     std::string file;
+    std::vector<std::string> apiSources;
+    const ScriptFiles* unsaved = nullptr;
     std::string rootFile; // `file` for the root script; an $include changes `file`, not this
     std::vector<Token> toks;
     size_t pos = 0;
@@ -181,6 +230,9 @@ struct Ctx {
     struct IncludeFrame { size_t endPos; std::string savedFile; fs::path savedDir; };
     std::vector<IncludeFrame> includeFrames;
     bool abortErr = false;        // a hard $include error; stops parsing at the next read
+    bool keepGoing = false;       // analyze: skip a failed command and read on
+    bool hadError = false;        // keepGoing skipped something; the script cannot compile
+    std::vector<Token> options;   // option words of the running command, see MarkOption
     bool resolvingInclude = false; // reentrancy guard for ResolveIncludes
     // set while a block is captured raw ($if/$switch branch, macro or cmdlist
     // body): a $include there is stored verbatim and resolved when executed, not
@@ -193,6 +245,7 @@ struct Ctx {
     // dirs, so a script command always wins.
     std::vector<fs::path> launchIncludeDirs;
     std::vector<fs::path> launchSearchDirs;
+    std::vector<fs::path> packageIncludeDirs, packageSearchDirs;
     std::map<std::string, source::Source*> rendermeshes; // $rendermesh name -> loaded source
     // filename -> shared source. A bodied $rendermesh is excluded: its edits must not leak to other refs.
     std::map<std::string, source::Source*> sourceCache;
@@ -206,7 +259,12 @@ struct Ctx {
     std::map<std::string, std::vector<Token>> cmdlists; // $cmdlist name -> body tokens
     std::map<std::string, std::vector<Token>> lodCmdlists; // $lodcmdlist, keyed lowercased
     std::map<std::string, std::vector<Token>> rendermeshCmdlists; // $rendermeshcmdlist, keyed lowercased
-    std::map<std::string, std::string> variables; // $definevariable, case-sensitive, shared across $include
+    struct Variable {
+        std::string text;
+        std::vector<Token> tokens;
+        bool list = false;
+    };
+    std::map<std::string, Variable> variables; // case-sensitive, shared across $include
     struct Macro {
         std::vector<std::string> params;
         std::map<std::string, std::string> defaults;
@@ -291,8 +349,43 @@ struct Ctx {
 
     bool Fail(int line, const std::string& msg) {
         if (abortErr) return false; // keep the first $include error, not a cascade
-        if (err) *err = file + "(" + std::to_string(line) + "): " + msg;
+        if (!err) return false;
+
+        const pulse::diag::Location at = pulse::diag::Resolve({Path(), line});
+        *err = file + "(" + std::to_string(line) + "): " + msg;
+        pulse::diag::NoteFailure(*err, at, msg);
         return false;
+    }
+
+    // Absolute path of the file being parsed.
+    std::string Path() const { return fs::absolute(curDir / file).lexically_normal().u8string(); }
+
+    // Analyze: the token at `at` is an option word of the running command, so it can be told
+    // apart from values. Sent when the command ends; DropOption undoes a mark that turned out a value.
+    void MarkOption(size_t at) {
+        if (!keepGoing || at >= toks.size()) return;
+        const Token& t = toks[at];
+        if (t.quoted || t.expanded || t.apiSource < 0 || t.text.empty()) return;
+        const unsigned char first = static_cast<unsigned char>(t.text[0]);
+        const bool negated = first == '-' && t.text.size() > 1 &&
+            std::isalpha(static_cast<unsigned char>(t.text[1]));
+        if (std::isalpha(first) || first == '_' || negated)
+            options.push_back(t);
+    }
+    void MarkOption() { MarkOption(pos - 1); }
+    void DropOption(const Token& t) {
+        if (!options.empty() && options.back().line == t.line && options.back().column == t.column)
+            options.pop_back();
+    }
+
+    // A failed command's last option word may be the one it rejected, so that one is left out.
+    void ReportOptions(bool succeeded) {
+        if (!succeeded && !options.empty()) options.pop_back();
+        for (const Token& t : options)
+            pulse::api::Record("option", "{\"file\":" + pulse::api::String(apiSources[static_cast<size_t>(t.apiSource)]) +
+                ",\"line\":" + std::to_string(t.line) + ",\"column\":" + std::to_string(t.column) +
+                ",\"text\":" + pulse::api::String(t.text) + "}");
+        options.clear();
     }
 
     // Next token, or null at end of file.
@@ -324,6 +417,13 @@ struct Ctx {
         } catch (const std::exception&) {
             return Fail(cmd.line, cmd.text + " expects " + what + ", got \"" + s + "\"");
         }
+        return true;
+    }
+
+    // A required word from a fixed set, such as a mode name.
+    bool WantOption(const char* what, const Token& cmd, std::string& value) {
+        if (!Want(what, cmd, value)) return false;
+        MarkOption();
         return true;
     }
 
@@ -389,27 +489,53 @@ std::string LookedIn(const std::vector<fs::path>& tried) {
     return s;
 }
 
+// Under keepGoing every missing file is reported and listed as a dependency,
+// at its first candidate path, since each one is independent of the others.
+bool FailMissing(Ctx& c, int line, const std::string& what, const std::vector<fs::path>& tried,
+                 pulse::dependencies::Kind kind = pulse::dependencies::Kind::Source) {
+    c.Fail(line, what + " - looked in:" + LookedIn(tried));
+    if (!c.keepGoing)
+        return false;
+    if (!tried.empty())
+        pulse::dependencies::NoteMissing(tried.front().string(), kind);
+    pulse::diag::RecordLastFailure();
+    c.hadError = true;
+    return false;
+}
+
 // Where a source file (.dmx/.smd/.vrd) actually is: the current $pushd
 // directory first, then each $addsearchdir dir in registration order.
 // Empty return = nowhere, and `tried` then holds every candidate.
 fs::path FindSourceFile(const Ctx& c, const std::string& filename,
-                        std::vector<fs::path>* tried) {
+                        std::vector<fs::path>* tried, bool internalOnly = false) {
     const fs::path rel = pulse::FilePath(filename);
-    std::vector<fs::path> cands;
+    std::vector<fs::path> cands, internalCands;
     if (rel.is_absolute()) {
         cands.push_back(rel);
     } else {
         cands.push_back(c.sourceDirStack.back() / rel);
         for (const fs::path& dir : c.searchDirs)
             cands.push_back(dir / rel);
+        internalCands = cands;
         for (const fs::path& dir : c.launchSearchDirs)
             cands.push_back(dir / rel);
+        for (const fs::path& dir : c.packageSearchDirs)
+            internalCands.push_back(dir / rel);
+    }
+
+    if (auto* package = pulse::qcpackage::active) {
+        for (const auto& candidate : internalCands) {
+            const auto internal = package->Internal(candidate);
+            if (!internal.empty()) return package->Materialize(internal);
+        }
+        if (internalOnly) return {};
+        if (!rel.is_absolute())
+            for (auto& candidate : cands) candidate = package->External(candidate);
     }
     for (fs::path& p : cands) {
         p = p.lexically_normal().make_preferred();
         std::error_code ec;
-        if (fs::is_regular_file(p, ec))
-            return p;
+        if (fs::is_regular_file(p, ec)) return p;
     }
     if (tried) *tried = std::move(cands);
     return {};
@@ -427,6 +553,27 @@ std::string Lower(std::string s) {
     for (char& ch : s)
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     return s;
+}
+
+std::string UnsavedKey(const fs::path& path) {
+    std::error_code ec;
+    const fs::path full = fs::absolute(path, ec);
+    const std::string key = (ec ? path : full).lexically_normal().make_preferred().string();
+#ifdef _WIN32
+    return Lower(key);
+#else
+    return key;
+#endif
+}
+
+// The caller's unsaved text for `path`, or null to read the saved file.
+const std::string* UnsavedText(const Ctx& c, const fs::path& path) {
+    if (!c.unsaved) return nullptr;
+
+    const std::string key = UnsavedKey(path);
+    for (const auto& [file, text] : *c.unsaved)
+        if (UnsavedKey(pulse::FilePath(file)) == key) return &text;
+    return nullptr;
 }
 
 std::string StripExtension(const std::string& s) {
@@ -456,6 +603,9 @@ std::string WithDmxExtension(const std::string& s) {
 std::string WithSourceExtension(const Ctx& c, const std::string& s) {
     if (HasExtension(s))
         return s;
+    if (pulse::qcpackage::active)
+        for (const char* ext : {".dmx", ".smd", ".fbx"})
+            if (!FindSourceFile(c, s + ext, nullptr, true).empty()) return s + ext;
     for (const char* ext : {".dmx", ".smd", ".fbx"})
         if (!FindSourceFile(c, s + ext, nullptr).empty())
             return s + ext;
@@ -483,20 +633,9 @@ bool IsFbxPath(const std::string& s) {
 struct MeshEdit {
     std::string name; // the $rendermesh alias, for the load print
     source::MeshFilter filter;
+    std::vector<std::vector<source::EditMeshOperation>> editBlocks;
     source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
-    source::WeldMode weld = source::WeldMode::None;
-    bool weldSharp = false;      // $weld sharp - keep authored split normals
-    float weldSharpAngle = 0.0f; // optional tolerance in degrees; 0 = exact normal match
     bool noMorph = false;
-    // $inflate <amount> [material|mesh <name>...] in script order; tag 0 = no mesh scope
-    struct Inflate {
-        float amount = 0.0f;
-        int tag = 0;
-        std::vector<std::string> materials;
-        int line = 0;
-    };
-    std::vector<Inflate> inflates;
-    bool flipNormals = false;
     bool skeletalAwareDecimation = false; // $use_skeletalaware_decimation
     // $decimate / $decimatemesh in script order: (factor, face tag or -1 = all)
     std::vector<std::pair<float, int>> decimates;
@@ -511,9 +650,238 @@ struct MeshEdit {
     std::vector<source::VtaFlexOption> vtaFlexes;
     std::string vca, vcaName; // $vca: the same file played back as one NWAY run
     int vcaLine = 0;
-    bool toonOutline = false; // $toonoutline, applied after every other edit
-    source::ToonOutlineOption outline;
 };
+
+bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
+    bool ignoreSelectWarn = false;
+    if (!c.Eof() && !c.Cur().quoted && c.Cur().line == cmd.line &&
+        Lower(c.Cur().text) == "ignoreselectwarn") {
+        ignoreSelectWarn = true;
+        ++c.pos;
+        c.MarkOption();
+    }
+
+    if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
+        return c.Fail(cmd.line, "$meshedit expects '{'");
+    ++c.pos;
+    c.MarkOption();
+
+    std::vector<source::EditMeshOperation> operations;
+    for (;;) {
+        const Token* t = c.Next();
+        if (!t)
+            return c.Fail(cmd.line, "$meshedit is missing '}'");
+        c.MarkOption();
+        if (!t->quoted && t->text == "}")
+            break;
+
+        std::string name = Lower(t->text);
+        if (!name.empty() && name.front() == '$') name.erase(0, 1);
+        source::EditMeshOperation op;
+        op.line = t->line;
+        op.ignoreSelectWarn = ignoreSelectWarn;
+        const std::string where = "$meshedit: " + t->text;
+        auto hasArg = [&] {
+            return !c.Eof() && c.Cur().line == t->line &&
+                   (c.Cur().quoted || (c.Cur().text != "}" && c.Cur().text != "{" &&
+                                      c.Cur().text.front() != '$'));
+        };
+        auto want = [&](const char* what, std::string& value) {
+            if (!hasArg()) return c.Fail(t->line, where + " expects " + what);
+            value = c.Next()->text;
+            return true;
+        };
+        auto number = [&](const char* what, float& value) {
+            if (!hasArg()) return c.Fail(t->line, where + " expects " + what);
+            if (!c.WantFloat(what, *t, value)) return false;
+            return std::isfinite(value) || c.Fail(t->line, where + " requires finite values");
+        };
+
+        using source::MeshOperation;
+        if (t->quoted)
+            return c.Fail(t->line, "$meshedit expects an unquoted operation");
+        if (name == "selectdatastream" || name == "selectmaterial" ||
+            name == "selectmesh" || name == "selectmeshbystream" || name == "selectweights") {
+            if (hasArg() && !c.Cur().quoted) {
+                const std::string mode = Lower(c.Cur().text);
+                if (mode == "add" || mode == "subtract" || mode == "intersect") {
+                    ++c.pos;
+                    c.MarkOption();
+                    if (mode == "subtract") op.combine = source::SelectionCombine::Subtract;
+                    if (mode == "intersect") op.combine = source::SelectionCombine::Intersect;
+                }
+            }
+            if (name == "selectmaterial") {
+                op.kind = MeshOperation::SelectMaterial;
+                if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "contains") {
+                    ++c.pos;
+                    c.MarkOption();
+                    op.contains = true;
+                }
+                while (hasArg()) {
+                    std::string material = c.Next()->text;
+                    if (material.empty()) return c.Fail(t->line, where + " requires nonempty material names");
+                    op.materials.push_back(std::move(material));
+                }
+                if (op.materials.empty()) return c.Fail(t->line, where + " expects one or more material names");
+            } else if (name == "selectmesh" || name == "selectmeshbystream") {
+                const bool byStream = name == "selectmeshbystream";
+                op.kind = byStream ? MeshOperation::SelectMeshByStream : MeshOperation::SelectMesh;
+                if (!want(byStream ? "a DMX stream name" : "a DMX mesh name", op.name)) return false;
+                if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
+                edit.filter.keepMeshIdentity = true;
+                edit.filter.selectMeshStreams = edit.filter.selectMeshStreams || byStream;
+            } else if (name == "selectweights") {
+                op.kind = MeshOperation::SelectWeights;
+                op.value = 0.001f;
+                if (!want("a bone name", op.name)) return false;
+
+                bool thresholdSeen = false;
+                while (hasArg()) {
+                    if (!c.Cur().quoted && Lower(c.Cur().text) == "selectchildren") {
+                        if (op.selectChildren)
+                            return c.Fail(t->line, where + ": selectchildren written twice");
+                        ++c.pos;
+                        c.MarkOption();
+                        op.selectChildren = true;
+                    } else if (!thresholdSeen) {
+                        if (!number("a selection threshold", op.value)) return false;
+                        if (op.value < 0.0f || op.value > 1.0f)
+                            return c.Fail(t->line, where + ": threshold must be between 0 and 1");
+                        thresholdSeen = true;
+                    } else {
+                        return c.Fail(t->line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+                    }
+                }
+            } else {
+                op.kind = MeshOperation::SelectStream;
+                if (!want("a DMX float stream name", op.name)) return false;
+                if (hasArg() && !number("a selection threshold", op.value)) return false;
+
+                bool registered = false;
+                for (const auto& stream : edit.filter.editStreams)
+                    registered = registered || (stream.component < 0 &&
+                                                _stricmp(stream.name.c_str(), op.name.c_str()) == 0);
+                if (!registered) edit.filter.editStreams.push_back({op.name});
+            }
+        } else if (name == "switchuv") {
+            op.kind = MeshOperation::SwitchUV;
+            if (!want("a DMX UV stream name", op.name)) return false;
+            if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
+
+            bool registered = false;
+            for (const auto& stream : edit.filter.editStreams)
+                registered = registered || (stream.component >= 0 &&
+                                            _stricmp(stream.name.c_str(), op.name.c_str()) == 0);
+            if (!registered) {
+                edit.filter.editStreams.push_back({op.name, 0});
+                edit.filter.editStreams.push_back({op.name, 1});
+            }
+        } else if (name == "setweight") {
+            op.kind = MeshOperation::SetWeight;
+            op.value = 1.0f;
+            if (!want("a bone name", op.name)) return false;
+            if (hasArg() && !number("a weight", op.value)) return false;
+            if (op.value < 0.0f || op.value > 1.0f)
+                return c.Fail(t->line, where + ": weight must be between 0 and 1");
+        } else if (name == "shiftweights") {
+            op.kind = MeshOperation::ShiftWeights;
+            if (!want("a bone name", op.name) ||
+                !number("an X offset", op.offset.x) ||
+                !number("a Y offset", op.offset.y) ||
+                !number("a Z offset", op.offset.z) ||
+                !number("a pitch", op.angles.x) ||
+                !number("a yaw", op.angles.y) ||
+                !number("a roll", op.angles.z))
+                return false;
+            while (hasArg()) {
+                if (!c.Cur().quoted && Lower(c.Cur().text) == "worldaxes") {
+                    if (op.worldAxes) return c.Fail(t->line, where + ": worldaxes written twice");
+                    ++c.pos;
+                    c.MarkOption();
+                    op.worldAxes = true;
+                } else if (op.residualBone.empty()) {
+                    if (!want("a residual bone name", op.residualBone)) return false;
+                    if (op.residualBone.empty())
+                        return c.Fail(t->line, where + ": residual bone must be nonempty");
+                } else {
+                    return c.Fail(t->line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+                }
+            }
+        } else if (name == "selectall") {
+            op.kind = MeshOperation::SelectAll;
+        } else if (name == "selectnone") {
+            op.kind = MeshOperation::SelectNone;
+        } else if (name == "invertselection") {
+            op.kind = MeshOperation::InvertSelection;
+        } else if (name == "deleteselection") {
+            std::string mode;
+            if (!want("faces or vertices", mode)) return false;
+            c.MarkOption();
+            mode = Lower(mode);
+            if (mode == "faces") op.kind = MeshOperation::DeleteFaces;
+            else if (mode == "vertices") op.kind = MeshOperation::DeleteVertices;
+            else if (mode == "edges")
+                return c.Fail(t->line, where + ": edges mode is not supported yet");
+            else return c.Fail(t->line, where + " expects faces or vertices");
+        } else if (name == "duplicatemesh") {
+            op.kind = MeshOperation::Duplicate;
+            if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "replaceselection") {
+                ++c.pos;
+                c.MarkOption();
+                op.replaceSelection = true;
+            }
+        } else if (name == "replacematerial") {
+            op.kind = MeshOperation::ReplaceMaterial;
+            if (!want("a material name", op.name)) return false;
+            if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty material");
+        } else if (name == "flipnormals") {
+            op.kind = MeshOperation::FlipNormals;
+        } else if (name == "weld") {
+            op.kind = MeshOperation::Weld;
+            op.value = 0.0001f;
+            if (hasArg() && Lower(c.Cur().text) != "sharpedges") {
+                if (!number("a merge distance", op.value)) return false;
+                if (op.value < 0.0f)
+                    return c.Fail(t->line, where + ": merge distance must be 0 or above");
+            }
+            if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "sharpedges") {
+                ++c.pos;
+                c.MarkOption();
+                op.sharpEdges = true;
+            }
+        } else if (name == "inflate") {
+            op.kind = MeshOperation::Inflate;
+            if (!number("an inflation amount", op.value)) return false;
+            bool modeSeen = false, clampSeen = false;
+            while (hasArg()) {
+                const std::string option = Lower(c.Next()->text);
+                c.MarkOption();
+                if ((option == "normals" || option == "hull") && !modeSeen) {
+                    op.hull = option == "hull";
+                    modeSeen = true;
+                } else if (option == "thicknessclamp" && !clampSeen) {
+                    if (!number("a thickness clamp factor", op.thicknessClamp)) return false;
+                    if (op.thicknessClamp < 0.0f)
+                        return c.Fail(t->line, where + ": thicknessclamp must be 0 or above");
+                    clampSeen = true;
+                } else return c.Fail(t->line, where + ": unexpected option \"" + option + "\"");
+            }
+        } else {
+            return c.Fail(t->line, "$meshedit: unknown operation \"" + t->text + "\"");
+        }
+
+        if ((op.kind == MeshOperation::SelectWeights || op.kind == MeshOperation::SetWeight ||
+             op.kind == MeshOperation::ShiftWeights) && op.name.empty())
+            return c.Fail(t->line, where + ": bone name must be nonempty");
+        if (hasArg())
+            return c.Fail(c.Cur().line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+        operations.push_back(std::move(op));
+    }
+
+    edit.editBlocks.push_back(std::move(operations));
+    return true;
+}
 
 // Load-or-reuse a source file, keyed by filename. `edit` marks the load as a
 // render mesh, always PRIVATE (never cached, never reused) since edits must
@@ -533,6 +901,20 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& ful
     std::shared_ptr<pulse::dmx::Datamodel> dm;
     { PULSE_PERF("load", "dmx parse");
       dm = pulse::dmx::Datamodel::Load(full.string().c_str(), err); }
+    if (dm && pulse::dependencies::g_enabled) {
+        pulse::dependencies::Markup markup;
+        markup.modelVersion = dm->format_version;
+        for (const auto& element : dm->elements) {
+            const std::string& name = element->className;
+            markup.jiggleBones += name == "DmeJiggleBone";
+            markup.proceduralBones += name == "DmeQuatInterpBone" || name == "DmeAimAtBone";
+            markup.physicsShapes += name == "DmePhysicsShape" || name == "DmePhysicsBox" ||
+                                    name == "DmePhysicsSphere" || name == "DmePhysicsCapsule";
+        }
+        pulse::dependencies::NoteMarkup(full.string(), markup);
+    }
+    if (dm && !source::ValidateDmxModel(*dm, full.string(), err))
+        return nullptr;
     if (dm)
         c.dmxCache[key] = dm;
     return dm;
@@ -559,7 +941,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     std::vector<fs::path> tried;
     const fs::path full = FindSourceFile(c, filename, &tried);
     if (full.empty()) {
-        c.Fail(line, "cannot find \"" + filename + "\" - looked in:" + LookedIn(tried));
+        FailMissing(c, line, "cannot find \"" + filename + "\"", tried);
         return nullptr;
     }
     std::string loadErr;
@@ -568,19 +950,36 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     // a render mesh names its alias and prints the basename only (the same file
     // loads once per $rendermesh); errors keep the full path. A DMX prints after
     // the read so the line can carry its "<format> <ver>, <encoding> <ver>".
+    const auto reported = pulse::FilePath(pulse::qcpackage::Logical(full.string()));
     const std::string head =
-        priv ? "loading rendermesh \"" + edit->name + "\": " + full.filename().string()
+        priv ? "loading rendermesh \"" + edit->name + "\": " + reported.filename().string()
              : std::string("loading ") +
                    (kind == source::LoadKind::Animation     ? "animation"
                     : kind == source::LoadKind::Collision   ? "collision"
                                                             : "model") +
-                   ": " + full.string();
+                   ": " + reported.string();
 
     auto src = std::make_unique<source::Source>();
     // the name AS WRITTEN, not where it was found - it is the cache key above,
     // and the SMD path derives cdtextures from it
     src->filename = filename;
     src->kind = kind;
+
+    if (edit && (!edit->filter.editStreams.empty() || edit->filter.keepMeshIdentity) &&
+        (IsSmdPath(filename) || IsFbxPath(filename))) {
+        for (const auto& block : edit->editBlocks)
+            for (const auto& op : block)
+                if (op.kind == source::MeshOperation::SelectStream ||
+                    op.kind == source::MeshOperation::SelectMesh ||
+                    op.kind == source::MeshOperation::SelectMeshByStream ||
+                    op.kind == source::MeshOperation::SwitchUV) {
+                    const char* selector = op.kind == source::MeshOperation::SelectStream ? "$selectdatastream"
+                        : op.kind == source::MeshOperation::SelectMesh ? "$selectmesh"
+                        : op.kind == source::MeshOperation::SwitchUV ? "$switchuv" : "$selectmeshbystream";
+                    c.Fail(op.line, std::string("$meshedit: ") + selector + " needs a DMX source");
+                    return nullptr;
+                }
+    }
 
     if (IsSmdPath(filename)) {
         std::printf("%s\n", head.c_str());
@@ -594,14 +993,7 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
             c.Fail(line, "$decimatemesh needs a DMX or FBX source - an SMD has no named meshes");
             return nullptr;
         }
-        if (edit && !edit->filter.inflateTags.empty()) {
-            c.Fail(line, "$inflate mesh needs a DMX or FBX source - an SMD has no named meshes");
-            return nullptr;
-        }
-        if (edit && !edit->filter.cullGroups.empty()) {
-            c.Fail(line, "$cullvertex needs a DMX source - an SMD has no vertex groups");
-            return nullptr;
-        }
+        PULSE_PERF("load", "smd -> source");
         if (!source::LoadSmdSource(full.string(), *src, mats, c.in.scale, &loadErr,
                                    morphSource, edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -609,10 +1001,6 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
         }
     } else if (IsFbxPath(filename)) {
         std::printf("%s\n", head.c_str());
-        if (edit && !edit->filter.cullGroups.empty()) {
-            c.Fail(line, "$cullvertex needs a DMX source");
-            return nullptr;
-        }
         if (!source::LoadFbxSource(full.string(), *src, mats, c.in.scale, &loadErr, morphSource,
                                    edit ? &edit->filter : nullptr, animOnly)) {
             c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
@@ -625,15 +1013,11 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 c.Fail(line, "$exceptionlist names \"" + *miss + "\", which is not a mesh in \"" +
                                  filename + "\"");
                 return nullptr;
-            }            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
+            }
+
+            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
                 if (!e.matched) {
                     c.Fail(line, "$decimatemesh names \"" + e.name +
-                                     "\", which is not a kept mesh in \"" + filename + "\"");
-                    return nullptr;
-                }
-            for (const source::MeshFilter::TagEntry& e : edit->filter.inflateTags)
-                if (!e.matched) {
-                    c.Fail(line, "$inflate mesh names \"" + e.name +
                                      "\", which is not a kept mesh in \"" + filename + "\"");
                     return nullptr;
                 }
@@ -659,38 +1043,47 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 c.Fail(line, "$exceptionlist names \"" + *miss + "\", which is not a mesh in \"" +
                                  filename + "\"");
                 return nullptr;
-            }            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
+            }
+
+            for (const source::MeshFilter::TagEntry& e : edit->filter.tags)
                 if (!e.matched) {
                     c.Fail(line, "$decimatemesh names \"" + e.name +
-                                     "\", which is not a kept mesh in \"" + filename + "\"");
-                    return nullptr;
-                }
-            for (const source::MeshFilter::TagEntry& e : edit->filter.inflateTags)
-                if (!e.matched) {
-                    c.Fail(line, "$inflate mesh names \"" + e.name +
                                      "\", which is not a kept mesh in \"" + filename + "\"");
                     return nullptr;
                 }
         }
     }
 
-    if (edit)
-        for (const source::MeshFilter::RemoveEntry& e : edit->filter.removeNames)
-            if (!e.matched) {
-                c.Fail(line, "$removemesh names \"" + e.name + "\", which is not a material in \"" +
-                                 filename + "\"");
-                return nullptr;
-            }
-    if (edit)
-        for (const source::MeshFilter::CullEntry& e : edit->filter.cullGroups)
-            if (!e.matched)
-                std::fprintf(stderr,
-                             "warning: %s line %d: $cullvertex \"%s\" is not a vertex group in \"%s\"\n",
-                             c.file.c_str(), line, e.group.c_str(), filename.c_str());
-
     if (edit) {
-        source::WeldVertices(*src, edit->weld, edit->weldSharp, edit->weldSharpAngle);
-        source::CullUnskinnedBones(*src, edit->boneCull);
+        // a missing UV stream is a hard error, unlike $selectdatastream's skip
+        for (const auto& block : edit->editBlocks)
+            for (const auto& op : block)
+                if (op.kind == source::MeshOperation::SwitchUV)
+                    for (const auto& stream : edit->filter.editStreams)
+                        if (stream.component >= 0 && !stream.found &&
+                            _stricmp(op.name.c_str(), stream.name.c_str()) == 0) {
+                            c.Fail(op.line, "$rendermesh \"" + edit->name + "\": $meshedit: no kept mesh has "
+                                            "UV stream \"" + op.name + "\"");
+                            return nullptr;
+                        }
+        for (auto& block : edit->editBlocks) {
+            block.erase(std::remove_if(block.begin(), block.end(), [&](const auto& op) {
+                if (op.kind != source::MeshOperation::SelectStream) return false;
+
+                for (const auto& stream : edit->filter.editStreams) {
+                    if (stream.component >= 0 || _stricmp(op.name.c_str(), stream.name.c_str()) != 0 ||
+                        stream.found) continue;
+
+                    if (!op.ignoreSelectWarn)
+                        pulse::diag::WarnAt({c.Path(), op.line}, "$rendermesh \"" + edit->name +
+                            "\": $meshedit: no kept mesh has float stream \"" + op.name +
+                            "\"; $selectdatastream skipped");
+                    return true;
+                }
+
+                return false;
+            }), block.end());
+        }
     }
 
     c.in.sources.push_back(std::move(src));
@@ -752,9 +1145,15 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             const Token* t = c.Next();
             if (!t)
                 return c.Fail(cmd.line, where + " is missing '}'");
+            c.MarkOption();
             if (t->text == "}")
                 break;
             const std::string o = Lower(t->text);
+
+            if (o == "$meshedit") {
+                if (!ParseEditMesh(c, *t, edit)) return false;
+                continue;
+            }
 
             if (o == "$rendermeshcmdlist") {
                 std::string list;
@@ -775,9 +1174,11 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 if (!n)
                     return c.Fail(t->line, "$exceptionlist expects '{'");
                 if (!n->quoted && Lower(n->text) == "exclusive") {
+                    c.MarkOption();
                     edit.filter.exclusive = true;
                     n = c.Next();
                 } else if (!n->quoted && Lower(n->text) == "inclusive") {
+                    c.MarkOption();
                     n = c.Next();
                 }
                 if (!n || n->text != "{")
@@ -799,6 +1200,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 const Token* n = c.Next();
                 if (!n)
                     return c.Fail(t->line, "$skinnedbonecull expects aggressive or tree");
+                c.MarkOption();
                 const std::string m = Lower(n->text);
                 if (m == "aggressive")
                     edit.boneCull = source::SkinnedBoneCull::Aggressive;
@@ -810,173 +1212,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            if (o == "$removemesh") {
-                std::string name;
-                if (!c.Want("a material name", *t, name))
-                    return false;
-                edit.filter.removeNames.push_back({name});
-                continue;
-            }
-
-            // $removemeshword <keyword> - drop every mesh whose material name
-            // contains the keyword (case-insensitive substring). Repeatable.
-            if (o == "$removemeshword") {
-                std::string word;
-                if (!c.Want("a material keyword", *t, word))
-                    return false;
-                edit.filter.removeWords.push_back(word);
-                continue;
-            }
-
-            // $cullvertex <stream> <threshold> - drop every face touching a vertex
-            // weighted above threshold in <stream> (e.g. cullvertex$0). Repeatable, DMX only.
-            if (o == "$cullvertex") {
-                source::MeshFilter::CullEntry e;
-                if (!c.Want("a vertex group name", *t, e.group) ||
-                    !c.WantFloat("a weight threshold", *t, e.threshold))
-                    return false;
-                if (!std::isfinite(e.threshold))
-                    return c.Fail(t->line, where + ": $cullvertex threshold must be finite");
-                edit.filter.cullGroups.push_back(std::move(e));
-                continue;
-            }
-
-            // $inflate <amount> [material <name>... | mesh <name>...] - repeatable;
-            // no scope inflates everything. Names run to the end of the line.
-            if (o == "$inflate") {
-                MeshEdit::Inflate inf;
-                inf.line = t->line;
-                if (!c.WantFloat("an inflation amount", *t, inf.amount))
-                    return false;
-                if (!std::isfinite(inf.amount))
-                    return c.Fail(t->line, where + ": $inflate amount must be finite");
-                auto onLine = [&] {
-                    return !c.AtCommand() && c.Cur().line == t->line &&
-                           !(!c.Cur().quoted && c.Cur().text == "}");
-                };
-                if (onLine()) {
-                    const Token* k = c.Next();
-                    const std::string kind = Lower(k->text);
-                    if (kind == "mesh") {
-                        inf.tag = 1;
-                        for (const auto& e : edit.filter.inflateTags)
-                            if (e.tag >= inf.tag) inf.tag = e.tag + 1;
-                        if (inf.tag > 255)
-                            return c.Fail(t->line, where + ": too many $inflate mesh lines");
-                    } else if (kind != "material") {
-                        return c.Fail(k->line, where + ": $inflate expects material or mesh, got \"" +
-                                                   k->text + "\"");
-                    }
-                    while (onLine()) {
-                        const Token* m = c.Next();
-                        if (inf.tag == 0) {
-                            inf.materials.push_back(m->text);
-                            continue;
-                        }
-                        for (const auto& e : edit.filter.inflateTags)
-                            if (_stricmp(e.name.c_str(), m->text.c_str()) == 0)
-                                return c.Fail(m->line, where + ": mesh \"" + m->text +
-                                                           "\" is in more than one $inflate mesh");
-                        edit.filter.inflateTags.push_back({m->text, inf.tag});
-                    }
-                    if (inf.materials.empty() &&
-                        (edit.filter.inflateTags.empty() || edit.filter.inflateTags.back().tag != inf.tag))
-                        return c.Fail(t->line, where + ": $inflate " + kind + " expects names");
-                }
-                edit.inflates.push_back(std::move(inf));
-                continue;
-            }
-
-            // $toonoutline <stream> <thickness> [<min> <max>] [noweld] [permaterial]
-            //              [forceuseoutline] [thicknessclamp <clamp>] [materialname <name>] [cdmaterial <dir>]
-            if (o == "$toonoutline") {
-                if (edit.toonOutline)
-                    return c.Fail(t->line, where + ": $toonoutline written twice");
-                edit.toonOutline = true;
-                source::ToonOutlineOption& ol = edit.outline;
-                ol.line = t->line;
-                if (!c.Want("a vertex stream name", *t, edit.filter.outlineStream) ||
-                    !c.WantFloat("an outline thickness", *t, ol.thickness))
-                    return false;
-                if (!std::isfinite(ol.thickness))
-                    return c.Fail(t->line, where + ": $toonoutline thickness must be finite");
-                auto onLine = [&] {
-                    return !c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
-                           !(!c.Cur().quoted && c.Cur().text == "}");
-                };
-                auto numberNext = [&] {
-                    if (!onLine())
-                        return false;
-                    char* end = nullptr;
-                    std::strtof(c.Cur().text.c_str(), &end);
-                    return end != c.Cur().text.c_str() && *end == '\0';
-                };
-                if (numberNext()) {
-                    if (!c.WantFloat("a min weight", *t, ol.minWeight) ||
-                        !c.WantFloat("a max weight", *t, ol.maxWeight))
-                        return false;
-                    if (ol.minWeight > ol.maxWeight)
-                        return c.Fail(t->line, where + ": $toonoutline min weight is above max weight");
-                }
-                while (onLine()) {
-                    const Token* k = c.Next();
-                    const std::string kw = Lower(k->text);
-                    if (kw == "noweld") {
-                        ol.weld = false;
-                    } else if (kw == "permaterial") {
-                        ol.perMaterial = true;
-                    } else if (kw == "forceuseoutline") {
-                        ol.forceUse = true;
-                    } else if (kw == "thicknessclamp") {
-                        if (!c.WantFloat("a thickness clamp factor", *t, ol.thicknessClamp))
-                            return false;
-                        if (!std::isfinite(ol.thicknessClamp) || ol.thicknessClamp <= 0.0f)
-                            return c.Fail(k->line, where + ": $toonoutline thicknessclamp must be above 0");
-                    } else if (kw == "materialname") {
-                        if (!c.Want("a material name", *t, ol.material))
-                            return false;
-                    } else if (kw == "cdmaterial") {
-                        if (!c.Want("a material directory", *t, ol.cdmaterial))
-                            return false;
-                    } else {
-                        return c.Fail(k->line, where + ": $toonoutline expects noweld, permaterial, "
-                                                       "forceuseoutline, thicknessclamp, materialname or cdmaterial, got \"" +
-                                                       k->text + "\"");
-                    }
-                }
-                continue;
-            }
-
             if (o == "$use_skeletalaware_decimation") {
                 edit.skeletalAwareDecimation = true;
-                continue;
-            }
-
-            if (o == "$flipnormals") {
-                edit.flipNormals = true;
-                continue;
-            }
-
-            // $weld [seams] [sharp <degrees>]
-            if (o == "$weld") {
-                edit.weld = source::WeldMode::KeepSeams;
-                if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "seams") {
-                    ++c.pos;
-                    edit.weld = source::WeldMode::All;
-                }
-                if (!c.Eof() && !c.Cur().quoted && Lower(c.Cur().text) == "sharp") {
-                    ++c.pos;
-                    edit.weldSharpAngle = 0.0f;
-                    if (!c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
-                        !(!c.Cur().quoted && c.Cur().text == "}")) {
-                        if (!c.WantFloat("a sharp angle in degrees", *t, edit.weldSharpAngle))
-                            return false;
-                        if (edit.weldSharpAngle < 0.0f || edit.weldSharpAngle > 180.0f)
-                            return c.Fail(t->line,
-                                          where + ": $weld sharp angle must be in [0, 180]");
-                    }
-                    edit.weldSharp = true;
-                }
                 continue;
             }
 
@@ -1027,6 +1264,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 while (!c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
                        !(!c.Cur().quoted && c.Cur().text == "}")) {
                     const Token* a = c.Next();
+                    c.MarkOption();
                     const std::string k = Lower(a->text);
                     if (k != "x" && k != "y" && k != "z")
                         return c.Fail(a->line, where + ": $scalebone axis must be x, y or z, got \"" +
@@ -1060,6 +1298,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                     const Token* m = c.Next();
                     if (!m)
                         return c.Fail(t->line, where + ": $vta is missing '}'");
+                    c.MarkOption();
                     if (m->text == "}")
                         break;
                     if (m->quoted || Lower(m->text) != "flex")
@@ -1073,11 +1312,13 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                         const std::string k = Lower(c.Cur().text);
                         if (k == "frame") {
                             ++c.pos;
+                            c.MarkOption();
                             if (!c.WantInt("a frame index", *m, fo.frame))
                                 return false;
                             sawFrame = true;
                         } else if (k == "position" || k == "decay") {
                             ++c.pos;
+                            c.MarkOption();
                             if (!c.WantFloat(k == "position" ? "a position" : "a decay", *m,
                                              k == "position" ? fo.position : fo.decay))
                                 return false;
@@ -1112,9 +1353,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, $removemesh, $removemeshword, "
-                                           "$cullvertex, $skinnedbonecull, $weld, $inflate, $flipnormals, $decimate, $decimatemesh, "
-                                           "$use_skeletalaware_decimation, $scalebone, $toonoutline, $nomorph, "
+            return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, "
+                                           "$meshedit, $skinnedbonecull, $decimate, $decimatemesh, "
+                                           "$use_skeletalaware_decimation, $scalebone, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
         }
     }
@@ -1148,8 +1389,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         std::vector<fs::path> tried;
         const fs::path full = FindSourceFile(c, file, &tried);
         if (full.empty())
-            return c.Fail(line, "cannot find \"" + file + "\" - looked in:" + LookedIn(tried));
+            return FailMissing(c, line, "cannot find \"" + file + "\"", tried);
         std::string loadErr;
+        PULSE_PERF("load", "vta -> morphs");
         const bool ok =
             isVca ? source::LoadVcaMorphs(full.string(), *src, c.in.scale, edit.vcaName, &loadErr)
                   : source::LoadVtaMorphs(full.string(), *src, c.in.scale, edit.vtaFlexes, &loadErr);
@@ -1157,12 +1399,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             return c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
     }
 
-    for (const MeshEdit::Inflate& inf : edit.inflates)
-        if (!source::InflateVertices(*src, inf.amount, inf.tag, inf.materials, &c.in.mats))
-            return c.Fail(inf.line, "$rendermesh \"" + name + "\": $inflate material matches no material in \"" +
-                                        file + "\"");
-    if (edit.flipNormals)
-        source::FlipNormals(*src);
     // Deepest bone first, so a parent's scale carries an already-scaled child
     // (the child's factor stays relative to its parent, whatever the script order).
     auto boneIndex = [&](const std::string& n) {
@@ -1181,15 +1417,18 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         source::SimplifyFaces(*src, *src, factor, c.in.archetype == cm::Archetype::Static,
                               nullptr, tag, edit.skeletalAwareDecimation);
 
-    if (edit.toonOutline) {
-        if (!edit.filter.outlineStreamFound && !edit.outline.forceUse)
-            return c.Fail(edit.outline.line, "$rendermesh \"" + name + "\": $toonoutline: no mesh in \"" + file +
-                                                 "\" has a \"" + edit.filter.outlineStream +
-                                                 "\" vertex stream (use forceuseoutline to outline it anyway)");
-        std::string outlineErr;
-        if (!source::AddToonOutline(*src, c.in.mats, edit.outline, &outlineErr))
-            return c.Fail(edit.outline.line, "$rendermesh \"" + name + "\": $toonoutline: " + outlineErr);
+    for (const auto& block : edit.editBlocks) {
+        std::string editError;
+        int errorLine = cmd.line;
+        if (!source::ApplyEditMesh(*src, c.in.mats, block, &editError, &errorLine))
+            return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
     }
+    // after $meshedit, so bones skinned only by deleted geometry are culled too
+    source::CullUnskinnedBones(*src, edit.boneCull);
+    src->editStreams.clear();
+    src->editMeshes.clear();
+    src->vertexEditMesh.clear();
+    src->extraEditMeshes.clear();
 
     c.rendermeshes[name] = src;
     return true;
@@ -1331,6 +1570,7 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
         const Token* t = c.Next();
         if (!t)
             return c.Fail(cmd.line, where + " is missing '}'");
+        c.MarkOption();
         if (t->text == "}")
             break;
 
@@ -1394,7 +1634,7 @@ bool CmdModelGroupPreset(Ctx& c, const Token& cmd) {
 // (may be a different file than the mesh - borrows another character's rig).
 // Neither builds skeleton or geometry; an imported entry with no matching bone
 // is dropped like a hand-written one, EXCEPT a hitbox, which is still a hard
-// $hitboxset error. Empty import list = import everything. First definition
+// $hboxset error. Empty import list = import everything. First definition
 // wins on duplicates, except hitbox sets: any set already declared makes the
 // whole imported list a no-op (model-global, all-or-nothing).
 // ---------------------------------------------------------------------------
@@ -1418,7 +1658,7 @@ fs::path FindRigFile(Ctx& c, const Token& cmd, const std::string& filename) {
     std::vector<fs::path> tried;
     const fs::path full = FindSourceFile(c, filename, &tried);
     if (full.empty())
-        c.Fail(cmd.line, "cannot find \"" + filename + "\" - looked in:" + LookedIn(tried));
+        FailMissing(c, cmd.line, "cannot find \"" + filename + "\"", tried);
     return full;
 }
 
@@ -1436,111 +1676,23 @@ std::shared_ptr<pulse::dmx::Datamodel> LoadRigDmx(Ctx& c, const Token& cmd,
         c.Fail(cmd.line, "cannot load \"" + full.string() + "\": " + loadErr);
         return nullptr;
     }
-    std::printf("loading %s: %s (%s %d, %s %d)\n", what.c_str(), full.filename().string().c_str(),
+    std::printf("loading %s: %s (%s %d, %s %d)\n", what.c_str(), pulse::FilePath(pulse::qcpackage::Logical(full.string())).filename().string().c_str(),
                 dm->format.c_str(), dm->format_version, dm->encoding.c_str(),
                 dm->encoding_version);
     return dm;
 }
 
-float DegToRad(float deg);
-
-// One settriggeraoi line (triggers [first, last] of `bone` get tolerance `aoiDeg`)
-// or removetrigger line (those triggers are dropped).
-struct TriggerAoiEdit {
-    int line = 0;
-    bool remove = false;
-    std::string bone;
-    float aoiDeg = 0.0f;
-    int first = 0, last = 0;
-};
-
-// Body of $datamodeljoints: `$proceduralbones { settriggeraoi <bone> <deg> <sel> |
-// removetrigger <bone> <sel> }`, sel = `frame <n> | framerange <min> <max>`, 0-based.
-bool ParseDataModelJointsBody(Ctx& c, const Token& cmd, std::vector<TriggerAoiEdit>& edits) {
-    ++c.pos; // '{'
-    for (;;) {
-        const Token* t = c.Next();
-        if (!t)
-            return c.Fail(cmd.line, "$datamodeljoints is missing '}'");
-        if (t->text == "}")
-            return true;
-        if (Lower(t->text) != "$proceduralbones")
-            return c.Fail(t->line, "$datamodeljoints: expected $proceduralbones, got \"" +
-                                       t->text + "\"");
-        const Token* brace = c.Next();
-        if (!brace || brace->quoted || brace->text != "{")
-            return c.Fail(t->line, "$proceduralbones expects '{'");
-        for (;;) {
-            const Token* s = c.Next();
-            if (!s)
-                return c.Fail(t->line, "$proceduralbones is missing '}'");
-            if (s->text == "}")
-                break;
-            const std::string kw = Lower(s->text);
-            if (kw != "settriggeraoi" && kw != "removetrigger")
-                return c.Fail(s->line, "$proceduralbones: expected settriggeraoi or "
-                                       "removetrigger, got \"" + s->text + "\"");
-            TriggerAoiEdit e;
-            e.line = s->line;
-            e.remove = kw == "removetrigger";
-            if (!c.Want("a procedural bone name", *s, e.bone))
-                return false;
-            if (!e.remove) {
-                if (!c.WantFloat("an angle of influence", *s, e.aoiDeg))
-                    return false;
-                if (e.aoiDeg <= 0.0f)
-                    return c.Fail(s->line, kw + " \"" + e.bone + "\": angle must be > 0");
-            }
-            // The first frame/framerange wins; any later one is parsed, warned and dropped.
-            for (bool have = false;;) {
-                const std::string mode = c.Eof() ? "" : Lower(c.Cur().text);
-                if (have && mode != "frame" && mode != "framerange")
-                    break;
-                std::string m;
-                if (!c.Want("frame or framerange", *s, m))
-                    return false;
-                int first = 0, last = 0;
-                if (mode == "frame") {
-                    if (!c.WantInt("a frame", *s, first))
-                        return false;
-                    last = first;
-                } else if (mode == "framerange") {
-                    if (!c.WantInt("a first frame", *s, first) ||
-                        !c.WantInt("a last frame", *s, last))
-                        return false;
-                } else {
-                    return c.Fail(s->line, kw + " expects frame or framerange, got \"" + m + "\"");
-                }
-                if (have) {
-                    std::fprintf(stderr, "warning: %s line %d: %s \"%s\": extra %s "
-                                         "ignored, using the first frame selection\n",
-                                 c.file.c_str(), s->line, kw.c_str(), e.bone.c_str(),
-                                 mode.c_str());
-                    continue;
-                }
-                e.first = first;
-                e.last = last;
-                have = true;
-            }
-            if (e.first < 0 || e.last < e.first)
-                return c.Fail(s->line, kw + " \"" + e.bone + "\": invalid frame range " +
-                                           std::to_string(e.first) + ".." +
-                                           std::to_string(e.last));
-            edits.push_back(std::move(e));
-        }
-    }
-}
-
 // $datamodeljoints <file> [jigglebones] [proceduralbones] [hitboxes]
-//                        [attachments] [{ $proceduralbones { settriggeraoi|removetrigger ... } }]
+//                        [attachments]
 bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     std::string file;
     if (!c.Want("a source filename", cmd, file))
         return false;
 
     bool jiggle = false, procedural = false, hitboxes = false, attachments = false;
-    while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "{")) {
+    while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "jigglebones")
             jiggle = true;
@@ -1557,11 +1709,6 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     if (!jiggle && !procedural && !hitboxes && !attachments)
         jiggle = procedural = hitboxes = attachments = true; // no list = the whole rig
 
-    std::vector<TriggerAoiEdit> edits;
-    if (!c.Eof() && !c.Cur().quoted && c.Cur().text == "{" &&
-        !ParseDataModelJointsBody(c, cmd, edits))
-        return false;
-
     const std::string resolved = WithDmxExtension(file);
     const std::string what = "joints (" + RigImportList({{jiggle, "jigglebones"},
                                                          {procedural, "proceduralbones"},
@@ -1571,49 +1718,9 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     auto dm = LoadRigDmx(c, cmd, resolved, what);
     if (!dm)
         return false;
-    const size_t firstBone = c.in.proceduralbones.size();
     if (!LoadDmxJoints(*dm, c.in, jiggle, procedural, hitboxes, attachments, &err))
         return c.Fail(cmd.line, "$datamodeljoints \"" + file + "\": " + err);
 
-    // Only bones this file contributed; an earlier $driverbone of the same name wins.
-    // A trigger already set by an earlier settriggeraoi keeps that value. Frames index
-    // the file's trigger order; removals apply after every settriggeraoi.
-    std::set<std::pair<cm::ProceduralBone*, int>> taken, removed;
-    for (const TriggerAoiEdit& e : edits) {
-        const std::string kw = e.remove ? "removetrigger" : "settriggeraoi";
-        cm::ProceduralBone* pb = nullptr;
-        for (size_t i = firstBone; i < c.in.proceduralbones.size() && !pb; ++i)
-            if (_stricmp(c.in.proceduralbones[i].helpername.c_str(), e.bone.c_str()) == 0)
-                pb = &c.in.proceduralbones[i];
-        if (!pb)
-            return c.Fail(e.line, kw + ": \"" + e.bone + "\" is not a procedural bone "
-                                       "imported by this $datamodeljoints");
-        if (static_cast<size_t>(e.last) >= pb->triggers.size())
-            return c.Fail(e.line, kw + " \"" + e.bone + "\": frame " +
-                                      std::to_string(e.last) + " out of range (" +
-                                      std::to_string(pb->triggers.size()) + " triggers)");
-        for (int f = e.first; f <= e.last; ++f) {
-            if (e.remove) {
-                removed.insert({pb, f});
-                continue;
-            }
-            if (!taken.insert({pb, f}).second) {
-                std::fprintf(stderr, "warning: %s line %d: settriggeraoi \"%s\": frame %d "
-                                     "already set by an earlier line, skipped\n",
-                             c.file.c_str(), e.line, e.bone.c_str(), f);
-                continue;
-            }
-            pb->triggers[f].tolerance = DegToRad(e.aoiDeg);
-        }
-    }
-    // Reverse order keeps the remaining indices valid while erasing.
-    for (auto it = removed.rbegin(); it != removed.rend(); ++it) {
-        auto& trig = it->first->triggers;
-        trig.erase(trig.begin() + it->second);
-        if (trig.empty())
-            return c.Fail(cmd.line, "removetrigger: \"" + it->first->helpername +
-                                        "\" has no triggers left");
-    }
     return true;
 }
 
@@ -1698,6 +1805,7 @@ bool CmdDataModelFlexes(Ctx& c, const Token& cmd) {
     bool controllers = false, correctives = false, dominators = false, rules = false;
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "flexcontroller")
             controllers = true;
@@ -1747,7 +1855,6 @@ source::Source* LoadStudioSource(Ctx& c, const Token& entry, const std::string& 
                                  bool flip, float importScale, bool importFlexRig) {
     MeshEdit edit;
     edit.name = file;
-    edit.flipNormals = flip;
     const float defaultScale = c.in.scale;
     c.in.scale = importScale;
     source::Source* src = LoadSource(c, file, entry.line, /*morphSource=*/true, &edit);
@@ -1795,6 +1902,7 @@ bool CmdLegacyBody(Ctx& c, const Token& cmd) {
         float importScale = c.in.scale;
         while (inlineBody && !c.AtCommand() && (c.Cur().quoted || c.Cur().text != "}")) {
             const Token option = *c.Next();
+            c.MarkOption();
             const std::string o = Lower(option.text);
             if (!option.quoted && o == "reverse") {
                 flip = true;
@@ -1830,6 +1938,7 @@ bool CmdLegacyBody(Ctx& c, const Token& cmd) {
             const Token* t = c.Next();
             if (!t)
                 return c.Fail(cmd.line, where + " is missing '}'");
+            c.MarkOption();
             if (!t->quoted && t->text == "}")
                 break;
             if (!t->quoted && _stricmp(t->text.c_str(), "studio") == 0) {
@@ -1877,8 +1986,9 @@ bool CmdModel(Ctx& c, const Token& cmd) {
     // inline studio flags up to the '{' or the next command
     bool flip = false;
     float importScale = c.in.scale;
-    while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "{")) {
+    while (!c.AtCommand() && (c.Cur().quoted || c.Cur().text != "{")) {
         const Token option = *c.Next();
+        c.MarkOption();
         const std::string o = Lower(option.text);
         if (option.quoted) {
             return c.Fail(option.line, where + ": expected reverse/scale/subd/faces/bias or '{'");
@@ -1971,6 +2081,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         const Token* tp = c.Next();
         if (!tp)
             return c.Fail(cmd.line, where + " is missing '}'");
+        c.MarkOption();
         if (!tp->quoted && tp->text == "{") { depth++; continue; }
         if (!tp->quoted && tp->text == "}") { if (--depth == 0) break; continue; }
         const Token t = *tp;
@@ -2038,6 +2149,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             while (sameLine(t.line)) {
                 const Token& n = *c.Next();
                 if (!n.quoted && _stricmp(n.text.c_str(), "range") == 0) {
+                    c.MarkOption();
                     if (!c.WantFloat("a range min", t, rMin) ||
                         !c.WantFloat("a range max", t, rMax))
                         return false;
@@ -2115,19 +2227,23 @@ bool CmdModel(Ctx& c, const Token& cmd) {
                 const std::string k = Lower(c.Cur().text);
                 if (k == "frame") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantInt("a frame index", t, fo.frame))
                         return false;
                     sawFrame = true;
                 } else if (k == "position") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantFloat("a position", t, fo.position))
                         return false;
                 } else if (k == "decay") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantFloat("a decay", t, fo.decay))
                         return false;
                 } else if (k == "split") {
                     ++c.pos;
+                    c.MarkOption();
                     if (!c.WantFloat("a split", t, split))
                         return false;
                     hasSplit = true;
@@ -2178,6 +2294,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             bool haveSlot[3] = {false, false, false};
             while (sameLine(t.line)) {
                 const Token& k = *c.Next();
+                c.MarkOption();
                 const std::string ko = Lower(k.text);
                 int slot = -1;
                 for (int i = 0; i < 3; ++i)
@@ -2237,6 +2354,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
             bool haveSlot[3] = {false, false, false};
             while (sameLine(t.line)) {
                 const Token& k = *c.Next();
+                c.MarkOption();
                 const std::string ko = Lower(k.text);
                 int slot = -1;
                 for (int i = 0; i < 3; ++i)
@@ -2307,8 +2425,9 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         std::vector<fs::path> tried;
         const fs::path full = FindSourceFile(c, kv.first, &tried);
         if (full.empty())
-            return c.Fail(vtaLine, "cannot find \"" + kv.first + "\" - looked in:" + LookedIn(tried));
+            return FailMissing(c, vtaLine, "cannot find \"" + kv.first + "\"", tried);
         std::string err;
+        PULSE_PERF("load", "vta -> morphs");
         if (!source::LoadVtaMorphs(full.string(), *src, importScale, kv.second, &err))
             return c.Fail(vtaLine, "cannot load \"" + full.string() + "\": " + err);
     }
@@ -2316,7 +2435,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         std::vector<fs::path> tried;
         const fs::path full = FindSourceFile(c, vcaFile, &tried);
         if (full.empty())
-            return c.Fail(vcaLine, "cannot find \"" + vcaFile + "\" - looked in:" + LookedIn(tried));
+            return FailMissing(c, vcaLine, "cannot find \"" + vcaFile + "\"", tried);
         std::string err;
         if (!source::LoadVcaMorphs(full.string(), *src, importScale, vcaName, &err))
             return c.Fail(vcaLine, "cannot load \"" + full.string() + "\": " + err);
@@ -2420,6 +2539,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "range") == 0) {
             c.Next();
+            c.MarkOption();
             if (!c.WantFrame("a start frame", t, cmd.driverStart) ||
                 !c.WantFrame("a peak frame", t, cmd.driverPeak) ||
                 !c.WantFrame("a tail frame", t, cmd.driverTail) ||
@@ -2501,6 +2621,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "pos") == 0) {
             c.Next();
+            c.MarkOption();
             cmd.forceDoPos = true;
             if (!c.WantFloat("pos x", t, cmd.forcePos.x) ||
                 !c.WantFloat("pos y", t, cmd.forcePos.y) ||
@@ -2510,6 +2631,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "rot") == 0) {
             c.Next();
+            c.MarkOption();
             cmd.forceDoRot = true;
             if (!c.WantFloat("rot x", t, cmd.forceRot.x) ||
                 !c.WantFloat("rot y", t, cmd.forceRot.y) ||
@@ -2518,6 +2640,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             if (!c.AtCommand() && !c.Cur().quoted &&
                 _stricmp(c.Cur().text.c_str(), "local") == 0) {
                 c.Next();
+                c.MarkOption();
                 cmd.forceRotLocal = true;
             }
         }
@@ -2529,24 +2652,6 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     // nocull: keep this animation whatever $animationcullmethod says, both as
     // unreferenced and as a duplicate of another one
     if (_stricmp(o.c_str(), "nocull") == 0) { a.nocull = true; return 1; }
-    // ignoretransformbone <angles|position>: roll back that category of
-    // $transformbone bind-pose edits while converting this clip
-    if (_stricmp(o.c_str(), "ignoretransformbone") == 0) {
-        std::string which;
-        if (!c.Want("angles or position", t, which))
-            return -1;
-        if (_stricmp(which.c_str(), "angles") == 0) {
-            a.ignoreTransformAngles = true;
-        } else if (_stricmp(which.c_str(), "position") == 0) {
-            a.ignoreTransformPosition = true;
-        } else {
-            c.Fail(t.line, "ignoretransformbone: expected angles or position, got \"" +
-                               which + "\"");
-            return -1;
-        }
-        return 1;
-    }
-
     // demand loading, all no-ops without $animblocksize
     if (_stricmp(o.c_str(), "noanimblock") == 0) { a.disableAnimblocks = true; return 1; }
     if (_stricmp(o.c_str(), "noanimblockstall") == 0) {
@@ -2718,6 +2823,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 break;
             cmd.motiontype |= ctrl;
             c.pos++;
+            c.MarkOption();
         }
         if (cmd.motiontype == 0) {
             c.Fail(t.line, "\"" + o + "\": missing motion controls");
@@ -2794,6 +2900,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 if (!c.WantFloat("an X offset", t, bt.origin.x) ||
                     !c.WantFloat("a Y offset", t, bt.origin.y) ||
                     !c.WantFloat("a Z offset", t, bt.origin.z))
@@ -2805,6 +2912,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 float p = 0.0f, y = 0.0f, r = 0.0f;
                 if (!c.WantFloat("a pitch", t, p) || !c.WantFloat("a yaw", t, y) ||
                     !c.WantFloat("a roll", t, r))
@@ -2848,6 +2956,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 break;
             cmd.motiontype |= bits;
             c.pos++;
+            c.MarkOption();
         }
         if (!cmd.motiontype)
             cmd.motiontype = 0x0001 | 0x0002 | 0x0004;
@@ -2903,6 +3012,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 if (!c.WantFloat("a fade-in length in frames", t, cmd.fadeIn))
                     return -1;
                 fin = true;
@@ -2912,14 +3022,17 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     return -1;
                 }
                 c.pos++;
+                c.MarkOption();
                 if (!c.WantFloat("a fade-out length in frames", t, cmd.fadeOut))
                     return -1;
                 fout = true;
             } else if (_stricmp(n.c_str(), "position") == 0) {
                 c.pos++;
+                c.MarkOption();
                 pos = true;
             } else if (_stricmp(n.c_str(), "rotation") == 0) {
                 c.pos++;
+                c.MarkOption();
                 rot = true;
             } else {
                 break;
@@ -2983,6 +3096,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     break;
                 cmd.motiontype |= ctrl;
                 c.pos++;
+                c.MarkOption();
             }
             if (cmd.motiontype == 0) {
                 c.Fail(t.line, "\"" + o + "\": missing motion controls "
@@ -3019,8 +3133,9 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "axis") == 0) {
             c.pos++;
+            c.MarkOption();
             std::string axis;
-            if (!c.Want("an axis (x/y/z)", t, axis))
+            if (!c.WantOption("an axis (x/y/z)", t, axis))
                 return -1;
             if (_stricmp(axis.c_str(), "x") == 0) cmd.driverAxis = 0;
             else if (_stricmp(axis.c_str(), "y") == 0) cmd.driverAxis = 1;
@@ -3033,12 +3148,14 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "value") == 0) {
             c.pos++;
+            c.MarkOption();
             if (!c.WantFloat("a value", t, cmd.driverValue))
                 return -1;
         }
         if (!c.AtCommand() && !c.Cur().quoted &&
             _stricmp(c.Cur().text.c_str(), "range") == 0) {
             c.pos++;
+            c.MarkOption();
             cmd.driverAll = false;
             if (!c.WantInt("a start frame", t, cmd.driverStart) ||
                 !c.WantInt("a peak frame", t, cmd.driverPeak) ||
@@ -3141,6 +3258,7 @@ bool ParseAnimBody(Ctx& c, const Token& cmd, const std::string& name,
             break;
         }
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const int r = ApplyAnimOption(c, t, a);
         if (r < 0)
             return false;
@@ -3252,7 +3370,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         return false;
 
     std::string type;
-    if (!c.Want("an ik rule type", cmd, type))
+    if (!c.WantOption("an ik rule type", cmd, type))
         return false;
     if (_stricmp(type.c_str(), "touch") == 0) {
         rule.type = "touch";
@@ -3289,6 +3407,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         if (c.Cur().quoted)
             break;
         const std::string o = c.Cur().text;
+        const size_t option = c.pos;
         if (_stricmp(o.c_str(), "height") == 0) {
             c.pos++;
             if (!c.WantFloat("a height", cmd, rule.height)) return false;
@@ -3346,6 +3465,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
         } else {
             break; // an unrecognized token belongs to the enclosing sequence
         }
+        c.MarkOption(option);
     }
 
     out.push_back(std::move(rule));
@@ -3560,6 +3680,7 @@ bool CmdFlexController(Ctx& c, const Token& cmd) {
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
         if (!t.quoted && _stricmp(t.text.c_str(), "range") == 0) {
+            c.MarkOption();
             if (!c.WantFloat("a range min", cmd, rangeMin) ||
                 !c.WantFloat("a range max", cmd, rangeMax))
                 return false;
@@ -3659,6 +3780,7 @@ bool CmdEyeball(Ctx& c, const Token& cmd) {
     bool haveBone = false, haveMaterial = false, haveOrigin = false;
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "bone") {
             if (!c.Want("a bone name", cmd, entry.eyeball.bonename)) return false;
@@ -3747,6 +3869,7 @@ bool CmdEyelid(Ctx& c, const Token& cmd) {
     bool haveSlot[3] = {false, false, false};
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
+        c.MarkOption();
         const std::string o = Lower(t.text);
         int slot = -1;
         for (int i = 0; i < 3; ++i)
@@ -3865,6 +3988,7 @@ bool CmdMorphSplitStereo(Ctx& c, const Token& cmd) {
     while (!c.AtCommand()) {
         const Token& t = *c.Next();
         if (!t.quoted && _stricmp(t.text.c_str(), "splitfactor") == 0) {
+            c.MarkOption();
             if (!c.WantFloat("a split factor", cmd, factor))
                 return false;
             continue;
@@ -3997,7 +4121,7 @@ bool ApplyMorphRenames(Ctx& c) {
 // which are both folded into "aggressive". See CullFlex() in compile.cpp.
 bool CmdFlexCullMethod(Ctx& c, const Token& cmd) {
     std::string m;
-    if (!c.Want("a cull method name", cmd, m))
+    if (!c.WantOption("a cull method name", cmd, m))
         return false;
     if (_stricmp(m.c_str(), "aggressive") == 0)
         c.in.flexCullMethod = cm::FlexCullMethod::Aggressive;
@@ -4018,7 +4142,7 @@ bool CmdFlexCullMethod(Ctx& c, const Token& cmd) {
 // removes anything but an animation. See CullAnimations() in compile.cpp.
 bool CmdAnimationCullMethod(Ctx& c, const Token& cmd) {
     std::string m;
-    if (!c.Want("a cull method name", cmd, m))
+    if (!c.WantOption("a cull method name", cmd, m))
         return false;
     if (_stricmp(m.c_str(), "aggressive") == 0)
         c.in.animCullMethod = cm::AnimCullMethod::Aggressive;
@@ -4075,6 +4199,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
         }
 
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string& o = t.text;
 
         if (!t.quoted && o == "{") { depth++; continue; }
@@ -4095,6 +4220,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     if (!c.Want("an activity name", t, seq.activityname))
                         return false;
                 } else {
+                    c.DropOption(t);
                     seq.activityname = o; // ACT_* shorthand: the token is the name
                 }
                 // $allowactivityname whitelist, checked where stock checks it
@@ -4223,6 +4349,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     al.flags |= kStudioAlLocal;
                     seq.flags |= kStudioLocal;
                     c.pos++;
+                    c.MarkOption();
                 }
                 seq.autolayers.push_back(std::move(al));
                 continue;
@@ -4239,15 +4366,17 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     if (c.AtCommand() || c.Cur().quoted || c.Cur().text == "}")
                         break;
                     const std::string f = c.Cur().text;
-                    if (_stricmp(f.c_str(), "xfade") == 0) { al.flags |= kStudioAlXfade; c.pos++; }
-                    else if (_stricmp(f.c_str(), "spline") == 0) { al.flags |= kStudioAlSpline; c.pos++; }
-                    else if (_stricmp(f.c_str(), "noblend") == 0) { al.flags |= kStudioAlNoblend; c.pos++; }
+                    if (_stricmp(f.c_str(), "xfade") == 0) { al.flags |= kStudioAlXfade; c.pos++; c.MarkOption(); }
+                    else if (_stricmp(f.c_str(), "spline") == 0) { al.flags |= kStudioAlSpline; c.pos++; c.MarkOption(); }
+                    else if (_stricmp(f.c_str(), "noblend") == 0) { al.flags |= kStudioAlNoblend; c.pos++; c.MarkOption(); }
                     else if (_stricmp(f.c_str(), "local") == 0) {
                         al.flags |= kStudioAlLocal;
                         seq.flags |= kStudioLocal;
                         c.pos++;
+                        c.MarkOption();
                     } else if (_stricmp(f.c_str(), "poseparameter") == 0) {
                         c.pos++;
+                        c.MarkOption();
                         al.flags |= kStudioAlPose;
                         if (!c.Want("a pose parameter name", t, al.poseparameter))
                             return false;
@@ -4366,6 +4495,8 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
         if (bindpose || isAppend)
             return c.Fail(t.line, cmd.text + " \"" + seq.name +
                                   "\": unknown option \"" + t.text + "\"");
+
+        c.DropOption(t);
 
         // --- otherwise an animation reference: a named $animation, else a
         //     filename loaded as an implied "@<seq>" animation ---
@@ -4521,7 +4652,7 @@ bool CmdContinue(Ctx& c, const Token& cmd) { return CmdAppendCommon(c, cmd, Appe
 // $modelarchetype <name> - replaces QC's $staticprop / $simpleprop flags.
 bool CmdModelArchetype(Ctx& c, const Token& cmd) {
     std::string a;
-    if (!c.Want("an archetype name", cmd, a))
+    if (!c.WantOption("an archetype name", cmd, a))
         return false;
     if (_stricmp(a.c_str(), "character") == 0 || _stricmp(a.c_str(), "general") == 0)
         c.in.archetype = cm::Archetype::General;
@@ -4570,6 +4701,7 @@ bool CmdModelBudget(Ctx& c, const Token& cmd) {
             return c.Fail(cmd.line, cmd.text + (braced ? ": missing '}'"
                                                        : ": expects a budget name"));
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (braced && !t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -4602,7 +4734,7 @@ bool CmdModelBudget(Ctx& c, const Token& cmd) {
 // "none" makes the no-flag default authorable.
 bool CmdRenderPass(Ctx& c, const Token& cmd) {
     std::string p;
-    if (!c.Want("a render pass name", cmd, p))
+    if (!c.WantOption("a render pass name", cmd, p))
         return false;
     if (_stricmp(p.c_str(), "none") == 0)
         c.in.renderPass = 0;
@@ -4643,8 +4775,10 @@ bool CmdSetBindPose(Ctx& c, const Token& cmd) {
         if (_stricmp(o.c_str(), "meshonly") == 0) {
             c.in.bindPoseMeshOnly = true;
             ++c.pos;
+            c.MarkOption();
         } else if (_stricmp(o.c_str(), "blockname") == 0) {
             ++c.pos;
+            c.MarkOption();
             if (!c.Want("a source clip name", cmd, c.in.bindPoseClip))
                 return false;
         } else {
@@ -4662,8 +4796,8 @@ bool CmdSetFlex(Ctx& c, const Token& cmd) {
     if (!c.WantFloat("a strength", cmd, fx.value))
         return false;
     if (fx.value < 0.0f || fx.value > 1.0f)
-        std::printf("WARNING: %s(%d): $setflex \"%s\" strength %g outside [0,1] - clamped\n",
-                    c.file.c_str(), cmd.line, fx.name.c_str(), fx.value);
+        pulse::diag::WarnAtf({c.Path(), cmd.line}, "$setflex \"%s\" strength %g outside [0,1] - clamped",
+                             fx.name.c_str(), fx.value);
     fx.line = cmd.line;
     c.in.fixedFlexes.push_back(std::move(fx));
     return true;
@@ -4683,6 +4817,7 @@ bool ParseContentsTokens(Ctx& c, const Token& cmd, int& add, int& remove) {
     add = 0;
     remove = 0;
     for (;;) {
+        c.MarkOption();
         if (_stricmp(tok.c_str(), "solid") == 0) {
             add |= kContentsSolid;
         } else if (_stricmp(tok.c_str(), "grate") == 0) {
@@ -4771,6 +4906,7 @@ bool CmdTransformModel(Ctx& c, const Token& cmd) {
     bool any = false;
     while (!c.AtCommand()) {
         const Token& t = c.toks[c.pos++];
+        c.MarkOption();
         // errors read "$transformmodel origin expects ..."
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
@@ -4852,7 +4988,7 @@ bool CmdScale(Ctx& c, const Token& cmd) {
 // leave the built-in +90 yaw.
 bool CmdUpAxis(Ctx& c, const Token& cmd) {
     std::string axis;
-    if (!c.Want("an axis", cmd, axis))
+    if (!c.WantOption("an axis", cmd, axis))
         return false;
 
     pm::RadianEuler r{0.0f, 0.0f, pm::kPiF / 2.0f};
@@ -4929,6 +5065,7 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const Token& t = c.toks[c.pos++];
+        c.MarkOption();
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
         if (!t.quoted && _stricmp(t.text.c_str(), "inherit") == 0) {
@@ -5141,7 +5278,7 @@ void FinishAttachments(Ctx& c) {
 // written down explicitly. $alwayscollapse overrules "none" per bone.
 bool CmdBoneCullMethod(Ctx& c, const Token& cmd) {
     std::string m;
-    if (!c.Want("a cull method name", cmd, m))
+    if (!c.WantOption("a cull method name", cmd, m))
         return false;
     if (_stricmp(m.c_str(), "aggressive") == 0)
         c.in.boneCullType = cm::BoneCullType::Aggressive;
@@ -5182,112 +5319,6 @@ bool CmdLimitRotation(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $transformbone <bone> [options]  (Cmd_TransformBindPoseBone)
-//
-// Edits a bone's bind pose late in the pipeline, after the global bone table is
-// built - the merged replacement for stock's $rotatebone + $movebone. The
-// options are order-independent:
-//   angles <p y r>                          rotate the bind orientation
-//   position <x y z>                        translate the bind position
-//   worldangles / worldposition             use world axes instead of the bone's
-//   transformweights <residualbone> [f] [s] re-skin ramp onto residualbone
-//   offset <x y z>                          shift the transformweights ramp end
-//   transformverts                          carry the rigged verts at rest
-//   transformchildren                       move the bone's whole subtree with it
-//   ignoreanimation                         never let the edit reach a clip
-//   ignorehitbox                            keep this bone's $hbox in place
-// Position-independent: the whole list is applied in one batch by the compile
-// stage, so the bone is resolved there, not here.
-bool CmdTransformBone(Ctx& c, const Token& cmd) {
-    cm::BoneTransformEdit e;
-    e.line = cmd.line;
-    if (!c.Want("a bone name", cmd, e.name))
-        return false;
-
-    // an optional trailing number: consumed only when the token parses whole as
-    // a float, so a following keyword is left for the option loop
-    auto optFloat = [&](float& out) {
-        if (c.AtCommand() || c.Cur().quoted)
-            return;
-        const std::string& s = c.Cur().text;
-        try {
-            size_t used = 0;
-            const float v = std::stof(s, &used);
-            if (used != s.size())
-                return;
-            out = std::min(std::max(v, 0.0f), 1.0f);
-            c.pos++;
-        } catch (const std::exception&) {
-        }
-    };
-
-    while (!c.AtCommand()) {
-        const Token& t = c.toks[c.pos++];
-        const Token sub{cmd.text + " " + t.text, t.line, false};
-        const char* o = t.text.c_str();
-
-        if (!t.quoted && _stricmp(o, "angles") == 0) {
-            if (!c.WantFloat("a pitch", sub, e.angles.x) ||
-                !c.WantFloat("a yaw", sub, e.angles.y) ||
-                !c.WantFloat("a roll", sub, e.angles.z))
-                return false;
-            e.hasAngles = true;
-        } else if (!t.quoted && _stricmp(o, "position") == 0) {
-            if (!c.WantFloat("an X offset", sub, e.pos.x) ||
-                !c.WantFloat("a Y offset", sub, e.pos.y) ||
-                !c.WantFloat("a Z offset", sub, e.pos.z))
-                return false;
-            e.hasPosition = true;
-        } else if (!t.quoted && _stricmp(o, "worldangles") == 0) {
-            e.worldAngles = true;
-        } else if (!t.quoted && _stricmp(o, "worldposition") == 0) {
-            e.worldPosition = true;
-        } else if (!t.quoted && _stricmp(o, "transformweights") == 0) {
-            if (!c.Want("a residual bone name", sub, e.residualbone))
-                return false;
-            e.hasMoveWeight = true;
-            optFloat(e.moveWeightFactor);    // ramp band width, default 1.0
-            optFloat(e.moveWeightSmoothing); // S-curve easing, default 0.0
-        } else if (!t.quoted && _stricmp(o, "offset") == 0) {
-            if (!c.WantFloat("an X offset", sub, e.moveWeightOffset.x) ||
-                !c.WantFloat("a Y offset", sub, e.moveWeightOffset.y) ||
-                !c.WantFloat("a Z offset", sub, e.moveWeightOffset.z))
-                return false;
-            e.hasMoveWeightOffset = true;
-        } else if (!t.quoted && _stricmp(o, "transformverts") == 0) {
-            e.transformVerts = true;
-        } else if (!t.quoted && _stricmp(o, "transformchildren") == 0) {
-            e.transformChildren = true;
-        } else if (!t.quoted && _stricmp(o, "ignoreanimation") == 0) {
-            e.ignoreAnimation = true;
-        } else if (!t.quoted && _stricmp(o, "ignorehitbox") == 0) {
-            e.ignoreHitbox = true;
-        } else {
-            return c.Fail(t.line, "$transformbone \"" + e.name +
-                                  "\": expected angles, position, worldangles, "
-                                  "worldposition, transformweights, offset, "
-                                  "transformverts, transformchildren, "
-                                  "ignoreanimation or ignorehitbox, "
-                                  "got \"" + t.text + "\"");
-        }
-    }
-
-    if (e.transformVerts && e.hasMoveWeight)
-        return c.Fail(cmd.line,
-                      "$transformbone: transformverts and transformweights are "
-                      "mutually exclusive");
-    if (e.hasMoveWeightOffset && !e.hasMoveWeight)
-        return c.Fail(cmd.line, "$transformbone: offset requires transformweights");
-    if (!e.hasAngles && !e.hasPosition)
-        return c.Fail(cmd.line, "$transformbone: requires at least one of angles or position");
-
-    c.in.boneTransformEdits.push_back(std::move(e));
-    if (c.in.boneTransformEdits.size() >
-        static_cast<size_t>(pulse::limits::kMaxBoneTransformEdits))
-        return c.Fail(cmd.line, "too many $transformbone entries");
-    return true;
-}
-
 // $root <bone> (Cmd_Root): the bone motion extraction, $alignto and $angle
 // work from. Resolved after the bone table exists; unknown falls back to bone 0.
 bool CmdRoot(Ctx& c, const Token& cmd) {
@@ -5317,9 +5348,11 @@ bool CmdDefineBone(Ctx& c, const Token& cmd) {
         if (_stricmp(c.Cur().text.c_str(), "unlocked") == 0) {
             ib.bUnlocked = true;
             c.pos++;
+            c.MarkOption();
         } else if (_stricmp(c.Cur().text.c_str(), "locked") == 0) {
             ib.bUnlocked = false;
             c.pos++;
+            c.MarkOption();
         }
     }
 
@@ -5354,8 +5387,7 @@ bool CmdDefineBone(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// The markup entries share one BoneMarkup per bone, so $bonemerge and
-// $donotcollapse can both name it.
+// Markup commands share one entry per bone.
 cm::BoneMarkup& FindOrAddMarkup(Ctx& c, const std::string& name) {
     for (auto& bm : c.in.bonemarkups)
         if (_stricmp(bm.name.c_str(), name.c_str()) == 0)
@@ -5395,6 +5427,72 @@ bool CmdDoNotCollapse(Ctx& c, const Token& cmd) {
         return false;
     for (const std::string& n : names)
         FindOrAddMarkup(c, n).doNotCollapse = true;
+    return true;
+}
+
+bool CmdRealignBone(Ctx& c, const Token& cmd) {
+    std::string name;
+    if (!c.Want("a bone name", cmd, name)) return false;
+
+    cm::BoneRealignEdit edit;
+    edit.line = cmd.line;
+    while (!c.AtCommand()) {
+        const Token option = c.toks[c.pos++];
+        c.MarkOption();
+        const std::string word = Lower(option.text);
+        if (!option.quoted && (word == "origin" || word == "angles")) {
+            const bool origin = word == "origin";
+            bool& present = origin ? edit.hasOrigin : edit.hasAngles;
+            if (present) return c.Fail(option.line, "$realignbone: " + word + " written twice");
+
+            pm::Vector3& value = origin ? edit.origin : edit.angles;
+            if (!c.WantFloat("an X value", option, value.x) ||
+                !c.WantFloat("a Y value", option, value.y) ||
+                !c.WantFloat("a Z value", option, value.z))
+                return false;
+            if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
+                return c.Fail(option.line, "$realignbone: " + word + " must be finite");
+            present = true;
+        } else if (!option.quoted && word == "worldaxes") {
+            edit.worldAxes = true;
+        } else if (!option.quoted && word == "absolute") {
+            edit.absolute = true;
+        } else if (!option.quoted && word == "ignoreanimation") {
+            edit.ignoreAnimation = true;
+        } else if (!option.quoted && word == "affectchildren") {
+            edit.affectChildren = true;
+        } else {
+            return c.Fail(option.line, "$realignbone: unknown option \"" + option.text + "\"");
+        }
+    }
+
+    if (edit.affectChildren && !edit.hasOrigin && !edit.hasAngles)
+        return c.Fail(cmd.line, "$realignbone: affectchildren requires origin or angles");
+
+    cm::BoneMarkup& markup = FindOrAddMarkup(c, name);
+    const bool manual = edit.hasOrigin || edit.hasAngles;
+    if (!markup.realigns.empty()) {
+        const cm::BoneRealignEdit& prev = markup.realigns.back();
+        if (manual != (prev.hasOrigin || prev.hasAngles))
+            return c.Fail(cmd.line, "$realignbone: \"" + name + "\" mixes automatic alignment "
+                          "with origin/angles edits (line " + std::to_string(prev.line) + ")");
+        if (!manual) markup.realigns.clear();
+    }
+    markup.noRealign = false;
+    markup.realigns.push_back(edit);
+    return true;
+}
+
+bool CmdNoRealign(Ctx& c, const Token& cmd) {
+    std::vector<std::string> names;
+    if (!WantBoneNames(c, cmd, names))
+        return false;
+
+    for (const std::string& n : names) {
+        cm::BoneMarkup& markup = FindOrAddMarkup(c, n);
+        markup.noRealign = true;
+        markup.realigns.clear();
+    }
     return true;
 }
 
@@ -5524,6 +5622,7 @@ bool ParseJiggleSection(Ctx& c, const Token& cmd, const std::string& sect, cm::J
         if (c.AtCommand())
             return c.Fail(cmd.line, where + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             return true;
         const std::string o = Lower(t.text);
@@ -5599,6 +5698,7 @@ bool CmdJiggleBone(Ctx& c, const Token& cmd) {
         if (c.AtCommand())
             return c.Fail(cmd.line, "$jigglebone: missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string sect = Lower(t.text);
@@ -5705,6 +5805,7 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
     // <file>` - a typo would otherwise surface as a confusing "missing '{'"
     while (!c.AtCommand() && !c.Cur().quoted && c.Cur().text != "{") {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         if (o == "poseanim") {
             const Token sub{"$driverbone poseanim", t.line, false};
@@ -5735,6 +5836,7 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
         if (c.AtCommand())
             return c.Fail(cmd.line, "$driverbone: missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -5918,8 +6020,7 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
     std::vector<fs::path> tried;
     const fs::path full = FindSourceFile(c, filename, &tried);
     if (full.empty())
-        return c.Fail(cmd.line, "cannot find \"" + filename + "\" - looked in:" +
-                                LookedIn(tried));
+        return FailMissing(c, cmd.line, "cannot find \"" + filename + "\"", tried);
     pulse::dependencies::Note(full.string());
     std::ifstream f(full.string(), std::ios::binary);
     if (!f)
@@ -6118,7 +6219,7 @@ bool CmdConstantDirectionalLight(Ctx& c, const Token& cmd) {
 // $skipboneinbbox (Cmd_SkipBoneInBBox): clears
 // useBoneInBBox, so the auto-generated hitboxes (and the sequence boxes derived
 // from them) grow from the bone's vertices alone instead of always containing
-// the bone origin. No arguments, no effect when $hitboxset is authored.
+// the bone origin. No arguments, no effect when $hboxset is authored.
 bool CmdSkipBoneInBBox(Ctx& c, const Token&) {
     c.in.skipBoneInBBox = true;
     return true;
@@ -6232,6 +6333,7 @@ bool CmdEyePosition(Ctx& c, const Token& cmd) {
     if (!c.AtCommand() && !c.Cur().quoted &&
         _stricmp(c.Cur().text.c_str(), "autoheight") == 0) {
         c.pos++;
+        c.MarkOption();
         c.in.eyepositionAutoHeight = true;
     }
     return true;
@@ -6299,6 +6401,31 @@ bool CmdOverrideMaterial(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $collapsematerial <from> <to> - faces that load with <from> take <to> instead,
+// merging both into one material and mesh. Resolved at load time, so it must
+// come before the $body/$model that loads <from>.
+bool CmdCollapseMaterial(Ctx& c, const Token& cmd) {
+    std::string from, to;
+    if (!c.Want("a material name", cmd, from) ||
+        !c.Want("a material to collapse to", cmd, to))
+        return false;
+
+    from = StripExtension(from);
+    to = StripExtension(to);
+    if (_stricmp(from.c_str(), to.c_str()) == 0)
+        return c.Fail(cmd.line, "$collapsematerial: \"" + from + "\" collapses to itself");
+    for (const auto& tex : c.in.mats.textures) {
+        const size_t slash = tex.name.find_last_of("/\\");
+        const std::string base = slash == std::string::npos ? tex.name : tex.name.substr(slash + 1);
+        if (tex.material >= 0 && (_stricmp(tex.name.c_str(), from.c_str()) == 0 ||
+                                  _stricmp(base.c_str(), from.c_str()) == 0))
+            return c.Fail(cmd.line, "$collapsematerial: \"" + from +
+                                    "\" is already loaded; place it before the $body/$model that uses it");
+    }
+    c.in.mats.collapse.emplace_back(from, to);
+    return true;
+}
+
 // One $set body: `material <replaced> <replacement>` lines until '}'.
 bool ParseTextureSet(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::SkinReplace>& fam) {
     if (!WantOpenBrace(c, cmd, "$texturegroup $set"))
@@ -6313,6 +6440,7 @@ bool ParseTextureSet(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::Ski
         if (t.quoted || _stricmp(t.text.c_str(), "material") != 0)
             return c.Fail(t.line, "$texturegroup $set: expected material or '}', got \"" +
                                   t.text + "\"");
+        c.MarkOption();
 
         const Token sub{"$texturegroup $set material", t.line, false};
         // a brace is not a material name - Want would happily eat the '}' and
@@ -6369,8 +6497,10 @@ bool ParseReplaceModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
 
     // "blank" means the LOD system was told to replace nothing - forget the
     // entry entirely (reference Cmd_ReplaceModel)
-    if (_stricmp(r.src.c_str(), "blank") == 0)
+    if (_stricmp(r.src.c_str(), "blank") == 0) {
+        c.MarkOption(c.pos - 2);
         return true;
+    }
 
     r.srcSource = FindModelSource(c, r.src);
     if (!r.srcSource)
@@ -6393,8 +6523,10 @@ bool ParseRemoveModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
     cm::LodReplacement r;
     if (!c.Want("a model name", cmd, r.src))
         return false;
-    if (_stricmp(r.src.c_str(), "blank") == 0)
+    if (_stricmp(r.src.c_str(), "blank") == 0) {
+        c.MarkOption(c.pos - 1);
         return true;
+    }
 
     r.srcSource = FindModelSource(c, r.src);
     if (!r.srcSource)
@@ -6472,6 +6604,7 @@ bool CmdLod(Ctx& c, const Token& cmd) {
         if (c.Eof())
             return c.Fail(cmd.line, cmd.text + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
 
@@ -6548,9 +6681,9 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             if (!c.Want("a material name", t, r.src))
                 return false;
             lod.meshRemovals.push_back(std::move(r));
-        } else if (opt == "removemeshword") {
+        } else if (opt == "removemeshsubstring") {
             cm::LodReplacement r;
-            if (!c.Want("a word to match", t, r.src))
+            if (!c.Want("a substring to match", t, r.src))
                 return false;
             lod.meshWordRemovals.push_back(std::move(r));
         } else if (opt == "nomorphs" || opt == "nofacial") {
@@ -6769,7 +6902,7 @@ void CheckMeshSortOrder(Ctx& c) {
                                                   c.in, im.source->meshindex[mi]).c_str(),
                                               StripExtension(want).c_str()) == 0;
         if (!found)
-            std::printf("WARNING: $meshsortorder \"%s\" matches no material on any mesh; "
+            pulse::diag::Warnf("$meshsortorder \"%s\" matches no material on any mesh; "
                         "it orders nothing.\n",
                         want.c_str());
     }
@@ -6794,11 +6927,11 @@ bool CmdMeshSortOrder(Ctx& c, const Token& cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Hitboxes - $hitboxset may use a body or select a set for following top-level
+// Hitboxes - $hboxset may use a body or select a set for following top-level
 // $hbox commands. A bare $hbox falls into an implicit "default" set.
 // ---------------------------------------------------------------------------
 
-// One $hbox inside a $hitboxset body:
+// One $hbox inside a $hboxset body:
 //   $hbox <group> <bone> <minx> <miny> <minz> <maxx> <maxy> <maxz>
 //         [angles <p> <y> <r>] [radius <r>] [name <hitboxname>]
 // The trailing clauses are stock's positional optionals ($hbox ... [angles]
@@ -6835,6 +6968,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
     // a clause list ends at '}' or the next $hbox
     while (!c.AtCommand() && !(!c.Cur().quoted && c.Cur().text == "}")) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const std::string o = Lower(t.text);
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
@@ -6866,7 +7000,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
     return true;
 }
 
-// $hitboxset <name> [{ $hbox ... }] also accepts stock's flat, order-dependent
+// $hboxset <name> [{ $hbox ... }] also accepts stock's flat, order-dependent
 // form. Declaring any set turns automatic hitbox generation off entirely.
 bool CmdHitboxSet(Ctx& c, const Token& cmd) {
     cm::HitboxSet set;
@@ -6901,8 +7035,7 @@ bool CmdHitboxSet(Ctx& c, const Token& cmd) {
 
 bool CmdHboxOutsideSet(Ctx& c, const Token& cmd) {
     if (c.activeHitboxSet < 0) {
-        std::printf("WARNING: %s(%d): $hbox has no preceding $hboxset; using set \"default\"\n",
-                    c.file.c_str(), cmd.line);
+        pulse::diag::WarnAt({c.Path(), cmd.line}, "$hbox has no preceding $hboxset; using set \"default\"");
         c.in.hitboxsets.push_back({"default", {}});
         if (c.in.hitboxsets.size() > static_cast<size_t>(pulse::limits::kMaxHitboxSets))
             return c.Fail(cmd.line, "too many hitbox sets");
@@ -6924,7 +7057,7 @@ bool CmdHGroup(Ctx& c, const Token& cmd) {
 // $renamehboxset <target> <newname> - rename an already-declared set.
 //
 // Acts on the sets declared ABOVE it, so it must be written after the
-// $hitboxset it renames; naming a set that does not exist yet is an error
+// $hboxset it renames; naming a set that does not exist yet is an error
 // rather than a silently-deferred rename. The point is reusing one hitbox
 // layout under a different set name - a shared block pulled in by (future)
 // $include can be renamed at the use site without editing the block.
@@ -6976,6 +7109,7 @@ bool CmdPoseParameter(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && _stricmp(t.text.c_str(), "wrap") == 0) {
             pp->flags |= kStudioLooping;
             pp->loop = pp->max - pp->min;
@@ -7005,7 +7139,7 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
         if (_stricmp(e.name.c_str(), name.c_str()) == 0) {
             while (!c.AtCommand())
                 c.pos++;
-            fprintf(stderr, "WARNING: duplicate ikchain \"%s\" ignored\n", name.c_str());
+            pulse::diag::Warnf("duplicate ikchain \"%s\" ignored\n", name.c_str());
             return true;
         }
 
@@ -7019,6 +7153,7 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         const Token sub{cmd.text + " " + t.text, t.line, false};
         if (LookupControl(t.text) != -1) {
             float unused = 0.0f;
@@ -7087,6 +7222,7 @@ bool ParseWeightEntries(Ctx& c, const Token& cmd, const std::string& listname,
 
         const Token t = c.toks[c.pos++];
         if (!t.quoted && _stricmp(t.text.c_str(), "posweight") == 0) {
+            c.MarkOption();
             if (entries.empty())
                 return c.Fail(t.line, "weightlist \"" + listname +
                                       "\": posweight before any bone");
@@ -7227,6 +7363,7 @@ bool CmdAnimBlockSize(Ctx& c, const Token& cmd) {
 
     while (!c.AtCommand()) {
         const std::string o = c.Next()->text;
+        c.MarkOption();
         if (_stricmp(o.c_str(), "nostall") == 0) {
             c.in.noAnimblockStall = true;
         } else if (_stricmp(o.c_str(), "highres") == 0) {
@@ -7263,6 +7400,7 @@ bool CmdBoneSaveFrame(Ctx& c, const Token& cmd) {
         return false;
     while (!c.AtCommand()) {
         const std::string o = c.Next()->text;
+        c.MarkOption();
         if (_stricmp(o.c_str(), "position") == 0)
             bsf.savePos = true;
         else if (_stricmp(o.c_str(), "rotation") == 0)
@@ -7323,6 +7461,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         if (c.Eof())
             return c.Fail(cmd.line, where + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7341,7 +7480,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         } else if (o == "maxconvex") {
             if (!c.WantInt("a piece count", sub, sh.maxConvex)) return false;
         } else if (!fromRender && o == "importtype") {
-            if (!c.Want("perjoint, singlejoint or singlehull", sub, importType))
+            if (!c.WantOption("perjoint, singlejoint or singlehull", sub, importType))
                 return false;
             importType = Lower(importType);
         } else if (!fromRender && o == "concave") {
@@ -7399,7 +7538,7 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         if (sh.maxHulls <= 0) {
             sh.maxHulls = pulse::limits::kMaxGeneratedHulls;
         } else if (sh.maxHulls > pulse::limits::kMaxGeneratedHulls) {
-            std::printf("WARNING: PhysicsShapeFromRender \"%s\" asks for %d hulls, "
+            pulse::diag::Warnf("PhysicsShapeFromRender \"%s\" asks for %d hulls, "
                         "clamped to %d\n",
                         sh.name.c_str(), sh.maxHulls, pulse::limits::kMaxGeneratedHulls);
             sh.maxHulls = pulse::limits::kMaxGeneratedHulls;
@@ -7459,7 +7598,7 @@ bool AtNumber(Ctx& c) {
 //   capsule <point0 xyz> <point1 xyz> <radius0> <radius1> [segments]
 bool ParsePhysPrimitive(Ctx& c, const Token& cmd, cm::PhysicsShape& sh) {
     std::string type;
-    if (!c.Want("box, sphere or capsule", cmd, type) ||
+    if (!c.WantOption("box, sphere or capsule", cmd, type) ||
         !c.Want("a bone name", cmd, sh.parentBone))
         return false;
     type = Lower(type);
@@ -7530,6 +7669,7 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
             return c.Fail(cmd.line, where + (braced ? ": missing '}'"
                                                     : ": expected x, y or z"));
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (braced && !t.quoted && t.text == "}")
             break;
 
@@ -7547,7 +7687,7 @@ bool ParsePhysJoint(Ctx& c, const Token& cmd, cm::PhysicsJoint& joint) {
 
         const Token sub{where + " " + t.text, t.line, false};
         std::string type;
-        if (!c.Want("free, limit or fixed", sub, type))
+        if (!c.WantOption("free, limit or fixed", sub, type))
             return false;
         type = Lower(type);
         if      (type == "free")  a.type = 0;
@@ -7588,6 +7728,7 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
             return c.Fail(cmd.line, where + (braced ? ": missing '}'"
                                                     : ": expects a field name"));
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (braced && !t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7638,6 +7779,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
         if (c.Eof())
             return c.Fail(cmd.line, "$physicsmodel: missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7645,7 +7787,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
 
         if (o == "$physicsshape") {
             std::string mode;
-            if (!c.Want("fromfile, fromrendermesh, fromrender or primitive", sub, mode))
+            if (!c.WantOption("fromfile, fromrendermesh, fromrender or primitive", sub, mode))
                 return false;
             mode = Lower(mode);
             if (mode == "primitive") {
@@ -7750,7 +7892,7 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
                                        }),
                         pairs.end());
             if (pairs.size() == before)
-                std::printf("WARNING: $physicsnocollide \"%s\" \"%s\" matches no "
+                pulse::diag::Warnf("$physicsnocollide \"%s\" \"%s\" matches no "
                             "$physicscollide above it - ignored\n", a.c_str(), b.c_str());
         } else if (o == "$noselfcollisions") {
             c.in.physNoSelfCollisions = true;
@@ -7850,6 +7992,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
         if (c.Eof())
             return c.Fail(cmd.line, cmd.text + ": missing '}'");
         const Token t = c.toks[c.pos++];
+        c.MarkOption();
         if (!t.quoted && t.text == "}")
             break;
         const std::string o = t.quoted ? std::string() : Lower(t.text);
@@ -7905,8 +8048,8 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
         } else if (o == "$jointconstrain") {
             std::string bone, axis, type;
             cm::PhysicsJointAxis a;
-            if (!c.Want("a bone name", sub, bone) || !c.Want("an axis", sub, axis) ||
-                !c.Want("free, fixed or limit", sub, type) ||
+            if (!c.Want("a bone name", sub, bone) || !c.WantOption("an axis", sub, axis) ||
+                !c.WantOption("free, fixed or limit", sub, type) ||
                 !c.WantFloat("a minimum angle", sub, a.min) ||
                 !c.WantFloat("a maximum angle", sub, a.max)) return false;
             axis = Lower(axis);
@@ -8145,7 +8288,7 @@ bool CmdAssert(Ctx& c, const Token& cmd) {
 // $qcassert <boneexists|importboneexists> <bone> [source] <true|false>
 bool CmdQcAssert(Ctx& c, const Token& cmd) {
     std::string type, bone;
-    if (!c.Want("boneexists or importboneexists", cmd, type) ||
+    if (!c.WantOption("boneexists or importboneexists", cmd, type) ||
         !c.Want("a bone name", cmd, bone))
         return false;
 
@@ -8174,7 +8317,7 @@ bool CmdQcAssert(Ctx& c, const Token& cmd) {
     }
 
     std::string expectedText;
-    if (!c.Want("true or false", cmd, expectedText))
+    if (!c.WantOption("true or false", cmd, expectedText))
         return false;
     bool expected = false;
     if (_stricmp(expectedText.c_str(), "true") == 0)
@@ -8220,13 +8363,38 @@ bool ExpandVars(Ctx& c, Token& t) {
         if (it == c.variables.end())
             return c.Fail(t.line, "unknown variable \"$" + name + "$\" - no "
                                   "$definevariable for it above this line");
-        out += it->second;
+        out += it->second.text;
         i = e + 1;
         t.expanded = true;
     }
     t.text = std::move(out);
     return true;
 }
+
+// Only a whole, unquoted reference expands into separate list arguments.
+bool ExpandVarTokens(Ctx& c, const Token& token, std::vector<Token>& out) {
+    if (!token.quoted && !token.text.empty() && token.text[0] == '$' &&
+        VarRefEnd(token.text, 0) == token.text.size() - 1) {
+        const auto it = c.variables.find(token.text.substr(1, token.text.size() - 2));
+        if (it != c.variables.end() && it->second.list) {
+            for (Token value : it->second.tokens) {
+                value.line = token.line;
+                value.apiSource = token.apiSource;
+                value.expanded = true;
+                out.push_back(std::move(value));
+            }
+            return true;
+        }
+    }
+
+    Token value = token;
+    if (!ExpandVars(c, value)) return false;
+
+    out.push_back(std::move(value));
+    return true;
+}
+
+bool ExpandCommandVars(Ctx& c);
 
 // $include "file.qci" [localdir] [optional]   (scriplib's
 // AttemptConditionalInclude; its nofallbackdir flag is `localdir` here, its
@@ -8243,6 +8411,8 @@ bool ExpandVars(Ctx& c, Token& t) {
 // an included file - source filenames, $proceduralbones - stays relative to the
 // ROOT script's directory, matching how stock keeps cddir pinned to the top.
 bool SpliceInclude(Ctx& c) {
+    if (!ExpandCommandVars(c)) return false;
+
     const Token cmd = c.toks[c.pos]; // the $include token
     size_t p = c.pos + 1;
     if (p >= c.toks.size() || (!c.toks[p].quoted && c.toks[p].text[0] == '$'))
@@ -8281,21 +8451,39 @@ bool SpliceInclude(Ctx& c) {
         if (c.curDir != c.scriptDir)
             tries.push_back(c.scriptDir / relPath);
         if (!localDir)
-            for (const auto* list : {&c.includeDirs, &c.launchIncludeDirs})
-                for (const fs::path& dir : *list) {
-                    tries.push_back(dir / relPath);
-                    // last resort: the bare filename in that dir, for a request
-                    // that carried a relative hierarchy the dir does not have
-                    if (relPath.has_parent_path())
-                        tries.push_back(dir / relPath.filename());
-                }
+            for (const fs::path& dir : c.includeDirs) {
+                tries.push_back(dir / relPath);
+                if (relPath.has_parent_path()) tries.push_back(dir / relPath.filename());
+            }
+    }
+
+    auto internalTries = tries;
+    if (!relPath.is_absolute() && !localDir) {
+        for (const fs::path& dir : c.launchIncludeDirs) {
+            tries.push_back(dir / relPath);
+            if (relPath.has_parent_path()) tries.push_back(dir / relPath.filename());
+        }
+        for (const fs::path& dir : c.packageIncludeDirs) {
+            internalTries.push_back(dir / relPath);
+            if (relPath.has_parent_path()) internalTries.push_back(dir / relPath.filename());
+        }
     }
 
     fs::path full;
+    if (auto* package = pulse::qcpackage::active) {
+        if (!relPath.is_absolute())
+            for (const auto& candidate : internalTries) {
+                const auto internal = package->Internal(candidate);
+                if (!internal.empty()) { full = internal; break; }
+            }
+        if (full.empty() && !relPath.is_absolute())
+            for (auto& candidate : tries) candidate = package->External(candidate);
+    }
     for (fs::path& t : tries) {
+        if (!full.empty()) break;
         t = t.lexically_normal().make_preferred();
         std::error_code fec;
-        if (fs::is_regular_file(t, fec)) {
+        if (fs::is_regular_file(t, fec) || UnsavedText(c, t)) {
             full = t;
             break;
         }
@@ -8307,8 +8495,9 @@ bool SpliceInclude(Ctx& c) {
                 f.endPos -= (directiveEnd - c.pos);
         if (optional)
             return true;
-        return c.Fail(cmd.line, "$include: cannot find \"" + rel +
-                                "\" - looked in:" + LookedIn(tries));
+        FailMissing(c, cmd.line, "$include: cannot find \"" + rel + "\"", tries,
+                    pulse::dependencies::Kind::Include);
+        return c.keepGoing; // the directive is gone, so reading can carry on past it
     }
 
     std::error_code ec;
@@ -8319,21 +8508,35 @@ bool SpliceInclude(Ctx& c) {
             return c.Fail(cmd.line, "$include: \"" + rel +
                                     "\" is already open - circular include");
 
-    pulse::dependencies::Note(full.string(), pulse::dependencies::Kind::Include);
-    std::ifstream f(full, std::ios::binary);
-    if (!f)
-        return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
-    std::ostringstream buf;
-    buf << f.rdbuf();
-    std::string text = buf.str();
+    const std::string* unsavedText = UnsavedText(c, full);
+    pulse::dependencies::Note(full.string(), pulse::dependencies::Kind::Include, unsavedText);
+    std::string text;
+    if (unsavedText) {
+        text = *unsavedText;
+    } else if (pulse::qcpackage::active && pulse::qcpackage::active->Contains(full)) {
+        text = pulse::qcpackage::active->Read(full);
+    } else {
+        std::ifstream f(full, std::ios::binary);
+        if (!f)
+            return c.Fail(cmd.line, "$include: cannot open \"" + full.string() + "\"");
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        text = buf.str();
+    }
     StripUtf8Bom(text);
 
     std::printf("$include: Including %s...\n", full.string().c_str());
 
     const std::string name = full.filename().string();
     std::vector<Token> toks;
-    if (!Tokenize(text, name, toks, c.err))
+    const auto sourcePath = fs::absolute(full).lexically_normal().u8string();
+    if (!Tokenize(text, name, sourcePath, toks, c.err))
         return false;
+    if (pulse::api::Active()) {
+        const auto source = static_cast<int>(c.apiSources.size());
+        c.apiSources.push_back(sourcePath);
+        for (auto& token : toks) token.apiSource = source;
+    }
 
     // drop the $include directive, splice the file in its place, and open a
     // frame so pos crossing its end restores file/curDir and the cycle guard.
@@ -8457,22 +8660,42 @@ size_t CommandExtent(const Ctx& c) {
     return i;
 }
 
-// Expand variables in the token run the command at c.pos is about to read. Run
-// per command rather than once over the whole file, so a $redefinevariable
-// takes effect exactly where it is written. $definemacro is skipped whole: its
-// body is stored raw and expands at each invocation instead, and so are $if /
-// $switch - only the branch that is taken may expand, and it does so after the
-// splice, one command at a time like anything else.
+// Expand per command so redefinitions take effect where written.
+// Variable definitions, macros and conditionals expand in their own handlers.
 bool ExpandCommandVars(Ctx& c) {
     const char* cmd = c.toks[c.pos].text.c_str();
     if (_stricmp(cmd, "$definemacro") == 0 || _stricmp(cmd, "$if") == 0 ||
         _stricmp(cmd, "$ifdef") == 0 || _stricmp(cmd, "$ifndef") == 0 ||
-        _stricmp(cmd, "$switch") == 0)
+        _stricmp(cmd, "$switch") == 0 || _stricmp(cmd, "$definevariable") == 0 ||
+        _stricmp(cmd, "$redefinevariable") == 0)
         return true;
-    const size_t end = CommandExtent(c);
-    for (size_t i = c.pos; i < end; i++)
-        if (!ExpandVars(c, c.toks[i]))
-            return false;
+
+    size_t end = CommandExtent(c);
+    for (size_t i = c.pos; i < end;) {
+        if (c.toks[i].text.find('$') == std::string::npos) {
+            i++;
+            continue;
+        }
+
+        std::vector<Token> values;
+        if (!ExpandVarTokens(c, c.toks[i], values)) return false;
+
+        if (values.size() == 1) {
+            c.toks[i++] = std::move(values.front());
+            continue;
+        }
+        if (i == c.pos)
+            return c.Fail(c.toks[i].line, "a variable list cannot replace a command name");
+
+        c.SpliceAt(i, values);
+        const size_t removed = i + values.size();
+        c.toks.erase(c.toks.begin() + removed);
+        for (Ctx::IncludeFrame& frame : c.includeFrames)
+            if (frame.endPos > removed) frame.endPos--;
+
+        end = end - 1 + values.size();
+        i += values.size();
+    }
     return true;
 }
 
@@ -8484,38 +8707,199 @@ bool PinnedByDefVar(Ctx& c, const Token& cmd, const std::string& name) {
         return false;
     std::printf("%s(%d): %s \"%s\" ignored - pinned to \"%s\" by -defvar\n",
                 c.file.c_str(), cmd.line, cmd.text.c_str(), name.c_str(),
-                c.variables[name].c_str());
+                c.variables[name].text.c_str());
     return true;
 }
 
-// $definevariable <name> <value>  (Cmd_DefineVariable)
-bool CmdDefineVariable(Ctx& c, const Token& cmd) {
-    std::string name, value;
-    if (!c.Want("a name", cmd, name) || !c.Want("a value", cmd, value))
+bool CondNumeric(const std::string& s);
+
+// "( ... )" arithmetic: + - * / with precedence, unary sign, nested parens.
+// A $name$ operand must hold a single number; anything else is an error.
+struct ArithEval {
+    Ctx& c;
+    const Token& cmd;
+    const std::string& s;
+    size_t i = 0;
+    bool ok = true;
+
+    double Stop(const std::string& msg) {
+        if (ok) c.Fail(cmd.line, cmd.text + ": " + msg + " in " + s);
+        ok = false;
+        return 0.0;
+    }
+    char Peek() {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) i++;
+        return i < s.size() ? s[i] : '\0';
+    }
+
+    double Number() {
+        const size_t start = i;
+        while (i < s.size() && (std::isdigit(static_cast<unsigned char>(s[i])) || s[i] == '.'))
+            i++;
+        const std::string text = s.substr(start, i - start);
+        if (!CondNumeric(text)) return Stop("\"" + text + "\" is not a number");
+        return std::strtod(text.c_str(), nullptr);
+    }
+
+    double Variable() {
+        const size_t e = VarRefEnd(s, i);
+        if (e == std::string::npos) return Stop("unclosed variable reference");
+        const std::string name = s.substr(i + 1, e - i - 1);
+        i = e + 1;
+        const auto it = c.variables.find(name);
+        if (it == c.variables.end())
+            return Stop("unknown variable \"$" + name + "$\"");
+        if (it->second.list || !CondNumeric(it->second.text))
+            return Stop("variable \"$" + name + "$\" is \"" + it->second.text +
+                        "\", not an int or float");
+        return std::strtod(it->second.text.c_str(), nullptr);
+    }
+
+    double Factor() {
+        const char ch = Peek();
+        if (ch == '-' || ch == '+') {
+            i++;
+            const double v = Factor();
+            return ch == '-' ? -v : v;
+        }
+        if (ch == '(') {
+            i++;
+            const double v = Expr();
+            if (Peek() != ')') return Stop("expected \")\"");
+            i++;
+            return v;
+        }
+        if (ch == '$') return Variable();
+        if (std::isdigit(static_cast<unsigned char>(ch)) || ch == '.') return Number();
+        return Stop(ch ? std::string("unexpected \"") + ch + "\"" : "the expression ends early");
+    }
+
+    double Term() {
+        double v = Factor();
+        for (char op = Peek(); ok && (op == '*' || op == '/'); op = Peek()) {
+            i++;
+            const double rhs = Factor();
+            if (op == '/' && rhs == 0.0) return Stop("division by zero");
+            v = op == '*' ? v * rhs : v / rhs;
+        }
+        return v;
+    }
+
+    double Expr() {
+        double v = Term();
+        for (char op = Peek(); ok && (op == '+' || op == '-'); op = Peek()) {
+            i++;
+            const double rhs = Term();
+            v = op == '+' ? v + rhs : v - rhs;
+        }
+        return v;
+    }
+};
+
+// Whole results print without a decimal point, so (2 * 3) can feed an int field.
+bool EvalArithmetic(Ctx& c, const Token& cmd, const std::string& expr, std::string& out) {
+    ArithEval e{c, cmd, expr};
+    const double v = e.Factor(); // the outer "( ... )" is itself one factor
+    if (e.ok && e.Peek() != '\0') e.Stop("unexpected text after the closing \")\"");
+    if (!e.ok) return false;
+
+    char buf[64];
+    if (v == std::floor(v) && std::fabs(v) < 1e15)
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
+    else
+        std::snprintf(buf, sizeof(buf), "%.10g", v);
+    out = buf;
+    return true;
+}
+
+bool ReadVariableValue(Ctx& c, const Token& cmd, Ctx::Variable& value) {
+    if (c.Eof()) return c.Fail(cmd.line, cmd.text + " expects a value");
+
+    Token token = c.toks[c.pos++];
+    if (!token.quoted && token.text == "[") {
+        value.list = true;
+        while (c.pos < c.toks.size()) {
+            token = c.toks[c.pos++];
+            if (!token.quoted) {
+                if (token.text == "]") return true;
+                if (token.text == "[")
+                    return c.Fail(token.line, "nested variable lists are not supported");
+                if (token.text == "{" || token.text == "}" ||
+                    (!token.text.empty() && token.text[0] == '$' &&
+                     VarRefEnd(token.text, 0) == std::string::npos))
+                    return c.Fail(cmd.line, cmd.text + " list expects a closing \"]\"");
+            }
+
+            std::vector<Token> elements;
+            if (token.expression) {
+                std::string result;
+                if (!EvalArithmetic(c, cmd, token.text, result)) return false;
+                token.text = std::move(result);
+                token.expression = false;
+                elements.push_back(std::move(token));
+            } else if (!ExpandVarTokens(c, token, elements)) {
+                return false;
+            }
+
+            for (Token& element : elements) {
+                if (!value.tokens.empty()) value.text += ' ';
+                value.text += element.text;
+                value.tokens.push_back(std::move(element));
+            }
+        }
+        return c.Fail(cmd.line, cmd.text + " list expects a closing \"]\"");
+    }
+    if (token.expression)
+        return EvalArithmetic(c, cmd, token.text, value.text);
+
+    if (!token.quoted && !token.text.empty() && token.text[0] == '$') {
+        if (VarRefEnd(token.text, 0) == std::string::npos)
+            return c.Fail(cmd.line, cmd.text + " expects a value");
+
+        const auto it = c.variables.find(token.text.substr(1, token.text.size() - 2));
+        if (VarRefEnd(token.text, 0) == token.text.size() - 1 &&
+            it != c.variables.end() && it->second.list) {
+            value = it->second;
+            return true;
+        }
+    }
+    if (!ExpandVars(c, token)) return false;
+
+    value.text = std::move(token.text);
+    return true;
+}
+
+bool SetVariable(Ctx& c, const Token& cmd, bool redefine) {
+    if (!c.Eof() && !ExpandVars(c, c.toks[c.pos])) return false;
+
+    std::string name;
+    Ctx::Variable value;
+    if (!c.Want("a name", cmd, name) || !ReadVariableValue(c, cmd, value))
         return false;
     if (PinnedByDefVar(c, cmd, name))
         return true;
-    if (c.variables.count(name))
+
+    const bool exists = c.variables.count(name) != 0;
+    if (exists && !redefine)
         return c.Fail(cmd.line, "duplicate $definevariable \"" + name +
                                 "\" - use $redefinevariable to change it");
-    c.variables[name] = value;
+    if (!exists && redefine)
+        return c.Fail(cmd.line, "$redefinevariable \"" + name + "\" is not "
+                                "defined - use $definevariable first");
+
+    c.variables[name] = std::move(value);
     return true;
 }
 
-// $redefinevariable <name> <value>. Replaces a value in place; the variable has
-// to exist already, which is the whole difference from $definevariable.
+// $definevariable <name> <value>, <name> [<value> ...] or <name> (<arithmetic>);
+// a list element may also be an (<arithmetic>).
+bool CmdDefineVariable(Ctx& c, const Token& cmd) {
+    return SetVariable(c, cmd, false);
+}
+
+// $redefinevariable accepts the same values and requires an existing name.
 bool CmdRedefineVariable(Ctx& c, const Token& cmd) {
-    std::string name, value;
-    if (!c.Want("a name", cmd, name) || !c.Want("a value", cmd, value))
-        return false;
-    if (PinnedByDefVar(c, cmd, name))
-        return true;
-    auto it = c.variables.find(name);
-    if (it == c.variables.end())
-        return c.Fail(cmd.line, "$redefinevariable \"" + name + "\" is not "
-                                "defined - use $definevariable first");
-    it->second = value;
-    return true;
+    return SetVariable(c, cmd, true);
 }
 
 bool IsCommandName(const std::string& name); // the kCommands lookup, below
@@ -8611,8 +8995,10 @@ bool ExpandMacro(Ctx& c, const Token& cmd, const Ctx::Macro& m) {
         args.push_back(std::move(a));
     }
     std::vector<Token> body = m.body;
-    for (Token& t : body)
+    for (Token& t : body) {
+        t.apiSource = -1;
         SubstMacroParams(t, m.params, args);
+    }
     c.SpliceAt(c.pos, body);
     return true;
 }
@@ -8718,9 +9104,11 @@ bool ReadCondition(Ctx& c, const Token& cmd, std::vector<CondTok>& out) {
         Token t = c.toks[c.pos++];
         if (!t.quoted && t.text == "{")
             break;
-        if (!ExpandVars(c, t))
-            return false;
-        out.push_back({t.text, t.line, t.quoted || t.expanded});
+        std::vector<Token> values;
+        if (!ExpandVarTokens(c, t, values)) return false;
+
+        for (const Token& value : values)
+            out.push_back({value.text, value.line, value.quoted || value.expanded});
     }
     if (out.empty())
         return c.Fail(cmd.line, cmd.text + " has an empty condition");
@@ -8765,7 +9153,7 @@ struct CondEval {
                                 "$definevariable for it above this line (a string "
                                 "literal goes in quotes)");
         }
-        value = it->second;
+        value = it->second.text;
         return CondTruthy(value);
     }
 
@@ -8830,6 +9218,18 @@ bool ReadDefName(Ctx& c, const Token& cmd, bool& result) {
     return true;
 }
 
+void ReportBranch(const Ctx& c, const Token& first, const Token& last, bool active) {
+    if (!pulse::api::Active() || first.apiSource < 0 || first.apiSource != last.apiSource ||
+        first.line <= 0 || last.line < first.line)
+        return;
+
+    assert(static_cast<size_t>(first.apiSource) < c.apiSources.size());
+    const auto& path = c.apiSources[static_cast<size_t>(first.apiSource)];
+    pulse::api::Record("branch", "{\"file\":" + pulse::api::String(path) +
+        ",\"firstLine\":" + std::to_string(first.line) + ",\"lastLine\":" +
+        std::to_string(last.line) + ",\"active\":" + (active ? "true" : "false") + "}");
+}
+
 // $if <cond> { ... } [$elif <cond> { ... }]... [$else { ... }], and $ifdef /
 // $ifndef with the same shape but a name check in every clause. Every clause's
 // condition is evaluated even once one has won, so a typo in a later $elif is
@@ -8851,6 +9251,7 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
         }
         if (!CollectBlock(c, clause, body))
             return false;
+        ReportBranch(c, clause, c.toks[c.pos - 1], val && !taken);
         if (val && !taken) {
             taken = true;
             chosen = std::move(body);
@@ -8864,6 +9265,7 @@ bool IfChain(Ctx& c, const Token& cmd, bool ifdef, bool negate = false) {
         std::vector<Token> body;
         if (!ExpectBrace(c, els) || !CollectBlock(c, els, body))
             return false;
+        ReportBranch(c, els, c.toks[c.pos - 1], !taken);
         if (!taken)
             chosen = std::move(body);
     }
@@ -8888,12 +9290,13 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
     if (it == c.variables.end())
         return c.Fail(var.line, "$switch: unknown variable \"" + var.text +
                                 "\" - no $definevariable for it above this line");
-    const std::string value = it->second;
+    const std::string value = it->second.text;
     if (!ExpectBrace(c, cmd))
         return false;
 
     std::vector<Token> chosen, fallback;
     bool taken = false, hasDefault = false;
+    Token defaultFirst, defaultLast;
     for (;;) {
         if (c.Eof())
             return c.Fail(cmd.line, "$switch is missing its closing \"}\"");
@@ -8907,8 +9310,10 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
             if (hasDefault)
                 return c.Fail(t.line, "$switch has more than one $default");
             hasDefault = true;
+            defaultFirst = t;
             if (!ExpectBrace(c, t) || !CollectBlock(c, t, fallback))
                 return false;
+            defaultLast = c.toks[c.pos - 1];
             continue;
         }
         if (c.Eof() || (!c.Cur().quoted && (c.Cur().text == "{" || c.Cur().text == "}")))
@@ -8919,6 +9324,7 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
         std::vector<Token> body;
         if (!ExpectBrace(c, t) || !CollectBlock(c, t, body))
             return false;
+        ReportBranch(c, t, c.toks[c.pos - 1], !taken && label.text == value);
         if (!taken && label.text == value) {
             taken = true;
             chosen = std::move(body);
@@ -8927,6 +9333,7 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
     if (!hasDefault)
         return c.Fail(cmd.line, "$switch requires a $default - say what happens "
                                 "when no $case matches, even if it is nothing");
+    ReportBranch(c, defaultFirst, defaultLast, !taken);
     if (!taken)
         chosen = std::move(fallback);
     c.SpliceAt(c.pos, chosen);
@@ -9057,8 +9464,7 @@ constexpr Command kCommands[] = {
     {"$upaxis", CmdUpAxis},
     {"$attachment", CmdAttachment},
     {"$declareattachment", CmdDeclareAttachment},
-    {"$hitboxset", CmdHitboxSet},
-    {"$hboxset", CmdHitboxSet}, // stock's spelling, same command
+    {"$hboxset", CmdHitboxSet},
     {"$hbox", CmdHboxOutsideSet},
     {"$hgroup", CmdHGroup},
     {"$renamehboxset", CmdRenameHboxSet},
@@ -9080,12 +9486,13 @@ constexpr Command kCommands[] = {
     {"$realignbones", CmdRealignBones},
     {"$lockbonelengths", CmdLockBoneLengths},
     {"$limitrotation", CmdLimitRotation},
-    {"$transformbone", CmdTransformBone},
     {"$root", CmdRoot},
     {"$definebone", CmdDefineBone},
     {"$unlockdefinebones", CmdUnlockDefineBones},
     {"$bonemerge", CmdBoneMerge},
     {"$donotcollapse", CmdDoNotCollapse},
+    {"$norealign", CmdNoRealign},
+    {"$realignbone", CmdRealignBone},
     {"$alwayscollapse", CmdAlwaysCollapse},
     {"$hierarchy", CmdHierarchy},
     {"$heirarchy", CmdHierarchy}, // stock's misspelling, same command
@@ -9106,6 +9513,7 @@ constexpr Command kCommands[] = {
     {"$renamebone", CmdRenameBone},
     {"$renamematerial", CmdRenameMaterial},
     {"$overridematerial", CmdOverrideMaterial},
+    {"$collapsematerial", CmdCollapseMaterial},
     {"$texturegroup", CmdTextureGroup},
     {"$meshsortorder", CmdMeshSortOrder},
     {"$minlod", CmdMinLod},
@@ -9124,6 +9532,33 @@ bool IsCommandName(const std::string& name) {
     return false;
 }
 
+// keepGoing: moves past the failed command at `start`. Only the first error is reported
+// (missing files report themselves); later ones may only follow from what was skipped.
+// A command whose { never closes has no end to skip to, so that stops the read.
+bool SkipFailedCommand(Ctx& c, size_t start) {
+    if (!c.keepGoing || c.abortErr)
+        return false;
+
+    c.pos = start;
+    const size_t end = CommandExtent(c);
+    int depth = 0;
+    for (size_t i = start; i < end && i < c.toks.size(); i++) {
+        if (c.toks[i].quoted) continue;
+        if (c.toks[i].text == "{") depth++;
+        else if (c.toks[i].text == "}" && depth > 0) depth--;
+    }
+    if (depth > 0) {
+        if (c.hadError) c.Fail(c.toks[start].line, c.toks[start].text + ": missing closing \"}\"");
+        return false;
+    }
+
+    if (!c.hadError)
+        pulse::diag::RecordLastFailure();
+    c.hadError = true;
+    c.pos = end;
+    return true;
+}
+
 bool RunCommands(Ctx& c) {
     while (!c.Eof()) {
         if (c.scriptBreak) // $break, here or in a file this one $included
@@ -9134,8 +9569,12 @@ bool RunCommands(Ctx& c) {
             c.pos = CommandExtent(c);
             continue;
         }
-        if (!ExpandCommandVars(c))
-            return false;
+        const size_t start = c.pos;
+        if (!ExpandCommandVars(c)) {
+            if (!SkipFailedCommand(c, start))
+                return false;
+            continue;
+        }
 
         const Token cmd = c.toks[c.pos];
         if (cmd.quoted || cmd.text[0] != '$')
@@ -9157,14 +9596,17 @@ bool RunCommands(Ctx& c) {
                 ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             auto m = c.macros.find(key);
             if (m != c.macros.end()) {
-                if (!ExpandMacro(c, cmd, m->second))
+                if (!ExpandMacro(c, cmd, m->second) && !SkipFailedCommand(c, start))
                     return false;
                 continue;
             }
             return c.Fail(cmd.line, "unknown command \"" + cmd.text +
                                     "\" - supported: " + SupportedList());
         }
-        if (!found->fn(c, cmd))
+        pulse::diag::Current() = {c.Path(), cmd.line};
+        const bool succeeded = found->fn(c, cmd);
+        c.ReportOptions(succeeded);
+        if (!succeeded && !SkipFailedCommand(c, start))
             return false;
     }
     return !c.abortErr; // a hard $include error surfaces as Eof
@@ -9179,78 +9621,8 @@ std::string SupportedList() {
     return os.str();
 }
 
-} // namespace
-
-void PrintCommandNames() {
-    for (const Command& k : kCommands)
-        std::printf("%s\n", k.name);
-}
-
-bool IsQcScriptPath(const char* path) {
-    const std::string ext = pulse::FilePath(path).extension().string();
-    return _stricmp(ext.c_str(), ".pulseqc") == 0 || _stricmp(ext.c_str(), ".qc") == 0;
-}
-
-bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
-                  const ScriptVars& defvars, const SearchDirs& includeDirs,
-                  const SearchDirs& fileDirs, const std::string* scriptText) {
-    const std::string normalizedPath = pulse::FilePath(rawPath).string();
-    const char* path = normalizedPath.c_str();
-    pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script, scriptText);
-    std::string text;
-    if (scriptText) {
-        text = *scriptText;
-    } else {
-        std::ifstream f(path, std::ios::binary);
-        if (!f) {
-            if (err) *err = std::string("cannot open \"") + path + "\"";
-            return false;
-        }
-        std::ostringstream buf;
-        buf << f.rdbuf();
-        text = buf.str();
-    }
-    StripUtf8Bom(text);
-
-    Ctx c{out};
-    c.scriptDir = fs::path(path).parent_path();
-    c.curDir = c.scriptDir;
-    c.sourceDirStack.push_back(c.scriptDir);
-    c.file = fs::path(path).filename().string();
-    c.rootFile = c.file;
-    c.err = err;
-
-    // -defvar: in effect from the first line, and pinned - a later repeat on
-    // the command line just wins over the earlier one
-    for (const auto& kv : defvars) {
-        c.variables[kv.first] = kv.second;
-        if (!c.IsLockedVar(kv.first))
-            c.lockedVars.push_back(kv.first);
-    }
-
-    auto seedDirs = [](const SearchDirs& in, std::vector<fs::path>& out) {
-        for (const std::string& dir : in) {
-            const fs::path path = pulse::FilePath(dir);
-            const fs::path p = path.is_absolute() ? path : fs::current_path() / path;
-            out.push_back(p.lexically_normal().make_preferred());
-        }
-    };
-    seedDirs(includeDirs, c.launchIncludeDirs);
-    seedDirs(fileDirs, c.launchSearchDirs);
-
-    if (!Tokenize(text, c.file, c.toks, err))
-        return false;
-
-    // the root of the $include cycle check
-    std::error_code ec;
-    const fs::path canon = fs::weakly_canonical(path, ec);
-    c.includeStack.push_back(ec ? std::string(path) : canon.string());
-
-    out.mdlPath = path;
-
-    if (!RunCommands(c))
-        return false;
-
+// The passes that need the whole script read, shared by both script loaders.
+bool FinishScript(Ctx& c, cm::CompileInput& out, std::string* err) {
     if (out.outname.empty()) {
         if (err) *err = c.file + ": no $modelname";
         return false;
@@ -9258,10 +9630,9 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     // animation-only models (.mdl + .ani, no geometry) are legal; a script with
     // geometry that never groups it is not - the meshes would not ship.
     if (out.bodyparts.empty() && !c.rendermeshes.empty())
-        printf("WARNING: %s: $rendermesh but no $modelgroup\n", c.file.c_str());
+        pulse::diag::WarnAt({c.Path(), 0}, "$rendermesh but no $modelgroup");
     if (c.shapelessPhysicsModelLine && !c.dataModelPhysics)
-        std::fprintf(stderr, "warning: %s line %d: $physicsmodel has no $physicsshape\n",
-                     c.file.c_str(), c.shapelessPhysicsModelLine);
+        pulse::diag::WarnAt({c.Path(), c.shapelessPhysicsModelLine}, "$physicsmodel has no $physicsshape");
 
     // set once every source has been read (the DMX loader latches it on the
     // first model carrying an upAxis attribute)
@@ -9302,6 +9673,106 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
     // needs the final rotation/scale, so it runs after everything above
     FinishAttachments(c);
     return true;
+}
+
+} // namespace
+
+void PrintCommandNames() {
+    for (const Command& k : kCommands) {
+        if (pulse::api::Active()) pulse::api::Record("command", "{\"name\":" + pulse::api::String(k.name) + "}");
+        else std::printf("%s\n", k.name);
+    }
+}
+
+bool IsQcScriptPath(const char* path)
+{
+    const std::string ext = pulse::FilePath(path).extension().string();
+    return _stricmp(ext.c_str(), ".qc") == 0 || _stricmp(ext.c_str(), ".pulseqc") == 0 ||
+        _stricmp(ext.c_str(), ".qczip") == 0;
+}
+
+bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
+                  const ScriptVars& defvars, const SearchDirs& includeDirs,
+                  const SearchDirs& fileDirs, const ScriptFiles* unsaved) {
+    const auto* package = pulse::qcpackage::active;
+    const std::string normalizedPath = (package ? package->Primary() : pulse::FilePath(rawPath)).string();
+    const char* path = normalizedPath.c_str();
+    Ctx c{out};
+    c.unsaved = unsaved;
+    c.keepGoing = pulse::dependencies::g_keepGoing;
+
+    const std::string* unsavedText = UnsavedText(c, normalizedPath);
+    pulse::dependencies::Note(normalizedPath, pulse::dependencies::Kind::Script, unsavedText);
+    std::string text;
+    if (unsavedText) {
+        text = *unsavedText;
+    } else if (pulse::qcpackage::active) {
+        text = pulse::qcpackage::active->Read(normalizedPath);
+    } else {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            if (err) *err = std::string("cannot open \"") + path + "\"";
+            return false;
+        }
+        std::ostringstream buf;
+        buf << f.rdbuf();
+        text = buf.str();
+    }
+    StripUtf8Bom(text);
+
+    c.scriptDir = fs::path(path).parent_path();
+    c.curDir = c.scriptDir;
+    c.sourceDirStack.push_back(c.scriptDir);
+    c.file = fs::path(path).filename().string();
+    c.rootFile = c.file;
+    c.err = err;
+
+    // -defvar: in effect from the first line, and pinned - a later repeat on
+    // the command line just wins over the earlier one
+    for (const auto& kv : defvars) {
+        c.variables[kv.first].text = kv.second;
+        if (!c.IsLockedVar(kv.first))
+            c.lockedVars.push_back(kv.first);
+    }
+
+    auto seedDirs = [package](const SearchDirs& in, std::vector<fs::path>& out, std::vector<fs::path>& internal) {
+        for (const std::string& dir : in) {
+            const fs::path path = pulse::FilePath(dir);
+            const fs::path full = path.is_absolute() ? path : fs::current_path() / path;
+            out.push_back(full.lexically_normal().make_preferred());
+            internal.push_back(package && !path.is_absolute() ? package->Path() / path : full);
+        }
+    };
+    seedDirs(includeDirs, c.launchIncludeDirs, c.packageIncludeDirs);
+    seedDirs(fileDirs, c.launchSearchDirs, c.packageSearchDirs);
+
+    { PULSE_PERF("load", "tokenize");
+      if (!Tokenize(text, c.file, c.Path(), c.toks, err))
+          return false; }
+    if (pulse::api::Active()) {
+        c.apiSources.push_back(fs::absolute(pulse::FilePath(path)).lexically_normal().u8string());
+        for (auto& token : c.toks) token.apiSource = 0;
+    }
+
+    // the root of the $include cycle check
+    std::error_code ec;
+    const fs::path canon = fs::weakly_canonical(path, ec);
+    c.includeStack.push_back(ec ? std::string(path) : canon.string());
+
+    out.mdlPath = rawPath;
+
+    bool ran;
+    { PULSE_PERF("load", "run commands"); ran = RunCommands(c); }
+    pulse::diag::Current() = {};
+    if (!ran)
+        return false;
+    if (c.hadError) { // already reported; the end-of-script passes would only add noise
+        pulse::diag::LastFailure().recorded = true;
+        if (err) *err = pulse::diag::LastFailure().message;
+        return false;
+    }
+    PULSE_PERF("load", "finish script");
+    return FinishScript(c, out, err);
 }
 
 } // namespace pulse::loader

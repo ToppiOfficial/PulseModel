@@ -3,6 +3,7 @@
 // Ports of Option_Eyeball, Option_Mouth and Option_DmxEyelid.
 
 #include "strcompat.h"
+#include "diagnostic.h"
 
 #include "facemarkup.h"
 
@@ -200,7 +201,7 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
             side = 0;
             leftOk = true;
         } else {
-            std::printf("WARNING: Unknown Eyeball: %s\n", eye.name.c_str());
+            pulse::diag::Warnf("Unknown Eyeball: %s\n", eye.name.c_str());
             continue;
         }
 

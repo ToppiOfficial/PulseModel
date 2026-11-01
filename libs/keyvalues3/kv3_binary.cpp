@@ -180,6 +180,8 @@ private:
             case 21: out = static_cast<int>(lane.two.U16()); break;
             case 22: out = static_cast<int>(static_cast<int8_t>(lane.one.U8())); break;
             case 23: out = static_cast<int>(lane.one.U8()); break;
+            case 26: out = uint64_t{0}; break;
+            case 27: out = uint64_t{1}; break;
             default: throw std::runtime_error("Unsupported binary KV3 type " + std::to_string(tag.first));
         }
         if (tag.second == 1) out.flag = "resource";

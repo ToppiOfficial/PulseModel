@@ -3,7 +3,7 @@
 // The `$rendermesh <name> <file> { ... }` edit options: what a modelling tool
 // would have done to the file before exporting it, done at load time instead.
 //
-// Both are scoped to ONE $rendermesh. A $rendermesh with a body loads its own
+// Edits are scoped to one $rendermesh. A $rendermesh with a body loads its own
 // private Source, so an edit never reaches another reference to the same file -
 // the compile is unaffected outside this render mesh.
 
@@ -29,24 +29,6 @@ struct MeshFilter {
     };
     std::vector<Entry> names;
     bool exclusive = false;
-    // $removemeshword: drop every face whose material name contains one of these
-    // (case-insensitive substring). Repeatable and independent of $exceptionlist.
-    std::vector<std::string> removeWords;
-    // $removemesh: drop every face whose material name equals one of these
-    // (case-insensitive, path and extension ignored). Unmatched is a hard error.
-    struct RemoveEntry {
-        std::string name;
-        mutable bool matched = false;
-    };
-    std::vector<RemoveEntry> removeNames;
-    // $cullvertex: drop every face touching a vertex whose weight in the named
-    // stream (e.g. cullvertex$0, case-insensitive) is above threshold. A mesh without it is skipped.
-    struct CullEntry {
-        std::string group;
-        float threshold = 0.0f;
-        bool matched = false;
-    };
-    std::vector<CullEntry> cullGroups;
 
     bool empty() const { return names.empty(); } // $exceptionlist only
 
@@ -56,9 +38,6 @@ struct MeshFilter {
     // First entry that never matched a mesh, or null.
     const std::string* Unmatched() const;
 
-    // True if the material is named by $removemesh or contains a $removemeshword keyword.
-    bool MaterialRemoved(const std::string& materialName) const;
-
     // $decimatemesh: mesh names -> face tag (1-based per command, 0 = untagged).
     struct TagEntry {
         std::string name;
@@ -66,13 +45,45 @@ struct MeshFilter {
         bool matched = false;
     };
     std::vector<TagEntry> tags;
-    std::vector<TagEntry> inflateTags; // $inflate mesh: same shape, packed into the high byte
     int Tag(const std::string& meshName, const std::string& dagName);
 
-    // $toonoutline: DMX float vertex stream read into SrcVertex::outline (case-insensitive)
-    std::string outlineStream;
-    bool outlineStreamFound = false;
+    struct EditStream {
+        std::string name;
+        int component = -1; // -1 float stream; 0/1 = U/V of a $switchuv vector2 stream
+        bool found = false;
+    };
+    std::vector<EditStream> editStreams;
+    std::string editStreamError;
+    bool keepMeshIdentity = false, selectMeshStreams = false;
 };
+
+enum class SelectionCombine { Add, Subtract, Intersect };
+enum class MeshOperation {
+    SelectStream, SelectMaterial, SelectMesh, SelectMeshByStream,
+    SelectWeights, SetWeight, ShiftWeights,
+    SelectAll, SelectNone, InvertSelection, DeleteFaces,
+    DeleteVertices, Duplicate, ReplaceMaterial, FlipNormals, Weld, Inflate, SwitchUV
+};
+
+struct EditMeshOperation {
+    MeshOperation kind = MeshOperation::SelectAll;
+    SelectionCombine combine = SelectionCombine::Add;
+    std::string name;
+    std::string residualBone;
+    Vector3 offset{}, angles{};
+    std::vector<std::string> materials;
+    float value = 0.5f, thicknessClamp = 0.0f;
+    bool replaceSelection = false, hull = true, sharpEdges = false;
+    bool selectChildren = false;
+    bool contains = false; // $selectmaterial contains: case-insensitive substring match
+    bool worldAxes = false;
+    bool ignoreSelectWarn = false;
+    int line = 0;
+};
+
+bool ApplyEditMesh(Source& src, MaterialTable& mats,
+                   const std::vector<EditMeshOperation>& operations,
+                   std::string* err, int* errorLine);
 
 // $wrinklescale <morph> <scale> - what dmxedit's SetWrinkleScale would have
 // baked into the DMX, minus the controller argument: wrinkle bakes per morph,
@@ -98,27 +109,10 @@ enum class SkinnedBoneCull { None, Tree, Aggressive };
 
 void CullUnskinnedBones(Source& src, SkinnedBoneCull mode);
 
-// $weld [seams] [sharp [deg]] - merge vertices that share an exact position,
-// within one material and with identical bone weights. Normals are averaged,
-// so hard-edge splits collapse.
-
-// `seams` also merges across differing UVs, which fuses texture seams -
-// without it a UV split still keeps its own vertex.
-enum class WeldMode { None, KeepSeams, All };
-
-// sharp keeps hard edges: vertices at one position whose normals differ stay
-// separate instead of averaging into one smooth normal. sharpAngle > 0 is a
-// tolerance in degrees, so near-equal normals still merge.
-void WeldVertices(Source& src, WeldMode mode, bool sharp = false,
-                  float sharpAngle = 0.0f);
-
-// Offset vertices and morph targets along their unit normals, in model units.
-// `meshTag` > 0 limits it to faces with that $inflate mesh group, `materials` to
-// vertices of those materials (path and extension ignored); neither = all.
-// False if the selection matched no vertex.
-bool InflateVertices(Source& src, float amount, int meshTag = 0,
-                     const std::vector<std::string>& materials = {},
-                     const MaterialTable* mats = nullptr);
+// Merge selected vertices across UV seams, within a material and identical
+// bone weights. sharpEdges preserves normal splits at each merged centroid.
+void WeldVertices(Source& src, std::vector<char>& selection,
+                  float distance = 0.0001f, bool sharpEdges = false);
 
 // $scalebone: scale a bone's subtree in its bind-space axes, deforming skinned
 // vertices by their subtree weight and moving descendant bone origins. False if no such bone.
@@ -153,20 +147,6 @@ void RemoveSmallMeshes(Source& src, float limit);
 // cannot both be right - vertices are baked into bind space at load - so the
 // first one wins and the other deforms. Merge meshes off one rig.
 bool MergeSources(const std::vector<Source*>& parts, Source& out, std::string* err);
-
-// $toonoutline: append an inverse hull pushed out by thickness * SrcVertex::outline.
-// A face with a corner weight outside [minWeight, maxWeight] gets no hull. An
-// unencoded weight is 0, or 1 with forceUse. perMaterial names each hull
-// material <source material>_<material>.
-struct ToonOutlineOption {
-    float thickness = 0.0f, minWeight = 0.1f, maxWeight = 1.0f;
-    float thicknessClamp = 0.0f; // Blender solidify Clamp factor, 0 = off
-    bool weld = true, perMaterial = false, forceUse = false;
-    std::string material = "toonoutline", cdmaterial;
-    int line = 0;
-};
-
-bool AddToonOutline(Source& src, MaterialTable& mats, const ToonOutlineOption& o, std::string* err);
 
 } // namespace pulse::source
 

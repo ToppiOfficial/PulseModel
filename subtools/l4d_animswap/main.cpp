@@ -18,12 +18,16 @@
 #include <vector>
 
 #include "animwrite.h"
+#include "apioutput.h"
 #include "dmxwrite.h"
 #include "format/mdl.h"
 #include "mdlfile.h"
 
 namespace fm = pulse::format;
 namespace dc = mdldecompiler;
+
+// The shared clip and DMX writers report decompile outputs; this tool has no API.
+void mdldecompiler::RecordOutput(const std::string&) {}
 
 namespace {
 
@@ -552,8 +556,7 @@ struct Retargeter {
             if (!WriteClip(clip, 30, Remap(m, f)))
                 return {};
             pre.push_back("$animation " + Quote(animName) + " " + Quote("anims/" + clip + ".dmx") +
-                          " { fps 30 ignorescale origin 0 0 0 ignoretransformbone angles "
-                          "ignoretransformbone position }  // the pose the deltas subtract");
+                          " { fps 30 ignorescale origin 0 0 0 }  // the pose the deltas subtract");
         }
         return animName;
     }
@@ -613,12 +616,9 @@ struct Retargeter {
         opt(first);
         if (delta)
             opt("subtract " + Quote(subtract) + " 0");
-        // Built at the rig's proportions and placement, so like the included vanilla
-        // clips it must not see the model's $scale, $origin or $transformbone edits.
+        // Clips already use the rig's proportions and placement.
         opt("ignorescale");
         opt("origin 0 0 0");
-        opt("ignoretransformbone angles");
-        opt("ignoretransformbone position");
         const auto* mv = m.At<fm::mstudiomovement_t>(&a, a.movementindex, a.nummovements);
         for (int k = 0; mv && k < a.nummovements; ++k) {
             std::string ctrl;
