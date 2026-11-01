@@ -274,7 +274,6 @@ struct Ctx {
     int macroExpansions = 0; // runaway-recursion guard
     std::vector<std::string> lockedVars; // -defvar names; locked against $definevariable
     bool scriptBreak = false; // $break, sticky through every $include parent
-    bool generated = false; // a .pulsemodel's lowered tokens: variables are already substituted
 
     float defaultFps = 30.0f;
     float defaultMotionRollback = 0.3f; // seed for a new anim's motionrollback
@@ -353,10 +352,7 @@ struct Ctx {
         if (!err) return false;
 
         const pulse::diag::Location at = pulse::diag::Resolve({Path(), line});
-        if (at.path.empty())
-            *err = file + "(" + std::to_string(line) + "): " + msg;
-        else
-            *err = fs::path(at.file).filename().string() + ": " + at.path + ": " + msg;
+        *err = file + "(" + std::to_string(line) + "): " + msg;
         pulse::diag::NoteFailure(*err, at, msg);
         return false;
     }
@@ -9574,7 +9570,7 @@ bool RunCommands(Ctx& c) {
             continue;
         }
         const size_t start = c.pos;
-        if (!c.generated && !ExpandCommandVars(c)) {
+        if (!ExpandCommandVars(c)) {
             if (!SkipFailedCommand(c, start))
                 return false;
             continue;
@@ -9681,17 +9677,6 @@ bool FinishScript(Ctx& c, cm::CompileInput& out, std::string* err) {
 
 } // namespace
 
-bool IsScriptCommand(const std::string& name) { return IsCommandName(name); }
-
-const std::string* FindUnsavedText(const ScriptFiles* unsaved, const std::string& path) {
-    if (!unsaved) return nullptr;
-
-    const std::string key = UnsavedKey(pulse::FilePath(path));
-    for (const auto& [file, text] : *unsaved)
-        if (UnsavedKey(pulse::FilePath(file)) == key) return &text;
-    return nullptr;
-}
-
 void PrintCommandNames() {
     for (const Command& k : kCommands) {
         if (pulse::api::Active()) pulse::api::Record("command", "{\"name\":" + pulse::api::String(k.name) + "}");
@@ -9787,36 +9772,6 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
         return false;
     }
     PULSE_PERF("load", "finish script");
-    return FinishScript(c, out, err);
-}
-
-bool LoadTokenScript(const char* rawPath, const std::vector<ScriptToken>& tokens,
-                     cm::CompileInput& out, std::string* err, const SearchDirs& fileDirs) {
-    const fs::path path = pulse::FilePath(rawPath);
-    Ctx c{out};
-    c.generated = true;
-    c.scriptDir = path.parent_path();
-    c.curDir = c.scriptDir;
-    c.sourceDirStack.push_back(c.scriptDir);
-    c.file = path.filename().string();
-    c.rootFile = c.file;
-    c.err = err;
-
-    for (const std::string& dir : fileDirs) {
-        const fs::path p = pulse::FilePath(dir);
-        c.launchSearchDirs.push_back((p.is_absolute() ? p : fs::current_path() / p)
-                                         .lexically_normal().make_preferred());
-    }
-
-    c.toks.reserve(tokens.size());
-    for (const ScriptToken& t : tokens)
-        c.toks.push_back({t.text, t.line, t.quoted});
-    out.mdlPath = path.string();
-
-    const bool ran = RunCommands(c);
-    pulse::diag::Current() = {};
-    if (!ran)
-        return false;
     return FinishScript(c, out, err);
 }
 

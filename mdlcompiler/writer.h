@@ -36,17 +36,10 @@ std::vector<uint8_t> BuildVtx(compile::CompiledModel& mdl, std::vector<uint8_t>&
 // checksum must be the one already stamped into the .mdl.
 std::vector<uint8_t> BuildPhy(compile::CompiledModel& mdl, int32_t checksum);
 
-// One output file kept in memory, named as the game reads it ("models/<name>.mdl").
-struct OutputFile {
-    std::string path;
-    std::vector<uint8_t> bytes;
-};
-
 // Write <outDir>/<outname>.mdl/.vvd/.dx90.vtx (+ .phy when there is collision
-// data, + .dx80.vtx when writeDx80). outDir may be empty (cwd). With `memory`
-// the files are returned there and nothing is written.
+// data, + .dx80.vtx when writeDx80). outDir may be empty (cwd).
 bool WriteModelFiles(compile::CompiledModel& mdl, const std::string& outDir, bool legacyVtx,
-                     bool writeDx80, std::string* err, std::vector<OutputFile>* memory = nullptr);
+                     bool writeDx80, std::string* err);
 
 } // namespace pulse::writer
 

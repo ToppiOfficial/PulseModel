@@ -1,19 +1,13 @@
 # mdlcompiler - the single portable executable.
 
-option(PULSEMODEL_ENABLE_PULSEMODEL "Enable the .pulsemodel front end" ON)
-
 add_executable(mdlcompiler main.cpp api.h dmxloader.cpp dmxvalidate.cpp dmxrig.cpp smdloader.cpp
                fbxloader.cpp meshedit.cpp compile.cpp facemarkup.cpp rename.cpp
                flexreg.cpp qcloader.cpp qcpackage.cpp writemdl.cpp writevtx.cpp writephy.cpp)
-if(PULSEMODEL_ENABLE_PULSEMODEL)
-    target_sources(mdlcompiler PRIVATE pulsemodel.cpp)
-endif()
 
 # Each tool owns its own version; there is no project-wide one.
 set(TOOL_VERSION 1.0.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
-target_compile_definitions(mdlcompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}"
-    PULSEMODEL_ENABLE_PULSEMODEL=$<BOOL:${PULSEMODEL_ENABLE_PULSEMODEL}>)
+target_compile_definitions(mdlcompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 
 # App icon plus Explorer's Details tab (description, product name/version, copyright).
 if(WIN32)

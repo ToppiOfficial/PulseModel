@@ -23,9 +23,6 @@
 #include "pathcompat.h"
 #include "perf.h"
 #include "pulselimits.h"
-#if PULSEMODEL_ENABLE_PULSEMODEL
-#include "pulsemodel.h"
-#endif
 #include "qcloader.h"
 #include "qcpackage.h"
 #include "rename.h"
@@ -35,11 +32,7 @@
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
-#if PULSEMODEL_ENABLE_PULSEMODEL
-static constexpr const char* kScriptFormats = ".qc/.pulseqc/.qczip/.pulsemodel";
-#else
 static constexpr const char* kScriptFormats = ".qc/.pulseqc/.qczip";
-#endif
 
 static int Fail(const char* what, const std::string& detail) {
     pulse::diag::RecordFatal(detail);
@@ -60,9 +53,6 @@ static int Usage() {
     std::printf("usage: mdlcompiler <%s> [-game <dir>]\n", kScriptFormats);
     std::printf("\n");
     std::printf("  -api          read a versioned integration request from stdin\n");
-#if PULSEMODEL_ENABLE_PULSEMODEL
-    std::printf("  -only <id>    the model to compile from a .pulsemodel holding several\n");
-#endif
     std::printf("  -game <dir>   mod dir to install into; output goes to\n");
     std::printf("                <dir>\\models\\<modelname>.mdl (-outdir is a synonym)\n");
     std::printf("  -modelname <path>   overrides $modelname\n");
@@ -127,7 +117,7 @@ struct ApiCall {
 static ApiCall ParseApiCall(const nlohmann::json& request) {
     ApiCall call;
     call.method = request.at("method").get<std::string>();
-    if (call.method == "analyze" || call.method == "preview")
+    if (call.method == "analyze")
         pulse::api::CheckMembers(request, {"script", "arguments", "files"});
     else if (call.method == "compile") pulse::api::CheckMembers(request, {"script", "arguments"});
     else throw std::runtime_error("Unknown API method \"" + call.method + "\"");
@@ -161,7 +151,6 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     const char* script = nullptr;
     std::string outdir;
     std::string modelname; // -modelname: overrides the script's $modelname
-    std::string only;      // -only: a .pulsemodel's model id
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
     bool noDx80 = false; // -nodx80: force-skip .dx80.vtx, overriding the script
     int launchMinLod = -1;
@@ -173,9 +162,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     bool dumpMaterials = false;
     const bool dumpDependencies = api && api->method == "compile";
     const bool analyze = api && api->method == "analyze";
-    const bool preview = api && api->method == "preview"; // compile, files sent back instead of written
-    pulse::dependencies::g_enabled = dumpDependencies || analyze || preview;
-    pulse::dependencies::g_hashes = !analyze && !preview;
+    pulse::dependencies::g_enabled = dumpDependencies || analyze;
+    pulse::dependencies::g_hashes = !analyze;
     pulse::dependencies::g_keepGoing = analyze;
     pulse::loader::ScriptVars defvars;
     pulse::loader::SearchDirs includeDirs, fileDirs;
@@ -190,14 +178,6 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
             if (i + 1 >= argc)
                 return Fail("bad option", "-modelname needs a model path");
             modelname = argv[++i];
-        } else if (std::strcmp(argv[i], "-only") == 0) {
-#if PULSEMODEL_ENABLE_PULSEMODEL
-            if (i + 1 >= argc)
-                return Fail("bad option", "-only needs a model id");
-            only = argv[++i];
-#else
-            return Fail("bad option", "-only is unavailable in this build");
-#endif
         } else if (std::strcmp(argv[i], "-defvar") == 0) {
             // a .pulseqc $definevariable, set from the launch line and pinned
             if (i + 2 >= argc)
@@ -258,11 +238,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
             // studiomdl GUI front ends pass switches we do not have (-nop4,
             // -verbose, ...). Warn and carry on rather than refusing to run.
             pulse::diag::Warnf("ignoring unknown option: %s\n", argv[i]);
-        } else if (!script || pulse::loader::IsQcScriptPath(argv[i])
-#if PULSEMODEL_ENABLE_PULSEMODEL
-                   || pulse::pulsemodel::IsPulseModelPath(argv[i])
-#endif
-        ) {
+        } else if (!script || pulse::loader::IsQcScriptPath(argv[i])) {
             // an ignored option may have eaten a value we now see as
             // positional, so a real script extension always wins
             script = argv[i];
@@ -280,19 +256,12 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
 
-#if PULSEMODEL_ENABLE_PULSEMODEL
-    const bool pulseModel = pulse::pulsemodel::IsPulseModelPath(script);
-#else
-    const bool pulseModel = false;
-#endif
-    if (!pulse::loader::IsQcScriptPath(script) && !pulseModel)
+    if (!pulse::loader::IsQcScriptPath(script))
         return Fail("unsupported script", std::string(script) +
                                               ": only " + kScriptFormats + " files are supported");
-    if (!only.empty() && !pulseModel)
-        return Fail("bad option", "-only selects a model of a .pulsemodel");
 
     std::unique_ptr<pulse::qcpackage::Package> package;
-    if (!pulseModel && pulse::qcpackage::Package::IsPackage(pulse::FilePath(script)))
+    if (pulse::qcpackage::Package::IsPackage(pulse::FilePath(script)))
         package = std::make_unique<pulse::qcpackage::Package>(pulse::FilePath(script));
 
     std::string err;
@@ -301,23 +270,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    bool loaded = false;
-#if PULSEMODEL_ENABLE_PULSEMODEL
-    if (pulseModel) {
-        pulse::pulsemodel::LoadOptions options;
-        options.only = only;
-        options.defvars = defvars;
-        options.fileDirs = fileDirs;
-        options.unsaved = api ? &api->unsaved : nullptr;
-        loaded = pulse::pulsemodel::Load(script, options, input, &err);
-        // sent even when a command failed: the merge itself may still have worked
-        if (analyze || preview) pulse::pulsemodel::PrintResolved();
-    } else
-#endif
-    {
-        loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
-                                             api ? &api->unsaved : nullptr);
-    }
+    const bool loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
+                                                    api ? &api->unsaved : nullptr);
     if (analyze) pulse::dependencies::Print(loaded);
     if (!loaded)
         return Fail("script error", err);
@@ -348,9 +302,6 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     if (!pulse::compile::Compile(input, model, &err))
         return Fail("compile error", err);
     auto tCompile = Clock::now();
-#if PULSEMODEL_ENABLE_PULSEMODEL
-    if (pulseModel && api) pulse::pulsemodel::PrintCompiled(input, model);
-#endif
 
     if (dumpMaterials) {
         std::printf("Used materials:\n");
@@ -361,18 +312,6 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     if (definebones) {
         g_stage = "definebones";
         DumpDefineBones(model);
-        return 0;
-    }
-
-    // the files a viewer needs; dx80 never reaches one, so it is not built
-    if (preview) {
-        g_stage = "write";
-        std::vector<pulse::writer::OutputFile> files;
-        if (!pulse::writer::WriteModelFiles(model, "", input.vtxArchetype == 0, false, &err, &files))
-            return Fail("write error", err);
-        for (const pulse::writer::OutputFile& file : files)
-            pulse::api::RecordFile(file.path, file.bytes.data(), file.bytes.size());
-        pulse::dependencies::Print();
         return 0;
     }
 
@@ -437,21 +376,9 @@ int main(int argc, char** argv) {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
                                                  "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
-                                                 "\"qczipPackage\":1,\"rename\":1,\"preview\":1"
-#if PULSEMODEL_ENABLE_PULSEMODEL
-                                                 ",\"pulsemodel\":1,\"schema\":1"
-#endif
-                                                 "}");
+                                                 "\"qczipPackage\":1,\"rename\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
-            } else if (request.at("method") == "schema") {
-                pulse::api::CheckMembers(request, {});
-#if PULSEMODEL_ENABLE_PULSEMODEL
-                pulse::pulsemodel::PrintSchema();
-                rc = 0;
-#else
-                rc = Fail("unsupported API method", ".pulsemodel schema is unavailable in this build");
-#endif
             } else if (request.at("method") == "rename") {
                 pulse::api::CheckMembers(request, {"arguments"});
                 std::string err;
