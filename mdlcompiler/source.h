@@ -21,6 +21,8 @@ using math::Vector4;
 using math::RadianEuler;
 using math::matrix3x4;
 
+enum class EditStreamKind { Float, UV, Channel };
+
 // Collapsed to kMaxBoneWeights after global bone collapse (BalanceGlobalBoneWeights).
 struct SrcBoneWeight {
     int numbones = 0;
@@ -212,12 +214,13 @@ struct Source {
     // comparator + same libc = same order).
     std::vector<SrcVertex> vertex;
 
-    // Requested model 22 float streams, per unified vertex; NaN means absent.
-    // A $switchuv vector2 stream is two entries, component 0 (U) and 1 (V).
+    // Requested model 22 streams, per unified vertex; NaN means absent. A vector
+    // stream is one entry per component: UV 0/1, or Channel 0-3 (r/x .. a/w).
     struct EditStream {
         std::string name;
         std::vector<float> values;
         int component = -1;
+        EditStreamKind kind = EditStreamKind::Float;
     };
     std::vector<EditStream> editStreams;
 
@@ -276,6 +279,11 @@ SourceAnim* FindSourceAnim(Source& src, const char* name);
 
 // Per-mesh tangent basis from face UV gradients. Shared by DMX + SMD loaders.
 void CalcModelTangentSpaces(Source& src);
+
+// One face's normalized S and T gradients.
+void CalcTriangleTangentSpace(const Vector3& p0, const Vector3& p1, const Vector3& p2,
+                              const Vector2& t0, const Vector2& t1, const Vector2& t2,
+                              Vector3& sVect, Vector3& tVect);
 
 // Dup-collapse, weight-desc bubble sort, drop tiny weights, clip to iMaxCount,
 // renormalize. Shared by loader + compile.

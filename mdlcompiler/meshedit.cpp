@@ -486,6 +486,127 @@ void ApplyInflation(Source& src, const std::vector<char>& selection,
     CalcModelTangentSpaces(src);
 }
 
+const Source::EditStream* FindEditStream(const Source& src, const std::string& name,
+                                         EditStreamKind kind, int component) {
+    for (const auto& stream : src.editStreams)
+        if (stream.kind == kind && stream.component == component &&
+            _stricmp(stream.name.c_str(), name.c_str()) == 0)
+            return &stream;
+    return nullptr;
+}
+
+// CalcModelTangentSpaces's basis without its reference vertex 0 accumulation.
+// Per vertex T and handedness; w = 0 when the UVs give no tangent.
+std::vector<Vector4> UnskewedTangents(const Source& src) {
+    auto cross = [](const Vector3& a, const Vector3& b) {
+        return Vector3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    };
+
+    std::vector<Vector3> sSum(src.vertex.size()), tSum(src.vertex.size());
+    for (int mi = 0; mi < src.nummeshes; ++mi) {
+        const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
+        for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
+            const uint32_t corners[3] = {mesh.vertexoffset + src.face[f].a, mesh.vertexoffset + src.face[f].b,
+                                         mesh.vertexoffset + src.face[f].c};
+            const SrcVertex &v0 = src.vertex[corners[0]], &v1 = src.vertex[corners[1]], &v2 = src.vertex[corners[2]];
+
+            Vector3 s, t;
+            CalcTriangleTangentSpace(v0.position, v1.position, v2.position,
+                                     v0.texcoord, v1.texcoord, v2.texcoord, s, t);
+            for (uint32_t corner : corners) {
+                sSum[corner] = {sSum[corner].x + s.x, sSum[corner].y + s.y, sSum[corner].z + s.z};
+                tSum[corner] = {tSum[corner].x + t.x, tSum[corner].y + t.y, tSum[corner].z + t.z};
+            }
+        }
+    }
+
+    std::vector<Vector4> tangents(src.vertex.size());
+    for (size_t i = 0; i < tangents.size(); ++i) {
+        const Vector3& n = src.vertex[i].normal;
+        const Vector3 handed = cross(sSum[i], tSum[i]);
+        const float w = handed.x * n.x + handed.y * n.y + handed.z * n.z < 0.0f ? -1.0f : 1.0f;
+
+        // S made perpendicular to N
+        Vector3 tangent = cross(cross(n, sSum[i]), n);
+        if (pm::VectorNormalize(tangent) > 0.0f)
+            tangents[i] = {tangent.x, tangent.y, tangent.z, w};
+    }
+    return tangents;
+}
+
+// Decode a tangent-frame 0..1 RGB stream into a per-vertex push direction.
+bool StreamDirections(const Source& src, const EditMeshOperation& op, const std::vector<char>& selection,
+                      std::vector<Vector3>& push, std::string& error) {
+    const Source::EditStream* channel[3];
+    for (int k = 0; k < 3; ++k) {
+        channel[k] = FindEditStream(src, op.directionStream, EditStreamKind::Channel, k);
+        if (!channel[k]) {
+            error = "no kept mesh has vector stream \"" + op.directionStream + "\"";
+            return false;
+        }
+    }
+
+    // 8-bit (0.5, 0.5, 0.5) decodes to length ~0.007 and still means no direction
+    const float kMinLength = 0.01f;
+    const std::vector<Vector4> tangents = UnskewedTangents(src);
+    size_t fallbacks = 0;
+    push.assign(src.vertex.size(), Vector3{});
+    for (size_t i = 0; i < push.size(); ++i) {
+        if (!selection[i]) continue;
+
+        const float r = channel[0]->values[i], g = channel[1]->values[i], b = channel[2]->values[i];
+        if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b)) {
+            error = "selected vertices have no vector stream \"" + op.directionStream + "\"";
+            return false;
+        }
+
+        Vector3 n = src.vertex[i].normal;
+        pm::VectorNormalize(n);
+        const Vector4& t = tangents[i];
+        const Vector3 d{r * 2.0f - 1.0f, (g * 2.0f - 1.0f) * (op.flipY ? -1.0f : 1.0f), b * 2.0f - 1.0f};
+        const Vector3 bitangent{(n.y * t.z - n.z * t.y) * t.w, (n.z * t.x - n.x * t.z) * t.w,
+                                (n.x * t.y - n.y * t.x) * t.w};
+
+        Vector3 direction{t.x * d.x + bitangent.x * d.y + n.x * d.z,
+                          t.y * d.x + bitangent.y * d.y + n.y * d.z,
+                          t.z * d.x + bitangent.z * d.y + n.z * d.z};
+        const float encoded = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        if (t.w == 0.0f || encoded < kMinLength || pm::VectorNormalize(direction) <= 0.0f) {
+            direction = n;
+            ++fallbacks;
+        }
+        push[i] = direction;
+    }
+
+    if (fallbacks) {
+        pulse::diag::Location at = pulse::diag::Current();
+        at.line = op.line;
+        pulse::diag::WarnAtf(at, "$meshedit: $inflate directionstream \"%s\": %zu vertices have no usable "
+                             "direction or tangent and use the vertex normal",
+                             op.directionStream.c_str(), fallbacks);
+    }
+
+    if (op.closeSeams) {
+        std::map<std::tuple<float, float, float>, Vector3> sums;
+        const auto key = [&](size_t i) {
+            const Vector3& p = src.vertex[i].position;
+            return std::make_tuple(p.x, p.y, p.z);
+        };
+
+        for (size_t i = 0; i < push.size(); ++i) {
+            if (!selection[i]) continue;
+            Vector3& sum = sums[key(i)];
+            sum = {sum.x + push[i].x, sum.y + push[i].y, sum.z + push[i].z};
+        }
+        for (size_t i = 0; i < push.size(); ++i) {
+            if (!selection[i]) continue;
+            Vector3 average = sums[key(i)];
+            if (pm::VectorNormalize(average) > 0.0f) push[i] = average;
+        }
+    }
+    return true;
+}
+
 void ReindexEditVertices(Source& src, const std::vector<int>& origins, std::vector<char>& selection) {
     std::vector<int> head(src.vertex.size(), -1), next(origins.size(), -1);
     std::vector<SrcVertex> vertices;
@@ -789,11 +910,9 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                             matches[i] = 1;
                 }
             } else if (op.kind == MeshOperation::SelectStream) {
-                const Source::EditStream* stream = nullptr;
-                for (const auto& candidate : src.editStreams)
-                    if (candidate.component < 0 && _stricmp(candidate.name.c_str(), op.name.c_str()) == 0)
-                        stream = &candidate;
-                if (!stream) return fail("no kept mesh has float stream \"" + op.name + "\"");
+                const Source::EditStream* stream = FindEditStream(
+                    src, op.name, op.channel < 0 ? EditStreamKind::Float : EditStreamKind::Channel, op.channel);
+                if (!stream) return fail("no kept mesh has stream \"" + op.name + "\"");
                 for (size_t i = 0; i < matches.size(); ++i)
                     matches[i] = std::isfinite(stream->values[i]) && stream->values[i] >= op.value;
             } else if (op.kind == MeshOperation::SelectMaterial) {
@@ -910,10 +1029,8 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
         if (std::find(selection.begin(), selection.end(), 1) == selection.end()) continue;
 
         if (op.kind == MeshOperation::SwitchUV) {
-            const Source::EditStream* uv[2] = {};
-            for (const auto& candidate : src.editStreams)
-                if (candidate.component >= 0 && _stricmp(candidate.name.c_str(), op.name.c_str()) == 0)
-                    uv[candidate.component] = &candidate;
+            const Source::EditStream* uv[2] = {FindEditStream(src, op.name, EditStreamKind::UV, 0),
+                                               FindEditStream(src, op.name, EditStreamKind::UV, 1)};
             if (!uv[0] || !uv[1]) return fail("no kept mesh has UV stream \"" + op.name + "\"");
             for (size_t i = 0; i < selection.size(); ++i)
                 if (selection[i] && (!std::isfinite(uv[0]->values[i]) || !std::isfinite(uv[1]->values[i])))
@@ -933,19 +1050,43 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             std::vector<Vector3> push;
             std::vector<float> distance;
             InflationVectors(src, op.value, op.thicknessClamp, selection, push, distance);
+
+            const Source::EditStream* weight = nullptr;
+            if (!op.weightStream.empty()) {
+                weight = FindEditStream(src, op.weightStream,
+                                        op.weightChannel < 0 ? EditStreamKind::Float : EditStreamKind::Channel,
+                                        op.weightChannel);
+                if (!weight) return fail("no kept mesh has stream \"" + op.weightStream + "\"");
+            }
+
+            const bool fromStream = !op.directionStream.empty();
+            std::vector<Vector3> streamPush;
+            if (fromStream) {
+                std::string error;
+                if (!StreamDirections(src, op, selection, streamPush, error)) return fail(error);
+            }
+
             for (size_t i = 0; i < push.size(); ++i) {
-                if (!op.hull) {
+                if (fromStream) {
+                    push[i] = streamPush[i];
+                } else if (!op.hull) {
                     push[i] = src.vertex[i].normal;
                     pm::VectorNormalize(push[i]);
                 }
                 distance[i] *= op.value;
+                if (weight && selection[i]) {
+                    if (!std::isfinite(weight->values[i]))
+                        return fail("selected vertices have no stream \"" + op.weightStream + "\"");
+                    distance[i] *= weight->values[i];
+                }
                 const auto& p = src.vertex[i].position;
                 if (selection[i] && (!std::isfinite(p.x + push[i].x * distance[i]) ||
                                      !std::isfinite(p.y + push[i].y * distance[i]) ||
                                      !std::isfinite(p.z + push[i].z * distance[i])))
                     return fail("inflate produces a non-finite position");
             }
-            ApplyInflation(src, selection, push, distance, op.hull);
+            // a stream push is the morph base, as in hull mode: deltas tilt it
+            ApplyInflation(src, selection, push, distance, op.hull || fromStream);
             continue;
         }
 

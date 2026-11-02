@@ -652,6 +652,29 @@ struct MeshEdit {
     int vcaLine = 0;
 };
 
+void RequestEditStream(source::MeshFilter& filter, const std::string& name,
+                       source::EditStreamKind kind, int component) {
+    for (const auto& stream : filter.editStreams)
+        if (stream.kind == kind && stream.component == component &&
+            _stricmp(stream.name.c_str(), name.c_str()) == 0)
+            return;
+
+    filter.editStreams.push_back({name, component, false, kind});
+}
+
+// Strip a trailing .r/.g/.b/.a or .x/.y/.z/.w. Returns its channel, or -1 if none.
+int SplitStreamChannel(std::string& name) {
+    if (name.size() < 3 || name[name.size() - 2] != '.') return -1;
+
+    const char suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(name.back())));
+    size_t channel = std::string("rgba").find(suffix);
+    if (channel == std::string::npos) channel = std::string("xyzw").find(suffix);
+    if (channel == std::string::npos) return -1;
+
+    name.resize(name.size() - 2);
+    return static_cast<int>(channel);
+}
+
 bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
     bool ignoreSelectWarn = false;
     if (!c.Eof() && !c.Cur().quoted && c.Cur().line == cmd.line &&
@@ -758,25 +781,18 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                 if (!want("a DMX float stream name", op.name)) return false;
                 if (hasArg() && !number("a selection threshold", op.value)) return false;
 
-                bool registered = false;
-                for (const auto& stream : edit.filter.editStreams)
-                    registered = registered || (stream.component < 0 &&
-                                                _stricmp(stream.name.c_str(), op.name.c_str()) == 0);
-                if (!registered) edit.filter.editStreams.push_back({op.name});
+                op.channel = SplitStreamChannel(op.name);
+                RequestEditStream(edit.filter, op.name,
+                                  op.channel < 0 ? source::EditStreamKind::Float : source::EditStreamKind::Channel,
+                                  op.channel);
             }
         } else if (name == "switchuv") {
             op.kind = MeshOperation::SwitchUV;
             if (!want("a DMX UV stream name", op.name)) return false;
             if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
 
-            bool registered = false;
-            for (const auto& stream : edit.filter.editStreams)
-                registered = registered || (stream.component >= 0 &&
-                                            _stricmp(stream.name.c_str(), op.name.c_str()) == 0);
-            if (!registered) {
-                edit.filter.editStreams.push_back({op.name, 0});
-                edit.filter.editStreams.push_back({op.name, 1});
-            }
+            RequestEditStream(edit.filter, op.name, source::EditStreamKind::UV, 0);
+            RequestEditStream(edit.filter, op.name, source::EditStreamKind::UV, 1);
         } else if (name == "setweight") {
             op.kind = MeshOperation::SetWeight;
             op.value = 1.0f;
@@ -865,7 +881,40 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                     if (op.thicknessClamp < 0.0f)
                         return c.Fail(t->line, where + ": thicknessclamp must be 0 or above");
                     clampSeen = true;
+                } else if (option == "directionstream" && op.directionStream.empty()) {
+                    if (!want("a DMX vector stream name", op.directionStream)) return false;
+                    if (op.directionStream.empty())
+                        return c.Fail(t->line, where + ": directionstream requires a nonempty name");
+                } else if (option == "weightstream" && op.weightStream.empty()) {
+                    if (!want("a DMX stream name", op.weightStream)) return false;
+                    if (op.weightStream.empty())
+                        return c.Fail(t->line, where + ": weightstream requires a nonempty name");
+                } else if (option == "flipy" && !op.flipY) {
+                    op.flipY = true;
+                } else if (option == "closeseams" && !op.closeSeams) {
+                    op.closeSeams = true;
                 } else return c.Fail(t->line, where + ": unexpected option \"" + option + "\"");
+            }
+
+            if (op.directionStream.empty()) {
+                if (op.flipY || op.closeSeams)
+                    return c.Fail(t->line, where + ": flipy and closeseams need directionstream");
+            } else {
+                if (modeSeen && op.hull)
+                    return c.Fail(t->line, where + ": directionstream cannot be combined with hull");
+                if (SplitStreamChannel(op.directionStream) >= 0)
+                    return c.Fail(t->line, where + ": directionstream reads RGB and takes no channel");
+                op.hull = false;
+                for (int component = 0; component < 3; ++component)
+                    RequestEditStream(edit.filter, op.directionStream, source::EditStreamKind::Channel, component);
+            }
+
+            if (!op.weightStream.empty()) {
+                op.weightChannel = SplitStreamChannel(op.weightStream);
+                RequestEditStream(edit.filter, op.weightStream,
+                                  op.weightChannel < 0 ? source::EditStreamKind::Float
+                                                       : source::EditStreamKind::Channel,
+                                  op.weightChannel);
             }
         } else {
             return c.Fail(t->line, "$meshedit: unknown operation \"" + t->text + "\"");
@@ -972,10 +1021,14 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                 if (op.kind == source::MeshOperation::SelectStream ||
                     op.kind == source::MeshOperation::SelectMesh ||
                     op.kind == source::MeshOperation::SelectMeshByStream ||
-                    op.kind == source::MeshOperation::SwitchUV) {
+                    op.kind == source::MeshOperation::SwitchUV ||
+                    (op.kind == source::MeshOperation::Inflate &&
+                     (!op.directionStream.empty() || !op.weightStream.empty()))) {
                     const char* selector = op.kind == source::MeshOperation::SelectStream ? "$selectdatastream"
                         : op.kind == source::MeshOperation::SelectMesh ? "$selectmesh"
-                        : op.kind == source::MeshOperation::SwitchUV ? "$switchuv" : "$selectmeshbystream";
+                        : op.kind == source::MeshOperation::SwitchUV ? "$switchuv"
+                        : op.kind == source::MeshOperation::Inflate ? "$inflate streams"
+                        : "$selectmeshbystream";
                     c.Fail(op.line, std::string("$meshedit: ") + selector + " needs a DMX source");
                     return nullptr;
                 }
@@ -1055,24 +1108,52 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
     }
 
     if (edit) {
-        // a missing UV stream is a hard error, unlike $selectdatastream's skip
+        const auto streamMissing = [&](const std::string& name, source::EditStreamKind kind, int component) {
+            for (const auto& stream : edit->filter.editStreams)
+                if (stream.kind == kind && (component < 0 || stream.component == component) && !stream.found &&
+                    _stricmp(name.c_str(), stream.name.c_str()) == 0)
+                    return true;
+            return false;
+        };
+
+        // a missing UV or $inflate stream is a hard error, unlike $selectdatastream's skip
         for (const auto& block : edit->editBlocks)
-            for (const auto& op : block)
-                if (op.kind == source::MeshOperation::SwitchUV)
-                    for (const auto& stream : edit->filter.editStreams)
-                        if (stream.component >= 0 && !stream.found &&
-                            _stricmp(op.name.c_str(), stream.name.c_str()) == 0) {
-                            c.Fail(op.line, "$rendermesh \"" + edit->name + "\": $meshedit: no kept mesh has "
-                                            "UV stream \"" + op.name + "\"");
-                            return nullptr;
-                        }
+            for (const auto& op : block) {
+                const char* missing = nullptr;
+                std::string missingName;
+                if (op.kind == source::MeshOperation::SwitchUV &&
+                    streamMissing(op.name, source::EditStreamKind::UV, -1)) {
+                    missing = "UV stream";
+                    missingName = op.name;
+                } else if (op.kind == source::MeshOperation::Inflate) {
+                    if (!op.directionStream.empty() &&
+                        streamMissing(op.directionStream, source::EditStreamKind::Channel, 0)) {
+                        missing = "vector stream";
+                        missingName = op.directionStream;
+                    } else if (!op.weightStream.empty() &&
+                               streamMissing(op.weightStream,
+                                             op.weightChannel < 0 ? source::EditStreamKind::Float
+                                                                  : source::EditStreamKind::Channel,
+                                             op.weightChannel)) {
+                        missing = "stream";
+                        missingName = op.weightStream;
+                    }
+                }
+                if (missing) {
+                    c.Fail(op.line, "$rendermesh \"" + edit->name + "\": $meshedit: no kept mesh has " +
+                                        missing + " \"" + missingName + "\"");
+                    return nullptr;
+                }
+            }
         for (auto& block : edit->editBlocks) {
             block.erase(std::remove_if(block.begin(), block.end(), [&](const auto& op) {
                 if (op.kind != source::MeshOperation::SelectStream) return false;
 
+                const source::EditStreamKind kind = op.channel < 0 ? source::EditStreamKind::Float
+                                                                   : source::EditStreamKind::Channel;
                 for (const auto& stream : edit->filter.editStreams) {
-                    if (stream.component >= 0 || _stricmp(op.name.c_str(), stream.name.c_str()) != 0 ||
-                        stream.found) continue;
+                    if (stream.kind != kind || stream.component != op.channel ||
+                        _stricmp(op.name.c_str(), stream.name.c_str()) != 0 || stream.found) continue;
 
                     if (!op.ignoreSelectWarn)
                         pulse::diag::WarnAt({c.Path(), op.line}, "$rendermesh \"" + edit->name +

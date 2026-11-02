@@ -1175,6 +1175,48 @@ Vector2VertexStream FindVector2VertexStream(const dmx::Element& state, const std
     return stream;
 }
 
+// A vector3 or vector4 stream, read one component at a time.
+struct ChannelVertexStream {
+    const std::vector<dmx::Vector3>* vec3 = nullptr;
+    const std::vector<dmx::Vector4>* vec4 = nullptr;
+    const std::vector<int32_t>* indices = nullptr;
+    bool present = false;
+
+    bool Read(size_t corner, int component, float& value) const {
+        if (!indices || corner >= indices->size()) return false;
+        const int32_t index = (*indices)[corner];
+        if (index < 0) return false;
+
+        if (vec4 && static_cast<size_t>(index) < vec4->size()) {
+            const dmx::Vector4& v = (*vec4)[index];
+            value = component == 0 ? v.x : component == 1 ? v.y : component == 2 ? v.z : v.w;
+            return true;
+        }
+        if (vec3 && static_cast<size_t>(index) < vec3->size() && component < 3) {
+            const dmx::Vector3& v = (*vec3)[index];
+            value = component == 0 ? v.x : component == 1 ? v.y : v.z;
+            return true;
+        }
+        return false;
+    }
+};
+
+ChannelVertexStream FindChannelVertexStream(const dmx::Element& state, const std::string& name) {
+    ChannelVertexStream stream;
+    const std::string indexName = name + "Indices";
+    for (const auto& attribute : state.attributes) {
+        if (_stricmp(attribute.name.c_str(), name.c_str()) == 0) {
+            stream.present = true;
+            stream.vec3 = std::get_if<std::vector<dmx::Vector3>>(&attribute.value);
+            stream.vec4 = std::get_if<std::vector<dmx::Vector4>>(&attribute.value);
+        } else if (_stricmp(attribute.name.c_str(), indexName.c_str()) == 0) {
+            stream.present = true;
+            stream.indices = std::get_if<std::vector<int32_t>>(&attribute.value);
+        }
+    }
+    return stream;
+}
+
 bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Element* mesh,
               const dmx::Element* bindState, const pm::matrix3x4& mat, int nBoneAssign) {
     MeshTemp& tmp = *info.tmp;
@@ -1260,7 +1302,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     if (info.filter && !info.filter->editStreams.empty() && positionIndices) {
         if (tmp.editStreams.empty())
             for (const auto& stream : info.filter->editStreams)
-                tmp.editStreams.push_back({stream.name, {}, stream.component});
+                tmp.editStreams.push_back({stream.name, {}, stream.component, stream.kind});
         streamStart = tmp.editStreams.front().values.size();
         for (size_t si = 0; si < info.filter->editStreams.size(); ++si) {
             auto& request = info.filter->editStreams[si];
@@ -1271,12 +1313,28 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                     return _stricmp(field.c_str(), request.name.c_str()) == 0;
                 })) continue;
             auto invalid = [&] {
-                info.filter->editStreamError = std::string(request.component < 0 ? "invalid float stream \""
-                                                                                 : "invalid UV stream \"") +
-                                               request.name + "\" on mesh \"" + mesh->name + "\"";
+                const char* label = request.kind == EditStreamKind::Float ? "invalid float stream \""
+                                    : request.kind == EditStreamKind::UV  ? "invalid UV stream \""
+                                                                          : "invalid vector stream \"";
+                info.filter->editStreamError = std::string(label) + request.name + "\" on mesh \"" +
+                                               mesh->name + "\"";
                 return false;
             };
-            if (request.component >= 0) {
+            if (request.kind == EditStreamKind::Channel) {
+                const auto channels = FindChannelVertexStream(*bindState, request.name);
+                if (!channels.present) continue;
+                if (!channels.indices || channels.indices->size() != positionIndices->size())
+                    return invalid();
+                for (size_t corner = 0; corner < positionIndices->size(); ++corner) {
+                    float value;
+                    if (!channels.Read(corner, request.component, value) || !std::isfinite(value))
+                        return invalid();
+                    values[streamStart + corner] = value;
+                }
+                request.found = true;
+                continue;
+            }
+            if (request.kind == EditStreamKind::UV) {
                 // a UV stream follows the bind state's flipVCoordinates, as the main UV does
                 const auto uv = FindVector2VertexStream(*bindState, request.name);
                 if (!uv.present) continue;
@@ -1683,6 +1741,8 @@ int FaceCompare(const void* elem1, const void* elem2) {
     return 0;
 }
 
+} // namespace (anon)
+
 // reference CalcTriangleTangentSpace (mathlib)
 void CalcTriangleTangentSpace(const pm::Vector3& p0, const pm::Vector3& p1, const pm::Vector3& p2,
                               const pm::Vector2& t0, const pm::Vector2& t1, const pm::Vector2& t2,
@@ -1725,9 +1785,6 @@ void CalcTriangleTangentSpace(const pm::Vector3& p0, const pm::Vector3& p1, cons
     pm::VectorNormalize(sVect);
     pm::VectorNormalize(tVect);
 }
-
-} // namespace (anon) - CalcModelTangentSpaces is exposed (source.h) for the
-  // SMD loader; it still uses the anon-namespace CalcTriangleTangentSpace above.
 
 // reference CalcModelTangentSpaces
 void CalcModelTangentSpaces(Source& src) {
@@ -1896,7 +1953,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
     if (!tmp.vertexEditMesh.empty()) out.vertexEditMesh.resize(numvlist);
     out.editStreams.clear();
     for (const auto& stream : tmp.editStreams)
-        out.editStreams.push_back({stream.name, std::vector<float>(numvlist), stream.component});
+        out.editStreams.push_back({stream.name, std::vector<float>(numvlist), stream.component, stream.kind});
     for (int i = 0; i < numvlist; i++) {
         const VUnify& u = st.listdata[v_listsort[i]];
         SrcVertex& vertex = out.vertex[i];
@@ -2570,10 +2627,14 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
                    std::string* err, bool morphSource, MeshFilter* filter, bool animOnly,
                    bool physicsShapes) {
     if (filter && (!filter->editStreams.empty() || filter->selectMeshStreams) && dm.format_version != 22) {
-        const bool uv = std::any_of(filter->editStreams.begin(), filter->editStreams.end(),
-                                    [](const MeshFilter::EditStream& s) { return s.component >= 0; });
+        const auto hasKind = [&](EditStreamKind kind) {
+            return std::any_of(filter->editStreams.begin(), filter->editStreams.end(),
+                               [&](const MeshFilter::EditStream& s) { return s.kind == kind; });
+        };
         const char* selector = filter->editStreams.empty() ? "$selectmeshbystream"
-                               : uv ? "$switchuv" : "$selectdatastream";
+                               : hasKind(EditStreamKind::UV) ? "$switchuv"
+                               : hasKind(EditStreamKind::Channel) ? "$meshedit stream channels"
+                                                                  : "$selectdatastream";
         if (err) *err = std::string(selector) + " uses model 22 data streams; this file declares model " +
                         std::to_string(dm.format_version);
         return false;
@@ -2643,7 +2704,7 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
             { PULSE_PERF("load", "BuildIndividualMeshes"); BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out); }
         else if (filter)
             for (const auto& stream : filter->editStreams)
-                out.editStreams.push_back({stream.name, {}, stream.component});
+                out.editStreams.push_back({stream.name, {}, stream.component, stream.kind});
     }
 
     // one flexkey per delta state (reference AddFlexKeys). With no combination

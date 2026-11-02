@@ -49,8 +49,9 @@ struct MeshFilter {
 
     struct EditStream {
         std::string name;
-        int component = -1; // -1 float stream; 0/1 = U/V of a $switchuv vector2 stream
+        int component = -1; // -1 float stream; UV 0/1; Channel 0-3
         bool found = false;
+        EditStreamKind kind = EditStreamKind::Float;
     };
     std::vector<EditStream> editStreams;
     std::string editStreamError;
@@ -70,6 +71,13 @@ struct EditMeshOperation {
     SelectionCombine combine = SelectionCombine::Add;
     std::string name;
     std::string residualBone;
+    int channel = -1; // $selectdatastream: -1 float stream, else a vector channel
+
+    // $inflate: directionStream holds tangent-frame RGB encoded as 0..1
+    std::string directionStream, weightStream;
+    int weightChannel = -1;
+    bool flipY = false, closeSeams = false;
+
     Vector3 offset{}, angles{};
     std::vector<std::string> materials;
     float value = 0.5f, thicknessClamp = 0.0f;
