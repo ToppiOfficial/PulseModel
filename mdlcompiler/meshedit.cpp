@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "math/math.h"
@@ -177,16 +178,18 @@ WeightEditResult TransferBoneWeight(SrcBoneWeight& weights, int slot, int residu
     return WeightEditResult::Applied;
 }
 
+bool ContainsNoCase(std::string hay, std::string needle) {
+    std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
+    std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+    return hay.find(needle) != std::string::npos;
+}
+
 bool MaterialMatches(const std::string& material, const std::vector<std::string>& names,
                      bool contains = false) {
     const std::string base = std::filesystem::path(material).stem().string();
-    std::string hay = material;
-    std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
     for (const auto& name : names) {
         if (contains) {
-            std::string needle = name;
-            std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
-            if (hay.find(needle) != std::string::npos) return true;
+            if (ContainsNoCase(material, name)) return true;
         } else if (_stricmp(name.c_str(), material.c_str()) == 0 || _stricmp(name.c_str(), base.c_str()) == 0) {
             return true;
         }
@@ -579,11 +582,9 @@ bool StreamDirections(const Source& src, const EditMeshOperation& op, const std:
     }
 
     if (fallbacks) {
-        pulse::diag::Location at = pulse::diag::Current();
-        at.line = op.line;
-        pulse::diag::WarnAtf(at, "$meshedit: $inflate directionstream \"%s\": %zu vertices have no usable "
-                             "direction or tangent and use the vertex normal",
-                             op.directionStream.c_str(), fallbacks);
+        std::printf("$meshedit: $inflate directionstream \"%s\": %zu vertices have no usable "
+                    "direction or tangent and use the vertex normal\n",
+                    op.directionStream.c_str(), fallbacks);
     }
 
     if (op.closeSeams) {
@@ -930,8 +931,10 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                 for (size_t i = 0; i < src.editMeshes.size(); ++i) {
                     const auto& mesh = src.editMeshes[i];
                     matchedMeshes[i] = op.kind == MeshOperation::SelectMesh
-                        ? _stricmp(mesh.name.c_str(), op.name.c_str()) == 0 ||
-                          _stricmp(mesh.dagName.c_str(), op.name.c_str()) == 0
+                        ? (op.contains
+                            ? ContainsNoCase(mesh.name, op.name) || ContainsNoCase(mesh.dagName, op.name)
+                            : _stricmp(mesh.name.c_str(), op.name.c_str()) == 0 ||
+                              _stricmp(mesh.dagName.c_str(), op.name.c_str()) == 0)
                         : std::any_of(mesh.streams.begin(), mesh.streams.end(),
                             [&](const std::string& name) { return _stricmp(name.c_str(), op.name.c_str()) == 0; });
                 }
@@ -943,8 +946,10 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
 
             if (!op.ignoreSelectWarn && std::find(matches.begin(), matches.end(), 1) == matches.end()) {
                 const char* selector = op.kind == MeshOperation::SelectStream ? "$selectdatastream"
-                    : op.kind == MeshOperation::SelectMaterial ? "$selectmaterial"
-                    : op.kind == MeshOperation::SelectMesh ? "$selectmesh"
+                    : op.kind == MeshOperation::SelectMaterial
+                        ? (op.contains ? "$selectmaterialsubstring" : "$selectmaterial")
+                    : op.kind == MeshOperation::SelectMesh
+                        ? (op.contains ? "$selectmeshsubstring" : "$selectmesh")
                     : op.kind == MeshOperation::SelectMeshByStream ? "$selectmeshbystream"
                     : "$selectweights";
                 pulse::diag::Location at = pulse::diag::Current();

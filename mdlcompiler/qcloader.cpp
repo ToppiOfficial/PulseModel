@@ -724,7 +724,9 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         if (t->quoted)
             return c.Fail(t->line, "$meshedit expects an unquoted operation");
         if (name == "selectdatastream" || name == "selectmaterial" ||
-            name == "selectmesh" || name == "selectmeshbystream" || name == "selectweights") {
+            name == "selectmaterialsubstring" || name == "selectmesh" ||
+            name == "selectmeshsubstring" || name == "selectmeshbystream" ||
+            name == "selectweights") {
             if (hasArg() && !c.Cur().quoted) {
                 const std::string mode = Lower(c.Cur().text);
                 if (mode == "add" || mode == "subtract" || mode == "intersect") {
@@ -734,23 +736,29 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
                     if (mode == "intersect") op.combine = source::SelectionCombine::Intersect;
                 }
             }
-            if (name == "selectmaterial") {
+            if (name == "selectmaterial" || name == "selectmaterialsubstring") {
                 op.kind = MeshOperation::SelectMaterial;
-                if (hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "contains") {
+                op.contains = name == "selectmaterialsubstring";
+                if (!op.contains && hasArg() && !c.Cur().quoted && Lower(c.Cur().text) == "contains") {
                     ++c.pos;
                     c.MarkOption();
                     op.contains = true;
                 }
+
                 while (hasArg()) {
                     std::string material = c.Next()->text;
                     if (material.empty()) return c.Fail(t->line, where + " requires nonempty material names");
                     op.materials.push_back(std::move(material));
                 }
                 if (op.materials.empty()) return c.Fail(t->line, where + " expects one or more material names");
-            } else if (name == "selectmesh" || name == "selectmeshbystream") {
+            } else if (name == "selectmesh" || name == "selectmeshsubstring" || name == "selectmeshbystream") {
                 const bool byStream = name == "selectmeshbystream";
                 op.kind = byStream ? MeshOperation::SelectMeshByStream : MeshOperation::SelectMesh;
-                if (!want(byStream ? "a DMX stream name" : "a DMX mesh name", op.name)) return false;
+                op.contains = name == "selectmeshsubstring";
+                if (!want(byStream ? "a DMX stream name"
+                          : op.contains ? "a DMX mesh name substring"
+                                        : "a DMX mesh name", op.name))
+                    return false;
                 if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
                 edit.filter.keepMeshIdentity = true;
                 edit.filter.selectMeshStreams = edit.filter.selectMeshStreams || byStream;
@@ -1025,7 +1033,8 @@ source::Source* LoadSource(Ctx& c, const std::string& filename, int line,
                     (op.kind == source::MeshOperation::Inflate &&
                      (!op.directionStream.empty() || !op.weightStream.empty()))) {
                     const char* selector = op.kind == source::MeshOperation::SelectStream ? "$selectdatastream"
-                        : op.kind == source::MeshOperation::SelectMesh ? "$selectmesh"
+                        : op.kind == source::MeshOperation::SelectMesh
+                            ? (op.contains ? "$selectmeshsubstring" : "$selectmesh")
                         : op.kind == source::MeshOperation::SwitchUV ? "$switchuv"
                         : op.kind == source::MeshOperation::Inflate ? "$inflate streams"
                         : "$selectmeshbystream";

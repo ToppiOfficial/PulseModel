@@ -83,7 +83,7 @@ struct EditMeshOperation {
     float value = 0.5f, thicknessClamp = 0.0f;
     bool replaceSelection = false, hull = true, sharpEdges = false;
     bool selectChildren = false;
-    bool contains = false; // $selectmaterial contains: case-insensitive substring match
+    bool contains = false; // material/mesh selection: case-insensitive substring match
     bool worldAxes = false;
     bool ignoreSelectWarn = false;
     int line = 0;
