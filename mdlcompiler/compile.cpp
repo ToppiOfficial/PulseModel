@@ -1041,6 +1041,63 @@ void WarnAimAtTargetOrder(const Ctx& ctx) {
     }
 }
 
+// The engine compares aimvector's raw numbers with the world aim direction and goes
+// unstable near their opposite, or when its roll fix nears 180 degrees (narrowest in
+// GMod, wider in L4D2). Rest pose only - animation can avoid or cause either case.
+void WarnAimAtFlickRisk(const Ctx& ctx) {
+    constexpr float kElevationMatchDeg = 0.1f;
+    constexpr float kVerticalAim = 0.9f;
+    constexpr float kMostlyLevelDir = 0.6f;
+    const float radToDeg = 180.0f / pm::kPiF;
+    const auto elevation = [&](float z) {
+        return std::asin(std::fmax(-1.0f, std::fmin(1.0f, z))) * radToDeg;
+    };
+
+    const CompiledModel& m = *ctx.out;
+    for (const AimAtBone& ab : m.aimatbones) {
+        const Vector3& aim = ab.aimvector;
+        if (aim.x == 0.0f && aim.y == 0.0f && aim.z == 0.0f)
+            continue;
+
+        // same rest positions the engine solves from: basepos in parent space
+        const Vector3 origin =
+            ab.parent >= 0 ? pm::VectorTransform(ab.basepos, m.bones[ab.parent].boneToPose)
+                           : ab.basepos;
+        Vector3 target;
+        if (ab.aimAttach >= 0) {
+            const Attachment& att = m.attachments[ab.aimAttach];
+            target = MatrixGetColumn(
+                pm::ConcatTransforms(m.bones[att.bone].boneToPose, att.local), 3);
+        } else {
+            target = MatrixGetColumn(m.bones[ab.aimBone].boneToPose, 3);
+        }
+
+        Vector3 dir{target.x - origin.x, target.y - origin.y, target.z - origin.z};
+        if (pm::VectorNormalize(dir) < 1e-4f)
+            continue;
+
+        // turning the model only changes yaw, so a matching elevation meets the bad zone
+        const bool crossesOpposite =
+            std::fabs(elevation(dir.z) - elevation(-aim.z)) <= kElevationMatchDeg;
+        if (crossesOpposite && std::fabs(aim.z) > 0.9999f) {
+            pulse::diag::Warnf("aimconstraint \"%s\": rest pose points opposite its aimvector, "
+                               "so it may solve wrong for as long as it holds this pose - "
+                               "flip the bone's aim axis\n",
+                               ab.bonename.c_str());
+        } else if (crossesOpposite) {
+            pulse::diag::Warnf("aimconstraint \"%s\": rest pose elevation matches the opposite "
+                               "of its aimvector, so turning the model may flick it for a frame "
+                               "- move the target a few degrees off that plane\n",
+                               ab.bonename.c_str());
+        } else if (std::fabs(aim.z) >= kVerticalAim && std::fabs(dir.z) <= kMostlyLevelDir) {
+            pulse::diag::Warnf("aimconstraint \"%s\": vertical aimvector on a mostly level bone "
+                               "is more prone to one-frame flicks - prefer a horizontal aim "
+                               "axis\n",
+                               ab.bonename.c_str());
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MapProceduralBones (TagProceduralBones' quatinterp half)
 //
@@ -11036,6 +11093,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     if (!LinkAttachments(ctx, err))
         return false;
     WarnAimAtTargetOrder(ctx);
+    WarnAimAtFlickRisk(ctx);
 
     // $lockbonelengths, immediately before the rules like the reference
     { PULSE_TIME_PASS("LockBoneLengths");
