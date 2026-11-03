@@ -2597,8 +2597,20 @@ void MapSources(Ctx& ctx) {
 // ---------------------------------------------------------------------------
 // RemapVerticesToGlobalBones + InitRemappedVertex
 // ---------------------------------------------------------------------------
+// The inputs skinning reads, compared bitwise so a match skins to the same bits.
+bool SameSkinInputs(const src::SrcVertex& a, const src::SrcVertex& b) {
+    return std::memcmp(&a.position, &b.position, sizeof(a.position)) == 0 &&
+           std::memcmp(&a.normal, &b.normal, sizeof(a.normal)) == 0 &&
+           std::memcmp(&a.boneweight, &b.boneweight, sizeof(a.boneweight)) == 0;
+}
+
 void RemapVertices(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
+    struct Skinned {
+        const src::Source* source;
+        std::vector<matrix3x4> destBoneToWorld;
+    };
+    std::vector<Skinned> skinned;
     for (auto& sp : ctx.in->sources) {
         src::Source* pSource = sp.get();
         if (pSource->vertex.empty())
@@ -2609,6 +2621,40 @@ void RemapVertices(Ctx& ctx) {
         { PULSE_PERF("remap verts", "bind transforms");
           BuildRawTransformsBind(ctx, pSource, srcBoneToWorld);
           TranslateAnimations(ctx, pSource, srcBoneToWorld, destBoneToWorld); }
+
+        // a generated LOD copies its parent's vertex pool; reuse the parent's
+        // skinned positions when every input matches bit for bit
+        const src::Source* match = nullptr;
+        { PULSE_PERF("remap verts", "reuse check");
+          for (const Skinned& s : skinned) {
+              const src::Source* o = s.source;
+              if (o->vertex.size() != pSource->vertex.size() || o->numbones != pSource->numbones ||
+                  o->boneLocalToGlobal != pSource->boneLocalToGlobal ||
+                  s.destBoneToWorld.size() != destBoneToWorld.size() ||
+                  std::memcmp(s.destBoneToWorld.data(), destBoneToWorld.data(),
+                              destBoneToWorld.size() * sizeof(matrix3x4)) != 0)
+                  continue;
+              size_t j = 0;
+              while (j < pSource->vertex.size() && SameSkinInputs(o->vertex[j], pSource->vertex[j])) ++j;
+              if (j == pSource->vertex.size()) {
+                  match = o;
+                  break;
+              }
+          } }
+        if (match) {
+            PULSE_PERF("remap verts", "reuse skinned verts");
+            pSource->globalVertices.resize(pSource->vertex.size());
+            for (size_t j = 0; j < pSource->vertex.size(); j++) {
+                src::SrcVertex& dst = pSource->globalVertices[j];
+                const src::SrcVertex& from = match->globalVertices[j];
+                dst = pSource->vertex[j];
+                dst.position = from.position;
+                dst.normal = from.normal;
+                dst.boneweight = from.boneweight;
+            }
+            continue;
+        }
+        skinned.push_back({pSource, destBoneToWorld});
 
         PULSE_PERF("remap verts", "skin to global bones");
         pSource->globalVertices.clear();
@@ -2769,12 +2815,48 @@ bool IsMeshRemoved(const Ctx& ctx, const ScriptLod& lod, int nMaterialID) {
     return false;
 }
 
+// RemoveSmallMeshes results by (source, limit). Every LOD starts from a fresh copy
+// of the same unedited source, so a repeat would compute the same faces.
+struct SmallMeshResult {
+    const src::Source* from;
+    float limit;
+    std::vector<src::SrcFace> face;
+    std::vector<uint16_t> faceTag;
+    std::vector<std::pair<int, int>> meshFaces; // per meshindex entry: faceoffset, numfaces
+};
+using SmallMeshCache = std::vector<SmallMeshResult>;
+
+// dst must still be an unedited copy of *from
+void RemoveSmallMeshesCached(SmallMeshCache& cache, const src::Source* from, src::Source& dst,
+                             float limit) {
+    PULSE_PERF("lod", "RemoveSmallMeshes");
+    for (const SmallMeshResult& r : cache) {
+        if (r.from != from || r.limit != limit)
+            continue;
+        dst.face = r.face;
+        dst.faceTag = r.faceTag;
+        for (int mi = 0; mi < dst.nummeshes; ++mi) {
+            src::SrcMesh& mesh = dst.mesh[dst.meshindex[mi]];
+            mesh.faceoffset = r.meshFaces[mi].first;
+            mesh.numfaces = r.meshFaces[mi].second;
+        }
+        return;
+    }
+    src::RemoveSmallMeshes(dst, limit);
+    SmallMeshResult r{from, limit, dst.face, dst.faceTag, {}};
+    for (int mi = 0; mi < dst.nummeshes; ++mi) {
+        const src::SrcMesh& mesh = dst.mesh[dst.meshindex[mi]];
+        r.meshFaces.emplace_back(mesh.faceoffset, mesh.numfaces);
+    }
+    cache.push_back(std::move(r));
+}
+
 // GenerateDecimatedSource: a meshoptimizer-simplified copy
 // of pSrc. The vertex pool is copied verbatim and only the face lists shrink,
 // so the LOD is already rigged - there is no weight transfer step. Registering
 // it as a source is what gets it bone-remapped along with everything else.
-src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float factor,
-                                     const ScriptLod& lod, float smallMeshLimit) {
+src::Source* GenerateDecimatedSource(Ctx& ctx, SmallMeshCache& smallCache, const src::Source* pSrc,
+                                     float factor, const ScriptLod& lod, float smallMeshLimit) {
     pulse::perf::Timer tCopy("lod", "copy source");
     auto owned = std::make_unique<src::Source>(*pSrc);
     tCopy.Stop();
@@ -2782,10 +2864,8 @@ src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float fa
     pDst->isActiveModel = false; // LOD geometry, never a bodygroup choice itself
     ctx.in->sources.push_back(std::move(owned));
 
-    if (smallMeshLimit > 0.0f) {
-        PULSE_PERF("lod", "RemoveSmallMeshes");
-        src::RemoveSmallMeshes(*pDst, smallMeshLimit);
-    }
+    if (smallMeshLimit > 0.0f)
+        RemoveSmallMeshesCached(smallCache, pSrc, *pDst, smallMeshLimit);
 
     // no point simplifying geometry this LOD is about to drop
     std::vector<bool> skip(lim::kMaxSkins, false);
@@ -2804,7 +2884,7 @@ src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float fa
 // GetLODSources: what geometry each LOD draws for one
 // model. Priority is replacemodel, then decimatemodel, then decimateallmodel,
 // and failing all three the LOD reuses the model's own full-detail source.
-void GetLodSources(Ctx& ctx, Model& model) {
+void GetLodSources(Ctx& ctx, SmallMeshCache& smallCache, Model& model) {
     const CompiledModel& m = *ctx.out;
     const int nNumLODs = static_cast<int>(m.scriptLods.size());
     model.lodSources.assign(nNumLODs, nullptr);
@@ -2834,7 +2914,7 @@ void GetLodSources(Ctx& ctx, Model& model) {
                 // always decimate the full-detail source, never the previous
                 // LOD's - the factor means "share of the original triangles"
                 pSource = GenerateDecimatedSource(
-                    ctx, model.source, r.decimation, lod,
+                    ctx, smallCache, model.source, r.decimation, lod,
                     removeSmall ? lod.smallMeshLimit : 0.0f);
                 bFound = true;
                 smallRemoved = removeSmall;
@@ -2844,7 +2924,7 @@ void GetLodSources(Ctx& ctx, Model& model) {
 
         if (!bFound && lod.HasDecimateAll()) {
             pSource = GenerateDecimatedSource(
-                ctx, model.source, lod.decimateAllFactor, lod,
+                ctx, smallCache, model.source, lod.decimateAllFactor, lod,
                 removeSmall ? lod.smallMeshLimit : 0.0f);
             bFound = true;
             smallRemoved = removeSmall;
@@ -2856,9 +2936,9 @@ void GetLodSources(Ctx& ctx, Model& model) {
         if (removeSmall && !smallRemoved && pSource) {
             PULSE_PERF("lod", "smallmesh-only copy");
             auto owned = std::make_unique<src::Source>(*pSource);
+            RemoveSmallMeshesCached(smallCache, pSource, *owned, lod.smallMeshLimit);
             pSource = owned.get();
             pSource->isActiveModel = false;
-            src::RemoveSmallMeshes(*pSource, lod.smallMeshLimit);
             ctx.in->sources.push_back(std::move(owned));
         }
 
@@ -2867,12 +2947,13 @@ void GetLodSources(Ctx& ctx, Model& model) {
 }
 
 void LoadLodSources(Ctx& ctx) {
+    SmallMeshCache smallCache;
     for (Model& model : ctx.out->models) {
         if (!model.source) { // "blank" - nothing to draw at any LOD
             model.lodSources.assign(ctx.out->scriptLods.size(), nullptr);
             continue;
         }
-        GetLodSources(ctx, model);
+        GetLodSources(ctx, smallCache, model);
     }
 }
 

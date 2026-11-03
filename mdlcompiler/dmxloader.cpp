@@ -523,15 +523,40 @@ void AddToDeltaList(DeltaTempState& ds, int nUniqueVertex) {
     }
 }
 
-// data index -> list of corner indices, ascending (reference
-// CDmeVertexDataBase::FindVertexIndicesFromDataIndex inverse map)
-std::vector<std::vector<int>> BuildInverseMap(const std::vector<int32_t>& indices,
-                                              int dataCount) {
-    std::vector<std::vector<int>> inv(dataCount);
-    for (size_t i = 0; i < indices.size(); ++i) {
-        int32_t idx = indices[i];
+// data index -> corner indices, ascending (reference
+// CDmeVertexDataBase::FindVertexIndicesFromDataIndex inverse map), stored flat
+struct InverseMap {
+    struct Corners {
+        const int* first;
+        const int* last;
+        const int* begin() const { return first; }
+        const int* end() const { return last; }
+    };
+    std::vector<int> start;   // dataCount + 1 offsets into corners
+    std::vector<int> corners;
+
+    size_t size() const { return start.empty() ? 0 : start.size() - 1; }
+    Corners operator[](size_t i) const {
+        return {corners.data() + start[i], corners.data() + start[i + 1]};
+    }
+};
+
+InverseMap BuildInverseMap(const std::vector<int32_t>& indices, int dataCount) {
+    InverseMap inv;
+    if (dataCount <= 0)
+        return inv;
+    inv.start.assign(static_cast<size_t>(dataCount) + 1, 0);
+    for (int32_t idx : indices)
         if (idx >= 0 && idx < dataCount)
-            inv[idx].push_back(static_cast<int>(i));
+            ++inv.start[idx + 1];
+    for (int d = 0; d < dataCount; ++d)
+        inv.start[d + 1] += inv.start[d];
+    inv.corners.resize(inv.start[dataCount]);
+    std::vector<int> fill(inv.start.begin(), inv.start.end() - 1);
+    for (size_t i = 0; i < indices.size(); ++i) {
+        const int32_t idx = indices[i];
+        if (idx >= 0 && idx < dataCount)
+            inv.corners[fill[idx]++] = static_cast<int>(i);
     }
     return inv;
 }
@@ -696,7 +721,7 @@ void CollapseBaseNormalsAggressive(std::vector<dmx::Vector3>& normals,
 // that are similar AROUND EACH POSITION. Produces outNormalMap (old normal
 // data index -> new) for the delta remap. Returns false (and changes nothing)
 // if the result would not be smaller.
-bool CollapseBaseNormalsWithMap(const std::vector<std::vector<int>>& posInverse,
+bool CollapseBaseNormalsWithMap(const InverseMap& posInverse,
                                 std::vector<dmx::Vector3>& normals,
                                 std::vector<int32_t>& normalIndices,
                                 float flNormalBlend,
@@ -708,7 +733,8 @@ bool CollapseBaseNormalsWithMap(const std::vector<std::vector<int>>& posInverse,
     std::vector<int32_t> newNormalIndices(nCorners, -1);
     std::vector<dmx::Vector3> newNormalData;
 
-    for (const std::vector<int>& corners : posInverse) {
+    for (size_t group = 0; group < posInverse.size(); ++group) {
+        const InverseMap::Corners corners = posInverse[group];
         int nNewNormalDataIndex = static_cast<int>(newNormalData.size());
         for (int corner : corners) {
             if (corner < 0 || corner >= static_cast<int>(nCorners))
@@ -1015,7 +1041,7 @@ inline float DeltaLength(const dmx::Vector3& v) {
 void GenerateWrinkleDelta(const std::vector<dmx::Vector3>& deltaPositions,
                           const std::vector<int32_t>& deltaPositionIndices,
                           float flScale,
-                          const std::vector<std::vector<int>>& posInverse,
+                          const InverseMap& posInverse,
                           const std::vector<int32_t>& bindTexcoordIndices,
                           int nTexcoordDataCount,
                           std::vector<float>& outWrinkle,
@@ -1070,13 +1096,13 @@ void LoadDeltaState(FlexTemp& flex, const std::string& deltaName,
                     const std::vector<float>& wrinkle,
                     const std::vector<int32_t>& wrinkleIndices,
                     const pm::matrix3x4& mat, const pm::matrix3x4& normalMat, float flScale,
-                    const std::vector<std::vector<int>>& posInverse,
-                    const std::vector<std::vector<int>>& normalInverse,
-                    const std::vector<std::vector<int>>& texcoordInverse,
+                    const InverseMap& posInverse,
+                    const InverseMap& normalInverse,
+                    const InverseMap& texcoordInverse,
                     int nStartingUniqueVertexMap) {
     DeltaTempState* ds = FindOrAddDeltaState(flex, deltaName, flex.uniqueVertices.size());
 
-    auto forEachUnique = [&](const std::vector<std::vector<int>>& inverse, int32_t dataIdx,
+    auto forEachUnique = [&](const InverseMap& inverse, int32_t dataIdx,
                              auto&& fn) {
         if (dataIdx < 0 || dataIdx >= static_cast<int32_t>(inverse.size()))
             return;
@@ -1252,9 +1278,11 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     // position-data inverse map (corner lists per position data index)
     // only the delta-state paths below read this, and it is one heap vector
     // per position - do not pay for it on a mesh without morphs
-    std::vector<std::vector<int>> posInverse;
-    if (hasDeltas && positions && positionIndices)
+    InverseMap posInverse;
+    if (hasDeltas && positions && positionIndices) {
+        PULSE_PERF("mesh", "position inverse map");
         posInverse = BuildInverseMap(*positionIndices, static_cast<int>(positions->size()));
+    }
 
     std::vector<int> normalMap; // old normal data index -> new (delta collapse)
     bool bNormalsCollapsed = false;
@@ -1262,6 +1290,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
         PULSE_PERF("mesh", "CollapseBaseNormals");
         CollapseBaseNormalsAggressive(normals, normalIndices, flNormalBlend);
     } else {
+        PULSE_PERF("mesh", "CollapseBaseNormals (morphs)");
         bNormalsCollapsed =
             CollapseBaseNormalsWithMap(posInverse, normals, normalIndices, flNormalBlend, normalMap);
     }
@@ -1299,6 +1328,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
     }
 
     size_t streamStart = 0;
+    pulse::perf::Timer tStreams("mesh", "edit streams");
     if (info.filter && !info.filter->editStreams.empty() && positionIndices) {
         if (tmp.editStreams.empty())
             for (const auto& stream : info.filter->editStreams)
@@ -1365,6 +1395,8 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
         }
     }
 
+    tStreams.Stop();
+
     // balance/speed data follows the mesh's vertices (reference LoadVertices
     // tail: whole array, or a single 1.0f so the 0-index default hits it)
     if (flex) {
@@ -1383,9 +1415,11 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
 
     // load the delta states (reference LoadMesh tail)
     if (flex && hasDeltas && positions && positionIndices) {
+        PULSE_PERF("mesh", "delta states");
         pm::matrix3x4 normalMat = pm::MatrixInverseTranspose(mat);
 
-        std::vector<std::vector<int>> normalInverse =
+        pulse::perf::Timer tInverse("mesh", "  normal/uv inverse maps");
+        InverseMap normalInverse =
             BuildInverseMap(normalIndices, static_cast<int>(normals.size()));
         int nTexcoordDataCount = 0;
         {
@@ -1393,12 +1427,14 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                 bindState->GetVector2Array(info.Stream(*bindState, "textureCoordinates"));
             if (tex) nTexcoordDataCount = static_cast<int>(tex->size());
         }
-        std::vector<std::vector<int>> texcoordInverse;
+        InverseMap texcoordInverse;
         if (texcoordIndices)
             texcoordInverse = BuildInverseMap(*texcoordIndices, nTexcoordDataCount);
+        tInverse.Stop();
 
         for (const dmx::Element* delta : *deltaStates) {
             if (!delta) continue;
+            pulse::perf::Timer tRead("mesh", "  read delta streams");
 
             std::vector<dmx::Vector3> dPos;
             if (auto p = delta->GetVector3Array(info.Stream(*delta, "positions")))
@@ -1413,8 +1449,11 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             std::vector<int32_t> dNormalIdx;
             if (auto ni = delta->GetIntArray(info.Stream(*delta, "normalsIndices")))
                 dNormalIdx = *ni;
-            if (bNormalsCollapsed)
+            tRead.Stop();
+            if (bNormalsCollapsed) {
+                PULSE_PERF("mesh", "  CollapseDeltaNormals");
                 CollapseDeltaNormals(normalMap, dNormals, dNormalIdx);
+            }
 
             // wrinkle: authored field wins (GenerateWrinkleDeltas is called
             // with bOverwrite = false); otherwise generate from the raw
@@ -1434,11 +1473,13 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                 if (auto wi = delta->GetIntArray(info.Stream(*delta, "wrinkleIndices")))
                     dWrinkleIdx = *wi;
             } else if (ws) {
+                PULSE_PERF("mesh", "  GenerateWrinkleDelta");
                 GenerateWrinkleDelta(dPos, dPosIdx, ws->scale, posInverse,
                                      texcoordIndices ? *texcoordIndices : std::vector<int32_t>{},
                                      nTexcoordDataCount, dWrinkle, dWrinkleIdx);
             }
 
+            PULSE_PERF("mesh", "  LoadDeltaState");
             LoadDeltaState(*flex, delta->name, dPos, dPosIdx, dNormals, dNormalIdx, dWrinkle,
                            dWrinkleIdx, mat, normalMat, info.flScale, posInverse, normalInverse,
                            texcoordInverse, nStartingUniqueVertexMap);
@@ -2676,14 +2717,16 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
     if (morphSource && !animOnly) {
         flexTemp.enabled = true;
         // controls first - GenerateWrinkleDeltas runs before the meshes load
-        if (const dmx::Element* comboOp = root->GetElement("combinationOperator"))
+        if (const dmx::Element* comboOp = root->GetElement("combinationOperator")) {
+            PULSE_PERF("load", "ParseComboControls");
             ParseComboControls(comboOp, comboTemp, flexTemp);
+        }
     }
 
     BoneMap boneMap;
-    out.numbones = LoadSkeleton(skeleton, model, out, boneMap);
+    { PULSE_PERF("load", "LoadSkeleton"); out.numbones = LoadSkeleton(skeleton, model, out, boneMap); }
 
-    LoadBindPose(model, scale, boneMap, out);
+    { PULSE_PERF("load", "LoadBindPose"); LoadBindPose(model, scale, boneMap, out); }
 
     // geometry (if any mesh dags exist under the model). Skipped whole for an
     // animation reference: geometry is model data and reading it would register
@@ -2691,15 +2734,18 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
     // model never draws in the .mdl.
     MeshTemp tmp;
     if (!animOnly) {
-        PULSE_PERF("load", "LoadMeshes");
+        pulse::perf::Timer tMeshes("load", "LoadMeshes");
         if (!LoadMeshes(model, dm.format_version, scale, boneMap, mats, tmp,
                         flexTemp.enabled ? &flexTemp : nullptr, filter, physicsShapes, out)) {
             if (err) *err = filter && !filter->editStreamError.empty()
                                ? filter->editStreamError : "failed to load meshes";
             return false;
         }
-        if (physicsShapes)
+        tMeshes.Stop();
+        if (physicsShapes) {
+            PULSE_PERF("load", "LoadPhysicsPrimitives");
             LoadPhysicsPrimitives(root, scale, mats, tmp, out);
+        }
         if (!tmp.face.empty())
             { PULSE_PERF("load", "BuildIndividualMeshes"); BuildIndividualMeshes(tmp, flexTemp.enabled ? &flexTemp : nullptr, out); }
         else if (filter)
@@ -2709,12 +2755,16 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
 
     // one flexkey per delta state (reference AddFlexKeys). With no combination
     // operator the ComboTemp is empty, so every key is mono.
-    if (flexTemp.enabled)
+    if (flexTemp.enabled) {
+        PULSE_PERF("load", "AddFlexKeys");
         AddFlexKeys(comboTemp, flexTemp, out);
+    }
 
     // animations
-    if (const dmx::Element* animationList = root->GetElement("animationList"))
+    if (const dmx::Element* animationList = root->GetElement("animationList")) {
+        PULSE_PERF("load", "LoadAnimations");
         LoadAnimations(animationList, scale, boneMap, out);
+    }
 
     return true;
 }
