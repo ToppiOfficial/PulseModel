@@ -1454,8 +1454,10 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
     // render mesh, and a render mesh always gets its own Source. $nomorph is the
     // load gate itself - with no morph parse there are no delta shapes, flexkeys
     // or balance data to drop later.
+    pulse::perf::Timer tLoad("rendermesh", "LoadSource");
     source::Source* src = LoadSource(c, WithSourceExtension(c, file), cmd.line,
                                      /*morphSource=*/!edit.noMorph, &edit);
+    tLoad.Stop();
     if (!src)
         return false;
 
@@ -1503,18 +1505,21 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             return c.Fail(bs.line, "$rendermesh \"" + name + "\": $scalebone: no bone \"" + bs.bone +
                                        "\" in \"" + file + "\"");
 
-    for (const auto& [factor, tag] : edit.decimates)
+    for (const auto& [factor, tag] : edit.decimates) {
+        PULSE_PERF("rendermesh", "$decimate");
         source::SimplifyFaces(*src, *src, factor, c.in.archetype == cm::Archetype::Static,
                               nullptr, tag, edit.skeletalAwareDecimation);
+    }
 
     for (const auto& block : edit.editBlocks) {
+        PULSE_PERF("rendermesh", "$meshedit");
         std::string editError;
         int errorLine = cmd.line;
         if (!source::ApplyEditMesh(*src, c.in.mats, block, &editError, &errorLine))
             return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
     }
     // after $meshedit, so bones skinned only by deleted geometry are culled too
-    source::CullUnskinnedBones(*src, edit.boneCull);
+    { PULSE_PERF("rendermesh", "CullUnskinnedBones"); source::CullUnskinnedBones(*src, edit.boneCull); }
     src->editStreams.clear();
     src->editMeshes.clear();
     src->vertexEditMesh.clear();
@@ -9650,6 +9655,7 @@ bool SkipFailedCommand(Ctx& c, size_t start) {
 }
 
 bool RunCommands(Ctx& c) {
+    pulse::perf::SortTag("command");
     while (!c.Eof()) {
         if (c.scriptBreak) // $break, here or in a file this one $included
             return true;
@@ -9660,7 +9666,9 @@ bool RunCommands(Ctx& c) {
             continue;
         }
         const size_t start = c.pos;
-        if (!ExpandCommandVars(c)) {
+        bool expanded;
+        { PULSE_PERF("load", "expand variables"); expanded = ExpandCommandVars(c); }
+        if (!expanded) {
             if (!SkipFailedCommand(c, start))
                 return false;
             continue;
@@ -9686,7 +9694,9 @@ bool RunCommands(Ctx& c) {
                 ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             auto m = c.macros.find(key);
             if (m != c.macros.end()) {
-                if (!ExpandMacro(c, cmd, m->second) && !SkipFailedCommand(c, start))
+                bool ok;
+                { PULSE_PERF("load", "expand macros"); ok = ExpandMacro(c, cmd, m->second); }
+                if (!ok && !SkipFailedCommand(c, start))
                     return false;
                 continue;
             }
@@ -9694,7 +9704,8 @@ bool RunCommands(Ctx& c) {
                                     "\" - supported: " + SupportedList());
         }
         pulse::diag::Current() = {c.Path(), cmd.line};
-        const bool succeeded = found->fn(c, cmd);
+        bool succeeded;
+        { PULSE_PERF("command", found->name); succeeded = found->fn(c, cmd); }
         c.ReportOptions(succeeded);
         if (!succeeded && !SkipFailedCommand(c, start))
             return false;

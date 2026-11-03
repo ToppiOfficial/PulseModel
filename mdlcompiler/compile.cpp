@@ -2605,10 +2605,12 @@ void RemapVertices(Ctx& ctx) {
             continue;
 
         std::vector<matrix3x4> srcBoneToWorld;
-        BuildRawTransformsBind(ctx, pSource, srcBoneToWorld);
         std::vector<matrix3x4> destBoneToWorld;
-        TranslateAnimations(ctx, pSource, srcBoneToWorld, destBoneToWorld);
+        { PULSE_PERF("remap verts", "bind transforms");
+          BuildRawTransformsBind(ctx, pSource, srcBoneToWorld);
+          TranslateAnimations(ctx, pSource, srcBoneToWorld, destBoneToWorld); }
 
+        PULSE_PERF("remap verts", "skin to global bones");
         pSource->globalVertices.clear();
         pSource->globalVertices.resize(pSource->vertex.size());
 
@@ -2773,20 +2775,26 @@ bool IsMeshRemoved(const Ctx& ctx, const ScriptLod& lod, int nMaterialID) {
 // it as a source is what gets it bone-remapped along with everything else.
 src::Source* GenerateDecimatedSource(Ctx& ctx, const src::Source* pSrc, float factor,
                                      const ScriptLod& lod, float smallMeshLimit) {
+    pulse::perf::Timer tCopy("lod", "copy source");
     auto owned = std::make_unique<src::Source>(*pSrc);
+    tCopy.Stop();
     src::Source* pDst = owned.get();
     pDst->isActiveModel = false; // LOD geometry, never a bodygroup choice itself
     ctx.in->sources.push_back(std::move(owned));
 
-    if (smallMeshLimit > 0.0f)
+    if (smallMeshLimit > 0.0f) {
+        PULSE_PERF("lod", "RemoveSmallMeshes");
         src::RemoveSmallMeshes(*pDst, smallMeshLimit);
+    }
 
     // no point simplifying geometry this LOD is about to drop
     std::vector<bool> skip(lim::kMaxSkins, false);
-    for (int matID = 0; matID < lim::kMaxSkins; matID++)
-        skip[matID] = IsMeshRemoved(ctx, lod, matID);
+    { PULSE_PERF("lod", "removemesh lookup");
+      for (int matID = 0; matID < lim::kMaxSkins; matID++)
+          skip[matID] = IsMeshRemoved(ctx, lod, matID); }
 
     // static props have no skeleton to hold a seam together, so pin the border
+    PULSE_PERF("lod", "SimplifyFaces");
     src::SimplifyFaces(*pDst, *pDst, factor,
                        ctx.in->archetype == Archetype::Static, &skip, -1,
                        lod.skeletalAwareDecimation);
@@ -2846,6 +2854,7 @@ void GetLodSources(Ctx& ctx, Model& model) {
             pSource = model.source;
 
         if (removeSmall && !smallRemoved && pSource) {
+            PULSE_PERF("lod", "smallmesh-only copy");
             auto owned = std::make_unique<src::Source>(*pSource);
             pSource = owned.get();
             pSource->isActiveModel = false;
@@ -3193,6 +3202,7 @@ void UnifyModelLods(Ctx& ctx, Model& model) {
             continue;
 
         // CopyVerts: the whole root LOD, in source order
+        pulse::perf::Timer tRoot("unify lods", "root lod verts");
         const int nStart = static_cast<int>(model.vertices.size());
         for (int v = 0; v < pLod0Mesh->numvertices; v++) {
             const int nSrcID = pLod0Mesh->vertexoffset + v;
@@ -3238,11 +3248,15 @@ void UnifyModelLods(Ctx& ctx, Model& model) {
         for (int lodID = 1; lodID < nNumLODs && !anyLowerLod; ++lodID)
             anyLowerLod = model.lodSources[lodID] != nullptr;
 
+        tRoot.Stop();
         DictIndex dictIndex;
-        if (anyLowerLod)
+        if (anyLowerLod) {
+            PULSE_PERF("unify lods", "dict index build");
             dictIndex.Build(model.vertices, pVertexDictMesh->vertexoffset,
                             pVertexDictMesh->vertexoffset + pVertexDictMesh->numvertices);
+        }
 
+        PULSE_PERF("unify lods", "lower lod match");
         for (int lodID = 1; lodID < nNumLODs; ++lodID) {
             const src::Source* pCurrLod = model.lodSources[lodID];
             if (!pCurrLod)
@@ -8949,6 +8963,7 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
     if (m.flexkeys.empty())
         return true;
 
+    pulse::perf::Timer tMaps("remap vanim", "build vertex maps");
     // sort flexkeys by (source, animationname) - SortFlexKeys
     std::vector<FlexSortEntry> sorted;
     sorted.reserve(m.flexkeys.size());
@@ -9002,6 +9017,8 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
         ins.first->second = &shared;
     }
 
+    tMaps.Stop();
+    PULSE_PERF("remap vanim", "remap deltas");
     // remap each key's deltas onto its model's vertices (original key order)
     int nNumMoved = 0;
     int nSkippedUnmapped = 0;

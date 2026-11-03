@@ -690,6 +690,7 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
     std::vector<fmt::vtx::Vertex_t> stripGroupVertices;
     std::unordered_map<int, int> vertexLookup;
 
+    pulse::perf::Timer tGather("vtx", "gather faces (cpu)");
     for (size_t n = 0; n < srcFaces.size(); ++n) {
         if (facesProcessed[n])
             continue;
@@ -745,12 +746,15 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
 
         facesProcessed[n] = true;
     }
+    tGather.Stop();
 
     if (stripGroupSourceFaces.empty())
         return;
 
-    BuildNeighborInfo(stripGroupSourceFaces, static_cast<int>(stripGroupVertices.size()));
+    { PULSE_PERF("vtx", "BuildNeighborInfo (cpu)");
+      BuildNeighborInfo(stripGroupSourceFaces, static_cast<int>(stripGroupVertices.size())); }
 
+    PULSE_PERF("vtx", "build strips (cpu)");
     if (bIsHWSkinned)
         BuildHWSkinnedStrips(b, stripGroupSourceFaces, stripGroupVertices, pStripGroup,
                              maxBonesPerStrip, pStudioModel, pStudioMesh);
@@ -949,6 +953,7 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
                                       pStudioModel, pStudioMesh, meshFaces, facesProcessed,
                                       tb.maxBonesPerVert, tb.maxBonesPerFace,
                                       tb.maxBonesPerStrip, !scriptLod.facialAnimation);
+                    PULSE_PERF("vtx", "PostProcessStripGroup (cpu)");
                     PostProcessStripGroup(&sg, newMesh.stripGroups);
                 }
             }
@@ -960,14 +965,22 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
                      [](const MeshTask& a, const MeshTask& c) { return a.work > c.work; });
     const size_t numWorkers =
         std::min<size_t>(tasks.size(), std::max(1u, std::thread::hardware_concurrency()));
+    // the slowest task bounds the wall time however many threads run
+    std::atomic<double> slowestMs{0};
+    auto timedMesh = [&](const MeshTask& t) {
+        pulse::perf::Timer tTask("vtx", "mesh tasks (cpu)");
+        runMesh(t);
+        const double ms = tTask.Elapsed();
+        for (double cur = slowestMs; ms > cur && !slowestMs.compare_exchange_weak(cur, ms);) {}
+    };
     if (numWorkers <= 1) {
         for (const MeshTask& t : tasks)
-            runMesh(t);
+            timedMesh(t);
     } else {
         std::atomic<size_t> next{0};
         auto worker = [&] {
             for (size_t i = next++; i < tasks.size(); i = next++)
-                runMesh(tasks[i]);
+                timedMesh(tasks[i]);
         };
         std::vector<std::thread> pool;
         for (size_t w = 1; w < numWorkers; ++w)
@@ -975,6 +988,12 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
         worker();
         for (std::thread& th : pool)
             th.join();
+    }
+    if (pulse::perf::g_enabled) {
+        pulse::perf::Record("vtx", "slowest mesh task", slowestMs);
+        pulse::perf::Record("vtx", "worker threads", 0);
+        std::printf("perf: vtx strip build ran %zu mesh tasks on %zu threads\n", tasks.size(),
+                    numWorkers);
     }
 
     }

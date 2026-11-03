@@ -7,17 +7,20 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <map>
+#include <iterator>
 #include <set>
 #include <tuple>
+#include <vector>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
 #include "math/math.h"
 #include "meshoptimizer.h"
+#include "perf.h"
 #include "pulselimits.h"
 
 namespace pulse::source {
@@ -86,6 +89,47 @@ const std::string* MeshFilter::Unmatched() const {
 }
 
 namespace {
+
+// Unsigned key that sorts like the float: -0 and +0 share one key, NaN sorts last.
+uint32_t FloatOrderKey(float f) {
+    if (std::isnan(f))
+        return 0xffffffffu;
+    if (f == 0.0f)
+        f = 0.0f;
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    return (bits & 0x80000000u) ? ~bits : bits | 0x80000000u;
+}
+
+// One id per distinct vertex position, ascending in (x, y, z) order, so ids sort
+// and group exactly like a std::map<std::tuple<float, float, float>> key would.
+std::vector<int> PositionIds(const Source& src, int& count) {
+    struct Key {
+        uint32_t x, y, z;
+        int vertex;
+        bool SamePosition(const Key& o) const { return x == o.x && y == o.y && z == o.z; }
+    };
+    const size_t n = src.vertex.size();
+    std::vector<Key> keys(n);
+    for (size_t i = 0; i < n; ++i) {
+        const Vector3& p = src.vertex[i].position;
+        keys[i] = {FloatOrderKey(p.x), FloatOrderKey(p.y), FloatOrderKey(p.z), static_cast<int>(i)};
+    }
+    std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
+    std::vector<int> ids(n);
+    count = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (i > 0 && !keys[i].SamePosition(keys[i - 1]))
+            ++count;
+        ids[keys[i].vertex] = count;
+    }
+    if (n) ++count;
+    return ids;
+}
 
 int FindWeightBone(const Source& src, const std::string& name) {
     for (int i = 0; i < src.numbones; ++i)
@@ -371,16 +415,13 @@ void InflationVectors(const Source& src, float thickness, float thicknessClamp,
     // Push along Blender solidify's high quality normal, built from face geometry
     // per position so authored normals cannot bend the hull: each edge takes the
     // sum of its (at most two) face normals, each position the sum of its edges.
-    using PosKey = std::tuple<float, float, float>;
-    auto posKey = [&](uint32_t v) {
-        const Vector3& p = src.vertex[v].position;
-        return std::make_tuple(p.x, p.y, p.z);
+    int numPositions = 0;
+    const std::vector<int> posId = PositionIds(src, numPositions);
+    struct EdgeFace {
+        uint64_t ends;
+        Vector3 normal;
     };
-    struct EdgeFaces {
-        Vector3 sum{0.0f, 0.0f, 0.0f};
-        int count = 0;
-    };
-    std::map<std::pair<PosKey, PosKey>, EdgeFaces> edges;
+    std::vector<EdgeFace> edgeFaces;
     for (int mi = 0; mi < src.nummeshes; ++mi) {
         const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
         for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
@@ -396,30 +437,39 @@ void InflationVectors(const Source& src, float thickness, float thicknessClamp,
             if (pm::VectorNormalize(fn) <= 0.0f)
                 continue;
             for (int k = 0; k < 3; ++k) {
-                PosKey a = posKey(c[k]), b = posKey(c[(k + 1) % 3]);
+                uint32_t a = static_cast<uint32_t>(posId[c[k]]);
+                uint32_t b = static_cast<uint32_t>(posId[c[(k + 1) % 3]]);
                 if (a == b)
                     continue;
                 if (b < a)
                     std::swap(a, b);
-                EdgeFaces& e = edges[{a, b}];
-                e.sum = {e.sum.x + fn.x, e.sum.y + fn.y, e.sum.z + fn.z};
-                ++e.count;
+                edgeFaces.push_back({(static_cast<uint64_t>(a) << 32) | b, fn});
             }
         }
     }
-    std::map<PosKey, Vector3> byPos;
-    for (auto& [ends, e] : edges) {
-        if (e.count > 2 || pm::VectorNormalize(e.sum) <= 0.0f)
+    // Stable: an edge sums its faces in face order, positions sum edges in edge
+    // order - the float results depend on both.
+    std::stable_sort(edgeFaces.begin(), edgeFaces.end(),
+                     [](const EdgeFace& x, const EdgeFace& y) { return x.ends < y.ends; });
+    std::vector<Vector3> byPos(numPositions, Vector3{0.0f, 0.0f, 0.0f});
+    for (size_t i = 0; i < edgeFaces.size();) {
+        const uint64_t ends = edgeFaces[i].ends;
+        Vector3 sum{0.0f, 0.0f, 0.0f};
+        int count = 0;
+        for (; i < edgeFaces.size() && edgeFaces[i].ends == ends; ++i, ++count) {
+            const Vector3& fn = edgeFaces[i].normal;
+            sum = {sum.x + fn.x, sum.y + fn.y, sum.z + fn.z};
+        }
+        if (count > 2 || pm::VectorNormalize(sum) <= 0.0f)
             continue; // non-manifold edges add nothing
-        for (const PosKey& p : {ends.first, ends.second}) {
+        for (uint64_t p : {ends >> 32, ends & 0xffffffffu}) {
             Vector3& s = byPos[p];
-            s = {s.x + e.sum.x, s.y + e.sum.y, s.z + e.sum.z};
+            s = {s.x + sum.x, s.y + sum.y, s.z + sum.z};
         }
     }
     push.assign(n, Vector3{});
     for (int i = 0; i < n; ++i) {
-        auto it = byPos.find(posKey(i));
-        Vector3 s = it != byPos.end() ? it->second : Vector3{0.0f, 0.0f, 0.0f};
+        Vector3 s = byPos[posId[i]];
         if (pm::VectorNormalize(s) <= 0.0f) {
             s = src.vertex[i].normal;
             pm::VectorNormalize(s);
@@ -433,8 +483,8 @@ void InflationVectors(const Source& src, float thickness, float thicknessClamp,
     clampScale.assign(n, 1.0f);
     const float clampOffset = std::fabs(thickness) * thicknessClamp;
     if (clampOffset > FLT_EPSILON) {
-        std::map<PosKey, float> lenSq;
-        auto key = posKey;
+        std::vector<float> lenSq(numPositions, FLT_MAX);
+        std::vector<char> hasEdge(numPositions, 0);
         for (int mi = 0; mi < src.nummeshes; ++mi) {
             const SrcMesh& mesh = src.mesh[src.meshindex[mi]];
             for (int f = mesh.faceoffset; f < mesh.faceoffset + mesh.numfaces; ++f) {
@@ -448,16 +498,17 @@ void InflationVectors(const Source& src, float thickness, float thicknessClamp,
                     if (l == 0.0f)
                         continue;
                     for (uint32_t v : {c[k], c[(k + 1) % 3]}) {
-                        auto it = lenSq.try_emplace(key(v), FLT_MAX).first;
-                        it->second = std::min(it->second, l);
+                        const int p = posId[v];
+                        lenSq[p] = std::min(lenSq[p], l);
+                        hasEdge[p] = 1;
                     }
                 }
             }
         }
         for (int i = 0; i < n; ++i) {
-            auto it = lenSq.find(key(i));
-            if (it != lenSq.end() && it->second < clampOffset * clampOffset)
-                clampScale[i] = std::sqrt(it->second) / clampOffset;
+            const int p = posId[i];
+            if (hasEdge[p] && lenSq[p] < clampOffset * clampOffset)
+                clampScale[i] = std::sqrt(lenSq[p]) / clampOffset;
         }
     }
 }
@@ -486,6 +537,7 @@ void ApplyInflation(Source& src, const std::vector<char>& selection,
         position.y += distance[i] * push[i].y;
         position.z += distance[i] * push[i].z;
     }
+    PULSE_PERF("meshedit", "  inflate: tangents");
     CalcModelTangentSpaces(src);
 }
 
@@ -588,20 +640,18 @@ bool StreamDirections(const Source& src, const EditMeshOperation& op, const std:
     }
 
     if (op.closeSeams) {
-        std::map<std::tuple<float, float, float>, Vector3> sums;
-        const auto key = [&](size_t i) {
-            const Vector3& p = src.vertex[i].position;
-            return std::make_tuple(p.x, p.y, p.z);
-        };
+        int numPositions = 0;
+        const std::vector<int> posId = PositionIds(src, numPositions);
+        std::vector<Vector3> sums(numPositions, Vector3{0.0f, 0.0f, 0.0f});
 
         for (size_t i = 0; i < push.size(); ++i) {
             if (!selection[i]) continue;
-            Vector3& sum = sums[key(i)];
+            Vector3& sum = sums[posId[i]];
             sum = {sum.x + push[i].x, sum.y + push[i].y, sum.z + push[i].z};
         }
         for (size_t i = 0; i < push.size(); ++i) {
             if (!selection[i]) continue;
-            Vector3 average = sums[key(i)];
+            Vector3 average = sums[posId[i]];
             if (pm::VectorNormalize(average) > 0.0f) push[i] = average;
         }
     }
@@ -859,11 +909,23 @@ void FlipNormals(Source& src) {
         std::swap(face.b, face.c);
 }
 
+static const char* OperationPerfName(MeshOperation kind) {
+    static const char* const kNames[] = {
+        "select stream", "select material", "select mesh", "select mesh by stream",
+        "select weights", "set weight", "shift weights",
+        "select all", "select none", "invert selection", "delete faces",
+        "delete vertices", "duplicate", "replace material", "flip normals", "weld", "inflate",
+        "switch uv"};
+    const size_t i = static_cast<size_t>(kind);
+    return i < std::size(kNames) ? kNames[i] : "other";
+}
+
 bool ApplyEditMesh(Source& src, MaterialTable& mats,
                    const std::vector<EditMeshOperation>& operations,
                    std::string* err, int* errorLine) {
     std::vector<char> selection(src.vertex.size(), 1);
     for (const auto& op : operations) {
+        PULSE_PERF("meshedit", OperationPerfName(op.kind));
         auto fail = [&](const std::string& message) {
             if (err) *err = message;
             if (errorLine) *errorLine = op.line;
@@ -1054,7 +1116,8 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             if (op.value == 0.0f) continue;
             std::vector<Vector3> push;
             std::vector<float> distance;
-            InflationVectors(src, op.value, op.thicknessClamp, selection, push, distance);
+            { PULSE_PERF("meshedit", "  inflate: hull normals");
+              InflationVectors(src, op.value, op.thicknessClamp, selection, push, distance); }
 
             const Source::EditStream* weight = nullptr;
             if (!op.weightStream.empty()) {
@@ -1068,6 +1131,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             std::vector<Vector3> streamPush;
             if (fromStream) {
                 std::string error;
+                PULSE_PERF("meshedit", "  inflate: stream directions");
                 if (!StreamDirections(src, op, selection, streamPush, error)) return fail(error);
             }
 
@@ -1380,6 +1444,7 @@ void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder
                 targetIdx = (targetIdx / 3) * 3;
                 if (targetIdx < 3)
                     targetIdx = 3;
+                PULSE_PERF("lod", "meshopt simplify");
                 if (rigAware)
                     newIdxCount = meshopt_simplifyWithAttributes(
                         dstIdx.data(), srcIdx.data(), srcIdx.size(), pPositions,
@@ -1417,18 +1482,39 @@ void RemoveSmallMeshes(Source& src, float limit) {
     std::vector<SrcFace> faces;
     std::vector<uint16_t> tags;
     const bool tagged = !src.faceTag.empty();
+    pulse::perf::Timer tIds("lod", "  smallmesh: position ids");
+    int numPositions = 0;
+    const std::vector<int> posId = PositionIds(src, numPositions);
+    std::vector<int> localId(numPositions, -1);
+    tIds.Stop();
 
     for (int mi = 0; mi < src.nummeshes; ++mi) {
         SrcMesh& mesh = src.mesh[src.meshindex[mi]];
         const int firstFace = mesh.faceoffset;
-        std::map<std::tuple<float, float, float>, std::vector<int>> positionFaces;
+
+        // faces touching each position, in face order: corner -> local position,
+        // then a counting sort into one flat list
+        std::vector<int> cornerPos(static_cast<size_t>(mesh.numfaces) * 3);
+        std::vector<int> touched;
         for (int fi = 0; fi < mesh.numfaces; ++fi) {
             const SrcFace& face = src.face[firstFace + fi];
-            for (uint32_t vi : {face.a, face.b, face.c}) {
-                const Vector3& p = src.vertex[mesh.vertexoffset + vi].position;
-                positionFaces[{p.x, p.y, p.z}].push_back(fi);
+            const uint32_t corners[3] = {face.a, face.b, face.c};
+            for (int k = 0; k < 3; ++k) {
+                int& l = localId[posId[mesh.vertexoffset + corners[k]]];
+                if (l < 0) {
+                    l = static_cast<int>(touched.size());
+                    touched.push_back(posId[mesh.vertexoffset + corners[k]]);
+                }
+                cornerPos[static_cast<size_t>(fi) * 3 + k] = l;
             }
         }
+        std::vector<int> listStart(touched.size() + 1, 0);
+        for (int l : cornerPos) ++listStart[l + 1];
+        for (size_t i = 1; i < listStart.size(); ++i) listStart[i] += listStart[i - 1];
+        std::vector<int> listFaces(cornerPos.size()), fill(listStart.begin(), listStart.end() - 1);
+        for (size_t c = 0; c < cornerPos.size(); ++c)
+            listFaces[fill[cornerPos[c]]++] = static_cast<int>(c / 3);
+        for (int p : touched) localId[p] = -1;
 
         std::vector<char> seen(mesh.numfaces);
         mesh.faceoffset = static_cast<int>(faces.size());
@@ -1442,7 +1528,9 @@ void RemoveSmallMeshes(Source& src, float limit) {
             Vector3 hi = lo;
             for (size_t i = 0; i < component.size(); ++i) {
                 const SrcFace& face = src.face[firstFace + component[i]];
-                for (uint32_t vi : {face.a, face.b, face.c}) {
+                const int f = component[i];
+                for (int k = 0; k < 3; ++k) {
+                    const uint32_t vi = k == 0 ? face.a : k == 1 ? face.b : face.c;
                     const Vector3& p = src.vertex[mesh.vertexoffset + vi].position;
                     lo.x = std::min(lo.x, p.x);
                     lo.y = std::min(lo.y, p.y);
@@ -1450,11 +1538,14 @@ void RemoveSmallMeshes(Source& src, float limit) {
                     hi.x = std::max(hi.x, p.x);
                     hi.y = std::max(hi.y, p.y);
                     hi.z = std::max(hi.z, p.z);
-                    for (int next : positionFaces[{p.x, p.y, p.z}])
+                    const int l = cornerPos[static_cast<size_t>(f) * 3 + k];
+                    for (int j = listStart[l]; j < listStart[l + 1]; ++j) {
+                        const int next = listFaces[j];
                         if (!seen[next]) {
                             seen[next] = 1;
                             component.push_back(next);
                         }
+                    }
                 }
             }
             if (std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z}) < limit)

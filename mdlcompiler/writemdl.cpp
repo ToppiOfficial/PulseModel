@@ -2388,6 +2388,7 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
     int numLODs = vtx.hdr()->numLODs;
 
     // ---- BuildSortedVertexList ----
+    pulse::perf::Timer tSort("fixup", "BuildSortedVertexList");
     std::vector<VertexPool> pools;
     {
         auto* bodyparts = reinterpret_cast<fmt::mstudiobodyparts_t*>(
@@ -2545,7 +2546,9 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
         }
     }
 
+    tSort.Stop();
     // ---- FixupVVDFile: rebuild the vvd ----
+    pulse::perf::Timer tVvd("fixup", "FixupVVDFile");
     {
         fmt::vertexFileHeader_t* oldHdr =
             reinterpret_cast<fmt::vertexFileHeader_t*>(vvdBuf.data());
@@ -2686,7 +2689,9 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
         vvdBuf.assign(nb.start(), nb.start() + nb.cur);
     }
 
+    tVvd.Stop();
     // ---- FixupVTXFile: remap origMeshVertIDs ----
+    pulse::perf::Timer tVtx("fixup", "FixupVTXFile");
     // Buffer-local: reads the vvd sort (pools/vertexList) computed above and
     // touches only the vtx buffer, so dx90 and dx80 both remap off one sort.
     auto remapVtx = [&](VtxNav& nav) {
@@ -2728,7 +2733,9 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
         remapVtx(vtx2);
     }
 
+    tVtx.Stop();
     // ---- FixupMDLFile: numLODVertexes + null material ptrs ----
+    PULSE_PERF("fixup", "FixupMDLFile");
     {
         auto* bodyparts = reinterpret_cast<fmt::mstudiobodyparts_t*>(
             mdlBuf.data() + pStudioHdr->bodypartindex);
@@ -2807,6 +2814,7 @@ bool SaveFile(const std::filesystem::path& path, const void* data, size_t len, s
 
 bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legacyVtx,
                      bool writeDx80, std::string* err) {
+    pulse::perf::Timer tLayout("write", "mdl layout");
     Buf buf(kFileBuffer);
 
     fmt::studiohdr_t* phdr = buf.Reserve<fmt::studiohdr_t>();
@@ -2975,6 +2983,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     }
 
     std::vector<uint8_t> mdlBuf(buf.start(), buf.start() + total);
+    tLayout.Stop();
 
     using WClock = std::chrono::steady_clock;
     auto wt0 = WClock::now();
@@ -3029,8 +3038,11 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
 
     // .phy - empty when the model has no collision data
     if (!m.physSolids.empty()) stage("collision data (.phy)");
+    pulse::perf::Timer tPhy("write", "BuildPhy");
     std::vector<uint8_t> phyBuf =
         BuildPhy(m, reinterpret_cast<fmt::studiohdr_t*>(mdlBuf.data())->checksum);
+    tPhy.Stop();
+    PULSE_PERF("write", "save files");
 
     // save. Reference hardcodes a "models/" root in the disk path (not in the
     // header name), so $modelname stays prefix-free and the .mdl bytes match.
