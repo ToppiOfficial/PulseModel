@@ -189,10 +189,12 @@ bool Tokenize(const std::string& s, const std::string& file, const std::string& 
         t.line = line;
         const size_t lineEnd = i ? s.rfind('\n', i - 1) : std::string::npos;
         t.column = static_cast<int>(lineEnd == std::string::npos ? i : i - lineEnd - 1);
+        bool inVarRef = false; // between the $ pair of $name[i]$, where [ ] are the index
         while (i < s.size()) {
             const char d = s[i];
+            if (d == '$') inVarRef = !inVarRef;
             if (std::isspace(static_cast<unsigned char>(d)) || d == '{' || d == '}' ||
-                d == '"' || d == ';' || (variableList && (d == '[' || d == ']')) ||
+                d == '"' || d == ';' || (variableList && !inVarRef && (d == '[' || d == ']')) ||
                 (d == '/' && i + 1 < s.size() && (s[i + 1] == '/' || s[i + 1] == '*')))
                 break;
             t.text.push_back(d);
@@ -8442,7 +8444,42 @@ size_t VarRefEnd(const std::string& s, size_t i) {
     return (j < s.size() && s[j] == '$' && j > i + 1) ? j : std::string::npos;
 }
 
-// Rewrite every $name$ in a token to its $definevariable value.
+enum class VarLookup { Found, Unknown, BadIndex };
+
+// "name" or "name[i]" - the latter is a list's 0-based element as a scalar.
+// Unknown means the name is undefined; BadIndex fills err.
+VarLookup FindVar(const Ctx& c, const std::string& ref, Ctx::Variable& out, std::string& err) {
+    const size_t open = ref.find('[');
+    const auto it = c.variables.find(ref.substr(0, open));
+    if (it == c.variables.end())
+        return VarLookup::Unknown;
+    if (open == std::string::npos) {
+        out = it->second;
+        return VarLookup::Found;
+    }
+    const std::string name = ref.substr(0, open);
+    const std::string index = ref.substr(open + 1, ref.size() - open - 2);
+    if (ref.back() != ']' || index.empty() ||
+        index.find_first_not_of("0123456789") != std::string::npos) {
+        err = "bad index in \"$" + ref + "$\" - expected $" + name + "[<number>]$";
+        return VarLookup::BadIndex;
+    }
+    if (!it->second.list) {
+        err = "\"$" + name + "$\" is not a list, so \"$" + ref + "$\" cannot index it";
+        return VarLookup::BadIndex;
+    }
+    const size_t n = it->second.tokens.size();
+    const size_t at = index.size() > 9 ? n : std::stoul(index);
+    if (at >= n) {
+        err = "index " + index + " is out of range for \"$" + name + "$\" (" +
+              std::to_string(n) + " element" + (n == 1 ? "" : "s") + ", from 0)";
+        return VarLookup::BadIndex;
+    }
+    out = {it->second.tokens[at].text, {it->second.tokens[at]}, false};
+    return VarLookup::Found;
+}
+
+// Rewrite every $name$ / $name[i]$ in a token to its $definevariable value.
 bool ExpandVars(Ctx& c, Token& t) {
     if (t.text.find('$') == std::string::npos)
         return true;
@@ -8454,11 +8491,15 @@ bool ExpandVars(Ctx& c, Token& t) {
             continue;
         }
         const std::string name = t.text.substr(i + 1, e - i - 1);
-        auto it = c.variables.find(name);
-        if (it == c.variables.end())
+        Ctx::Variable var;
+        std::string err;
+        const VarLookup found = FindVar(c, name, var, err);
+        if (found == VarLookup::BadIndex)
+            return c.Fail(t.line, err);
+        if (found == VarLookup::Unknown)
             return c.Fail(t.line, "unknown variable \"$" + name + "$\" - no "
                                   "$definevariable for it above this line");
-        out += it->second.text;
+        out += var.text;
         i = e + 1;
         t.expanded = true;
     }
@@ -8841,13 +8882,16 @@ struct ArithEval {
         if (e == std::string::npos) return Stop("unclosed variable reference");
         const std::string name = s.substr(i + 1, e - i - 1);
         i = e + 1;
-        const auto it = c.variables.find(name);
-        if (it == c.variables.end())
+        Ctx::Variable var;
+        std::string err;
+        const VarLookup found = FindVar(c, name, var, err);
+        if (found == VarLookup::BadIndex) return Stop(err);
+        if (found == VarLookup::Unknown)
             return Stop("unknown variable \"$" + name + "$\"");
-        if (it->second.list || !CondNumeric(it->second.text))
-            return Stop("variable \"$" + name + "$\" is \"" + it->second.text +
+        if (var.list || !CondNumeric(var.text))
+            return Stop("variable \"$" + name + "$\" is \"" + var.text +
                         "\", not an int or float");
-        return std::strtod(it->second.text.c_str(), nullptr);
+        return std::strtod(var.text.c_str(), nullptr);
     }
 
     double Factor() {
@@ -8969,7 +9013,12 @@ bool SetVariable(Ctx& c, const Token& cmd, bool redefine) {
 
     std::string name;
     Ctx::Variable value;
-    if (!c.Want("a name", cmd, name) || !ReadVariableValue(c, cmd, value))
+    if (!c.Want("a name", cmd, name))
+        return false;
+    if (name.find_first_of("[]") != std::string::npos)
+        return c.Fail(cmd.line, cmd.text + " \"" + name + "\": a name cannot "
+                                "contain \"[\" or \"]\" - those index a list");
+    if (!ReadVariableValue(c, cmd, value))
         return false;
     if (PinnedByDefVar(c, cmd, name))
         return true;
@@ -9239,8 +9288,12 @@ struct CondEval {
             value = t.text;
             return CondTruthy(value);
         }
-        auto it = c.variables.find(t.text);
-        if (it == c.variables.end()) {
+        Ctx::Variable var;
+        std::string err;
+        const VarLookup found = FindVar(c, t.text, var, err);
+        if (found == VarLookup::BadIndex)
+            return Stop(t.line, err);
+        if (found == VarLookup::Unknown) {
             if (t.text.find_first_of("=<>&|") != std::string::npos)
                 return Stop(t.line, "cannot read \"" + t.text + "\" - an operator "
                                     "needs a space on each side");
@@ -9248,7 +9301,7 @@ struct CondEval {
                                 "$definevariable for it above this line (a string "
                                 "literal goes in quotes)");
         }
-        value = it->second.text;
+        value = var.text;
         return CondTruthy(value);
     }
 
@@ -9381,11 +9434,15 @@ bool CmdSwitch(Ctx& c, const Token& cmd) {
     if (HasVarRef(var.text))
         return c.Fail(var.line, "$switch takes the bare variable name, not \"" +
                                 var.text + "\"");
-    auto it = c.variables.find(var.text);
-    if (it == c.variables.end())
+    Ctx::Variable found;
+    std::string err;
+    const VarLookup lookup = FindVar(c, var.text, found, err);
+    if (lookup == VarLookup::BadIndex)
+        return c.Fail(var.line, "$switch: " + err);
+    if (lookup == VarLookup::Unknown)
         return c.Fail(var.line, "$switch: unknown variable \"" + var.text +
                                 "\" - no $definevariable for it above this line");
-    const std::string value = it->second.text;
+    const std::string value = found.text;
     if (!ExpectBrace(c, cmd))
         return false;
 
