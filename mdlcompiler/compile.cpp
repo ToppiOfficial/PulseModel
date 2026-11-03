@@ -8752,47 +8752,61 @@ struct MorphMaps {
     std::vector<std::vector<int>> map;  // per source vertex -> model verts
 };
 
-// Uniform-grid accelerator for the vertex-anim nearest-neighbor search. The
-// reference uses a CUtlSphereTree; a brute-force scan is O(srcVerts *
-// modelVerts) and dominated compile time on character models (150k x 150k).
-//
-// Parity: cells are kMaxVAnimDist across and every query radius is <=
-// kMaxVAnimDist, so the 3x3x3 neighborhood of the query cell always fully
-// contains the query sphere - no candidate can be missed. Each candidate then
-// passes the SAME exact float test as the brute-force scan, and results are
-// emitted in ascending index order, so the candidate list is identical.
+// Uniform-grid accelerator for the vertex-anim nearest-neighbor search (the
+// reference uses a CUtlSphereTree). Every query scans the cells its sphere
+// touches, widened past float rounding, so no candidate can be missed; each
+// candidate then passes the same exact float test and comes out in ascending
+// index order, so the list matches a brute-force scan.
 class VertexGrid {
 public:
     explicit VertexGrid(const std::vector<LodVertex>& verts) : m_verts(verts) {
+        std::vector<std::pair<Cell, int>> keyed(verts.size());
         for (size_t k = 0; k < verts.size(); ++k)
-            m_cells[CellOf(verts[k].position)].push_back(static_cast<int>(k));
+            keyed[k] = {CellOf(verts[k].position), static_cast<int>(k)};
+        std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) {
+            if (a.first.x != b.first.x) return a.first.x < b.first.x;
+            if (a.first.y != b.first.y) return a.first.y < b.first.y;
+            if (a.first.z != b.first.z) return a.first.z < b.first.z;
+            return a.second < b.second;
+        });
+        m_order.resize(keyed.size());
+        m_cells.reserve(keyed.size());
+        for (size_t i = 0; i < keyed.size(); ++i) {
+            m_order[i] = keyed[i].second;
+            if (i == 0 || !(keyed[i].first == keyed[i - 1].first))
+                m_cells[keyed[i].first] = {static_cast<int>(i), 0};
+            m_cells[keyed[i].first].second++;
+        }
     }
 
     void Gather(const Vector3& p, float radius, std::vector<int>& out) const {
         out.clear();
         const float r2 = radius * radius;
-        const Cell c = CellOf(p);
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    auto it = m_cells.find(Cell{c.x + dx, c.y + dy, c.z + dz});
+        const float margin = radius + (std::fabs(p.x) + std::fabs(p.y) + std::fabs(p.z) + radius) * 1e-5f;
+        const Cell lo = CellOf({p.x - margin, p.y - margin, p.z - margin});
+        const Cell hi = CellOf({p.x + margin, p.y + margin, p.z + margin});
+        for (int32_t z = lo.z; z <= hi.z; ++z) {
+            for (int32_t y = lo.y; y <= hi.y; ++y) {
+                for (int32_t x = lo.x; x <= hi.x; ++x) {
+                    auto it = m_cells.find(Cell{x, y, z});
                     if (it == m_cells.end())
                         continue;
-                    for (int k : it->second) {
-                        float ddx = p.x - m_verts[k].position.x;
-                        float ddy = p.y - m_verts[k].position.y;
-                        float ddz = p.z - m_verts[k].position.z;
+                    const int* k = &m_order[it->second.first];
+                    for (const int* e = k + it->second.second; k < e; ++k) {
+                        float ddx = p.x - m_verts[*k].position.x;
+                        float ddy = p.y - m_verts[*k].position.y;
+                        float ddz = p.z - m_verts[*k].position.z;
                         if (ddx * ddx + ddy * ddy + ddz * ddz <= r2)
-                            out.push_back(k);
+                            out.push_back(*k);
                     }
                 }
             }
         }
-        // brute force scanned k ascending; match it so order can never diverge
         std::sort(out.begin(), out.end());
     }
 
 private:
+    static constexpr float kCellSize = kMaxVAnimDist / 4.0f;
     struct Cell {
         int32_t x, y, z;
         bool operator==(const Cell& o) const { return x == o.x && y == o.y && z == o.z; }
@@ -8806,13 +8820,14 @@ private:
         }
     };
     static Cell CellOf(const Vector3& p) {
-        return Cell{static_cast<int32_t>(std::floor(p.x / kMaxVAnimDist)),
-                    static_cast<int32_t>(std::floor(p.y / kMaxVAnimDist)),
-                    static_cast<int32_t>(std::floor(p.z / kMaxVAnimDist))};
+        return Cell{static_cast<int32_t>(std::floor(p.x / kCellSize)),
+                    static_cast<int32_t>(std::floor(p.y / kCellSize)),
+                    static_cast<int32_t>(std::floor(p.z / kCellSize))};
     }
 
     const std::vector<LodVertex>& m_verts;
-    std::unordered_map<Cell, std::vector<int>, CellHash> m_cells;
+    std::vector<int> m_order;                                         // vertex ids, cell-grouped
+    std::unordered_map<Cell, std::pair<int, int>, CellHash> m_cells;  // cell -> (start, count)
 };
 
 // Pin the root LOD's vertices to the source vertex they were actually built
@@ -8861,13 +8876,16 @@ void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
     std::vector<float> imapdot(nModelVerts, -1.0f);
     pModelToVAnim.assign(nModelVerts, -1);
 
-    PinRootLodVertices(pVSource, lodModel, pModelToVAnim, imapdist);
+    { PULSE_PERF("remap vanim", "    pin root lod");
+      PinRootLodVertices(pVSource, lodModel, pModelToVAnim, imapdist); }
 
     int nError = 0;
     float flErrorDist = 0.0f;
     std::vector<int> candidates;
     float searchRadius = kMaxVAnimDist;
+    pulse::perf::Timer tGrid("remap vanim", "    grid build");
     const VertexGrid grid(lodModel.vertices);
+    tGrid.Stop();
 
     const size_t nSrcVerts = pVSource->globalVertices.size();
     for (size_t j = 0; j < nSrcVerts; ++j) {
@@ -8991,8 +9009,9 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
     for (int i = 0; i < static_cast<int>(sorted.size()); ++i) {
         FlexKey* pFlexKey = sorted[i].key;
         src::Source* pVSource = pFlexKey->source;
-        src::SrcMorphAnim* pVSourceAnim =
-            FindSourceMorph(pVSource, pFlexKey->animationname.c_str());
+        src::SrcMorphAnim* pVSourceAnim;
+        { PULSE_PERF("remap vanim", "  find morph");
+          pVSourceAnim = FindSourceMorph(pVSource, pFlexKey->animationname.c_str()); }
         if (!pVSourceAnim)
             continue;
 
@@ -9003,6 +9022,7 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
             continue; // reference: no m_pLodData
 
         if (pVSource != pVLastSource) {
+            PULSE_PERF("remap vanim", "  BuildModelToVAnimMap");
             BuildModelToVAnimMap(pVSource, lodModel, modelToVAnim);
             pVLastSource = pVSource;
         }
@@ -9012,8 +9032,10 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
             continue; // already built for this morph
 
         MorphMaps& shared = sourceMaps[pVSource];
-        if (shared.mapcount.empty())
+        if (shared.mapcount.empty()) {
+            PULSE_PERF("remap vanim", "  BuildVAnimMap");
             BuildVAnimMap(pVSource, shared, modelToVAnim);
+        }
         ins.first->second = &shared;
     }
 

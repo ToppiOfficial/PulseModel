@@ -537,8 +537,6 @@ void ApplyInflation(Source& src, const std::vector<char>& selection,
         position.y += distance[i] * push[i].y;
         position.z += distance[i] * push[i].z;
     }
-    PULSE_PERF("meshedit", "  inflate: tangents");
-    CalcModelTangentSpaces(src);
 }
 
 const Source::EditStream* FindEditStream(const Source& src, const std::string& name,
@@ -692,6 +690,7 @@ void ReindexEditVertices(Source& src, const std::vector<int>& origins, std::vect
     }
     for (auto& morph : src.morphs) {
         std::vector<SrcVertAnim> deltas;
+        deltas.reserve(morph.vanims.size());
         for (const auto& va : morph.vanims) {
             if (va.vertex < 0 || static_cast<size_t>(va.vertex) >= head.size()) continue;
             for (int v = head[va.vertex]; v >= 0; v = next[v]) {
@@ -721,20 +720,49 @@ std::vector<MFace> AbsoluteFaces(const Source& src) {
     return faces;
 }
 
-void RebuildEditMeshes(Source& src, std::vector<MFace>& faces, std::vector<char>& selection) {
-    std::vector<int> origins(src.vertex.size()), remap(src.vertex.size());
-    for (size_t i = 0; i < origins.size(); ++i) origins[i] = static_cast<int>(i);
-    std::stable_sort(origins.begin(), origins.end(),
-                     [&](int a, int b) { return src.vertex[a].material < src.vertex[b].material; });
-    for (size_t i = 0; i < origins.size(); ++i) remap[origins[i]] = static_cast<int>(i);
-    ReindexEditVertices(src, origins, selection);
-    for (auto& face : faces) {
-        face.a = remap[face.a];
-        face.b = remap[face.b];
-        face.c = remap[face.c];
+// Stable counting sort of [0, n) by material; true when the order is already sorted.
+template <class MaterialOf>
+bool StableMaterialOrder(size_t n, MaterialOf material, std::vector<int>& order) {
+    std::vector<int> start(lim::kMaxSkins + 1, 0);
+    for (size_t i = 0; i < n; ++i) ++start[material(i) + 1];
+    for (int m = 0; m < lim::kMaxSkins; ++m) start[m + 1] += start[m];
+    order.resize(n);
+    bool identity = true;
+    for (size_t i = 0; i < n; ++i) {
+        const int slot = start[material(i)]++;
+        order[slot] = static_cast<int>(i);
+        identity = identity && slot == static_cast<int>(i);
     }
-    std::stable_sort(faces.begin(), faces.end(),
-                     [](const MFace& a, const MFace& b) { return a.material < b.material; });
+    return identity;
+}
+
+void RebuildEditMeshes(Source& src, std::vector<MFace>& faces, std::vector<char>& selection) {
+    std::vector<int> origins;
+    const bool sortedVerts = StableMaterialOrder(
+        src.vertex.size(), [&](size_t i) { return src.vertex[i].material; }, origins);
+    if (sortedVerts) {
+        // nothing moves; only the out-of-range deltas a reindex drops need dropping
+        for (auto& morph : src.morphs)
+            morph.vanims.erase(std::remove_if(morph.vanims.begin(), morph.vanims.end(), [&](const SrcVertAnim& va) {
+                return va.vertex < 0 || static_cast<size_t>(va.vertex) >= src.vertex.size();
+            }), morph.vanims.end());
+    } else {
+        std::vector<int> remap(src.vertex.size());
+        for (size_t i = 0; i < origins.size(); ++i) remap[origins[i]] = static_cast<int>(i);
+        ReindexEditVertices(src, origins, selection);
+        for (auto& face : faces) {
+            face.a = remap[face.a];
+            face.b = remap[face.b];
+            face.c = remap[face.c];
+        }
+    }
+    std::vector<int> faceOrder;
+    if (!StableMaterialOrder(faces.size(), [&](size_t i) { return faces[i].material; }, faceOrder)) {
+        std::vector<MFace> sorted;
+        sorted.reserve(faces.size());
+        for (int f : faceOrder) sorted.push_back(faces[f]);
+        faces.swap(sorted);
+    }
     FillMeshes(src, faces);
 }
 
@@ -894,7 +922,6 @@ void WeldVertices(Source& src, std::vector<char>& selection, float distance, boo
 
     PruneEditVertices(src, weldedFaces, selection);
     FillMeshes(src, weldedFaces);
-    CalcModelTangentSpaces(src);
 }
 
 void FlipNormals(Source& src) {
@@ -924,6 +951,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                    const std::vector<EditMeshOperation>& operations,
                    std::string* err, int* errorLine) {
     std::vector<char> selection(src.vertex.size(), 1);
+    bool tangentsDirty = false;
     for (const auto& op : operations) {
         PULSE_PERF("meshedit", OperationPerfName(op.kind));
         auto fail = [&](const std::string& message) {
@@ -1104,12 +1132,13 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                     return fail("selected vertices have no UV stream \"" + op.name + "\"");
             for (size_t i = 0; i < selection.size(); ++i)
                 if (selection[i]) src.vertex[i].texcoord = {uv[0]->values[i], uv[1]->values[i]};
-            CalcModelTangentSpaces(src);
+            tangentsDirty = true;
             continue;
         }
 
         if (op.kind == MeshOperation::Weld) {
             WeldVertices(src, selection, op.value, op.sharpEdges);
+            tangentsDirty = true;
             continue;
         }
         if (op.kind == MeshOperation::Inflate) {
@@ -1156,6 +1185,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             }
             // a stream push is the morph base, as in hull mode: deltas tilt it
             ApplyInflation(src, selection, push, distance, op.hull || fromStream);
+            tangentsDirty = true;
             continue;
         }
 
@@ -1170,7 +1200,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             }), faces.end());
             PruneEditVertices(src, faces, selection);
             RebuildEditMeshes(src, faces, selection);
-            CalcModelTangentSpaces(src);
+            tangentsDirty = true;
             continue;
         }
 
@@ -1226,7 +1256,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                 faces[i] = face;
             }
         }
-        ReindexEditVertices(src, origins, selection);
+        { PULSE_PERF("meshedit", "  edit: reindex"); ReindexEditVertices(src, origins, selection); }
 
         if (op.kind == MeshOperation::Duplicate && op.replaceSelection)
             selection = affected;
@@ -1243,7 +1273,13 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                 for (auto& va : morph.vanims)
                     if (affected[va.vertex]) va.normal = {-va.normal.x, -va.normal.y, -va.normal.z};
         }
-        RebuildEditMeshes(src, faces, selection);
+        { PULSE_PERF("meshedit", "  edit: rebuild meshes"); RebuildEditMeshes(src, faces, selection); }
+        tangentsDirty = true;
+    }
+    // once at the end: no operation reads tangents, and the recompute depends only on
+    // the final geometry
+    if (tangentsDirty) {
+        PULSE_PERF("meshedit", "tangents");
         CalcModelTangentSpaces(src);
     }
     return true;

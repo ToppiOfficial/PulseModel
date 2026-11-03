@@ -25,17 +25,40 @@ inline std::vector<Entry> g_entries;
 inline std::vector<const char*> g_sortedTags;
 inline std::mutex g_mutex;
 
-// Repeat entries under the same tag+name are summed and counted. Thread-safe.
-inline void Record(const char* tag, const char* name, double ms) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    for (Entry& e : g_entries) {
-        if (std::strcmp(e.tag, tag) == 0 && std::strcmp(e.name, name) == 0) {
-            e.ms += ms;
-            e.calls++;
+inline void Accumulate(std::vector<Entry>& entries, const Entry& add) {
+    for (Entry& e : entries) {
+        if (std::strcmp(e.tag, add.tag) == 0 && std::strcmp(e.name, add.name) == 0) {
+            e.ms += add.ms;
+            e.calls += add.calls;
             return;
         }
     }
-    g_entries.push_back({tag, name, ms, 1});
+    entries.push_back(add);
+}
+
+// A worker thread's entries, merged into g_entries once when the thread exits.
+struct ThreadEntries {
+    bool deferred = false;
+    std::vector<Entry> entries;
+    ~ThreadEntries() {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (const Entry& e : entries)
+            Accumulate(g_entries, e);
+    }
+};
+inline thread_local ThreadEntries t_entries;
+
+// Call at the top of a short-lived worker thread so its timers never contend on the lock.
+inline void DeferThisThread() { t_entries.deferred = true; }
+
+// Repeat entries under the same tag+name are summed and counted. Thread-safe.
+inline void Record(const char* tag, const char* name, double ms) {
+    if (t_entries.deferred) {
+        Accumulate(t_entries.entries, {tag, name, ms, 1});
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Accumulate(g_entries, {tag, name, ms, 1});
 }
 
 // The tag prints slowest first instead of in first-recorded order.

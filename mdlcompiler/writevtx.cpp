@@ -409,124 +409,123 @@ void BuildNeighborInfo(std::vector<Face>& faceList, int numVerts) {
     }
 }
 
-int ComputeNewBonesNeeded(Builder& b, const Face& face) {
-    int numNewBones = 0;
-    for (int i = 0; i < face.numBones; ++i)
-        if (!b.hwState.IsMatrixAllocated(face.boneID[i]))
-            ++numNewBones;
-    return numNewBones;
-}
+// Seed-search index: each untouched face sits in a bucket by how many of its bones
+// the palette still lacks, kept current as bones are allocated. The lowest face
+// id in the lowest allowed bucket is the face a full in-order scan would pick.
+struct SeedIndex {
+    static constexpr int kBuckets = kMaxBonesPerVert * 3 + 1;
+    std::vector<int> newBones;              // per face, palette bones it still needs
+    std::vector<uint64_t> bits[kBuckets];   // untouched faces per newBones value
+    size_t firstWord[kBuckets] = {};        // no set bit below this word
+    std::vector<int> boneStart, boneFaces;  // global bone -> faces using it (CSR)
 
-// Ascending list of face indices, a superset of the untouched ones. Every seed
-// search below walked the whole face list skipping touched faces; iterating
-// this and skipping them is the same traversal in the same order. Compaction
-// is amortized - rewriting the array on every search costs more than it saves.
-struct LiveFaces {
-    std::vector<int> ids;
-    size_t remaining = 0; // exact untouched count
-    void Reset(size_t n) {
-        ids.resize(n);
-        for (size_t i = 0; i < n; ++i) ids[i] = static_cast<int>(i);
-        remaining = n;
+    void Build(const std::vector<Face>& faces, int numGlobalBones) {
+        const size_t words = (faces.size() + 63) / 64;
+        for (auto& b : bits) b.assign(words, 0);
+        newBones.assign(faces.size(), 0);
+        boneStart.assign(static_cast<size_t>(numGlobalBones) + 1, 0);
+        for (const Face& f : faces)
+            for (int i = 0; i < f.numBones; ++i)
+                if (f.boneID[i] >= 0 && f.boneID[i] < numGlobalBones) ++boneStart[f.boneID[i] + 1];
+        for (int g = 0; g < numGlobalBones; ++g) boneStart[g + 1] += boneStart[g];
+        boneFaces.resize(boneStart[numGlobalBones]);
+        std::vector<int> fill(boneStart.begin(), boneStart.end() - 1);
+        for (size_t id = 0; id < faces.size(); ++id)
+            for (int i = 0; i < faces[id].numBones; ++i) {
+                const int g = faces[id].boneID[i];
+                if (g >= 0 && g < numGlobalBones) boneFaces[fill[g]++] = static_cast<int>(id);
+            }
     }
-    void Touched() { --remaining; }
-    void MaybeCompact(const std::vector<Face>& faces) {
-        if (ids.size() <= remaining * 2)
+    void Set(int id, int bucket) {
+        bits[bucket][id >> 6] |= uint64_t(1) << (id & 63);
+        firstWord[bucket] = std::min(firstWord[bucket], static_cast<size_t>(id >> 6));
+    }
+    void Clear(int id, int bucket) { bits[bucket][id >> 6] &= ~(uint64_t(1) << (id & 63)); }
+
+    // after Init or DeallocateAll: an empty palette, so every bone is needed
+    void ResetCounts(const std::vector<Face>& faces) {
+        for (int c = 0; c < kBuckets; ++c) {
+            std::fill(bits[c].begin(), bits[c].end(), 0);
+            firstWord[c] = bits[c].size();
+        }
+        for (size_t id = 0; id < faces.size(); ++id) {
+            newBones[id] = faces[id].numBones;
+            if (!faces[id].touched) Set(static_cast<int>(id), newBones[id]);
+        }
+    }
+    void BoneAllocated(int g, const std::vector<Face>& faces) {
+        if (g < 0 || g + 1 >= static_cast<int>(boneStart.size()))
             return;
-        size_t w = 0;
-        for (size_t r = 0; r < ids.size(); ++r)
-            if (!faces[ids[r]].touched) ids[w++] = ids[r];
-        ids.resize(w);
+        for (int k = boneStart[g]; k < boneStart[g + 1]; ++k) {
+            const int id = boneFaces[k];
+            if (!faces[id].touched) {
+                Clear(id, newBones[id]);
+                Set(id, newBones[id] - 1);
+            }
+            --newBones[id];
+        }
+    }
+    void Touch(Face& f, int id) {
+        f.touched = true;
+        Clear(id, newBones[id]);
+    }
+    // lowest untouched face id needing at most maxNew bones, fewest needed first
+    int Lowest(int maxNew) {
+        for (int c = 0; c <= std::min(maxNew, kBuckets - 1); ++c) {
+            std::vector<uint64_t>& w = bits[c];
+            size_t& i = firstWord[c];
+            while (i < w.size() && !w[i]) ++i;
+            if (i < w.size()) {
+                unsigned long bit = 0;
+                for (uint64_t v = w[i]; !(v & 1); v >>= 1) ++bit;
+                return static_cast<int>(i * 64 + bit);
+            }
+        }
+        return -1;
     }
 };
 
-Face* GetNextUntouched(std::vector<Face>& faces, LiveFaces& live) {
-    live.MaybeCompact(faces);
-    for (int id : live.ids)
-        if (!faces[id].touched)
-            return &faces[id];
-    return nullptr;
-}
-
-Face* GetNextUntouchedWithoutBoneStateChange(Builder& b, std::vector<Face>& faces,
-                                            LiveFaces& live) {
-    live.MaybeCompact(faces);
-    Face* bestFace = nullptr;
-    int bestNumNewBones = kMaxBonesPerVert * 3 + 1;
-    for (int id : live.ids) {
-        Face& f = faces[id];
-        if (f.touched)
-            continue;
-        int numNewBones = ComputeNewBonesNeeded(b, f);
-        if (numNewBones <= b.hwState.FreeMatrixCount() && numNewBones < bestNumNewBones) {
-            bestNumNewBones = numNewBones;
-            bestFace = &f;
-            if (bestNumNewBones == 0)
-                break;
+// reference GetNextUntouchedWithoutBoneStateChange, then (allowNewStrip)
+// GetNextUntouchedWithLeastBoneStateChanges. PARITY: the reference flushes the
+// whole palette there (its USE_FLUSH branch), not just enough LRU slots.
+Face* GetNextFace(Builder& b, std::vector<Face>& faceList, SeedIndex& index, bool allowNewStrip) {
+    int id = index.Lowest(b.hwState.FreeMatrixCount());
+    if (id < 0 && allowNewStrip) {
+        id = index.Lowest(SeedIndex::kBuckets - 1);
+        if (id >= 0) {
+            b.hwState.DeallocateAll();
+            index.ResetCounts(faceList);
         }
     }
-    return bestFace;
+    return id < 0 ? nullptr : &faceList[id];
 }
 
-Face* GetNextUntouchedWithLeastBoneStateChanges(Builder& b, std::vector<Face>& faces,
-                                               LiveFaces& live) {
-    live.MaybeCompact(faces);
-    Face* bestFace = nullptr;
-    int bestNumNewBones = kMaxBonesPerVert * 3 + 1;
-    for (int id : live.ids) {
-        Face& f = faces[id];
-        if (f.touched)
-            continue;
-        int numNewBones = ComputeNewBonesNeeded(b, f);
-        if (numNewBones < bestNumNewBones) {
-            bestNumNewBones = numNewBones;
-            bestFace = &f;
-        }
-    }
-    if (!bestFace)
-        return nullptr;
-    // PARITY: the reference compiles the USE_FLUSH branch -
-    // it flushes the WHOLE palette here, it does NOT evict just enough via
-    // DeallocateLRU (that is the dead #else branch). The difference is not
-    // just bookkeeping: an empty palette means the next
-    // GetNextUntouchedWithoutBoneStateChange finds nothing, so face traversal
-    // (and therefore strip/vertex order) changes. Found by byte-diffing
-    b.hwState.DeallocateAll();
-    return bestFace;
-}
-
-Face* GetNextFace(Builder& b, std::vector<Face>& faceList, LiveFaces& live, bool allowNewStrip) {
-    Face* face = GetNextUntouchedWithoutBoneStateChange(b, faceList, live);
-    if (!face && allowNewStrip)
-        face = GetNextUntouchedWithLeastBoneStateChanges(b, faceList, live);
-    return face;
-}
-
-bool AllocateHardwareBonesForFace(Builder& b, Face* face) {
+void AllocateHardwareBonesForFace(Builder& b, std::vector<Face>& faceList, SeedIndex& index,
+                                  Face* face) {
     for (int i = 0; i < face->numBones; ++i) {
-        int bone = face->boneID[i];
-        if (!b.hwState.IsMatrixAllocated(bone))
-            if (!b.hwState.AllocateMatrix(bone))
-                return false;
+        const int bone = face->boneID[i];
+        if (b.hwState.IsMatrixAllocated(bone))
+            continue;
+        if (!b.hwState.AllocateMatrix(bone))
+            return;
+        if (b.hwState.IsMatrixAllocated(bone))
+            index.BoneAllocated(bone, faceList);
     }
-    return true;
 }
 
 // BuildStripsRecursive (iterative flood fill)
-void BuildStripsFloodFill(Builder& b, std::vector<uint16_t>& indices, std::vector<Face>& faceList,
-                          LiveFaces& live, Face* seed) {
+void BuildStripsFloodFill(std::vector<uint16_t>& indices, std::vector<Face>& faceList,
+                          SeedIndex& index, Face* seed) {
     std::vector<Face*> stack;
     stack.reserve(faceList.size());
     stack.push_back(seed);
     while (!stack.empty()) {
         Face* f = stack.back();
         stack.pop_back();
-        if (f->touched)
+        const int id = static_cast<int>(f - faceList.data());
+        if (f->touched || index.newBones[id])
             continue;
-        if (ComputeNewBonesNeeded(b, *f))
-            continue;
-        f->touched = true;
-        live.Touched();
+        index.Touch(*f, id);
         indices.push_back(static_cast<uint16_t>(f->vertID[0]));
         indices.push_back(static_cast<uint16_t>(f->vertID[1]));
         indices.push_back(static_cast<uint16_t>(f->vertID[2]));
@@ -569,14 +568,18 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
     std::vector<uint16_t> facesToStrip;
     facesToStrip.reserve(faceList.size() * 3);
 
-    LiveFaces live;
-    live.Reset(faceList.size());
-    Face* pSeedFace = GetNextUntouched(faceList, live);
+    SeedIndex index;
+    { PULSE_PERF("vtx", "  strips: seed index (cpu)");
+      index.Build(faceList, b.numBones);
+      index.ResetCounts(faceList); }
+    Face* pSeedFace = faceList.empty() ? nullptr : &faceList[0];
     while (pSeedFace) {
-        AllocateHardwareBonesForFace(b, pSeedFace);
-        BuildStripsFloodFill(b, facesToStrip, faceList, live, pSeedFace);
+        AllocateHardwareBonesForFace(b, faceList, index, pSeedFace);
+        { PULSE_PERF("vtx", "  strips: flood fill (cpu)");
+          BuildStripsFloodFill(facesToStrip, faceList, index, pSeedFace); }
 
-        pSeedFace = GetNextFace(b, faceList, live, false);
+        { PULSE_PERF("vtx", "  strips: seed search (cpu)");
+          pSeedFace = GetNextFace(b, faceList, index, false); }
         if (pSeedFace)
             continue;
 
@@ -584,9 +587,10 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
         Strip& newStrip = pStripGroup->strips.back();
         newStrip.flags = fmt::vtx::STRIP_IS_TRILIST;
 
-        Stripify(facesToStrip, newStrip);
+        { PULSE_PERF("vtx", "  strips: vertex cache (cpu)"); Stripify(facesToStrip, newStrip); }
 
         // meshopt_optimizeOverdraw at 1.05 (positions from the vvd copy)
+        pulse::perf::Timer tOverdraw("vtx", "  strips: overdraw (cpu)");
         if (newStrip.numIndices > 0) {
             int nVerts = static_cast<int>(vertices.size());
             std::vector<float> positions(nVerts * 3);
@@ -611,8 +615,9 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
             for (int ii = 0; ii < newStrip.numIndices; ii++)
                 newStrip.indices[ii] = static_cast<uint16_t>(indices32[ii]);
         }
+        tOverdraw.Stop();
 
-        newStrip.verts = vertices;
+        { PULSE_PERF("vtx", "  strips: copy group verts (cpu)"); newStrip.verts = vertices; }
 
         newStrip.numBoneStateChanges = b.hwState.AllocatedMatrixCount();
         for (int i = 0; i < b.hwState.AllocatedMatrixCount(); i++) {
@@ -621,7 +626,8 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
         }
 
         facesToStrip.clear();
-        pSeedFace = GetNextFace(b, faceList, live, true);
+        PULSE_PERF("vtx", "  strips: seed search (cpu)");
+        pSeedFace = GetNextFace(b, faceList, index, true);
     }
 }
 
@@ -685,7 +691,9 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
     if (bIsHWSkinned)
         pStripGroup->flags |= fmt::vtx::STRIPGROUP_IS_HWSKINNED;
 
+    pulse::perf::Timer tFlexFlags("vtx", "  gather: flexed flags (cpu)");
     const std::vector<bool> flexedVerts = BuildFlexedVertexFlags(pStudioMesh);
+    tFlexFlags.Stop();
     std::vector<Face> stripGroupSourceFaces;
     std::vector<fmt::vtx::Vertex_t> stripGroupVertices;
     std::unordered_map<int, int> vertexLookup;
@@ -984,17 +992,16 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
         };
         std::vector<std::thread> pool;
         for (size_t w = 1; w < numWorkers; ++w)
-            pool.emplace_back(worker);
+            pool.emplace_back([&] {
+                pulse::perf::DeferThisThread();
+                worker();
+            });
         worker();
         for (std::thread& th : pool)
             th.join();
     }
-    if (pulse::perf::g_enabled) {
+    if (pulse::perf::g_enabled)
         pulse::perf::Record("vtx", "slowest mesh task", slowestMs);
-        pulse::perf::Record("vtx", "worker threads", 0);
-        std::printf("perf: vtx strip build ran %zu mesh tasks on %zu threads\n", tasks.size(),
-                    numWorkers);
-    }
 
     }
     PULSE_PERF("vtx", "serialize");
