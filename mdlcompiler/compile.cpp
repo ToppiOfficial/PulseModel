@@ -2805,7 +2805,7 @@ bool ContainsNoCase(const std::string& haystack, const std::string& needle) {
 // FindOrCullMesh's removemesh / removemeshsubstring tests, both
 // matched on the path-stripped material base name so DMX pathing is ignored
 bool IsMeshRemoved(const Ctx& ctx, const ScriptLod& lod, int nMaterialID) {
-    if (lod.meshRemovals.empty() && lod.meshWordRemovals.empty())
+    if (lod.meshRemovals.empty() && lod.meshSubstringRemovals.empty())
         return false;
     const src::MaterialTable& mats = ctx.in->mats;
     if (nMaterialID < 0 || nMaterialID >= static_cast<int>(mats.materialToTexture.size()))
@@ -2815,7 +2815,7 @@ bool IsMeshRemoved(const Ctx& ctx, const ScriptLod& lod, int nMaterialID) {
     for (const LodReplacement& r : lod.meshRemovals)
         if (_stricmp(FileBaseName(r.src).c_str(), base.c_str()) == 0)
             return true;
-    for (const LodReplacement& r : lod.meshWordRemovals)
+    for (const LodReplacement& r : lod.meshSubstringRemovals)
         if (ContainsNoCase(base, r.src))
             return true;
     return false;
@@ -11465,11 +11465,11 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 r.dst = tex->name;
             claimedMaterials.push_back(r.src);
         }
-        for (const LodReplacement& rule : lod.materialWordReplacements) {
+        for (const LodReplacement& rule : lod.materialSubstringReplacements) {
             const auto* destination = findReplacementMaterial(rule.dst);
             if (!destination) {
                 if (err)
-                    *err = "replacematerialword: unknown destination material \"" + rule.dst + "\"";
+                    *err = "replacematerialsubstring: unknown destination material \"" + rule.dst + "\"";
                 return false;
             }
             for (const auto& tex : input.mats.textures) {

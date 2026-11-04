@@ -902,11 +902,11 @@ struct ScriptLod {
     std::vector<LodReplacement> boneReplacements;  // replacebone
     std::vector<LodReplacement> boneTreeCollapses; // bonetreecollapse
     std::vector<LodReplacement> materialReplacements;
-    std::vector<LodReplacement> materialWordReplacements;
+    std::vector<LodReplacement> materialSubstringReplacements;
     std::vector<LodReplacement> meshRemovals;
     // removemeshsubstring: drop any mesh whose material base name CONTAINS the
     // stored substring, case-insensitively
-    std::vector<LodReplacement> meshWordRemovals;
+    std::vector<LodReplacement> meshSubstringRemovals;
     float smallMeshLimit = 0.0f;
     std::vector<source::Source*> smallMeshSources;
     bool collapseJiggleBones = false;
