@@ -4780,10 +4780,9 @@ bool CmdVtxFormat(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $nodx80 - skip the DirectX 8 .dx80.vtx output. Only relevant when $vtxformat
-// is 0; archetype 1 (Alien Swarm+) never emits dx80. The -nodx80 launch switch
-// forces this on too.
-bool CmdNoDx80(Ctx& c, const Token&) { c.in.noDx80 = true; return true; }
+// $dx80 - also write the DirectX 8 .dx80.vtx. Only honored at $vtxformat 0;
+// archetype 1 (Alien Swarm+) never emits dx80. -dx80 forces this on too.
+bool CmdDx80(Ctx& c, const Token&) { c.in.dx80 = true; return true; }
 
 // $modelbudget { bones <n> materials <n> } - set the compile ceilings for this
 // model. Braces are optional for a single field. The pulselimits.h value is the
@@ -5370,9 +5369,9 @@ void FinishAttachments(Ctx& c) {
 // Bone structure - $definebone and the collapse markup, stock syntax 1:1.
 // ---------------------------------------------------------------------------
 
-// $bonecullmethod <name> - bone_cull_type. Replaces QC's $nocollapsebones
-// (= none) and its "onlyweights" variant, and names the default so it can be
-// written down explicitly. $alwayscollapse overrules "none" per bone.
+// $bonecullmethod <name> - bone_cull_type; replaces QC's $nocollapsebones (= none).
+// "skinned" is aggressive that also keeps every vertex-weighted bone.
+// $alwayscollapse overrules "none" and "skinned" per bone.
 bool CmdBoneCullMethod(Ctx& c, const Token& cmd) {
     std::string m;
     if (!c.WantOption("a cull method name", cmd, m))
@@ -5383,9 +5382,11 @@ bool CmdBoneCullMethod(Ctx& c, const Token& cmd) {
         c.in.boneCullType = cm::BoneCullType::LeafOnly;
     else if (_stricmp(m.c_str(), "none") == 0)
         c.in.boneCullType = cm::BoneCullType::None;
+    else if (_stricmp(m.c_str(), "skinned") == 0)
+        c.in.boneCullType = cm::BoneCullType::Skinned;
     else
         return c.Fail(cmd.line, "unknown $bonecullmethod \"" + m +
-                                "\" (expected aggressive/leafonly/none)");
+                                "\" (expected aggressive/leafonly/none/skinned)");
     return true;
 }
 
@@ -7833,6 +7834,7 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
 
         bool already = false;
         if      (o == "massbias")   already = mk.massBiasSet;
+        else if (o == "mass")       already = mk.massSet;
         else if (o == "inertia")    already = mk.inertiaSet;
         else if (o == "damping")    already = mk.dampingSet;
         else if (o == "rotdamping") already = mk.rotdampingSet;
@@ -7844,6 +7846,11 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
         if (o == "massbias") {
             if (!c.WantFloat("a bias", sub, mk.massBias)) return false;
             mk.massBiasSet = true;
+        } else if (o == "mass") {
+            if (!c.WantFloat("a mass in kg", sub, mk.mass)) return false;
+            if (mk.mass <= 0.0f)
+                return c.Fail(t.line, where + ": mass must be greater than 0");
+            mk.massSet = true;
         } else if (o == "inertia") {
             if (!c.WantFloat("an inertia", sub, mk.inertia)) return false;
             mk.inertiaSet = true;
@@ -7864,6 +7871,8 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
 
     if (mk.skip && !mk.mergeInto.empty())
         return c.Fail(cmd.line, where + ": sets both skip and mergeinto - pick one");
+    if (mk.massSet && mk.massBiasSet)
+        return c.Fail(cmd.line, where + ": sets both mass and massbias - pick one");
     return true;
 }
 
@@ -9582,7 +9591,7 @@ constexpr Command kCommands[] = {
     {"$autocenter", CmdAutoCenter},
     {"$forcewritevertexdata", CmdForceWriteVertexData},
     {"$vtxformat", CmdVtxFormat},
-    {"$nodx80", CmdNoDx80},
+    {"$dx80", CmdDx80},
     {"$modelbudget", CmdModelBudget},
     {"$setbindpose", CmdSetBindPose},
     {"$setflex", CmdSetFlex},

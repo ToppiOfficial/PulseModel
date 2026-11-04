@@ -6,6 +6,7 @@
 // keyvalues tail.
 
 #include "writer.h"
+#include "diagnostic.h"
 
 #include <cstdio>
 #include <cstring>
@@ -49,6 +50,33 @@ void KeyFloat(std::vector<uint8_t>& buf, const char* key, float v) {
     AppendText(buf, tmp);
 }
 
+// A fixed-mass body becomes a plain massbias plus a larger total, chosen so the
+// shared bodies keep their masses; the .phy stays stock-readable that way.
+void ResolveFixedMasses(cm::CompiledModel& m) {
+    float sharedWeight = 0.0f, fixedTotal = 0.0f;
+    bool anyFixed = false;
+    for (const cm::PhysicsSolid& s : m.physSolids) {
+        if (s.fixedMass > 0.0f) { fixedTotal += s.fixedMass; anyFixed = true; }
+        else sharedWeight += s.volume * s.massBias;
+    }
+    if (!anyFixed)
+        return;
+    if (m.physTotalMass < 0.0f) {
+        pulse::diag::Warnf("physics markup mass is ignored under $automass\n");
+        for (cm::PhysicsSolid& s : m.physSolids) s.fixedMass = -1.0f;
+        return;
+    }
+    // with no shared bodies (or no $mass to share) the fixed masses are the total
+    const bool shared = sharedWeight > 0.0f && m.physTotalMass > 0.0f;
+    for (cm::PhysicsSolid& s : m.physSolids) {
+        if (s.fixedMass <= 0.0f || s.volume <= 0.0f)
+            continue;
+        s.massBias = shared ? s.fixedMass * sharedWeight / (m.physTotalMass * s.volume)
+                            : s.fixedMass / s.volume;
+    }
+    m.physTotalMass = shared ? m.physTotalMass + fixedTotal : fixedTotal;
+}
+
 void KeyIntPair(std::vector<uint8_t>& buf, const char* key, int v0, int v1) {
     char tmp[256];
     std::snprintf(tmp, sizeof(tmp), "\"%s\" \"%d,%d\"\n", key, v0, v1);
@@ -80,6 +108,7 @@ std::vector<uint8_t> BuildPhy(cm::CompiledModel& m, int32_t checksum) {
     // Mass is distributed by volume share, so it can only be resolved once
     // every solid is built. A zero total would divide by zero on a degenerate
     // model, so it falls back to 1 exactly like the reference.
+    ResolveFixedMasses(m);
     float totalVolume = 0.0f;
     for (const cm::PhysicsSolid& s : m.physSolids)
         totalVolume += s.volume * s.massBias;

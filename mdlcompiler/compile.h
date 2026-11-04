@@ -280,6 +280,7 @@ enum class BoneCullType {
     Aggressive = 0, // drop every unreferenced bone, reparenting its children
     LeafOnly = 1,   // drop unreferenced bones only while they have no children
     None = 2,       // keep everything (non-skeletal bones excepted - exporter noise)
+    Skinned = 3,    // aggressive, but a bone with vertex weights is always kept
 };
 
 // global bone table entry (reference s_bonetable_t subset)
@@ -292,6 +293,7 @@ struct Bone {
     bool bPreDefined = false;  // created by a locked $definebone (not a source)
     bool bDontCollapse = false;
     bool bPreAligned = false;  // $definebone provided the realign - RealignBones skips it
+    bool skinned = false;      // weighted by an active-model vertex (not inherited from children)
     int physicsbone = 0;       // index into the .phy solid list; 0 with no physics
     Vector3 pos;      // local, rebuilt from boneToPose
     RadianEuler rot;  // local, rebuilt from boneToPose
@@ -815,6 +817,7 @@ struct PhysicsMarkup {
     std::string name;
     std::string bonename;
     float massBias = 1.0f;    bool massBiasSet = false;
+    float mass = 0.0f;        bool massSet = false;   // fixed kg, outside $mass
     float inertia = 1.0f;     bool inertiaSet = false;
     float damping = 0.0f;     bool dampingSet = false;
     float rotdamping = 0.0f;  bool rotdampingSet = false;
@@ -838,6 +841,7 @@ struct PhysicsSolid {
     float volume = 0.0f;
     float surfaceArea = 0.0f;
     float massBias = 1.0f;
+    float fixedMass = -1.0f; // markup `mass`, -1 = share $mass by volume
     float mass = 1.0f;    // computed at write time from volume share
     float damping = 0.0f;
     float rotdamping = 0.0f;
@@ -1094,9 +1098,9 @@ struct CompileInput {
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.
     int vtxArchetype = 0;
-    // $nodx80 / -nodx80: skip the DirectX 8 .dx80.vtx. dx80 is only emitted at
-    // all when vtxArchetype == 0 (archetype 1 is Alien Swarm+, which dropped it).
-    bool noDx80 = false;
+    // $dx80 / -dx80: also write the DirectX 8 .dx80.vtx. Only honored when
+    // vtxArchetype == 0 (archetype 1 is Alien Swarm+, which dropped it).
+    bool dx80 = false;
     float scale = 1.0f;      // $scale
     Vector3 adjust;          // $origin translation (translatemodel)
     // rotatemodel, pre-converted to the reference's g_defaultrotation radians:

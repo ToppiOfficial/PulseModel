@@ -40,7 +40,7 @@ A successful compile does not guarantee the model will load in the target game.
 ```
 mdlcompiler <file.qc|file.qczip> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
             [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
-            [-vtxformat <0|1>] [-nodx80]
+            [-vtxformat <0|1>] [-dx80]
             [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
             [-legacysequencebounds] [-perfmetrics] [-pause]
 mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move] [-pause]
@@ -58,7 +58,7 @@ mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move] [-pause
 | `-filesearchdir <dir>` | Extra fallback directory for source files, searched after any `$addsearchdir`. Repeatable. |
 | `-tempcontent <dir>` | Synonym for `-filesearchdir`. |
 | `-vtxformat <0\|1>` | `.vtx` layout, overriding the script's `$vtxformat`. 0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW). |
-| `-nodx80` | Skip the DirectX 8 `.dx80.vtx` output (also `$nodx80`). Only written at vtx format 0. |
+| `-dx80` | Also write the DirectX 8 `.dx80.vtx` output (also `$dx80`). Only written at vtx format 0. |
 | `-striplods` | Ignore all `$lod` and `$shadowlod` commands and compile only the original root LOD. |
 | `-minlod <lod>` | Discard higher-detail LODs and promote the zero-based LOD index to root, overriding `$minlod` in the script. |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |

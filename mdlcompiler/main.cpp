@@ -67,7 +67,7 @@ static int Usage() {
     std::printf("  -vtxformat <0|1>\n");
     std::printf("                .vtx layout, overriding the script's $vtxformat.\n");
     std::printf("                0 = legacy (TF2/L4D2/GMod/HL2), 1 = full (SFM/CS:GO/ASW)\n");
-    std::printf("  -nodx80       skip the DirectX 8 .dx80.vtx output (also $nodx80).\n");
+    std::printf("  -dx80         also write the DirectX 8 .dx80.vtx output (also $dx80).\n");
     std::printf("                dx80 is only written when the vtx format is 0\n");
     std::printf("  -includesearchdir <dir>\n");
     std::printf("                extra fallback dir for $include, searched after any\n");
@@ -160,7 +160,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     std::string outdir;
     std::string modelname; // -modelname: overrides the script's $modelname
     int vtxFormat = -1; // unset; otherwise wins over the script's $vtxformat
-    bool noDx80 = false; // -nodx80: force-skip .dx80.vtx, overriding the script
+    bool dx80 = false; // -dx80: force .dx80.vtx output, overriding the script
     int launchMinLod = -1;
     bool stripLods = false;
     bool forceWriteVertexData = false;
@@ -219,8 +219,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
                 return Fail("bad option", "-minlod needs a non-negative LOD index, got \"" +
                                               value + "\"");
             }
-        } else if (std::strcmp(argv[i], "-nodx80") == 0) {
-            noDx80 = true;
+        } else if (std::strcmp(argv[i], "-dx80") == 0) {
+            dx80 = true;
         } else if (std::strcmp(argv[i], "-striplods") == 0) {
             stripLods = true;
         } else if (std::strcmp(argv[i], "-forcewritevertexdata") == 0) {
@@ -302,8 +302,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     }
     if (vtxFormat >= 0)
         input.vtxArchetype = vtxFormat;
-    if (noDx80)
-        input.noDx80 = true;
+    if (dx80)
+        input.dx80 = true;
 
     pulse::compile::CompiledModel model;
     g_stage = "compile";
@@ -325,10 +325,10 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
 
     if (!verify) {
         g_stage = "write";
-        // dx80 only ships with the legacy archetype; Alien Swarm+ (archetype 1)
-        // dropped DirectX 8, and $nodx80 / -nodx80 opt out explicitly.
+        // dx80 is opt-in ($dx80 / -dx80) and only ships with the legacy archetype;
+        // Alien Swarm+ (archetype 1) dropped DirectX 8.
         const bool legacyVtx = input.vtxArchetype == 0;
-        const bool writeDx80 = legacyVtx && !input.noDx80;
+        const bool writeDx80 = legacyVtx && input.dx80;
         if (!pulse::writer::WriteModelFiles(model, outdir, legacyVtx, writeDx80, &err))
             return Fail("write error", err);
     }

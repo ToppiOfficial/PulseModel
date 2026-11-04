@@ -1571,6 +1571,7 @@ bool BuildGlobalBonetable(Ctx& ctx, std::string* err) {
                 else
                     b.parent = -1;
                 b.flags = psource->boneflags[j];
+                b.skinned = (psource->boneflags[j] & BONE_USED_BY_VERTEX_LOD0) != 0;
                 b.isNonSkeletal = psource->localBone[j].isNonSkeletal;
                 if (b.parent == -1 || !m.bones[b.parent].bPreAligned) {
                     if (ctx.in->bindPoseSource && !ctx.in->bindPoseMeshOnly) {
@@ -1600,6 +1601,8 @@ bool BuildGlobalBonetable(Ctx& ctx, std::string* err) {
 
             // accumulate flags
             m.bones[k].flags |= psource->boneflags[j];
+            if (psource->boneflags[j] & BONE_USED_BY_VERTEX_LOD0)
+                m.bones[k].skinned = true;
             if (!psource->localBone[j].isNonSkeletal)
                 m.bones[k].isNonSkeletal = false;
         }
@@ -1781,6 +1784,9 @@ void CollapseBones(Ctx& ctx) {
             // "leaf only" never reparents: an unreferenced bone that still has
             // children stays where it is.
             if (cull == BoneCullType::LeafOnly && BoneHasChildren(m, k))
+                continue;
+
+            if (cull == BoneCullType::Skinned && m.bones[k].skinned && !always)
                 continue;
 
             // BoneShouldCollapse. $donotcollapse is checked first so it wins
@@ -3984,7 +3990,10 @@ bool CheckSolidVertBudget(const std::vector<phys::Convex*>& convexes, const char
 // which is the bone space the hull must be built in.
 int ResolveLocalBoneToGlobal(const src::Source* ps, int node, int* nodeOut) {
     int guard = 0;
-    while (node >= 0 && ps->boneLocalToGlobal[node] < 0) {
+    // MapSources points a collapsed bone at its ancestor's slot, so walk until
+    // the local bone actually owns the slot it maps to.
+    while (node >= 0 && (ps->boneLocalToGlobal[node] < 0 ||
+                         ps->boneGlobalToLocal[ps->boneLocalToGlobal[node]] != node)) {
         if (guard++ > lim::kMaxSrcBones)
             return -1;
         node = ps->localBone[node].parent;
@@ -4024,6 +4033,7 @@ void ApplyMarkupsToSolid(const CompiledModel& m, const CompileInput& in, Physics
         if (bone < 0 || bone != solid.bone)
             continue;
         if (mk.massBiasSet)    solid.massBias = mk.massBias;
+        if (mk.massSet)        solid.fixedMass = mk.mass;
         if (mk.inertiaSet)     solid.inertia = mk.inertia;
         if (mk.dampingSet)     solid.damping = mk.damping;
         if (mk.rotdampingSet)  solid.rotdamping = mk.rotdamping;
