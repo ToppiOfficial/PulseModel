@@ -3159,7 +3159,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         std::printf("  %-20s 0x%08X  %10zu bytes\n", name(phyPath).c_str(), checksum,
                     phyBuf.size());
     if (pulse::api::Active()) pulse::api::Record("model", "{\"path\":" +
-        pulse::api::String(std::filesystem::absolute(std::filesystem::path(mdlPath)).lexically_normal().u8string()) + "}");
+        pulse::api::String(pulse::Utf8(std::filesystem::absolute(std::filesystem::path(mdlPath)).lexically_normal())) + "}");
     return true;
 }
 

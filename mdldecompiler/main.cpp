@@ -40,6 +40,7 @@
 #include "goldsrc.h"
 #include "format/phy.h"
 #include "mdlfile.h"
+#include "pathcompat.h"
 #include "perf.h"
 
 using namespace mdldecompiler;
@@ -100,7 +101,7 @@ int Usage() {
 }
 
 std::string AbsolutePath(const std::string& path) {
-    return std::filesystem::absolute(std::filesystem::path(path)).lexically_normal().u8string();
+    return pulse::Utf8(std::filesystem::absolute(std::filesystem::path(path)).lexically_normal());
 }
 
 bool ReadFile(const char* path, Mdl& m, int forceVersion, std::string& err) {

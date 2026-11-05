@@ -33,7 +33,7 @@ using Env = std::vector<std::pair<std::string, std::string>>;
 constexpr int kTimeoutSeconds = 120;
 
 std::string ReadText(const fs::path& path) {
-    const auto bytes = kv::ReadFile(path.u8string());
+    const auto bytes = kv::ReadFile(pulse::Utf8(path));
     return {bytes.begin(), bytes.end()};
 }
 
@@ -93,7 +93,7 @@ std::string GetEnv(const char* name) {
     std::wstring value(n, L'\0');
     GetEnvironmentVariableW(Wide(name).c_str(), value.data(), n);
     value.resize(n - 1);
-    return fs::path(value).u8string();
+    return pulse::Utf8(fs::path(value));
 }
 
 // Runs `exe args` in `cwd` with stdout and stderr in `log`. Only the log and a
@@ -104,7 +104,7 @@ int RunProcess(const fs::path& exe, const std::vector<std::string>& args, const 
     HANDLE out = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS,
                              FILE_ATTRIBUTE_NORMAL, nullptr);
     if (out == INVALID_HANDLE_VALUE)
-        throw runtime_error("cannot create " + log.u8string());
+        throw runtime_error("cannot create " + pulse::Utf8(log));
     HANDLE in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit, OPEN_EXISTING, 0, nullptr);
 
     std::wstring command = QuoteArgument(exe.wstring());
@@ -139,14 +139,14 @@ int RunProcess(const fs::path& exe, const std::vector<std::string>& args, const 
     if (in != INVALID_HANDLE_VALUE)
         CloseHandle(in);
     if (!launched)
-        throw runtime_error("cannot start " + exe.u8string() + " (Windows error " + std::to_string(launchError) + ")");
+        throw runtime_error("cannot start " + pulse::Utf8(exe) + " (Windows error " + std::to_string(launchError) + ")");
     CloseHandle(process.hThread);
 
     if (WaitForSingleObject(process.hProcess, kTimeoutSeconds * 1000) != WAIT_OBJECT_0) {
         TerminateProcess(process.hProcess, 1);
         WaitForSingleObject(process.hProcess, 5000);
         CloseHandle(process.hProcess);
-        throw runtime_error("the resource compiler timed out, see " + log.u8string());
+        throw runtime_error("the resource compiler timed out, see " + pulse::Utf8(log));
     }
     DWORD code = 1;
     GetExitCodeProcess(process.hProcess, &code);
@@ -160,11 +160,11 @@ std::string GetEnv(const char* name) {
 }
 
 // Wine maps the host root to Z: by default.
-std::string WinePath(const fs::path& path) { return "Z:" + fs::absolute(path).generic_u8string(); }
+std::string WinePath(const fs::path& path) { return "Z:" + pulse::Utf8Generic(fs::absolute(path)); }
 
 int RunProcess(const fs::path& exe, const std::vector<std::string>& args, const fs::path& cwd,
                const fs::path& log, const Env& env) {
-    std::vector<std::string> storage{exe.u8string()};
+    std::vector<std::string> storage{pulse::Utf8(exe)};
     storage.insert(storage.end(), args.begin(), args.end());
     std::vector<char*> argv;
     for (std::string& s : storage)
@@ -198,7 +198,7 @@ int RunProcess(const fs::path& exe, const std::vector<std::string>& args, const 
         if (std::chrono::steady_clock::now() >= deadline) {
             kill(-child, SIGKILL);
             waitpid(child, &status, 0);
-            throw runtime_error("the resource compiler timed out, see " + log.u8string());
+            throw runtime_error("the resource compiler timed out, see " + pulse::Utf8(log));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -230,10 +230,10 @@ Toolchain FindToolchain(const fs::path& cs2, bool windowsBinaries) {
     t.modtools = windowsBinaries ? "modtools.dll" : "libmodtools.so";
     for (const std::string& name : t.files)
         if (!fs::exists(t.bin / name))
-            throw runtime_error("missing " + (t.bin / name).u8string() +
+            throw runtime_error("missing " + pulse::Utf8(t.bin / name) +
                                 "; install CS2 Workshop Tools or use --generate-only");
     if (!fs::exists(t.modBin / t.modtools))
-        throw runtime_error("missing " + (t.modBin / t.modtools).u8string());
+        throw runtime_error("missing " + pulse::Utf8(t.modBin / t.modtools));
     return t;
 }
 
@@ -260,21 +260,21 @@ void BuildWorkspace(const fs::path& ws, const Toolchain& t, const fs::path& cs2,
         if (!known)
             registry["assettypes"][key] = type;
     }
-    kv::WriteFile((ws / "game/bin/assettypes_common.txt").u8string(), kv::WriteText(registry));
+    kv::WriteFile(pulse::Utf8(ws / "game/bin/assettypes_common.txt"), kv::WriteText(registry));
     if (fs::exists(cs2 / "game/bin/assettypes_internal.txt"))
         fs::copy_file(cs2 / "game/bin/assettypes_internal.txt", ws / "game/bin/assettypes_internal.txt");
 
-    kv::WriteFile((game / "gameinfo.gi").u8string(),
+    kv::WriteFile(pulse::Utf8(game / "gameinfo.gi"),
                   "\"GameInfo\" { game \"AG2 Proportions\" FileSystem { SteamAppId 730 SearchPaths { Game ag2 Game " +
-                      kv::Quote((cs2 / "game/csgo").generic_u8string()) + " Game " +
-                      kv::Quote((cs2 / "game/core").generic_u8string()) + " Mod ag2 } } }\n");
-    kv::WriteFile((game / (std::string(kStockSkeleton) + "_c")).u8string(), skeleton);
-    kv::WriteFile((game / (std::string(kStockGraph) + "_c")).u8string(), graph);
-    kv::WriteFile((game / (std::string(kStockUiGraph) + "_c")).u8string(), uiGraph);
+                      kv::Quote(pulse::Utf8Generic(cs2 / "game/csgo")) + " Game " +
+                      kv::Quote(pulse::Utf8Generic(cs2 / "game/core")) + " Mod ag2 } } }\n");
+    kv::WriteFile(pulse::Utf8(game / (std::string(kStockSkeleton) + "_c")), skeleton);
+    kv::WriteFile(pulse::Utf8(game / (std::string(kStockGraph) + "_c")), graph);
+    kv::WriteFile(pulse::Utf8(game / (std::string(kStockUiGraph) + "_c")), uiGraph);
 
     // the clip compile needs the skeleton's source form at its canonical path
-    kv::WriteFile((content / kStockSkeleton).u8string(), kv::WriteText(descriptor));
-    const fs::path sources = content / fs::u8path(paths.relative);
+    kv::WriteFile(pulse::Utf8(content / kStockSkeleton), kv::WriteText(descriptor));
+    const fs::path sources = content / pulse::Utf8Path(paths.relative);
     fs::create_directories(sources / "graphs");
     fs::create_directories(sources / "anims");
     for (const char* name : {kReferenceFile, kProportionsFile, kClipFile, kWorldGraphFile, kUiGraphFile})
@@ -336,31 +336,31 @@ void Compile(const Options& options, const Paths& paths, const std::vector<uint8
         for (const char* name : {kClipFile, kWorldGraphFile, kUiGraphFile}) {
             const std::string asset = paths.relative + "/" + name;
             fs::path exe = ws / "game/bin" / tools.platform / tools.files[0];
-            std::vector<std::string> args{"-game", game.u8string(), "-i", (content / fs::u8path(asset)).u8string(),
+            std::vector<std::string> args{"-game", pulse::Utf8(game), "-i", pulse::Utf8(content / pulse::Utf8Path(asset)),
                                           "-nop4", "-empty", "-f"};
 #ifdef _WIN32
-            const Env env{{"PATH", Prepend(tools.bin.u8string() + ";" + tools.modBin.u8string(), "PATH", ';')}};
+            const Env env{{"PATH", Prepend(pulse::Utf8(tools.bin) + ";" + pulse::Utf8(tools.modBin), "PATH", ';')}};
 #else
-            Env env{{"LD_LIBRARY_PATH", Prepend(tools.bin.u8string() + ":" + tools.modBin.u8string(), "LD_LIBRARY_PATH", ':')}};
+            Env env{{"LD_LIBRARY_PATH", Prepend(pulse::Utf8(tools.bin) + ":" + pulse::Utf8(tools.modBin), "LD_LIBRARY_PATH", ':')}};
             if (windowsBinaries) {
                 args[1] = WinePath(game);
-                args[3] = WinePath(content / fs::u8path(asset));
+                args[3] = WinePath(content / pulse::Utf8Path(asset));
                 args.insert(args.begin(), WinePath(exe));
-                exe = fs::u8path(options.compilerRunner);
+                exe = pulse::Utf8Path(options.compilerRunner);
                 env.push_back({"WINEPATH", WinePath(tools.bin) + ";" + WinePath(tools.modBin)});
             }
 #endif
-            const fs::path log = ws / (fs::u8path(name).filename().u8string() + ".compile.log");
+            const fs::path log = ws / (pulse::Utf8(pulse::Utf8Path(name).filename()) + ".compile.log");
             const int code = RunProcess(exe, args, ws, log, env);
-            const fs::path compiled = game / fs::u8path(asset + "_c");
+            const fs::path compiled = game / pulse::Utf8Path(asset + "_c");
             if (code != 0 || !fs::exists(compiled) || ReadText(log).find("0 failed") == std::string::npos)
-                throw runtime_error(std::string("compiling ") + name + " failed, see " + log.u8string());
+                throw runtime_error(std::string("compiling ") + name + " failed, see " + pulse::Utf8(log));
 
-            const kv::Value data = kv::ReadResource(kv::ReadFile(compiled.u8string()));
+            const kv::Value data = kv::ReadResource(kv::ReadFile(pulse::Utf8(compiled)));
             if (fs::path(name).extension() == ".vnmclip") {
                 // the clip compile also rebuilt the skeleton from its descriptor
                 const kv::Value rebuilt =
-                    kv::ReadResource(kv::ReadFile((game / (std::string(kStockSkeleton) + "_c")).u8string()));
+                    kv::ReadResource(kv::ReadFile(pulse::Utf8(game / (std::string(kStockSkeleton) + "_c"))));
                 if (kv::TextBody(expected.At("m_boneIDs")) != kv::TextBody(rebuilt.At("m_boneIDs")) ||
                     kv::TextBody(expected.At("m_parentIndices")) != kv::TextBody(rebuilt.At("m_parentIndices")))
                     throw runtime_error("the workspace skeleton's bone order differs from stock");
@@ -370,24 +370,24 @@ void Compile(const Options& options, const Paths& paths, const std::vector<uint8
             }
         }
 
-        const fs::path published = paths.cs2 / "game/csgo_addons" / paths.addon.filename() / fs::u8path(paths.relative);
+        const fs::path published = paths.cs2 / "game/csgo_addons" / paths.addon.filename() / pulse::Utf8Path(paths.relative);
         for (const char* source : {kClipFile, kWorldGraphFile, kUiGraphFile}) {
-            const fs::path name = fs::u8path(std::string(source) + "_c");
+            const fs::path name = pulse::Utf8Path(std::string(source) + "_c");
             fs::create_directories((published / name).parent_path());
-            fs::copy_file(game / fs::u8path(paths.relative) / name, published / name,
+            fs::copy_file(game / pulse::Utf8Path(paths.relative) / name, published / name,
                           fs::copy_options::overwrite_existing);
-            std::cout << "Compiled: " << (published / name).u8string() << '\n';
+            std::cout << "Compiled: " << pulse::Utf8(published / name) << '\n';
         }
 
         const fs::path reportPath = paths.output / "debug/report.kv3";
         if (fs::exists(reportPath)) {
             kv::Value report = kv::ParseText(ReadText(reportPath));
             report["compiled"] = true;
-            report["compiledOutput"] = published.generic_u8string();
-            kv::WriteFile(reportPath.u8string(), kv::WriteText(report));
+            report["compiledOutput"] = pulse::Utf8Generic(published);
+            kv::WriteFile(pulse::Utf8(reportPath), kv::WriteText(report));
         }
     } catch (const std::exception& e) {
-        throw runtime_error(std::string(e.what()) + " (workspace kept at " + ws.u8string() + ")");
+        throw runtime_error(std::string(e.what()) + " (workspace kept at " + pulse::Utf8(ws) + ")");
     }
     std::error_code ec;
     fs::remove_all(ws, ec);

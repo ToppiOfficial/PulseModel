@@ -44,7 +44,7 @@ const char* const kUsage =
     "  Output goes beside the VMDL, in a folder named after the model.\n\n";
 
 bool HasExtension(const path& file, const char* ext) {
-    return _stricmp(file.extension().u8string().c_str(), ext) == 0;
+    return _stricmp(pulse::Utf8(file.extension()).c_str(), ext) == 0;
 }
 
 void PrintHeader() {
@@ -62,13 +62,13 @@ ag2::Job LoadJob(const path& file) {
         job.writeModel = true; // a dragged model should come out wired up
         return job;
     }
-    const auto bytes = ag2::kv::ReadFile(file.u8string());
+    const auto bytes = ag2::kv::ReadFile(pulse::Utf8(file));
     const ag2::kv::Value doc = ag2::kv::ParseText(std::string(bytes.begin(), bytes.end()));
     if (!doc.IsObject())
         throw std::runtime_error("the job file must be a KV3 object");
     const path base = file.parent_path();
     for (const auto& [key, value] : doc.Members()) {
-        auto at = [&] { return ag2::fs::weakly_canonical(base / ag2::fs::u8path(value.String())); };
+        auto at = [&] { return ag2::fs::weakly_canonical(base / pulse::Utf8Path(value.String())); };
         if (key == "vmdl") job.vmdl = at();
         else if (key == "model_dmx") job.modelDmx = at();
         else if (key == "proportions") job.proportions = at();
@@ -80,7 +80,7 @@ ag2::Job LoadJob(const path& file) {
         throw std::runtime_error("the job has no vmdl");
     for (const path* p : {&job.vmdl, &job.modelDmx, &job.proportions, &job.vnmskel})
         if (!p->empty() && !ag2::fs::is_regular_file(*p))
-            throw std::runtime_error("not found: " + p->u8string());
+            throw std::runtime_error("not found: " + pulse::Utf8(*p));
     return job;
 }
 
@@ -109,7 +109,7 @@ int Main(const std::vector<std::string>& args) {
         } else if (a.rfind("--", 0) == 0) {
             throw std::runtime_error("unknown option " + a);
         } else {
-            jobs.push_back(ag2::fs::absolute(ag2::fs::u8path(a)));
+            jobs.push_back(ag2::fs::absolute(pulse::Utf8Path(a)));
         }
     }
     if (jobs.empty()) {
@@ -122,7 +122,7 @@ int Main(const std::vector<std::string>& args) {
         try {
             ag2::Generate(LoadJob(file), options);
         } catch (const std::exception& e) {
-            std::cerr << "ERROR: " << file.u8string() << ": " << e.what() << '\n';
+            std::cerr << "ERROR: " << pulse::Utf8(file) << ": " << e.what() << '\n';
             ++failed;
         }
     }
@@ -145,7 +145,7 @@ void PauseIfOwnConsole() {
 int wmain(int argc, wchar_t** argv) {
     std::vector<std::string> args;
     for (int i = 0; i < argc; ++i)
-        args.push_back(std::filesystem::path(argv[i]).u8string());
+        args.push_back(pulse::Utf8(std::filesystem::path(argv[i])));
     int code = 1;
     try {
         code = Main(args);

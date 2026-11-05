@@ -28,6 +28,7 @@
 #include "apioutput.h"
 #include "dmxwrite.h"
 #include "mdlfile.h"
+#include "pathcompat.h"
 #include "pulselimits.h"
 #include "strcompat.h"
 
@@ -48,7 +49,7 @@ namespace {
 
 bool ReadInput(const std::string& path, std::vector<char>& bytes)
 {
-    std::ifstream file(fs::u8path(path), std::ios::binary | std::ios::ate);
+    std::ifstream file(pulse::Utf8Path(path), std::ios::binary | std::ios::ate);
     if (!file) return false;
     const auto length = file.tellg();
     if (length < 0 || length > 128 * 1024 * 1024) return false;
@@ -947,7 +948,7 @@ std::string ResolveFaceSet(const std::string& set, const std::vector<mdldecompil
 // One "<morph> <controller>=<weight>..." per line, # comments. <morph> is a kFace
 // id, its UTF-8 name, or the raw VMD bytes (a Shift-JIS file names any morph).
 bool LoadFaceMap(const std::string& path, FaceMap& map, std::string& err) {
-    std::ifstream f(fs::u8path(path), std::ios::binary);
+    std::ifstream f(pulse::Utf8Path(path), std::ios::binary);
     if (!f) {
         err = "cannot read \"" + path + "\"";
         return false;

@@ -8,8 +8,7 @@ project(PulseModel LANGUAGES CXX C)
 # with byte-identical output, but made an incremental build 4x slower. Left off;
 # worth passing in the CI release workflows only, where build time is free.
 
-# C++17: inline constexpr + nested namespaces (used by libs/pulselimits.h).
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 

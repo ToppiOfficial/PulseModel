@@ -52,7 +52,7 @@ std::string ClassOf(const kv::Value& node) {
 }
 
 std::string ReadText(const fs::path& path) {
-    const auto bytes = kv::ReadFile(path.u8string());
+    const auto bytes = kv::ReadFile(pulse::Utf8(path));
     return {bytes.begin(), bytes.end()};
 }
 
@@ -73,13 +73,13 @@ Paths Locate(const fs::path& vmdl) {
     if (!fs::exists(p.cs2 / "game/csgo/pak01_dir.vpk"))
         throw runtime_error("no CS2 install above the addon (game/csgo/pak01_dir.vpk is missing)");
     p.output = vmdl.parent_path() / vmdl.stem();
-    p.relative = p.output.lexically_relative(p.addon).generic_u8string();
+    p.relative = pulse::Utf8Generic(p.output.lexically_relative(p.addon));
     return p;
 }
 
 // A ModelDoc path is addon-relative; a model-relative one is accepted too.
 fs::path ResolveImport(const std::string& name, const Paths& paths, const fs::path& vmdl) {
-    const fs::path file = fs::u8path(name);
+    const fs::path file = pulse::Utf8Path(name);
     for (const fs::path& candidate : {paths.addon / file, vmdl.parent_path() / file})
         if (fs::is_regular_file(candidate))
             return fs::weakly_canonical(candidate);
@@ -102,7 +102,7 @@ RigSource FindRig(kv::Value& vmdl, const Job& job, const Paths& paths, const std
         if ((cls != "RenderMeshFile" && cls != "SkeletonFile") || !node.Has("filename"))
             return;
         const std::string name = node.At("filename").String();
-        if (_stricmp(fs::u8path(name).extension().u8string().c_str(), ".dmx") != 0)
+        if (_stricmp(pulse::Utf8(pulse::Utf8Path(name).extension()).c_str(), ".dmx") != 0)
             return;
         RigSource source{ResolveImport(name, paths, job.vmdl),
                          node.Has("import_scale") ? static_cast<float>(node.At("import_scale").Number()) : 1.0f};
@@ -124,7 +124,7 @@ RigSource FindRig(kv::Value& vmdl, const Job& job, const Paths& paths, const std
         size_t bestCount = 0, bestStockCount = 0;
         for (const RigSource& source : *list) {
             std::string err;
-            auto dm = dmx::Datamodel::Load(source.path.u8string(), &err);
+            auto dm = dmx::Datamodel::Load(pulse::Utf8(source.path), &err);
             const size_t count = dm ? CountBones(*dm) : 0;
             if (!count)
                 continue;
@@ -134,7 +134,7 @@ RigSource FindRig(kv::Value& vmdl, const Job& job, const Paths& paths, const std
             } catch (const std::exception&) {
             }
             if (stockLengths) {
-                std::cout << "Skipping " << source.path.filename().u8string()
+                std::cout << "Skipping " << pulse::Utf8(source.path.filename())
                           << ": its bone lengths match the stock skeletons\n";
                 if (count > bestStockCount) {
                     bestStock = source;
@@ -203,9 +203,9 @@ std::vector<Bone> BoneNodes(const kv::Value& vmdl) {
 
 std::unique_ptr<dmx::Datamodel> LoadDmx(const fs::path& path) {
     std::string err;
-    auto dm = dmx::Datamodel::Load(path.u8string(), &err);
+    auto dm = dmx::Datamodel::Load(pulse::Utf8(path), &err);
     if (!dm)
-        throw runtime_error("cannot load " + path.u8string() + ": " + err);
+        throw runtime_error("cannot load " + pulse::Utf8(path) + ": " + err);
     return dm;
 }
 
@@ -342,8 +342,8 @@ void EditModel(const std::string& originalText, kv::Value model, const Job& job,
     fs::path backup = job.vmdl;
     backup += ".bak";
     if (!fs::exists(backup))
-        kv::WriteFile(backup.u8string(), originalText);
-    kv::WriteFile(job.vmdl.u8string(), originalText.substr(0, header + 3) + "\n" + kv::TextBody(model) + "\n");
+        kv::WriteFile(pulse::Utf8(backup), originalText);
+    kv::WriteFile(pulse::Utf8(job.vmdl), originalText.substr(0, header + 3) + "\n" + kv::TextBody(model) + "\n");
 }
 
 std::string SetupNotes(const Paths& paths, const SkeletonBuild& skeleton, const std::vector<std::string>& warnings,
@@ -389,7 +389,7 @@ kv::Value Report(const Job& job, const std::string& rig, const std::string& pose
                                           {"reference", triple(stock[i].position)},
                                           {"target", triple(target[i].position)}});
     return kv::Value::Object{
-        {"model", job.vmdl.generic_u8string()},
+        {"model", pulse::Utf8Generic(job.vmdl)},
         {"rig", rig},
         {"pose", pose},
         {"graph", paths.relative + "/" + kWorldGraphFile},
@@ -406,8 +406,8 @@ void PrintSummary(const Paths& paths, const SkeletonBuild& skeleton, const std::
     std::cout << "Skeleton " << paths.relative << "/" << kSkeletonFile << ": " << skeleton.added.size()
               << " stock bones added, " << skeleton.reparented.size() << " moved under their stock parent\n";
     if (job.writeModel)
-        std::cout << "Edited " << job.vmdl.filename().u8string() << " (original kept as "
-                  << job.vmdl.filename().u8string() << ".bak)\n";
+        std::cout << "Edited " << pulse::Utf8(job.vmdl.filename()) << " (original kept as "
+                  << pulse::Utf8(job.vmdl.filename()) << ".bak)\n";
     else
         std::cout << "Run with write_model to make it the VMDL's only SkeletonFile with its stock bones as Bone nodes\n"
                   << "Set the worldmodel AnimGraph2 to " << paths.relative << "/" << kWorldGraphFile << "\n"
@@ -424,7 +424,7 @@ void PrintSummary(const Paths& paths, const SkeletonBuild& skeleton, const std::
 } // namespace
 
 void Generate(const Job& job, const Options& options) {
-    std::cout << "Processing " << job.vmdl.u8string() << '\n';
+    std::cout << "Processing " << pulse::Utf8(job.vmdl) << '\n';
     const Paths paths = Locate(job.vmdl);
     const std::string vmdlText = ReadText(job.vmdl);
     kv::Value vmdl = kv::ParseText(vmdlText);
@@ -432,7 +432,7 @@ void Generate(const Job& job, const Options& options) {
     std::vector<uint8_t> skeletonBytes = package.Read(std::string(kStockSkeleton) + "_c");
     const StockSkeleton installed = ReadStockSkeleton(skeletonBytes);
     if (!job.vnmskel.empty()) {
-        skeletonBytes = kv::ReadFile(job.vnmskel.u8string());
+        skeletonBytes = kv::ReadFile(pulse::Utf8(job.vnmskel));
         RequireSameSkeleton(installed, ReadStockSkeleton(skeletonBytes));
     }
     const StockSkeleton viewmodel = ReadStockSkeleton(package.Read(std::string(kStockViewSkeleton) + "_c"));
@@ -516,7 +516,7 @@ void Generate(const Job& job, const Options& options) {
     std::error_code ec;
     for (const char* folder : {"debug", "graphs", "anims", "dmx"})
         fs::remove(paths.output / folder, ec); // only when empty
-    std::cout << "Output: " << paths.output.u8string() << '\n';
+    std::cout << "Output: " << pulse::Utf8(paths.output) << '\n';
 
     for (const char* name : {kSkeletonFile, kReferenceFile})
         fs::create_directories((paths.output / name).parent_path());
@@ -524,26 +524,26 @@ void Generate(const Job& job, const Options& options) {
     WriteHeldPose(paths.output / kReferenceFile, installed.bones, installed.lowLodCount);
     WriteHeldPose(paths.output / kProportionsFile, target, installed.lowLodCount);
     const kv::Value descriptor = SkeletonDescriptor(ReadStockSkeleton(skeletonBytes), paths.relative + "/" + kReferenceFile);
-    kv::WriteFile((paths.output / kClipFile).u8string(), kv::WriteText(ProportionClip(paths.relative)));
-    kv::WriteFile((paths.output / kWorldGraphFile).u8string(), kv::WriteText(graph));
-    kv::WriteFile((paths.output / kUiGraphFile).u8string(), kv::WriteText(uiGraph));
+    kv::WriteFile(pulse::Utf8(paths.output / kClipFile), kv::WriteText(ProportionClip(paths.relative)));
+    kv::WriteFile(pulse::Utf8(paths.output / kWorldGraphFile), kv::WriteText(graph));
+    kv::WriteFile(pulse::Utf8(paths.output / kUiGraphFile), kv::WriteText(uiGraph));
     if (job.writeModel)
         EditModel(vmdlText, vmdl, job, paths, StockBoneNodes(skeleton.bones, modelStock));
     // what the clip was built from, for issue reports
     if (options.debug) {
-        const std::string rigName = rigSource.path.generic_u8string();
-        const std::string poseName = job.proportions.empty() ? rigName : job.proportions.generic_u8string();
-        kv::WriteFile((paths.output / "debug/skeleton_descriptor.kv3").u8string(), kv::WriteText(descriptor));
-        kv::WriteFile((paths.output / "debug/report.kv3").u8string(),
+        const std::string rigName = pulse::Utf8Generic(rigSource.path);
+        const std::string poseName = job.proportions.empty() ? rigName : pulse::Utf8Generic(job.proportions);
+        kv::WriteFile(pulse::Utf8(paths.output / "debug/skeleton_descriptor.kv3"), kv::WriteText(descriptor));
+        kv::WriteFile(pulse::Utf8(paths.output / "debug/report.kv3"),
                       kv::WriteText(Report(job, rigName, poseName, paths, installed.bones, target)));
-        kv::WriteFile((paths.output / "debug/MODEL_SETUP.txt").u8string(),
+        kv::WriteFile(pulse::Utf8(paths.output / "debug/MODEL_SETUP.txt"),
                       SetupNotes(paths, skeleton, warnings, job.writeModel));
     }
     PrintSummary(paths, skeleton, warnings, job);
 
     if (!options.generateOnly)
         Compile(options, paths, skeletonBytes, graphBytes, uiGraphBytes, descriptor);
-    std::cout << "DONE: " << paths.output.u8string()
+    std::cout << "DONE: " << pulse::Utf8(paths.output)
               << (options.generateOnly ? " (source assets only)\n" : " (graph and clip compiled)\n");
 }
 

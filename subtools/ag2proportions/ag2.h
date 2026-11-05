@@ -11,6 +11,7 @@
 #include "dmx/dmx.h"
 #include "keyvalues3/kv3.h"
 #include "math/math.h"
+#include "pathcompat.h"
 
 namespace ag2 {
 

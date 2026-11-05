@@ -319,7 +319,7 @@ void SaveModelDmx(const fs::path& path, const char* modelName, const std::vector
     }
 
     std::string err;
-    if (!q.Save(path.u8string(), &err))
+    if (!q.Save(pulse::Utf8(path), &err))
         throw runtime_error(err);
 }
 

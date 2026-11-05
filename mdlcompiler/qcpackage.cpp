@@ -38,7 +38,7 @@ bool Package::IsPackage(const fs::path& path)
 Package::Package(const fs::path& path) : path_(fs::absolute(path).lexically_normal()), input_(path_, std::ios::binary)
 {
     if (active) throw std::runtime_error("A QCZip package is already open.");
-    if (!input_) throw std::runtime_error("Cannot open QCZip package: " + path_.u8string());
+    if (!input_) throw std::runtime_error("Cannot open QCZip package: " + pulse::Utf8(path_));
 
     zip_.m_pIO_opaque = &input_;
     zip_.m_pRead = [](void* context, mz_uint64 offset, void* data, size_t size) -> size_t {
@@ -72,7 +72,7 @@ Package::Package(const fs::path& path) : path_(fs::absolute(path).lexically_norm
                 throw std::runtime_error("Unsupported compression or encryption in QCZip member: " + name);
             if (stat.m_is_directory) continue;
 
-            name = member.lexically_normal().generic_u8string();
+            name = pulse::Utf8Generic(member.lexically_normal());
             if (name == "." || !members_.emplace(Key(name), Member{i, name, stat.m_uncomp_size}).second)
                 throw std::runtime_error("Duplicate or invalid QCZip member: " + name);
         }
@@ -99,7 +99,7 @@ const Package::Member* Package::Find(const fs::path& path) const
     const auto full = fs::absolute(path).lexically_normal();
     const auto relative = full.lexically_relative(path_);
     if (!Inside(relative)) return nullptr;
-    const auto found = members_.find(Key(relative.generic_u8string()));
+    const auto found = members_.find(Key(pulse::Utf8Generic(relative)));
     return found == members_.end() ? nullptr : &found->second;
 }
 
@@ -109,7 +109,7 @@ fs::path Package::Internal(const fs::path& path) const
     auto relative = full.lexically_relative(path_);
     if (!Inside(relative)) relative = full.lexically_relative(path_.parent_path());
     if (!Inside(relative)) return {};
-    const auto found = members_.find(Key(relative.generic_u8string()));
+    const auto found = members_.find(Key(pulse::Utf8Generic(relative)));
     return found == members_.end() ? fs::path{} : path_ / pulse::FilePath(found->second.name);
 }
 
@@ -120,7 +120,7 @@ bool Package::Contains(const fs::path& path) const { return Find(path) != nullpt
 std::string Package::Read(const fs::path& path)
 {
     const auto* member = Find(path);
-    if (!member) throw std::runtime_error("Missing QCZip member: " + path.u8string());
+    if (!member) throw std::runtime_error("Missing QCZip member: " + pulse::Utf8(path));
     if (member->size > (64u << 20)) throw std::runtime_error("QCZip script exceeds 64 MiB: " + member->name);
     std::string text(static_cast<size_t>(member->size), '\0');
     if (!mz_zip_reader_extract_to_mem(&zip_, member->index, text.data(), text.size(), 0))

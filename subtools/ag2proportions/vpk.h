@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "pathcompat.h"
+
 namespace ag2 {
 class Vpk {
     struct Entry { uint16_t archive; uint32_t offset, size; std::vector<uint8_t> preload; };
@@ -24,7 +26,7 @@ class Vpk {
 public:
     explicit Vpk(const std::filesystem::path& path) : directory(path) {
         std::ifstream file(path, std::ios::binary);
-        if (!file || Read32(file) != 0x55aa1234) throw std::runtime_error("Invalid VPK: " + path.u8string());
+        if (!file || Read32(file) != 0x55aa1234) throw std::runtime_error("Invalid VPK: " + pulse::Utf8(path));
         uint32_t version = Read32(file), treeSize = Read32(file);
         if ((version != 1 && version != 2) || treeSize > 128 * 1024 * 1024) throw std::runtime_error("Unsupported VPK header");
         size_t header = version == 1 ? 12 : 28;
@@ -68,15 +70,15 @@ public:
         uint64_t offset = entry.offset;
         if (entry.archive == 0x7fff) offset += embeddedOffset;
         else {
-            auto filename = directory.filename().u8string();
+            auto filename = pulse::Utf8(directory.filename());
             auto suffix = filename.rfind("_dir.vpk");
             if (suffix == std::string::npos) throw std::runtime_error("VPK directory filename must end in _dir.vpk");
             std::array<char, 16> index{};
             std::snprintf(index.data(), index.size(), "_%03u.vpk", static_cast<unsigned>(entry.archive));
-            archive = directory.parent_path() / std::filesystem::u8path(filename.substr(0, suffix) + index.data());
+            archive = directory.parent_path() / pulse::Utf8Path(filename.substr(0, suffix) + index.data());
         }
         std::ifstream file(archive, std::ios::binary);
-        if (!file) throw std::runtime_error("VPK archive missing: " + archive.u8string());
+        if (!file) throw std::runtime_error("VPK archive missing: " + pulse::Utf8(archive));
         std::vector<uint8_t> data = entry.preload;
         data.resize(data.size() + entry.size);
         file.seekg(static_cast<std::streamoff>(offset));

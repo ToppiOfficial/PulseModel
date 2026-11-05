@@ -1,6 +1,7 @@
 // dmx.cpp - data model, guid/type helpers, header parsing and codec dispatch.
 
 #include "dmx/dmx.h"
+#include "pathcompat.h"
 
 #include <cctype>
 #include <cstdio>
@@ -279,7 +280,7 @@ bool Save(const Datamodel& dm, std::vector<uint8_t>& out, std::string* err) {
 bool Save(const Datamodel& dm, const std::string& path, std::string* err) {
     std::vector<uint8_t> bytes;
     if (!Save(dm, bytes, err)) return false;
-    std::ofstream f(std::filesystem::u8path(path), std::ios::binary);
+    std::ofstream f(pulse::Utf8Path(path), std::ios::binary);
     if (f) f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!f) {
         if (err) *err = "cannot write file: " + path;

@@ -124,7 +124,7 @@ inline void Print(bool complete = true) {
         record += ",\"path\":" + pulse::api::String(path);
         const auto* package = pulse::qcpackage::active;
         if (package && package->Contains(pulse::FilePath(path)))
-            record += ",\"archive\":" + pulse::api::String(package->Path().u8string());
+            record += ",\"archive\":" + pulse::api::String(pulse::Utf8(package->Path()));
         if (e.missing) record += ",\"missing\":true";
         if (e.dmx)
             record += ",\"modelVersion\":" + std::to_string(e.markup.modelVersion) +

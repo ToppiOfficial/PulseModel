@@ -360,7 +360,7 @@ struct Ctx {
     }
 
     // Absolute path of the file being parsed.
-    std::string Path() const { return fs::absolute(curDir / file).lexically_normal().u8string(); }
+    std::string Path() const { return pulse::Utf8(fs::absolute(curDir / file).lexically_normal()); }
 
     // Analyze: the token at `at` is an option word of the running command, so it can be told
     // apart from values. Sent when the command ends; DropOption undoes a mark that turned out a value.
@@ -8678,7 +8678,7 @@ bool SpliceInclude(Ctx& c) {
 
     const std::string name = full.filename().string();
     std::vector<Token> toks;
-    const auto sourcePath = fs::absolute(full).lexically_normal().u8string();
+    const auto sourcePath = pulse::Utf8(fs::absolute(full).lexically_normal());
     if (!Tokenize(text, name, sourcePath, toks, c.err))
         return false;
     if (pulse::api::Active()) {
@@ -9921,7 +9921,7 @@ bool LoadQcScript(const char* rawPath, cm::CompileInput& out, std::string* err,
       if (!Tokenize(text, c.file, c.Path(), c.toks, err))
           return false; }
     if (pulse::api::Active()) {
-        c.apiSources.push_back(fs::absolute(pulse::FilePath(path)).lexically_normal().u8string());
+        c.apiSources.push_back(pulse::Utf8(fs::absolute(pulse::FilePath(path)).lexically_normal()));
         for (auto& token : c.toks) token.apiSource = 0;
     }
 

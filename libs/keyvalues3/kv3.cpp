@@ -1,4 +1,5 @@
 #include "keyvalues3/kv3.h"
+#include "pathcompat.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,7 +38,7 @@ int64_t Value::Integer() const {
 }
 bool Value::Boolean() const { return std::get<bool>(data); }
 std::vector<uint8_t> ReadFile(const std::string& path) {
-    std::ifstream file(std::filesystem::u8path(path), std::ios::binary | std::ios::ate);
+    std::ifstream file(pulse::Utf8Path(path), std::ios::binary | std::ios::ate);
     if (!file) throw std::runtime_error("Cannot read: " + path);
     const auto length = file.tellg(); if (length < 0 || length > 1073741824) throw std::runtime_error("Invalid or oversized file: " + path);
     std::vector<uint8_t> out(static_cast<size_t>(length)); file.seekg(0);
@@ -45,7 +46,7 @@ std::vector<uint8_t> ReadFile(const std::string& path) {
     return out;
 }
 void WriteFile(const std::string& path, const std::vector<uint8_t>& data) {
-    const auto dest = std::filesystem::u8path(path); std::filesystem::create_directories(dest.parent_path());
+    const auto dest = pulse::Utf8Path(path); std::filesystem::create_directories(dest.parent_path());
     std::ofstream file(dest, std::ios::binary); if (!file) throw std::runtime_error("Cannot write: " + path);
     if (!data.empty()) file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     file.close(); if (!file) throw std::runtime_error("Failed writing: " + path);
