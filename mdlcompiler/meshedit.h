@@ -63,7 +63,8 @@ enum class MeshOperation {
     SelectStream, SelectMaterial, SelectMesh, SelectMeshByStream,
     SelectWeights, SetWeight, ShiftWeights,
     SelectAll, SelectNone, InvertSelection, DeleteFaces,
-    DeleteVertices, Duplicate, ReplaceMaterial, FlipNormals, Weld, Inflate, SwitchUV
+    DeleteVertices, Duplicate, ReplaceMaterial, AddMaterialSuffix, FlipNormals, Weld, Inflate,
+    SwitchUV
 };
 
 struct EditMeshOperation {

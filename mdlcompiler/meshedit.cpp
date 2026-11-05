@@ -1228,6 +1228,24 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
                 return fail("replacematerial exceeds the material limit");
             material = mats.UseTextureAsMaterial(texture);
         }
+        // old material -> "<name><suffix>", built for every material a picked face uses
+        std::vector<int> suffixed;
+        if (op.kind == MeshOperation::AddMaterialSuffix) {
+            suffixed.assign(mats.materialToTexture.size(), -1);
+            for (size_t i = 0; i < faces.size(); ++i) {
+                const int from = faces[i].material;
+                if (!pickedFaces[i] || from < 0 || suffixed[from] >= 0) continue;
+                const auto& tex = mats.textures[mats.materialToTexture[from]];
+                const int texture = mats.LookupTexture((tex.name + op.name).c_str(), tex.relative);
+                if (mats.textures[texture].material < 0 && mats.materialToTexture.size() >= lim::kMaxSkins)
+                    return fail("addmaterialsuffix exceeds the material limit");
+                suffixed[from] = mats.UseTextureAsMaterial(texture);
+            }
+        }
+        auto suffixedMaterial = [&](int from) {
+            return from >= 0 && from < static_cast<int>(suffixed.size()) && suffixed[from] >= 0
+                ? suffixed[from] : from;
+        };
 
         std::vector<int> origins(src.vertex.size()), copied(src.vertex.size(), -1);
         std::vector<char> affected(src.vertex.size(), 0);
@@ -1252,6 +1270,7 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
             if (op.kind == MeshOperation::Duplicate) faces.push_back(face);
             else {
                 if (op.kind == MeshOperation::ReplaceMaterial) face.material = material;
+                if (op.kind == MeshOperation::AddMaterialSuffix) face.material = suffixedMaterial(face.material);
                 if (op.kind == MeshOperation::FlipNormals) std::swap(face.b, face.c);
                 faces[i] = face;
             }
@@ -1263,6 +1282,9 @@ bool ApplyEditMesh(Source& src, MaterialTable& mats,
         if (op.kind == MeshOperation::ReplaceMaterial)
             for (size_t i = 0; i < affected.size(); ++i)
                 if (affected[i]) src.vertex[i].material = material;
+        if (op.kind == MeshOperation::AddMaterialSuffix)
+            for (size_t i = 0; i < affected.size(); ++i)
+                if (affected[i]) src.vertex[i].material = suffixedMaterial(src.vertex[i].material);
         if (op.kind == MeshOperation::FlipNormals) {
             for (size_t i = 0; i < affected.size(); ++i) {
                 if (!affected[i]) continue;

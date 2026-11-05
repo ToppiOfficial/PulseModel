@@ -861,6 +861,10 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
             op.kind = MeshOperation::ReplaceMaterial;
             if (!want("a material name", op.name)) return false;
             if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty material");
+        } else if (name == "addmaterialsuffix") {
+            op.kind = MeshOperation::AddMaterialSuffix;
+            if (!want("a material suffix", op.name)) return false;
+            if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty suffix");
         } else if (name == "flipnormals") {
             op.kind = MeshOperation::FlipNormals;
         } else if (name == "weld") {
