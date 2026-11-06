@@ -18,7 +18,9 @@ if(WIN32)
     configure_file(version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
     target_sources(ag2proportions PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/version.rc" "${CMAKE_SOURCE_DIR}/utf8.manifest")
 endif()
+# licenses/ sits beside mdlcompiler, one level above subtools/
+set(LICENSES_DIR "$<TARGET_FILE_DIR:ag2proportions>/../licenses")
 add_custom_command(TARGET ag2proportions POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ag2proportions>/licenses"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/libs/zstd/LICENSE" "$<TARGET_FILE_DIR:ag2proportions>/licenses/zstd.txt"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/libs/keyvalues3/ValveResourceFormat.LICENSE" "$<TARGET_FILE_DIR:ag2proportions>/licenses/ValveResourceFormat.txt")
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${LICENSES_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/libs/zstd/LICENSE" "${LICENSES_DIR}/zstd.txt"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/libs/keyvalues3/ValveResourceFormat.LICENSE" "${LICENSES_DIR}/ValveResourceFormat.txt")

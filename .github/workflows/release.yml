@@ -61,8 +61,7 @@ jobs:
           mkdir -p PulseModel
           cp "dist/mdlcompiler${{ matrix.ext }}" "dist/mdldecompiler${{ matrix.ext }}" \
              LICENSE PulseModel/
-          cp -r dist/subtools PulseModel/
-          mv PulseModel/subtools/licenses PulseModel/licenses
+          cp -r dist/subtools dist/licenses PulseModel/
           7z a -tzip "pulsemodel-${{ needs.prepare.outputs.tag }}-${{ matrix.plat }}.zip" PulseModel/
 
       - uses: actions/upload-artifact@v7
