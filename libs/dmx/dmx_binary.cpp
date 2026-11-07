@@ -1,9 +1,8 @@
 // dmx_binary.cpp - binary DMX decoder and encoder.
 //
-// Covers every version Valve emitted: 1 (no dictionary at all), 2/3 (inline
-// string values, 16-bit dictionary), 4 (dictionary string values), 5 and 9
-// (32-bit dictionary). Version-specific behaviour is isolated in StringDict +
-// the type table. 6-8 never existed and are rejected.
+// Reads 1 (no dictionary at all), 2/3 (inline string values, 16-bit dictionary),
+// 4 (dictionary string values), 5, 8 and 9 (32-bit dictionary). Version-specific
+// behaviour is isolated in StringDict + the type table. 6/7 exist but are rejected.
 //
 // NOTE: validated primarily against keyvalues2 fixtures so far; binary needs a
 // real sample to lock the byte layout per the project testing protocol. On an
@@ -75,7 +74,7 @@ private:
 };
 
 // Maps the on-disk type byte to AttrType. Two schemes exist:
-//   ev 1..5 : scalars 1..14, arrays contiguous 15..28 (Element..MatrixArray).
+//   ev 1..8 : scalars 1..14, arrays contiguous 15..28 (Element..MatrixArray).
 //   ev >= 9 : scalars 1..14 (Time still 7; 15/16 are uint64/uint8, unsupported),
 //             arrays encoded as (scalar | 0x20). modeldoc/Source-2 style.
 AttrType TypeFromId(uint8_t id, int ev) {
@@ -107,12 +106,11 @@ struct StringDict {
     //   table count width       : 4 bytes if ev >= 4, else 2
     //   index width             : 4 bytes if ev >= 5, else 2
     // So v1 = everything inline; v2/v3 = count16/idx16 inline values;
-    // v4 = count32/idx16 pooled; v5/v9 = count32/idx32 pooled.
+    // v4 = count32/idx16 pooled; v5/v8/v9 = count32/idx32 pooled.
     static bool Configure(int ev, StringDict& d) {
-        // 1-5 and 9 are the only versions Valve ever emitted (Binary.cs
-        // CodecFormat attributes); 6-8 do not exist, so reject rather than
-        // silently misparse one as v5.
-        if (ev < 1 || (ev > 5 && ev != 9)) return false;
+        // NOTE: v8 is untested - inferred from CS2 dmxconvert reading patched v9 files.
+        // v6/v7 are read by CS2 but their layout is unknown, so reject them.
+        if (ev < 1 || ev == 6 || ev == 7 || ev > 9) return false;
         d.dummy = (ev == 1);
         d.encoded_values = ev >= 4;
         d.len_size = ev >= 4 ? 4 : 2;
@@ -209,10 +207,10 @@ bool ParseBinary(Datamodel& dm, const uint8_t* body, size_t len, std::string* er
 
     Reader r(body, len);
 
-    // Encoding version 9 (model 22 / modeldoc) prepends an int32 count of
-    // "prefix elements" before the string table. It is 0 in practice; non-zero
-    // prefix blocks are not yet supported (need a sample to lock the layout).
-    if (dm.encoding_version >= 9) {
+    // Encoding version 8+ prepends an int32 count of "prefix elements" before the
+    // string table. It is 0 in practice; non-zero prefix blocks are unsupported.
+    // NOTE: untested for v8 - CS2 accepts patched v8 files with or without it.
+    if (dm.encoding_version >= 8) {
         int32_t prefix = r.I32();
         if (prefix != 0)
             return fail("binary 9 prefix elements not supported (count=" +
