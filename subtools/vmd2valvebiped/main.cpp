@@ -34,6 +34,15 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <iconv.h>
+#endif
+
 namespace fm = pulse::format;
 namespace fs = std::filesystem;
 namespace pm = pulse::math;
@@ -1060,7 +1069,9 @@ void AddEyeTracks(const std::map<std::string, std::vector<Key>>& keys,
         side.values.push_back(std::clamp(yaw * pm::kRad2Deg / range, -1.0f, 1.0f));
     }
     for (mdldecompiler::FlexTrack* t : {&up, &side})
-        if (!t->name.empty())
+        if (!t->name.empty() && std::none_of(out.begin(), out.end(), [&](const auto& mapped) {
+            return !_stricmp(mapped.name.c_str(), t->name.c_str());
+        }))
             out.push_back(std::move(*t));
 }
 
@@ -1306,6 +1317,7 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
     return true;
 }
 
+#include "facemapping.h"
 #include "curveapi.h"
 
 } // namespace
@@ -1383,14 +1395,16 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     const fm::mstudiobone_t* bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
     if (!bones)
         return Fail("\"" + mdlPath + "\" has no readable bones");
-    std::vector<mdldecompiler::FlexTrack> ctrls;
-    const fm::mstudioflexcontroller_t* fcs =
-        m.At<fm::mstudioflexcontroller_t>(m.buf.data(), h.flexcontrollerindex, h.numflexcontrollers);
-    for (int i = 0; fcs && i < h.numflexcontrollers; ++i)
-        ctrls.push_back({m.Str(&fcs[i], fcs[i].sznameindex), fcs[i].min, fcs[i].max, {}});
-
+    const auto ctrls = ModelControllers(m);
     faceSet = ResolveFaceSet(faceSet, ctrls);
-    FaceMap faceMap = BuiltinFaceMap(faceSet);
+    FaceMap faceMap = api && api->customFaceMap ? api->faceMap : BuiltinFaceMap(faceSet);
+    if (api && api->customFaceMap)
+        for (const auto& [morph, targets] : faceMap)
+            for (const auto& [name, strength] : targets)
+                if (std::none_of(ctrls.begin(), ctrls.end(), [&](const auto& controller) {
+                    return !_stricmp(name.c_str(), controller.name.c_str());
+                })) return Fail("Unknown face mapping controller: " + name);
+
     if (!faceMapPath.empty() && !LoadFaceMap(faceMapPath, faceMap, err))
         return Fail(err);
 
@@ -1920,7 +1934,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
             EmitMotionApi(m, t, times, frames, face, keyed != 0);
             for (const auto& missing : faceMissing)
                 pulse::api::Record("diagnostic", "{\"warning\":true,\"text\":" + pulse::api::String("Missing facial controller: " + missing) + "}");
-            if (unmapped) pulse::api::Record("diagnostic", "{\"warning\":true,\"text\":\"Some VMD facial morphs have no built-in mapping\"}");
+            if (unmapped) pulse::api::Record("diagnostic", "{\"warning\":true,\"text\":\"Some VMD facial morphs have no mapping\"}");
             if (!keyed && face.empty()) return Fail("The VMD has no supported body or facial animation");
             return 0;
         }
@@ -2064,17 +2078,29 @@ int main(int argc, char** argv)
             pulse::api::CheckMembers(request, {});
             result = 0;
         }
+        else if (method == "faceMapping")
+        {
+            EmitFaceMapping(request);
+            result = 0;
+        }
         else
         {
-            if (method == "motion") pulse::api::CheckMembers(request, {"motions", "model", "modelData", "fps", "rotation", "faceSet"});
+            if (method == "motion")
+                pulse::api::CheckMembers(request, {"motions", "model", "modelData", "fps", "rotation", "faceSet", "faceMap"});
             else if (method == "camera")
                 pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
                                                    "transform", "orientation", "distanceTransform",
-                                                   "boundaryMin", "boundaryMax", "boundaryTransform"});
+                                                   "boundaryMin", "boundaryMax", "boundaryTransform", "cameraHeight"});
             else throw std::runtime_error("Unknown conversion method \"" + method + "\"");
 
             ApiOptions options;
             options.method = method;
+            if (const auto mapping = request.find("faceMap"); mapping != request.end())
+            {
+                options.faceMap = ReadApiFaceMap(*mapping);
+                options.customFaceMap = true;
+            }
+
             // "motions" lists the top layer first; the last one is the base the others stack over
             std::string motion;
             if (method == "motion")
@@ -2116,6 +2142,14 @@ int main(int argc, char** argv)
                 if (!rotation->is_number() || !std::isfinite(rotation->get<double>()) || std::fabs(rotation->get<double>()) > 360)
                     throw std::runtime_error("API member \"rotation\" must be degrees from -360 to 360");
                 options.rotation = rotation->get<double>();
+            }
+
+            if (const auto height = request.find("cameraHeight"); height != request.end())
+            {
+                if (!height->is_number() || !std::isfinite(height->get<double>()) || height->get<double>() < 30
+                    || height->get<double>() > 500)
+                    throw std::runtime_error("API member \"cameraHeight\" must be centimeters from 30 to 500");
+                options.cameraHeight = height->get<double>();
             }
 
             // 3x4 matrices are 12 numbers, row-major

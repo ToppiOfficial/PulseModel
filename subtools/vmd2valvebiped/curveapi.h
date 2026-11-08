@@ -6,9 +6,14 @@
 #include <limits>
 #include <stdexcept>
 
+// Height in cm of the standard MMD model, the one cameras are made for unless stated
+constexpr double kMmdStandardHeight = 158;
+
 struct ApiOptions
 {
     std::string method;
+    bool customFaceMap = false;
+    FaceMap faceMap;
     // VMDs stacked over the motion, lowest priority first; each keyed track replaces the one below.
     std::vector<std::string> layers;
     std::vector<char> modelData; // the target .mdl sent in the request, instead of a path
@@ -16,6 +21,8 @@ struct ApiOptions
     // Degrees about the target model's Z axis, turning the whole converted motion.
     double rotation = 0;
     matrix3x4 transform, orientation, distanceTransform;
+    // Height in cm of the model the camera was made for; the camera scales from the floor to fit.
+    double cameraHeight = kMmdStandardHeight;
     // Camera eyes stay inside [boundaryMin, boundaryMax] once mapped by boundaryTransform.
     bool boundary = false;
     Vector3 boundaryMin, boundaryMax;
@@ -33,7 +40,7 @@ std::string Number(double value)
 
 void ApiCapabilities()
 {
-    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1,\"layers\":1,\"faceSet\":1}");
+    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1,\"layers\":1,\"faceSet\":1,\"cameraHeight\":1,\"faceMapping\":1}");
 }
 
 std::vector<float> ApiTimes(uint32_t last, double fps)
@@ -89,32 +96,55 @@ std::vector<double> EmitCurve(const char* property, const std::string& control, 
     if (values.empty() || values.size() != sourceTimes.size()) throw std::runtime_error("Invalid converted curve");
 
     const size_t count = values.size();
-    std::vector<double> times(count), slopes(count);
+    std::vector<double> times(count), incoming = values, outgoing = values;
     for (size_t i = 0; i < count; ++i)
     {
         times[i] = double(sourceTimes[i]) / 30;
-        if (!std::isfinite(values[i]) || (i && times[i] <= times[i - 1]))
+        if (!std::isfinite(times[i]) || !std::isfinite(values[i]) || (i && times[i] <= times[i - 1]))
             throw std::runtime_error("Invalid converted sample");
     }
 
-    for (size_t i = 1; i + 1 < count; ++i)
+    const auto fit = [&](size_t a, size_t b)
     {
-        const double a = (values[i] - values[i - 1]) / (times[i] - times[i - 1]);
-        const double b = (values[i + 1] - values[i]) / (times[i + 1] - times[i]);
-        slopes[i] = a * b > 0 ? std::copysign(std::min(std::abs(a), std::abs(b)), a) : 0;
-    }
-    if (count > 1)
-    {
-        slopes.front() = (values[1] - values[0]) / (times[1] - times[0]);
-        slopes.back() = (values[count - 1] - values[count - 2]) / (times[count - 1] - times[count - 2]);
-    }
+        std::array<double, 2> handles{std::lerp(values[a], values[b], 1.0 / 3),
+                                     std::lerp(values[a], values[b], 2.0 / 3)};
+        if (discrete || cuts.count(b) || b - a <= 1) return handles;
 
-    const auto sample = [&](size_t a, size_t b, size_t at)
+        // Fit both handle values to the whole span with the endpoint keys held fixed.
+        double aa = 0, ab = 0, bb = 0, av = 0, bv = 0;
+        const double duration = times[b] - times[a];
+        for (size_t i = a + 1; i < b; ++i)
+        {
+            const double t = (times[i] - times[a]) / duration, s = 1 - t;
+            const double left = 3 * s * s * t, right = 3 * s * t * t;
+            const double value = values[i] - std::lerp(values[a], values[b], t);
+            aa += left * left;
+            ab += left * right;
+            bb += right * right;
+            av += left * value;
+            bv += right * value;
+        }
+
+        const double determinant = aa * bb - ab * ab;
+        if (determinant > 1e-12 * aa * bb)
+        {
+            handles[0] += (av * bb - bv * ab) / determinant;
+            handles[1] += (bv * aa - av * ab) / determinant;
+        }
+        else
+        {
+            const double offset = (av + bv) / (aa + 2 * ab + bb);
+            handles[0] += offset;
+            handles[1] += offset;
+        }
+        return handles;
+    };
+
+    const auto sample = [&](size_t a, size_t b, double t, const std::array<double, 2>& handles)
     {
         if (discrete || cuts.count(b)) return values[a];
-        const double duration = times[b] - times[a], t = (times[at] - times[a]) / duration, s = 1 - t;
-        return s*s*s*values[a] + 3*s*s*t*(values[a] + slopes[a]*duration/3)
-             + 3*s*t*t*(values[b] - slopes[b]*duration/3) + t*t*t*values[b];
+        const double s = 1 - t;
+        return s*s*s*values[a] + 3*s*s*t*handles[0] + 3*s*t*t*handles[1] + t*t*t*values[b];
     };
 
     std::set<size_t> keep{0, count - 1};
@@ -133,16 +163,56 @@ std::vector<double> EmitCurve(const char* property, const std::string& control, 
     {
         const auto [a, b] = pending.back();
         pending.pop_back();
+        const auto handles = fit(a, b);
         double error = tolerance;
         size_t split = a;
         for (size_t i = a + 1; i < b; ++i)
-            if (const auto distance = std::abs(sample(a, b, i) - values[i]); distance > error) { error = distance; split = i; }
+        {
+            const double t = (times[i] - times[a]) / (times[b] - times[a]);
+            const double distance = std::abs(sample(a, b, t, handles) - values[i]);
+            if (distance > error) { error = distance; split = i; }
+        }
+
+        if (split == a && !discrete && !cuts.count(b) && b - a > 1)
+        {
+            // Bound between-frame extrema by their neighboring source samples.
+            const auto checkExtremum = [&](double t)
+            {
+                if (!(t > 0 && t < 1)) return;
+                const double time = std::lerp(times[a], times[b], t);
+                const auto next = std::lower_bound(times.begin() + a, times.begin() + b + 1, time);
+                const size_t right = std::clamp(size_t(next - times.begin()), a + 1, b);
+                const double value = sample(a, b, t, handles);
+                const double distance = std::max(std::min(values[right - 1], values[right]) - value,
+                                                 value - std::max(values[right - 1], values[right]));
+                if (distance > error) { error = distance; split = std::min(right, b - 1); }
+            };
+
+            const double p = -values[a] + 3 * handles[0] - 3 * handles[1] + values[b];
+            const double q = 2 * (values[a] - 2 * handles[0] + handles[1]);
+            const double r = handles[0] - values[a];
+            if (p == 0)
+            {
+                if (q != 0) checkExtremum(-r / q);
+            }
+            else if (const double discriminant = q * q - 4 * p * r; discriminant >= 0)
+            {
+                const double root = std::sqrt(discriminant);
+                checkExtremum((-q + root) / (2 * p));
+                checkExtremum((-q - root) / (2 * p));
+            }
+        }
 
         if (split != a)
         {
             keep.insert(split);
             pending.emplace_back(a, split);
             pending.emplace_back(split, b);
+        }
+        else
+        {
+            outgoing[a] = handles[0];
+            incoming[b] = handles[1];
         }
     }
 
@@ -158,11 +228,12 @@ std::vector<double> EmitCurve(const char* property, const std::string& control, 
         if (k) json += ',';
         json += "{\"time\":" + Number(times[i]) + ",\"value\":" + Number(values[i])
             + ",\"interpolation\":" + ((discrete || cuts.count(next)) ? "0" : "2")
-            + ",\"left\":{\"time\":" + Number(times[i] - left) + ",\"value\":" + Number(values[i] - slopes[i]*left) + ",\"type\":4}"
-            + ",\"right\":{\"time\":" + Number(times[i] + right) + ",\"value\":" + Number(values[i] + slopes[i]*right) + ",\"type\":4}}";
+            + ",\"left\":{\"time\":" + Number(times[i] - left) + ",\"value\":" + Number(incoming[i]) + ",\"type\":4}"
+            + ",\"right\":{\"time\":" + Number(times[i] + right) + ",\"value\":" + Number(outgoing[i]) + ",\"type\":4}}";
         if (k + 1 < keys.size())
             for (size_t at = i + 1; at < next; ++at) {
-                fitted[at] = sample(i, next, at);
+                const double t = (times[at] - times[i]) / (times[next] - times[i]);
+                fitted[at] = sample(i, next, t, {outgoing[i], incoming[next]});
                 assert(std::abs(fitted[at] - values[at]) <= tolerance + 1e-8);
             }
     }
@@ -273,6 +344,7 @@ int EmitCameraApi(const ApiOptions& api, const std::string& path, const matrix3x
     std::string error;
     if (!LoadVmd(path, bones, morphs, cameras, last, error)) return Fail(error);
     if (cameras.empty()) return Fail("The VMD has no camera keys");
+    scale *= float(kMmdStandardHeight / api.cameraHeight);
 
     auto times = ApiTimes(cameras.back().frame, api.fps);
     for (size_t i = 1; i < cameras.size(); ++i)
