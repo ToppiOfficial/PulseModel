@@ -3,6 +3,7 @@
 #include <array>
 #include <cassert>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 
@@ -104,47 +105,206 @@ std::vector<double> EmitCurve(const char* property, const std::string& control, 
             throw std::runtime_error("Invalid converted sample");
     }
 
+    using Handles = std::array<double, 4>;
+    const auto cubic = [](double a, double b, double c, double d, double t)
+    {
+        const double s = 1 - t;
+        return s*s*s*a + 3*s*s*t*b + 3*s*t*t*c + t*t*t*d;
+    };
+    const auto parameter = [&](double time, const Handles& handles)
+    {
+        if (time <= 0 || time >= 1) return std::clamp(time, 0.0, 1.0);
+        double lo = 0, hi = 1, t = time;
+        for (int iteration = 0; iteration < 16; ++iteration)
+        {
+            const double x = cubic(0, handles[0], handles[2], 1, t);
+            const double error = x - time;
+            if (std::abs(error) < 1e-12) break;
+            if (error < 0) lo = t;
+            else hi = t;
+
+            const double s = 1 - t;
+            const double slope = 3 * (s*s*handles[0] + 2*s*t*(handles[2] - handles[0]) + t*t*(1 - handles[2]));
+            const double next = slope > 1e-12 ? t - error / slope : -1;
+            t = next > lo && next < hi ? next : (lo + hi) * 0.5;
+        }
+        return t;
+    };
+    const auto sample = [&](size_t a, size_t b, double time, const Handles& handles)
+    {
+        if (discrete || cuts.count(b)) return values[a];
+        return cubic(values[a], handles[1], handles[3], values[b], parameter(time, handles));
+    };
+
+    const auto check = [&](size_t a, size_t b, const Handles& handles)
+    {
+        double error = tolerance;
+        size_t split = a;
+        for (size_t i = a + 1; i < b; ++i)
+        {
+            const double time = (times[i] - times[a]) / (times[b] - times[a]);
+            const double distance = std::abs(sample(a, b, time, handles) - values[i]);
+            if (distance > error) { error = distance; split = i; }
+        }
+
+        if (split == a && !discrete && !cuts.count(b) && b - a > 1)
+        {
+            // Bound between-frame extrema by their neighboring source samples.
+            const auto checkExtremum = [&](double t)
+            {
+                if (!(t > 0 && t < 1)) return;
+                const double time = std::lerp(times[a], times[b], cubic(0, handles[0], handles[2], 1, t));
+                const auto next = std::lower_bound(times.begin() + a, times.begin() + b + 1, time);
+                const size_t right = std::clamp(size_t(next - times.begin()), a + 1, b);
+                const double value = cubic(values[a], handles[1], handles[3], values[b], t);
+                const double distance = std::max(std::min(values[right - 1], values[right]) - value,
+                                                 value - std::max(values[right - 1], values[right]));
+                if (distance > error) { error = distance; split = std::min(right, b - 1); }
+            };
+
+            const double p = -values[a] + 3 * handles[1] - 3 * handles[3] + values[b];
+            const double q = 2 * (values[a] - 2 * handles[1] + handles[3]);
+            const double r = handles[1] - values[a];
+            if (p == 0)
+            {
+                if (q != 0) checkExtremum(-r / q);
+            }
+            else if (const double discriminant = q*q - 4*p*r; discriminant >= 0)
+            {
+                const double root = std::sqrt(discriminant);
+                checkExtremum((-q + root) / (2*p));
+                checkExtremum((-q - root) / (2*p));
+            }
+        }
+        return std::pair{split, error};
+    };
+
     const auto fit = [&](size_t a, size_t b)
     {
-        std::array<double, 2> handles{std::lerp(values[a], values[b], 1.0 / 3),
-                                     std::lerp(values[a], values[b], 2.0 / 3)};
+        Handles handles{1.0 / 3, std::lerp(values[a], values[b], 1.0 / 3),
+                        2.0 / 3, std::lerp(values[a], values[b], 2.0 / 3)};
         if (discrete || cuts.count(b) || b - a <= 1) return handles;
 
-        // Fit both handle values to the whole span with the endpoint keys held fixed.
         double aa = 0, ab = 0, bb = 0, av = 0, bv = 0;
         const double duration = times[b] - times[a];
+        double minimum = values[a], maximum = values[a];
         for (size_t i = a + 1; i < b; ++i)
         {
             const double t = (times[i] - times[a]) / duration, s = 1 - t;
-            const double left = 3 * s * s * t, right = 3 * s * t * t;
+            const double left = 3*s*s*t, right = 3*s*t*t;
             const double value = values[i] - std::lerp(values[a], values[b], t);
             aa += left * left;
             ab += left * right;
             bb += right * right;
             av += left * value;
             bv += right * value;
+            minimum = std::min(minimum, values[i]);
+            maximum = std::max(maximum, values[i]);
         }
 
-        const double determinant = aa * bb - ab * ab;
+        const double determinant = aa*bb - ab*ab;
         if (determinant > 1e-12 * aa * bb)
         {
-            handles[0] += (av * bb - bv * ab) / determinant;
-            handles[1] += (bv * aa - av * ab) / determinant;
+            handles[1] += (av*bb - bv*ab) / determinant;
+            handles[3] += (bv*aa - av*ab) / determinant;
         }
         else
         {
-            const double offset = (av + bv) / (aa + 2 * ab + bb);
-            handles[0] += offset;
+            const double offset = (av + bv) / (aa + 2*ab + bb);
             handles[1] += offset;
+            handles[3] += offset;
         }
-        return handles;
-    };
 
-    const auto sample = [&](size_t a, size_t b, double t, const std::array<double, 2>& handles)
-    {
-        if (discrete || cuts.count(b)) return values[a];
-        const double s = 1 - t;
-        return s*s*s*values[a] + 3*s*s*t*handles[0] + 3*s*t*t*handles[1] + t*t*t*values[b];
+        auto best = handles;
+        auto [split, bestError] = check(a, b, best);
+        if (split == a || b - a <= 2) return best;
+
+        // A cubic has at most two turns; larger reversals cannot fit inside the error budget.
+        int direction = 0, turns = 0;
+        double extreme = values[a];
+        for (size_t i = a + 1; i <= b; ++i)
+        {
+            const double change = values[i] - extreme;
+            if ((!direction && std::abs(change) > 2*tolerance)
+                || (direction > 0 && change < -2*tolerance) || (direction < 0 && change > 2*tolerance))
+            {
+                if (direction && ++turns > 2) return best;
+                direction = change > 0 ? 1 : -1;
+                extreme = values[i];
+            }
+            else if ((direction > 0 && change > 0) || (direction < 0 && change < 0)) extreme = values[i];
+        }
+
+        minimum = std::min(minimum, values[b]);
+        maximum = std::max(maximum, values[b]);
+        const double scale = std::max(maximum - minimum, 1e-9);
+
+        // Fit handle times and values together in normalized coordinates.
+        for (int iteration = 0; iteration < 10; ++iteration)
+        {
+            std::array<std::array<double, 5>, 4> system{};
+            double cost = 0;
+            for (size_t i = a + 1; i < b; ++i)
+            {
+                const double time = (times[i] - times[a]) / duration;
+                const double t = parameter(time, handles), s = 1 - t;
+                const double left = 3*s*s*t, right = 3*s*t*t;
+                const double xSlope = 3 * (s*s*handles[0] + 2*s*t*(handles[2] - handles[0]) + t*t*(1 - handles[2]));
+                const double ySlope = 3 * (s*s*(handles[1] - values[a]) + 2*s*t*(handles[3] - handles[1])
+                                          + t*t*(values[b] - handles[3]));
+                const double slope = ySlope / (std::max(xSlope, 1e-12) * scale);
+                const std::array<double, 4> gradient{-slope*left, left, -slope*right, right};
+                const double residual = (values[i] - cubic(values[a], handles[1], handles[3], values[b], t)) / scale;
+                cost += residual * residual;
+                for (size_t row = 0; row < 4; ++row)
+                {
+                    for (size_t col = 0; col < 4; ++col) system[row][col] += gradient[row] * gradient[col];
+                    system[row][4] += gradient[row] * residual;
+                }
+            }
+            for (size_t row = 0; row < 4; ++row) system[row][row] += 1e-5 * std::max(system[row][row], 1.0);
+
+            for (size_t col = 0; col < 4; ++col)
+            {
+                size_t pivot = col;
+                for (size_t row = col + 1; row < 4; ++row)
+                    if (std::abs(system[row][col]) > std::abs(system[pivot][col])) pivot = row;
+                std::swap(system[col], system[pivot]);
+                const double divisor = system[col][col];
+                for (size_t at = col; at < 5; ++at) system[col][at] /= divisor;
+                for (size_t row = 0; row < 4; ++row) if (row != col)
+                {
+                    const double factor = system[row][col];
+                    for (size_t at = col; at < 5; ++at) system[row][at] -= factor * system[col][at];
+                }
+            }
+
+            bool improved = false;
+            for (double step = 1; step >= 1.0 / 128; step *= 0.5)
+            {
+                Handles candidate{
+                    std::clamp(handles[0] + step*system[0][4], 0.0, 1.0), handles[1] + step*system[1][4]*scale,
+                    std::clamp(handles[2] + step*system[2][4], 0.0, 1.0), handles[3] + step*system[3][4]*scale};
+                candidate[2] = std::max(candidate[0], candidate[2]);
+                double candidateCost = 0;
+                for (size_t i = a + 1; i < b; ++i)
+                {
+                    const double time = (times[i] - times[a]) / duration;
+                    const double residual = (values[i] - sample(a, b, time, candidate)) / scale;
+                    candidateCost += residual * residual;
+                }
+                if (!(candidateCost < cost - 1e-12 * std::max(cost, 1e-12))) continue;
+                handles = candidate;
+                improved = true;
+                break;
+            }
+            if (!improved) break;
+
+            const auto [candidateSplit, error] = check(a, b, handles);
+            if (candidateSplit == a) return handles;
+            if (error < bestError) { best = handles; bestError = error; }
+        }
+        return best;
     };
 
     std::set<size_t> keep{0, count - 1};
@@ -155,64 +315,53 @@ std::vector<double> EmitCurve(const char* property, const std::string& control, 
     }
     if (discrete) for (size_t i = 1; i < count; ++i)
         if (values[i] != values[i - 1]) { keep.insert(i); keep.insert(i - 1); }
+    const auto anchors = keep;
+    std::vector<double> incomingTime = times, outgoingTime = times;
+    const auto store = [&](size_t a, size_t b, const Handles& handles)
+    {
+        outgoingTime[a] = std::lerp(times[a], times[b], handles[0]);
+        outgoing[a] = handles[1];
+        incomingTime[b] = std::lerp(times[a], times[b], handles[2]);
+        incoming[b] = handles[3];
+    };
 
     std::vector<std::pair<size_t, size_t>> pending;
     for (auto i = keep.begin(), j = i; ++j != keep.end(); i = j) pending.emplace_back(*i, *j);
-
     while (!pending.empty())
     {
         const auto [a, b] = pending.back();
         pending.pop_back();
         const auto handles = fit(a, b);
-        double error = tolerance;
-        size_t split = a;
-        for (size_t i = a + 1; i < b; ++i)
-        {
-            const double t = (times[i] - times[a]) / (times[b] - times[a]);
-            const double distance = std::abs(sample(a, b, t, handles) - values[i]);
-            if (distance > error) { error = distance; split = i; }
-        }
-
-        if (split == a && !discrete && !cuts.count(b) && b - a > 1)
-        {
-            // Bound between-frame extrema by their neighboring source samples.
-            const auto checkExtremum = [&](double t)
-            {
-                if (!(t > 0 && t < 1)) return;
-                const double time = std::lerp(times[a], times[b], t);
-                const auto next = std::lower_bound(times.begin() + a, times.begin() + b + 1, time);
-                const size_t right = std::clamp(size_t(next - times.begin()), a + 1, b);
-                const double value = sample(a, b, t, handles);
-                const double distance = std::max(std::min(values[right - 1], values[right]) - value,
-                                                 value - std::max(values[right - 1], values[right]));
-                if (distance > error) { error = distance; split = std::min(right, b - 1); }
-            };
-
-            const double p = -values[a] + 3 * handles[0] - 3 * handles[1] + values[b];
-            const double q = 2 * (values[a] - 2 * handles[0] + handles[1]);
-            const double r = handles[0] - values[a];
-            if (p == 0)
-            {
-                if (q != 0) checkExtremum(-r / q);
-            }
-            else if (const double discriminant = q * q - 4 * p * r; discriminant >= 0)
-            {
-                const double root = std::sqrt(discriminant);
-                checkExtremum((-q + root) / (2 * p));
-                checkExtremum((-q - root) / (2 * p));
-            }
-        }
-
+        const auto [split, error] = check(a, b, handles);
         if (split != a)
         {
             keep.insert(split);
             pending.emplace_back(a, split);
             pending.emplace_back(split, b);
         }
-        else
+        else store(a, b, handles);
+    }
+
+    // Refit adjacent spans so temporary split points do not become permanent keys.
+    if (!discrete && keep.size() > 2)
+    {
+        auto middle = std::next(keep.begin());
+        while (std::next(middle) != keep.end())
         {
-            outgoing[a] = handles[0];
-            incoming[b] = handles[1];
+            const auto before = std::prev(middle), after = std::next(middle);
+            if (!anchors.count(*middle))
+            {
+                const auto handles = fit(*before, *after);
+                if (check(*before, *after, handles).first == *before)
+                {
+                    store(*before, *after, handles);
+                    keep.erase(middle);
+                    middle = before == keep.begin() ? after : before;
+                    if (middle == std::prev(keep.end())) break;
+                    continue;
+                }
+            }
+            ++middle;
         }
     }
 
@@ -223,17 +372,18 @@ std::vector<double> EmitCurve(const char* property, const std::string& control, 
         + ",\"discrete\":" + (discrete ? "true" : "false") + ",\"keys\":[";
     for (size_t k = 0; k < keys.size(); ++k)
     {
-        const size_t i = keys[k], previous = keys[k ? k - 1 : k], next = keys[std::min(k + 1, keys.size() - 1)];
-        const double left = (times[i] - times[previous]) / 3, right = (times[next] - times[i]) / 3;
+        const size_t i = keys[k], next = keys[std::min(k + 1, keys.size() - 1)];
         if (k) json += ',';
         json += "{\"time\":" + Number(times[i]) + ",\"value\":" + Number(values[i])
             + ",\"interpolation\":" + ((discrete || cuts.count(next)) ? "0" : "2")
-            + ",\"left\":{\"time\":" + Number(times[i] - left) + ",\"value\":" + Number(incoming[i]) + ",\"type\":4}"
-            + ",\"right\":{\"time\":" + Number(times[i] + right) + ",\"value\":" + Number(outgoing[i]) + ",\"type\":4}}";
+            + ",\"left\":{\"time\":" + Number(incomingTime[i]) + ",\"value\":" + Number(incoming[i]) + ",\"type\":4}"
+            + ",\"right\":{\"time\":" + Number(outgoingTime[i]) + ",\"value\":" + Number(outgoing[i]) + ",\"type\":4}}";
         if (k + 1 < keys.size())
             for (size_t at = i + 1; at < next; ++at) {
                 const double t = (times[at] - times[i]) / (times[next] - times[i]);
-                fitted[at] = sample(i, next, t, {outgoing[i], incoming[next]});
+                const double duration = times[next] - times[i];
+                fitted[at] = sample(i, next, t, {(outgoingTime[i] - times[i]) / duration, outgoing[i],
+                                               (incomingTime[next] - times[i]) / duration, incoming[next]});
                 assert(std::abs(fitted[at] - values[at]) <= tolerance + 1e-8);
             }
     }

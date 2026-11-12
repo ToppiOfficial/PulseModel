@@ -1,7 +1,7 @@
 // mdldecompiler - reads a compiled .mdl and writes back a .qc describing it.
 //
 // Usage:
-//   mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-forceversion <n>]
+//   mdldecompiler <file.mdl|folder> ... [-outdir <dir>] [-nodecompiledfolder] [-forceversion <n>]
 //                            [-dmxencoding <enc>] [-dmxmodel <n>] [-smdanimation]
 //                            [-pause]
 //
@@ -75,6 +75,9 @@ int Usage() {
     std::printf("\n");
     std::printf("  -outdir <dir> put the \"decompiled <version>\" wrapper under <dir> instead of\n");
     std::printf("                beside the input; absolute, or relative to the cwd\n");
+    std::printf("  -nodecompiledfolder\n");
+    std::printf("                drop the \"decompiled <version>\" folder; each model lands in\n");
+    std::printf("                <name>/ directly beside the input (or under -outdir)\n");
     std::printf("  -forceversion <n>\n");
     std::printf("                read the file as version <n>, ignoring the header field\n");
     std::printf("                (some compilers write a bogus one to block decompiling)\n");
@@ -2856,8 +2859,12 @@ int FailCaught() {
 // Output goes under a "decompiled <toolversion>" wrapper beside the input (its
 // parent folder, or -outdir), mirroring the input folder's subtree - its own
 // name included - then the per-model folder. A direct .mdl wraps in its own dir.
+// -nodecompiledfolder drops the "decompiled <version>" level.
+bool g_nodecompiledfolder = false;
+
 std::string OutFolder(const std::string& in, const std::string& root, const char* outDir) {
-    const std::string ver = std::string("decompiled ") + (*kAppVersion ? kAppVersion : "0.0.0");
+    const std::string ver =
+        g_nodecompiledfolder ? std::string() : std::string("decompiled ") + (*kAppVersion ? kAppVersion : "0.0.0");
     const std::filesystem::path parent =
         std::filesystem::path(root.empty() ? in : root).parent_path();
     const std::filesystem::path base = outDir ? std::filesystem::path(outDir) : parent;
@@ -3095,6 +3102,8 @@ int RunDecompile(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-outdir") == 0 && i + 1 < argc)
             outDir = argv[++i];
+        else if (std::strcmp(argv[i], "-nodecompiledfolder") == 0)
+            g_nodecompiledfolder = true;
         else if (std::strcmp(argv[i], "-forceversion") == 0 && i + 1 < argc)
             forceVersion = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "-dmxencoding") == 0 && i + 1 < argc)
