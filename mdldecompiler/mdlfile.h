@@ -4,6 +4,7 @@
 #define MDLDECOMPILER_MDLFILE_H
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -280,8 +281,24 @@ inline int SubtractBase(const Mdl& m, const std::vector<AnimRef>& refs) {
 // absolute pose and loses STUDIO_DELTA. (wtf?)
 inline constexpr char kBindPoseAnim[] = "a_bindpose";
 
+// The synthesized clip's name: a_bindpose, numbered past any real clip called that.
+inline std::string BindPoseName(const std::vector<AnimRef>& refs) {
+    auto lower = [](std::string s) {
+        for (char& c : s)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    std::set<std::string> taken;
+    for (const AnimRef& r : refs)
+        taken.insert(lower(r.name));
+    std::string name = kBindPoseAnim;
+    for (int k = 2; taken.count(lower(name)); ++k)
+        name = std::string(kBindPoseAnim) + "_" + std::to_string(k);
+    return name;
+}
+
 inline std::string SubtractNameFor(const std::vector<AnimRef>& refs, int base, int i) {
-    return (base >= 0 && base < i) ? refs[base].name : std::string(kBindPoseAnim);
+    return (base >= 0 && base < i) ? refs[base].name : BindPoseName(refs);
 }
 
 // True when some delta clip has to fall back on that synthesized bind-pose clip.

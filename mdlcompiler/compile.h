@@ -1509,7 +1509,7 @@ struct CompileInput {
     // $sectionframes: animation sectioning thresholds. An animation of at least
     // minSectionFrameLimit frames is split into sectionFrames-long sections.
     int sectionFrames = 30;
-    int minSectionFrameLimit = 30;
+    int minSectionFrameLimit = 120;
 
     // --- $animblocksize: demand-loaded animation (the external .ani) ---------
     // Non-zero moves animation payload out of the .mdl into models/<name>.ani,

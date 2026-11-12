@@ -692,7 +692,7 @@ void WriteAnimationFiles(const Mdl& m, const std::string& mdlPath, const std::st
     if (NeedsBindPoseAnim(m, src.baseIndex)) {
         std::vector<std::vector<Pose>> one{src.bindPose};
         src.UnyawRoots(one[0]);
-        if (emit(kBindPoseAnim, one, 30)) // the fps the .pulseqc writes for it
+        if (emit(BindPoseName(refs), one, 30)) // the fps the .pulseqc writes for it
             ++written;
     }
     for (int i = 0; i < h.numlocalanim; ++i) {

@@ -2313,7 +2313,7 @@ void WriteAnimBlocks(Qc& q, const Mdl& m, const std::string& mdlPath) {
 
     // Every clip at or over the frame limit was sectioned, all at the same
     // length. Any limit above the longest unsectioned clip and at or below the
-    // shortest sectioned one reproduces the file, so prefer the default 30.
+    // shortest sectioned one reproduces the file, so prefer the default 120.
     int section = 0, sectioned = 0, plain = 0;
     bool frameanim = false;
     for (int i = 0; i < h.numlocalanim; ++i) {
@@ -2329,8 +2329,8 @@ void WriteAnimBlocks(Qc& q, const Mdl& m, const std::string& mdlPath) {
             plain = frames;
         }
     }
-    const int limit = (section && plain < 30 && 30 <= sectioned) ? 30 : sectioned;
-    if (section && (section != 30 || limit != 30))
+    const int limit = (section && plain < 120 && 120 <= sectioned) ? 120 : sectioned;
+    if (section && (section != 30 || limit != 120))
         lines.push_back("$sectionframes " + std::to_string(section) + " " + std::to_string(limit));
 
     const fm::mstudioanimblock_t* blocks =
@@ -2464,9 +2464,11 @@ void WriteAnimations(Qc& q, const Mdl& m) {
     std::vector<std::string> lines;
     bool prevBlock = false; // a { } body gets a blank line either side
     // declared first so every delta below can name it
-    if (NeedsBindPoseAnim(m, base))
-        lines.push_back("$animation \"" + std::string(kBindPoseAnim) + "\" \"" +
-                        AnimFile(kBindPoseAnim) + "\" fps 30  // the pose the deltas subtract");
+    if (NeedsBindPoseAnim(m, base)) {
+        const std::string bindName = BindPoseName(refs);
+        lines.push_back("$animation \"" + bindName + "\" \"" + AnimFile(bindName) +
+                        "\" fps 30  // the pose the deltas subtract");
+    }
     for (int i = 0; i < h.numlocalanim; ++i) {
         if (a[i].flags & fm::STUDIO_OVERRIDE) {
             lines.push_back("$declareanimation \"" + refs[i].name + "\"");

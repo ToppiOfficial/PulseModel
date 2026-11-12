@@ -7433,7 +7433,7 @@ bool CmdAllowActivityName(Ctx& c, const Token& cmd) {
 }
 
 // $sectionframes <frames> <minframelimit>  (Cmd_SectionFrames): animation
-// compression sectioning. Stock's defaults are 30 30.
+// compression sectioning. Stock's defaults are 30 120.
 bool CmdSectionFrames(Ctx& c, const Token& cmd) {
     int frames = 0, minLimit = 0;
     if (!c.WantInt("a section length in frames", cmd, frames) ||
