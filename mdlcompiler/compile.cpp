@@ -79,14 +79,12 @@ namespace {
 // small helpers
 // ---------------------------------------------------------------------------
 void ClipRotations(RadianEuler& rot) {
-    // clip everything to: -M_PI <= x < M_PI (double compare, like the reference).
-    // PARITY: the 2*pi step must be a DOUBLE op narrowed on store (`x -= M_PI*2`
-    // on a float). Subtracting float(2pi) instead maps +float_pi to exactly
-    // -float_pi, which is < -M_PI (double), so the second while bounces it back
-    // to +float_pi - the reference lands on -3.1415925026f (inside the range)
-    // and keeps the wrap. Found via tc8 byte-diff (anim values at the +-pi
-    // knife edge).  
-    // This is stupid but it make this shit more consistent. - Airi
+    // clip everything to: -M_PI <= x < M_PI. the 2*pi step must be a DOUBLE op narrowed on store
+    // (`x -= M_PI*2` on a float). Subtracting float(2pi) instead maps +float_pi to exactly
+    // -float_pi, which is < -M_PI (double), so the second while bounces it back to +float_pi -
+    // stock studiomdl lands on -3.1415925026f (inside the range) and keeps the wrap. Found via tc8
+    // byte-diff (anim values at the +-pi knife edge). This is stupid but it make this shit more
+    // consistent. - Airi
     float* r = &rot.x;
     for (int j = 0; j < 3; j++) {
         while (r[j] >= kPiD)
@@ -124,13 +122,13 @@ void MatrixSetColumn(const Vector3& v, int col, matrix3x4& m) {
     m.m[1][col] = v.y;
     m.m[2][col] = v.z;
 }
-// DotProduct of two matrix ROWS (first three components) - the reference's
+// DotProduct of two matrix ROWS (first three components) - stock studiomdl's
 // DotProduct(boneToPose[k][0], boneToPose[k][1]) in the orthonormality check.
 float RowDot(const matrix3x4& m, int r1, int r2) {
     return m.m[r1][0] * m.m[r2][0] + m.m[r1][1] * m.m[r2][1] + m.m[r1][2] * m.m[r2][2];
 }
 
-// reference TransformAABB (center/extents with DotProductAbs)
+// (center/extents with DotProductAbs)
 void TransformAABB(const matrix3x4& t, const Vector3& minsIn, const Vector3& maxsIn,
                    Vector3& minsOut, Vector3& maxsOut) {
     Vector3 localCenter{(minsIn.x + maxsIn.x) * 0.5f, (minsIn.y + maxsIn.y) * 0.5f,
@@ -192,7 +190,6 @@ int FindGlobalBone(const CompiledModel& m, const std::string& name) {
 
 // A .vrd may drop the skeleton's dotted namespace, so "Bip01_R_Thigh" resolves
 // "ValveBiped.Bip01_R_Thigh". $driverbone/$driveraimat stay strict.
-// Reference IsGlobalBoneXSI.
 bool ProcBoneNameMatches(const std::string& name, const std::string& bonename, bool strict) {
     if (_stricmp(bonename.c_str(), name.c_str()) == 0)
         return true;
@@ -304,16 +301,15 @@ bool BoneIsBonemerge(const Ctx& ctx, const char* pname) {
     return false;
 }
 
-// A procedural bone is driven at runtime, so it has to exist in the .mdl even
-// when nothing else references it (reference BoneIsProcedural).
+// A procedural bone is driven at runtime, so it has to exist in the .mdl even when nothing else
+// references it.
 //
-// Note this guards CollapseBones only - the reference does NOT protect
-// procedural bones from the earlier unreferenced-bone cull in
-// BuildGlobalBonetable, so neither do we.
+// Note this guards CollapseBones only - stock studiomdl does NOT protect procedural bones from the
+// earlier unreferenced-bone cull in BuildGlobalBonetable, so neither do we.
 //
-// Only the animconstraint HELPER is protected, never its driver: the reference
-// tests bonename alone. A driver that nothing else keeps alive collapses out
-// and MapProceduralBones then errors on the dangling control bone.
+// Only the animconstraint HELPER is protected, never its driver: stock studiomdl tests bonename
+// alone. A driver that nothing else keeps alive collapses out and MapProceduralBones then errors on
+// the dangling control bone.
 bool BoneIsProcedural(const Ctx& ctx, const char* pname) {
     for (const JiggleBone& jb : ctx.out->jigglebones)
         if (_stricmp(jb.bonename.c_str(), pname) == 0)
@@ -327,9 +323,8 @@ bool BoneIsProcedural(const Ctx& ctx, const char* pname) {
     return false;
 }
 
-// The DRIVER of an animconstraint: the engine reads its rotation every frame,
-// so it cannot be folded into its parent. Reference BoneIsProceduralControl.
-// ($driverbone's driver used to need an explicit $donotcollapse.)
+// The DRIVER of an animconstraint: the engine reads its rotation every frame, so it cannot be
+// folded into its parent. ($driverbone's driver used to need an explicit $donotcollapse.)
 bool BoneIsProceduralControl(const Ctx& ctx, const char* pname) {
     for (const ProceduralBone& pb : ctx.out->proceduralbones)
         if (ProcBoneNameMatches(pb.drivername, pname, pb.strictName))
@@ -337,11 +332,9 @@ bool BoneIsProceduralControl(const Ctx& ctx, const char* pname) {
     return false;
 }
 
-// A procedural bone's aim target must outlive the collapse or the constraint
-// points at nothing. Reference BoneIsProceduralParent, minus the parent keeps -
-// a collapsing parent is re-solved by ResolveProceduralParentCollapse instead.
-// (A bone-flavoured aim target only; an attachment target is kept by
-// BoneHasAttachments.)
+// A procedural bone's aim target must outlive the collapse or the constraint points at nothing. a
+// collapsing parent is re-solved by ResolveProceduralParentCollapse instead. (A bone-flavoured aim
+// target only; an attachment target is kept by BoneHasAttachments.)
 bool BoneIsProceduralDependency(const Ctx& ctx, const char* pname) {
     const CompiledModel& m = *ctx.out;
     for (const AimAtBone& ab : ctx.out->aimatbones) {
@@ -353,11 +346,9 @@ bool BoneIsProceduralDependency(const Ctx& ctx, const char* pname) {
     return false;
 }
 
-// The bone a $boneflexdriver reads. The engine samples its translation at
-// runtime, so folding it into its parent would break the driver. Reference
-// BoneIsFlexDriver, 3355. The list has already been through
-// PruneFlexDriverBones, so a driver dropped for naming an unknown morph
-// controller correctly keeps nothing alive.
+// The bone a $boneflexdriver reads. The engine samples its translation at runtime, so folding it
+// into its parent would break the driver. The list has already been through PruneFlexDriverBones,
+// so a driver dropped for naming an unknown morph controller correctly keeps nothing alive.
 bool BoneIsFlexDriver(const Ctx& ctx, const char* pname) {
     for (const BoneFlexDriver& d : ctx.out->boneflexdrivers)
         if (_stricmp(d.bonename.c_str(), pname) == 0)
@@ -372,8 +363,8 @@ bool BoneIsDoNotCollapse(const Ctx& ctx, const char* pname) {
     return false;
 }
 
-// $alwayscollapse names this bone and $donotcollapse does not, which wins
-// (reference BoneIsAlwaysCollapse). Overrules bone_cull_type 2 (none).
+// $alwayscollapse names this bone and $donotcollapse does not, which wins. Overrules bone_cull_type
+// 2 (none).
 bool BoneIsAlwaysCollapse(const Ctx& ctx, const char* pname) {
     if (BoneIsDoNotCollapse(ctx, pname))
         return false;
@@ -457,8 +448,8 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
     if (!in.bindPoseSource && in.fixedFlexes.empty())
         return true;
 
-    // the pose clip: `blockname` if given, else the file's first real animation,
-    // the bind pose if that is all it has (reference m_Animations[0])
+    // the pose clip: `blockname` if given, else the file's first real animation, the bind pose if
+    // that is all it has
     src::Source* poseSrc = in.bindPoseSource;
     src::SourceAnim* poseClip = nullptr;
     int poseFrame = 0;
@@ -584,7 +575,7 @@ bool ApplyBindPoseBake(Ctx& ctx, std::string* err) {
                               v.position.y + value * worldDelta.y,
                               v.position.z + value * worldDelta.z};
 
-                // the normal delta is added unrotated, as the reference does
+                // the normal delta is added unrotated, as stock studiomdl does
                 Vector3 newNormal{v.normal.x + value * va.normal.x,
                                   v.normal.y + value * va.normal.y,
                                   v.normal.z + value * va.normal.z};
@@ -723,8 +714,8 @@ void MakeStaticProp(Ctx& ctx) {
 
     // (flexkeys: nothing to do here)
 
-    // Recalc attachment points. Reference drops IS_FROM_SOURCE attachments only
-    // on the $staticproppose path (not supported); plain $staticprop keeps all.
+    // Recalc attachment points. stock studiomdl drops IS_FROM_SOURCE attachments only on the
+    // $staticproppose path (not supported); plain $staticprop keeps all.
     for (size_t i = 0; i < m.attachments.size(); i++) {
         Attachment& att = m.attachments[i];
         if (ctx.in->autoCenter && i == placementOrigin)
@@ -784,9 +775,9 @@ void MakeSimpleProp(Ctx& ctx) {
 // ---------------------------------------------------------------------------
 // TagFlexDriverBones - prune half
 //
-// The reference does the pruning inside the per-source call, so it effectively
-// runs once (later sources find nothing left to drop). Splitting it out is
-// equivalent: nothing in the pruning depends on the source being walked.
+// stock studiomdl does the pruning inside the per-source call, so it effectively runs once (later
+// sources find nothing left to drop). Splitting it out is equivalent: nothing in the pruning
+// depends on the source being walked.
 // ---------------------------------------------------------------------------
 void PruneFlexDriverBones(Ctx& ctx) {
     std::vector<BoneFlexDriver>& drivers = ctx.out->boneflexdrivers;
@@ -846,10 +837,9 @@ void TagFlexDriverBones(Ctx& ctx, src::Source* psource) {
 // ---------------------------------------------------------------------------
 // GetRemappedBoneAxis
 //
-// A driver on a PARENTED bone uses its axis as authored. On a root bone the
-// model-level up-axis rotation has already been baked into the bone, so the
-// authored axis has to follow it. Only Y-up is remapped (the reference
-// supports no other $upaxis).
+// A driver on a PARENTED bone uses its axis as authored. On a root bone the model-level up-axis
+// rotation has already been baked into the bone, so the authored axis has to follow it. Only Y-up
+// is remapped.
 // ---------------------------------------------------------------------------
 int GetRemappedBoneAxis(Ctx& ctx, int nBoneIndex, int nAxis) {
     if (nBoneIndex < 0 || nBoneIndex >= static_cast<int>(ctx.out->bones.size()))
@@ -892,10 +882,9 @@ void MapFlexDriverBonesToGlobalBoneTable(Ctx& ctx) {
 // ---------------------------------------------------------------------------
 // MapJiggleBones (inside RemapBones)
 //
-// Resolves each jigglebone against the final bone table and tags the bone
-// BONE_ALWAYS_PROCEDURAL - the engine simulates it, so nothing may animate it.
-// A jigglebone whose bone did not survive is dropped silently (it was optimized
-// out), matching the reference.
+// Resolves each jigglebone against the final bone table and tags the bone BONE_ALWAYS_PROCEDURAL -
+// the engine simulates it, so nothing may animate it. A jigglebone whose bone did not survive is
+// dropped silently (it was optimized out), matching stock studiomdl.
 // ---------------------------------------------------------------------------
 void MapJiggleBones(Ctx& ctx) {
     std::vector<JiggleBone>& jbs = ctx.out->jigglebones;
@@ -960,8 +949,8 @@ void CullUnskinnedJiggleBones(Ctx& ctx) {
 // a missing parent or aim target is an error - the constraint would have
 // nothing to point at.
 //
-// The reference does NOT push aimvector/upvector/basepos through srcRealign
-// (its post-realign pass only re-validates), so neither do we.
+// stock studiomdl does NOT push aimvector/upvector/basepos through srcRealign (its post-realign
+// pass only re-validates), so neither do we.
 // ---------------------------------------------------------------------------
 bool MapAimAtBones(Ctx& ctx, std::string* err) {
     std::vector<AimAtBone>& abs = ctx.out->aimatbones;
@@ -1237,10 +1226,9 @@ bool RemapProceduralBones(Ctx& ctx, std::string* err) {
                 pm::MatrixAngles(destControlRelative, tr.trigger, tmp);
             }
 
-            // ---- pose: the helper, relative to the helper's parent ----
-            // Note the helper's OWN srcRealign is deliberately not applied here -
-            // only its parent's. That asymmetry with the trigger block above is
-            // the reference's, not an oversight.
+            // pose: the helper, relative to the helper's parent ---- Note the helper's OWN
+            // srcRealign is deliberately not applied here - only its parent's. That asymmetry with
+            // the trigger block above is stock studiomdl's, not an oversight.
             parent = m.bones[pb.helper].parent;
             if (hasHelperEdit) {
                 Vector3 pos;
@@ -1297,24 +1285,28 @@ void TagUsedBones(Ctx& ctx) {
                 if (_stricmp(att.bonename.c_str(), psource->localBone[j].name.c_str()) != 0)
                     continue;
                 if (att.type & kAttachIsRigid) {
-                    bool bBoneFlagged = false;
+                    auto isDefinedBone = [&](const std::string& name) {
+                        for (const ImportBone& ib : ctx.in->importbones)
+                            if (_stricmp(name.c_str(), ib.name.c_str()) == 0)
+                                return true;
+                        return false;
+                    };
+
+                    // Climb from the bone until one carries vertices; defined bones met on
+                    // the way are kept too and the climb continues past them.
+                    bool tagged = false;
                     for (int n = j; n != -1; n = psource->localBone[n].parent) {
                         if (psource->boneflags[n] & BONE_USED_BY_VERTEX_LOD0) {
                             psource->boneflags[n] |= BONE_USED_BY_ATTACHMENT;
-                            bBoneFlagged = true;
+                            tagged = true;
                             break;
                         }
-                        // ancestors in the definebone list are kept too
-                        // (reference: flags and keeps walking - no break)
-                        for (const ImportBone& ib : ctx.in->importbones) {
-                            if (_stricmp(psource->localBone[n].name.c_str(),
-                                         ib.name.c_str()) == 0) {
-                                psource->boneflags[n] |= BONE_USED_BY_ATTACHMENT;
-                                bBoneFlagged = true;
-                            }
+                        if (isDefinedBone(psource->localBone[n].name)) {
+                            psource->boneflags[n] |= BONE_USED_BY_ATTACHMENT;
+                            tagged = true;
                         }
                     }
-                    if (!bBoneFlagged)
+                    if (!tagged)
                         psource->boneflags[j] |= BONE_USED_BY_ATTACHMENT;
                 } else {
                     psource->boneflags[j] |= BONE_USED_BY_ATTACHMENT;
@@ -1371,11 +1363,9 @@ void TagUsedBones(Ctx& ctx) {
             if (nFlags == 0)
                 continue;
             psource->boneref[k] |= nFlags;
-            int n = psource->localBone[k].parent;
-            while (n != -1) {
-                psource->boneref[n] |= psource->boneref[k];
-                n = psource->localBone[n].parent;
-            }
+            const int merged = psource->boneref[k];
+            for (int n = psource->localBone[k].parent; n != -1; n = psource->localBone[n].parent)
+                psource->boneref[n] |= merged;
         }
 
         // $jigglebone / $driverbone / $driveraimat / .vrd bones survive the
@@ -1395,10 +1385,9 @@ void TagUsedBones(Ctx& ctx) {
         // creates bones parent-first; a culled parent would leave the survivor
         // reparented to -1.
         //
-        // This is a deliberate DEVIATION from the reference, which only checks
-        // these bones in BoneShouldCollapse. $alwayscollapse still wins: it
-        // short-circuits CollapseBones, so the bone is created here and folded
-        // there.
+        // This is a deliberate DEVIATION from stock studiomdl, which only checks these bones in
+        // BoneShouldCollapse. $alwayscollapse still wins: it short-circuits CollapseBones, so the
+        // bone is created here and folded there.
         auto keepProceduralBone = [&](const std::string& name) {
             if (name.empty())
                 return;
@@ -1453,8 +1442,7 @@ void InsertPredefinedBones(Ctx& ctx, bool bUnlocked) {
             if (ib.parent.empty()) {
                 b.parent = -1;
             } else {
-                // reference FIXME kept for parity: a parent that is itself a
-                // later import bone is not found yet
+                // a parent that is itself a later import bone is not found yet
                 b.parent = FindGlobalBone(m, ib.parent);
                 if (b.parent == -1) {
                     pulse::diag::Warnf("Imported bone %s tried to access parent bone %s and failed!\n",
@@ -1479,11 +1467,10 @@ void InsertPredefinedBones(Ctx& ctx, bool bUnlocked) {
 }
 
 // ---------------------------------------------------------------------------
-// EnforceHierarchy: $hierarchy relinks a bone's parent. It runs after
-// boneToPose is built and RebuildLocalPose re-derives the locals afterwards, so
-// the bone keeps its world placement and only the parent changes. The table is
-// then resorted until every parent precedes its child - the insert-a-bone half
-// of the reference (its $insertbone) is commented out there, so it is absent
+// EnforceHierarchy: $hierarchy relinks a bone's parent. It runs after boneToPose is built and
+// RebuildLocalPose re-derives the locals afterwards, so the bone keeps its world placement and only
+// the parent changes. The table is then resorted until every parent precedes its child - the
+// insert-a-bone half of stock studiomdl (its $insertbone) is commented out there, so it is absent
 // here too.
 // ---------------------------------------------------------------------------
 bool EnforceHierarchy(Ctx& ctx, std::string* err) {
@@ -1503,8 +1490,8 @@ bool EnforceHierarchy(Ctx& ctx, std::string* err) {
         m.bones[k].parent = j;
     }
 
-    // resort hierarchy - swap any bone that precedes its own parent, relinking
-    // from the swap point on (the reference relinks from i, not from 0)
+    // resort hierarchy - swap any bone that precedes its own parent, relinking from the swap point
+    // on
     const int n = static_cast<int>(m.bones.size());
     for (int count = 0, sorted = 0; !sorted;) {
         if (++count > 1000) {
@@ -1774,12 +1761,11 @@ void CollapseBones(Ctx& ctx) {
             if (m.bones[k].bDontCollapse)
                 continue;
 
-            // $alwayscollapse overrules every keep below (reference BoneIsAlwaysCollapse)
+            // $alwayscollapse overrules every keep below
             const bool always = BoneIsAlwaysCollapse(ctx, m.bones[k].name.c_str());
 
-            // "none" keeps every bone the script authored. Non-skeletal bones
-            // (mesh dags, defaultRoot) are exempt - exporter noise, not part of
-            // the skeleton (reference: $nocollapsebones has the same exemption).
+            // "none" keeps every bone the script authored. Non-skeletal bones (mesh dags,
+            // defaultRoot) are exempt - exporter noise, not part of the skeleton.
             if (cull == BoneCullType::None && !m.bones[k].isNonSkeletal && !always)
                 continue;
 
@@ -2172,13 +2158,14 @@ bool RealignBones(Ctx& ctx, std::string* err) {
                 MatrixSetColumn(left, 1, boneToPose[k]);
                 MatrixSetColumn(up, 2, boneToPose[k]);
 
-                // check orthonormality of matrix
-                d = fabsf(DotProduct(forward, left))
-                    + fabsf(DotProduct(left, up))
-                    + fabsf(DotProduct(up, forward))
-                    + fabsf(RowDot(boneToPose[k], 0, 1))
-                    + fabsf(RowDot(boneToPose[k], 1, 2))
-                    + fabsf(RowDot(boneToPose[k], 2, 0));
+                // the new axes, and the matrix rows built from them, must each be mutually perpendicular
+                const Vector3 axes[3] = {forward, left, up};
+                d = 0.0f;
+                for (int a = 0; a < 3; ++a) {
+                    const int next = (a + 1) % 3;
+                    d += fabsf(DotProduct(axes[a], axes[next]));
+                    d += fabsf(RowDot(boneToPose[k], a, next));
+                }
                 if (d > 0.0001f) {
                     if (err) *err = "error with realigning bone " + m.bones[k].name;
                     return false;
@@ -2262,7 +2249,7 @@ void RemoveDuplicateAttachments(Ctx& ctx) {
     std::vector<Attachment>& atts = ctx.out->attachments;
     for (int i = 0; i < static_cast<int>(atts.size()); ++i) {
         for (int j = static_cast<int>(atts.size()) - 1; j > i; --j) {
-            // name compare is case-SENSITIVE in the reference (Q_strcmp)
+            // name compare is case-SENSITIVE in stock studiomdl (Q_strcmp)
             if (strcmp(atts[i].name.c_str(), atts[j].name.c_str()) != 0)
                 continue;
 
@@ -2304,8 +2291,8 @@ bool MaterialNameMatches(const std::string& stored, const std::string& query) {
     return _stricmp(base.c_str(), q.c_str()) == 0;
 }
 
-// reference Add_Flexdesc, against the compiled model (CheckEyeballSetup runs
-// after input.flexdescs has moved into the output). Find by name or append.
+// against the compiled model (CheckEyeballSetup runs after input.flexdescs has moved into the
+// output). Find by name or append.
 int AddFlexDesc(Ctx& ctx, const std::string& name) {
     CompiledModel& m = *ctx.out;
     for (size_t i = 0; i < m.flexdescs.size(); ++i)
@@ -2315,17 +2302,16 @@ int AddFlexDesc(Ctx& ctx, const std::string& name) {
     return static_cast<int>(m.flexdescs.size()) - 1;
 }
 
-// Option_Eyeball. Runs at parse time in the
-// reference, against the owning model's SOURCE bone table - so eye.bone is a
-// source-local index here and is remapped to global later by ReLinkEyeballs.
-// one authored Eyeball binds to EVERY body carrying its material, not just the first.
+// Runs at parse time in stock studiomdl, against the owning model's SOURCE bone table - so eye.bone
+// is a source-local index here and is remapped to global later by ReLinkEyeballs. one authored
+// Eyeball binds to EVERY body carrying its material, not just the first.
 bool SetupEyeballs(Ctx& ctx, std::string* err) {
     CompiledModel& m = *ctx.out;
     m.eyeballs.clear();
 
     for (const Eyeball& authored : ctx.in->eyeballs) {
-        // the texture table is global (reference LookupTexture); resolve the
-        // script's bare material name to its material index there first
+        // the texture table is global; resolve the script's bare material name to its material
+        // index there first
         int texture = -1;
         for (const auto& tex : m.mats->textures) {
             if (tex.material >= 0 && MaterialNameMatches(tex.name, authored.material)) {
@@ -2334,12 +2320,10 @@ bool SetupEyeballs(Ctx& ctx, std::string* err) {
             }
         }
 
-        // then clone the eyeball onto every model carrying a mesh with that
-        // material. Meshes are stored by material index, and eyeball->mesh is
-        // the ORDINAL of that material within meshindex
-        // (Option_Eyeball). Cloning happens BEFORE the derivation
-        // below so each clone transforms its own authored values once, against
-        // its own model's bone table.
+        // then clone the eyeball onto every model carrying a mesh with that material. Meshes are
+        // stored by material index, and eyeball->mesh is the ORDINAL of that material within
+        // meshindex. Cloning happens BEFORE the derivation below so each clone transforms its own
+        // authored values once, against its own model's bone table.
         size_t matches = 0;
         for (size_t mi = 0; mi < m.models.size() && texture >= 0; ++mi) {
             source::Source* ps = m.models[mi].source;
@@ -2577,6 +2561,19 @@ bool LinkAttachments(Ctx& ctx, std::string* err) {
     return true;
 }
 
+// Adds `weight` to the vertex's entry for `bone`, appending an entry when it has none.
+static void AddInfluence(src::SrcBoneWeight& bw, int bone, float weight) {
+    for (int i = 0; i < bw.numbones; ++i) {
+        if (bw.bone[i] == bone) {
+            bw.weight[i] += weight;
+            return;
+        }
+    }
+    bw.bone[bw.numbones] = bone;
+    bw.weight[bw.numbones] = weight;
+    ++bw.numbones;
+}
+
 // MapSourcesToGlobalBonetable
 void MapSources(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
@@ -2586,18 +2583,20 @@ void MapSources(Ctx& ctx) {
         pSource->boneGlobalToLocal.assign(m.bones.size(), -1);
 
         for (int j = 0; j < pSource->numbones; j++) {
-            int k = FindGlobalBone(m, pSource->localBone[j].name);
-            if (k >= 0) {
-                pSource->boneLocalToGlobal[j] = k;
-                pSource->boneGlobalToLocal[k] = j;
+            const int exact = FindGlobalBone(m, pSource->localBone[j].name);
+            if (exact >= 0) {
+                pSource->boneLocalToGlobal[j] = exact;
+                pSource->boneGlobalToLocal[exact] = j;
                 continue;
             }
-            int n = pSource->localBone[j].parent;
-            while (n != -1 && (k = FindGlobalBone(m, pSource->localBone[n].name)) == -1)
-                n = pSource->localBone[n].parent;
-            if (k == -1)
-                k = 0;
-            pSource->boneLocalToGlobal[j] = k;
+
+            // No global bone of that name: borrow the nearest ancestor's, else the root.
+            int global = -1;
+            for (int n = pSource->localBone[j].parent; n != -1 && global == -1;
+                 n = pSource->localBone[n].parent)
+                global = FindGlobalBone(m, pSource->localBone[n].name);
+
+            pSource->boneLocalToGlobal[j] = (global == -1) ? 0 : global;
         }
     }
 }
@@ -2677,49 +2676,42 @@ void RemapVertices(Ctx& ctx) {
             Vector3 vdest{0, 0, 0};
             Vector3 ndest{0, 0, 0};
 
-            int nNumBones = srcVertex.boneweight.numbones;
-            if (nNumBones > lim::kMaxSrcBoneWeights)
-                nNumBones = lim::kMaxSrcBoneWeights;
+            // Skin through each influence's global bone: out of the source bind pose, into
+            // the global one. Influences that land on the same global bone merge.
+            const int influences = srcVertex.boneweight.numbones > lim::kMaxSrcBoneWeights
+                                       ? lim::kMaxSrcBoneWeights
+                                       : srcVertex.boneweight.numbones;
 
-            for (int n = 0; n < nNumBones; n++) {
-                int q = srcVertex.boneweight.bone[n];
-                if (q < 0 || q >= pSource->numbones)
+            for (int n = 0; n < influences; n++) {
+                const int local = srcVertex.boneweight.bone[n];
+                if (local < 0 || local >= pSource->numbones)
                     continue;
-                int k = pSource->boneLocalToGlobal[q];
-                if (k == -1) {
+
+                const int global = pSource->boneLocalToGlobal[local];
+                if (global == -1) {
+                    // a bone with no global counterpart leaves the vertex where it is
                     vdest = srcVertex.position;
                     ndest = srcVertex.normal;
                     break;
                 }
-                if (k < 0 || k >= static_cast<int>(m.bones.size()))
+                if (global < 0 || global >= static_cast<int>(m.bones.size()))
                     continue;
 
-                // collapsed influences merge into one global bone
-                int mm;
-                for (mm = 0; mm < dstVertex.boneweight.numbones; mm++) {
-                    if (k == dstVertex.boneweight.bone[mm]) {
-                        dstVertex.boneweight.weight[mm] += srcVertex.boneweight.weight[n];
-                        break;
-                    }
-                }
-                if (mm == dstVertex.boneweight.numbones) {
-                    dstVertex.boneweight.bone[mm] = k;
-                    dstVertex.boneweight.weight[mm] = srcVertex.boneweight.weight[n];
-                    dstVertex.boneweight.numbones++;
-                }
+                const float weight = srcVertex.boneweight.weight[n];
+                AddInfluence(dstVertex.boneweight, global, weight);
 
-                // into the original bone's local space, out through the global pose
-                Vector3 tmp1 = pm::VectorITransform(srcVertex.position, destBoneToWorld[k]);
-                Vector3 tmp2 = pm::VectorTransform(tmp1, m.bones[k].boneToPose);
-                vdest.x += srcVertex.boneweight.weight[n] * tmp2.x;
-                vdest.y += srcVertex.boneweight.weight[n] * tmp2.y;
-                vdest.z += srcVertex.boneweight.weight[n] * tmp2.z;
+                const matrix3x4& bindToWorld = destBoneToWorld[global];
+                const matrix3x4& globalPose = m.bones[global].boneToPose;
 
-                tmp1 = pm::VectorIRotate(srcVertex.normal, destBoneToWorld[k]);
-                tmp2 = pm::VectorRotate(tmp1, m.bones[k].boneToPose);
-                ndest.x += srcVertex.boneweight.weight[n] * tmp2.x;
-                ndest.y += srcVertex.boneweight.weight[n] * tmp2.y;
-                ndest.z += srcVertex.boneweight.weight[n] * tmp2.z;
+                const Vector3 skinnedPos = pm::VectorTransform(
+                    pm::VectorITransform(srcVertex.position, bindToWorld), globalPose);
+                vdest = {vdest.x + weight * skinnedPos.x, vdest.y + weight * skinnedPos.y,
+                         vdest.z + weight * skinnedPos.z};
+
+                const Vector3 skinnedNormal = pm::VectorRotate(
+                    pm::VectorIRotate(srcVertex.normal, bindToWorld), globalPose);
+                ndest = {ndest.x + weight * skinnedNormal.x, ndest.y + weight * skinnedNormal.y,
+                         ndest.z + weight * skinnedNormal.z};
             }
 
             dstVertex.position = vdest;
@@ -2963,49 +2955,54 @@ void BalanceGlobalBoneWeights(Ctx& ctx) {
 // ---------------------------------------------------------------------------
 // UnifyLODs - single-LOD path
 // ---------------------------------------------------------------------------
-void SortBoneWeightByWeight(src::SrcBoneWeight& bw) {
-    for (int j = bw.numbones; j > 1; j--) {
-        for (int k = 0; k < j - 1; k++) {
-            if (bw.weight[k] >= bw.weight[k + 1])
-                continue;
-            int tb = bw.bone[k]; bw.bone[k] = bw.bone[k + 1]; bw.bone[k + 1] = tb;
-            float tw = bw.weight[k]; bw.weight[k] = bw.weight[k + 1]; bw.weight[k + 1] = tw;
+// Stable insertion sort of the (bone, weight) pairs. `before(bone, weight, otherBone,
+// otherWeight)` is true when the first pair must come strictly ahead of the second.
+template <typename Before>
+void SortBoneWeight(src::SrcBoneWeight& bw, Before before) {
+    for (int i = 1; i < bw.numbones; ++i) {
+        const int bone = bw.bone[i];
+        const float weight = bw.weight[i];
+
+        int slot = i;
+        while (slot > 0 && before(bone, weight, bw.bone[slot - 1], bw.weight[slot - 1])) {
+            bw.bone[slot] = bw.bone[slot - 1];
+            bw.weight[slot] = bw.weight[slot - 1];
+            --slot;
         }
+        bw.bone[slot] = bone;
+        bw.weight[slot] = weight;
     }
 }
 
+void SortBoneWeightByWeight(src::SrcBoneWeight& bw) {
+    SortBoneWeight(bw, [](int, float weight, int, float otherWeight) { return weight > otherWeight; });
+}
+
 void SortBoneWeightByIndex(src::SrcBoneWeight& bw) {
-    for (int j = bw.numbones; j > 1; j--) {
-        for (int k = 0; k < j - 1; k++) {
-            if (bw.bone[k] <= bw.bone[k + 1])
-                continue;
-            int tb = bw.bone[k]; bw.bone[k] = bw.bone[k + 1]; bw.bone[k + 1] = tb;
-            float tw = bw.weight[k]; bw.weight[k] = bw.weight[k + 1]; bw.weight[k + 1] = tw;
-        }
-    }
+    SortBoneWeight(bw, [](int bone, float, int otherBone, float) { return bone < otherBone; });
 }
 
 void CollapseBoneWeights(src::SrcBoneWeight& bw) {
     SortBoneWeightByIndex(bw);
-    for (int i = 0; i < bw.numbones - 1; i++) {
-        if (bw.bone[i] != bw.bone[i + 1])
+
+    // Equal bones are now adjacent: fold each run into its first entry.
+    int kept = 0;
+    for (int i = 0; i < bw.numbones; ++i) {
+        if (kept > 0 && bw.bone[kept - 1] == bw.bone[i]) {
+            bw.weight[kept - 1] += bw.weight[i];
             continue;
-        bw.weight[i] += bw.weight[i + 1];
-        for (int j = i + 1; j < bw.numbones - 1; j++) {
-            bw.bone[j] = bw.bone[j + 1];
-            bw.weight[j] = bw.weight[j + 1];
         }
-        --bw.numbones;
-        --i;
+        bw.bone[kept] = bw.bone[i];
+        bw.weight[kept] = bw.weight[i];
+        ++kept;
     }
+    bw.numbones = kept;
 }
 
 // ---------------------------------------------------------------------------
-// LOD sources (reference GenerateDecimatedSource / GetLODSources /
-// LoadLODSources)
 // ---------------------------------------------------------------------------
 
-// path- and extension-stripped name (reference Q_FileBase)
+// path- and extension-stripped name
 std::string FileBaseName(const std::string& s) {
     const size_t slash = s.find_last_of("/\\");
     std::string base = slash == std::string::npos ? s : s.substr(slash + 1);
@@ -3013,7 +3010,7 @@ std::string FileBaseName(const std::string& s) {
     return dot == std::string::npos ? base : base.substr(0, dot);
 }
 
-// case-insensitive substring test (reference V_stristr)
+// case-insensitive substring test
 bool ContainsNoCase(const std::string& haystack, const std::string& needle) {
     if (needle.empty() || needle.size() > haystack.size())
         return false;
@@ -3260,10 +3257,9 @@ void FixupReplacedBones(Ctx& ctx) {
     }
 }
 
-// $jointcontents (reference GetContents). Resolved against
-// the FINAL bone table: a bone with no entry of its own takes the nearest
-// ancestor that has one, and the model word when nothing in the chain matches.
-// Naming a bone here keeps nothing alive - a collapsed bone only warns.
+// $jointcontents. Resolved against the FINAL bone table: a bone with no entry of its own takes the
+// nearest ancestor that has one, and the model word when nothing in the chain matches. Naming a
+// bone here keeps nothing alive - a collapsed bone only warns.
 void ApplyJointContents(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
     const auto& list = ctx.in->jointContents;
@@ -3287,7 +3283,6 @@ void ApplyJointContents(Ctx& ctx) {
         }
     }
 
-    // reference ConsistencyCheckContents
     for (const auto& jc : list)
         if (FindGlobalBone(m, jc.first) == -1)
             std::fprintf(stderr,
@@ -3351,15 +3346,14 @@ void RemapBoneWeights(const std::vector<int>& boneMap, src::SrcBoneWeight& bw) {
 }
 
 // AreBoneWeightsEqual - order independent
-bool AreBoneWeightsEqual(const src::SrcBoneWeight& b1, const src::SrcBoneWeight& b2) {
-    if (b1.numbones != b2.numbones)
+bool AreBoneWeightsEqual(const src::SrcBoneWeight& a, const src::SrcBoneWeight& b) {
+    if (a.numbones != b.numbones)
         return false;
-    for (int i = 0; i < b1.numbones; ++i) {
-        int j = 0;
-        for (; j < b2.numbones; ++j)
-            if (b2.bone[j] == b1.bone[i])
-                break;
-        if (j == b2.numbones || b1.weight[i] != b2.weight[j])
+
+    // Every bone of a must appear in b with the identical weight.
+    for (int i = 0; i < a.numbones; ++i) {
+        const int* match = std::find(b.bone, b.bone + b.numbones, a.bone[i]);
+        if (match == b.bone + b.numbones || a.weight[i] != b.weight[match - b.bone])
             return false;
     }
     return true;
@@ -3441,10 +3435,9 @@ struct DictIndex {
     }
 };
 
-// AddVertex: the dictionary sorts every vertex it stores by
-// bone index. LOD 0 verts are then re-sorted by weight in MarkRootLODBones;
-// verts a lower LOD introduces keep the index order. That asymmetry is the
-// reference's and the .vvd bytes depend on it.
+// AddVertex: the dictionary sorts every vertex it stores by bone index. LOD 0 verts are then
+// re-sorted by weight in MarkRootLODBones; verts a lower LOD introduces keep the index order. That
+// asymmetry is stock studiomdl's and the .vvd bytes depend on it.
 int AddDictVertex(std::vector<LodVertex>& dict, const LodVertex& v) {
     dict.push_back(v);
     SortBoneWeightByIndex(dict.back().boneweight);
@@ -3627,7 +3620,7 @@ void UnifyLods(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// Output meshes - no reference counterpart, the reference cannot do this.
+// Output meshes - no stock studiomdl counterpart, stock studiomdl cannot do this.
 //
 // Everything above treats a mesh AS a material: Model::meshes is indexed by
 // material id and mesh order is the source's meshindex. That identity breaks
@@ -3920,8 +3913,6 @@ void BuildOutputMeshes(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// Collision model (reference ProcessSingleBody / CreateCollide /
-// BuildConvexListForFaceList)
 //
 // This is the SINGLE-BODY path. There is no $collisionmodel / $collisionjoints
 // split: the bone set the collision geometry resolves to decides which it is,
@@ -4037,7 +4028,7 @@ void BuildVertWeldTable(const src::Source* ps, float posEpsilon, float normalEps
     }
 }
 
-// One triangle with SOURCE-global vertex indices (reference GlobalFace).
+// One triangle with SOURCE-global vertex indices.
 struct SrcTri { int a, b, c; };
 
 // Every face of the source, with mesh-relative indices lifted to source-global.
@@ -4082,9 +4073,9 @@ void BucketByVertID(std::vector<int>& vertID, int totalSourceFaces,
 // This is NOT convex decomposition - it splits geometry that is already
 // physically separate. Genuine concave-solid decomposition is not implemented.
 //
-// `faces` may be a subset of the source (the ragdoll path passes one bone's
-// faces), but the sentinel is keyed to the source's TOTAL face count, exactly
-// as the reference keys it to pmodel->numfaces.
+// `faces` may be a subset of the source (the ragdoll path passes one bone's faces), but the
+// sentinel is keyed to the source's TOTAL face count, exactly as stock studiomdl keys it to
+// pmodel->numfaces.
 void BuildIslandsForFaces(const src::Source* ps, const std::vector<SrcTri>& faces,
                           int totalSourceFaces, float posEpsilon, float normalEpsilon,
                           std::vector<std::vector<int>>& islandsOut) {
@@ -4138,14 +4129,12 @@ void BuildSingleGroupForFaces(const src::Source* ps, const std::vector<SrcTri>& 
     BucketByVertID(vertID, totalSourceFaces, groupsOut);
 }
 
-// Turn vertex groups into convex hulls. Shared by the single-body and ragdoll
-// paths (reference BuildConvexesForLists).
+// Turn vertex groups into convex hulls. Shared by the single-body and ragdoll paths.
 //
-// Deviation from the reference: it sets bValid=false on a planar piece or an
-// over-budget count, and the jointed path then throws away every hull for that
-// bone. We warn and keep the good pieces instead - losing a whole limb's
-// collision because one face of it came out flat is worse than a slightly
-// wrong hull. A hull that builds but is not a closed 2-manifold is still fatal.
+// Deviation from stock studiomdl: it sets bValid=false on a planar piece or an over-budget count,
+// and the jointed path then throws away every hull for that bone. We warn and keep the good pieces
+// instead - losing a whole limb's collision because one face of it came out flat is worse than a
+// slightly wrong hull. A hull that builds but is not a closed 2-manifold is still fatal.
 bool BuildConvexesForGroups(const std::vector<std::vector<int>>& groups,
                             const std::vector<phys::Vec3>& verts, const char* shapeName,
                             bool remove2d, unsigned int gameData,
@@ -4160,7 +4149,7 @@ bool BuildConvexesForGroups(const std::vector<std::vector<int>>& groups,
                 pieceVerts.push_back(verts[idx]);
         }
 
-        const float kPlanarEpsilon = 0.5f; // reference g_epsilon_2d, inches
+        const float kPlanarEpsilon = 0.5f;
         if (IsApproximatelyPlanar(pieceVerts, kPlanarEpsilon)) {
             if (remove2d)
                 continue;
@@ -4225,9 +4214,9 @@ int ResolveLocalBoneToGlobal(const src::Source* ps, int node, int* nodeOut) {
     return ps->boneLocalToGlobal[node];
 }
 
-// CreateCollide: a very elongated body tumbles unrealistically, so the
-// reference damps its rotation. The AABB is handed back because the
-// single-body path also needs it to widen the render hull.
+// CreateCollide: a very elongated body tumbles unrealistically, so stock studiomdl damps its
+// rotation. The AABB is handed back because the single-body path also needs it to widen the render
+// hull.
 void ApplyLongBodyRotdamping(const phys::Collide* collide, PhysicsSolid& solid,
                              phys::Vec3* minsOut = nullptr, phys::Vec3* maxsOut = nullptr) {
     phys::Vec3 mins, maxs;
@@ -4272,7 +4261,6 @@ void WarnUnknownMarkupBones(const CompiledModel& m, const CompileInput& in) {
 }
 
 // ---------------------------------------------------------------------------
-// Ragdoll - reference ProcessJointedModel + FixCollisionHierarchy
 //
 // Two things differ from the single-body path and drive everything else:
 //   1. Geometry is partitioned per bone (a face joins the bone its verts are
@@ -4343,11 +4331,10 @@ std::string FixParentSolid(const CompiledModel& m, std::string name) {
     return "";
 }
 
-// SortCollisionList: a body must be written after its parent, because a
-// ragdollconstraint names both by solid index. The reference builds the list by
-// prepending (so it comes out in reverse bone order) and then bubbles parents
-// ahead of children; both halves are reproduced so the solid numbering matches
-// what studiomdl would have produced.
+// SortCollisionList: a body must be written after its parent, because a ragdollconstraint names
+// both by solid index. stock studiomdl builds the list by prepending (so it comes out in reverse
+// bone order) and then bubbles parents ahead of children; both halves are reproduced so the solid
+// numbering matches what studiomdl would have produced.
 void SortRagdollBodies(std::vector<RagdollBody>& bodies) {
     std::reverse(bodies.begin(), bodies.end());
 
@@ -4796,9 +4783,8 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
         anyConcave = anyConcave || shape.concave;
         maxConvexPieces = std::max(maxConvexPieces, shape.maxConvex);
 
-        // ---- bonemap: skip / merge (reference CCollisionModelSource) -------
-        // bonemap[i] == i means "build a body here"; -1 is skipped, anything
-        // else folds this bone's geometry into that bone's body.
+        // bonemap: skip / merge ------- bonemap[i] == i means "build a body here"; -1 is skipped,
+        // anything else folds this bone's geometry into that bone's body.
         std::vector<int> bonemap(numLocalBones);
         for (int i = 0; i < numLocalBones; i++)
             bonemap[i] = i;
@@ -4929,12 +4915,11 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
             if (faceList.empty())
                 continue;
 
-            // Which bone actually survives to carry this body, and therefore
-            // whose space the hull belongs in. The reference builds the hull in
-            // the collapsed bone's space and only renames it afterwards, which
-            // leaves the hull offset from the bone it ends up attached to; we
-            // use the surviving bone's space instead so a collapsed collision
-            // bone still lands correctly.
+            // Which bone actually survives to carry this body, and therefore whose space the hull
+            // belongs in. stock studiomdl builds the hull in the collapsed bone's space and only
+            // renames it afterwards, which leaves the hull offset from the bone it ends up attached
+            // to; we use the surviving bone's space instead so a collapsed collision bone still
+            // lands correctly.
             int node = b;
             int globalBone = ResolveLocalBoneToGlobal(ps, b, &node);
             if (globalBone < 0) {
@@ -5132,8 +5117,8 @@ bool BuildRagdollCollision(Ctx& ctx, const std::vector<GeneratedShape>& generate
         std::string name = m.bones[gb].name;
         int idx = FindSolidByName(m.physSolids, name);
         if (idx < 0) {
-            // the bone collapsed or was skipped - the constraint slides up to
-            // whichever ancestor kept a body, as the reference does
+            // the bone collapsed or was skipped - the constraint slides up to whichever ancestor
+            // kept a body, as stock studiomdl does
             std::string fixed = FixParentSolid(m, name);
             idx = fixed.empty() ? -1 : FindSolidByName(m.physSolids, fixed);
             if (idx >= 0) {
@@ -5467,9 +5452,9 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     m.physSolids.push_back(std::move(solid));
     m.bones[physBone].physicsbone = 0; // single body is always physics bone 0
 
-    // $automass leaves the total at -1, which tells the engine to derive mass
-    // from volume; every solid's own mass then floors at 1 in the writer. This
-    // is the reference's behavior (SetAutoMass).
+    // $automass leaves the total at -1, which tells the engine to derive mass from volume; every
+    // solid's own mass then floors at 1 in the writer. This is stock studiomdl's behavior
+    // (SetAutoMass).
     m.physTotalMass = in.physAutoMass ? -1.0f : in.physMass;
     m.physName = in.physName;
     m.physConcave = in.physBuildMode == PhysicsBuildMode::Auto
@@ -5484,11 +5469,10 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     m.physAnimFrictionTimeOut = in.physAnimFrictionTimeOut;
     m.physAnimFrictionTimeHold = in.physAnimFrictionTimeHold;
 
-    // CollisionModel_ExpandBBox: the render hull must enclose the
-    // collision hull, or the model gets culled while its physics is still in
-    // view. The hull itself is not known until the writer picks it (it comes
-    // from sequence 0 unless $bbox), so the bounds are stashed and applied
-    // there, exactly as the reference calls ExpandBBox from WriteModelFiles.
+    // CollisionModel_ExpandBBox: the render hull must enclose the collision hull, or the model gets
+    // culled while its physics is still in view. The hull itself is not known until the writer
+    // picks it (it comes from sequence 0 unless $bbox), so the bounds are stashed and applied
+    // there, exactly as stock studiomdl calls ExpandBBox from WriteModelFiles.
     const float kBBoxRadius = 0.25f;
     m.physCollideMins = {collideMins.x - kBBoxRadius, collideMins.y - kBBoxRadius,
                          collideMins.z - kBBoxRadius};
@@ -5627,9 +5611,8 @@ void BuildAnimationWeights(Ctx& ctx, std::vector<WeightList>& lists) {
     CompiledModel& m = *ctx.out;
     size_t numbones = m.bones.size();
 
-    // list 0 = default; script lists follow (index i in CompileInput -> i+1).
-    // $defaultweightlist entries land in slot 0 (Cmd_DefaultWeightlist)
-    // and resolve through the normal list-0 path (roots 1, inheritance).
+    // list 0 = default; script lists follow (index i in CompileInput -> i+1). $defaultweightlist
+    // entries land in slot 0 and resolve through the normal list-0 path (roots 1, inheritance).
     lists.clear();
     lists.emplace_back(); // default
     lists[0].name = "default";
@@ -5738,20 +5721,122 @@ bool SubtractBaseAnimations(Ctx& ctx, const Anim& psrc, Anim& pdest, int srcfram
 
 // processAnimations: default weights, then per-anim commands IN ORDER,
 // then loop forcing. Sequence weight merge at the end.
-// SolveInverseQuadratic (mathlib): fit y = Ax^2 + Bx + C through three points.
-// Returns false on a degenerate system, leaving A/B/C untouched.
+// Fit y = Ax^2 + Bx + C through three points (Newton divided differences).
+// Returns false when two x values coincide, leaving A/B/C untouched.
 bool SolveInverseQuadratic(float x1, float y1, float x2, float y2, float x3, float y3,
                            float& a, float& b, float& c) {
-    const float det = (x1 - x2) * (x1 - x3) * (x2 - x3);
-    if (det == 0.0f)
+    if (x1 == x2 || x1 == x3 || x2 == x3)
         return false;
-    // term order copied verbatim from mathlib_base.cpp - algebraically
-    // equivalent regroupings land on different bits
-    a = (x3 * (-y1 + y2) + x2 * (y1 - y3) + x1 * (-y2 + y3)) / det;
-    b = (x3 * x3 * (y1 - y2) + x1 * x1 * (y2 - y3) + x2 * x2 * (-y1 + y3)) / det;
-    c = (x1 * x3 * (-x1 + x3) * y2 + x2 * x2 * (x3 * y1 - x1 * y3) +
-         x2 * (-(x3 * x3 * y1) + x1 * x1 * y3)) / det;
+
+    const double slope12 = (double(y2) - y1) / (double(x2) - x1);
+    const double slope23 = (double(y3) - y2) / (double(x3) - x2);
+    const double qa = (slope23 - slope12) / (double(x3) - x1);
+    const double qb = slope12 - qa * (double(x1) + x2);
+    const double qc = y1 - (qa * x1 + qb) * x1;
+
+    a = static_cast<float>(qa);
+    b = static_cast<float>(qb);
+    c = static_cast<float>(qc);
     return true;
+}
+
+// Rotation bits of a motion extraction type: which root axes turn with the extracted travel.
+constexpr int kMotionRotX = 0x0200, kMotionRotY = 0x0400, kMotionRotZ = 0x0800;
+constexpr int kMotionMoveX = 0x0040, kMotionMoveY = 0x0080, kMotionMoveZ = 0x0100;
+constexpr int kMotionLinear = 0x1000, kMotionQuadratic = 0x2000;
+
+struct MotionSpeeds {
+    float start, end;
+};
+
+// Speeds at both ends of a span, from the distance covered by the midpoint (d1) and by the
+// end (d2). A quadratic path through (0,0), (1/2,d1), (1,d2) gives v0 = 4*d1 - d2 and
+// v1 = 3*d2 - 4*d1; a negative speed means the path reverses, so that end is pinned to zero.
+static MotionSpeeds EstimateMotionSpeeds(float d1, float d2, bool linear) {
+    const float v0 = 4 * d1 - d2;
+    const float v1 = 3 * d2 - 4 * d1;
+
+    if (linear)
+        return {d2, d2};
+    if (v0 < 0.0f)
+        return {0.0f, d2 * 2.0f};
+    if (v1 < 0.0f)
+        return {d2 * 2.0f, 0.0f};
+
+    // Both speeds within about 20% of their sum: treat the span as constant speed.
+    if (v0 + v1 > 0.01f && std::fabs(v0 - v1) / (v0 + v1) < 0.2f)
+        return {d2, d2};
+    return {v0, v1};
+}
+
+// Yaw of the extracted turn. `full` is the angle to the end frame and `half` the angle to
+// the midpoint; a turn past half a revolution reads as the short way round, so the midpoint
+// decides which direction to unwrap.
+static float UnwrappedYaw(float full, float half) {
+    const float pi = static_cast<float>(kPiD);
+
+    if (full > pi) half -= 2 * pi;
+    if (full < -pi) half += 2 * pi;
+    if (half > pi) half -= 2 * pi;
+    if (half < -pi) half += 2 * pi;
+
+    if (half > pi / 4 && full < 0) full += 2 * pi;
+    if (half < -pi / 4 && full > 0) full -= 2 * pi;
+    return full;
+}
+
+// Root rotation to extract: the turn from the reference pose to the end frame, limited to
+// the axes the motion type enables.
+static RadianEuler ExtractedRootRotation(const Anim& panim, const Anim& refAnim, int root,
+                                         int refFrame, int midFrame, int endFrame,
+                                         int motiontype) {
+    RadianEuler rot{0, 0, 0};
+    if (!(motiontype & (kMotionRotX | kMotionRotY | kMotionRotZ)))
+        return rot;
+
+    Quaternion refQ, midQ, endQ;
+    pm::AngleQuaternion(refAnim.sanim[refFrame][root].rot, refQ);
+    pm::AngleQuaternion(panim.sanim[midFrame][root].rot, midQ);
+    pm::AngleQuaternion(panim.sanim[endFrame][root].rot, endQ);
+
+    Quaternion midDelta, endDelta;
+    pm::QuaternionMA(midQ, -1.0f, refQ, midDelta);
+    pm::QuaternionMA(endQ, -1.0f, refQ, endDelta);
+
+    // Euler angles of a delta reduced to one axis (w is kept so it stays a rotation).
+    auto singleAxis = [](const Quaternion& delta, float x, float y, float z) {
+        Quaternion q{x, y, z, delta.w};
+        pm::QuaternionNormalize(q);
+
+        RadianEuler angles;
+        pm::QuaternionAngles(q, angles);
+        return angles;
+    };
+
+    if (motiontype & kMotionRotX)
+        rot.x = singleAxis(endDelta, endDelta.x, 0, 0).x;
+    if (motiontype & kMotionRotY)
+        rot.y = singleAxis(endDelta, 0, endDelta.y, 0).y;
+    if (motiontype & kMotionRotZ) {
+        const float full = singleAxis(endDelta, 0, 0, endDelta.z).z;
+        const float half = singleAxis(midDelta, 0, 0, midDelta.z).z;
+        rot.z = UnwrappedYaw(full, half);
+    }
+    return rot;
+}
+
+// Re-expresses every root bone of one frame relative to `adjustment`.
+static void RemoveRootMotion(CompiledModel& m, Anim& panim, int frame, const matrix3x4& adjustment) {
+    for (size_t k = 0; k < m.bones.size(); k++) {
+        if (m.bones[k].parent != -1)
+            continue;
+
+        src::SrcBonePose& pose = panim.sanim[frame][k];
+        matrix3x4 local;
+        pm::AngleMatrix(pose.rot, pose.pos, local);
+        local = pm::ConcatTransforms(adjustment, local);
+        pm::MatrixAngles(local, pose.rot, pose.pos);
+    }
 }
 
 // extractLinearMotion: pull the root bone's travel out of
@@ -5778,105 +5863,46 @@ bool ExtractLinearMotion(Ctx& ctx, Anim& panim, int motiontype, int iStartFrame,
         return true;
     }
 
-    const float fFrame = (iStartFrame + iSrcFrame) / 2.0f;
-    const int iMidFrame = static_cast<int>(fFrame);
-    const float s = fFrame - iMidFrame;
+    const float midpoint = (iStartFrame + iSrcFrame) / 2.0f;
+    const int iMidFrame = static_cast<int>(midpoint);
+    const float midBlend = midpoint - iMidFrame;
 
     const int root = ctx.rootIndex; // $root
-    RadianEuler rot{0, 0, 0};
-
-    constexpr int kLX = 0x0040, kLY = 0x0080, kLZ = 0x0100;
-    constexpr int kLXR = 0x0200, kLYR = 0x0400, kLZR = 0x0800;
-    constexpr int kLinear = 0x1000, kQuadratic = 0x2000;
-
-    if (motiontype & (kLXR | kLYR | kLZR)) {
-        Quaternion q0, q1, q2;
-        pm::AngleQuaternion(refAnim.sanim[iRefFrame][root].rot, q0);
-        pm::AngleQuaternion(panim.sanim[iMidFrame][root].rot, q1);
-        pm::AngleQuaternion(panim.sanim[iSrcFrame][root].rot, q2);
-
-        Quaternion deltaQ1, deltaQ2;
-        pm::QuaternionMA(q1, -1.0f, q0, deltaQ1);
-        pm::QuaternionMA(q2, -1.0f, q0, deltaQ2);
-
-        RadianEuler a3;
-        auto axis = [&](float x, float y, float z) {
-            Quaternion q4{x, y, z, deltaQ2.w};
-            pm::QuaternionNormalize(q4);
-            pm::QuaternionAngles(q4, a3);
-        };
-        if (motiontype & kLXR) { axis(deltaQ2.x, 0, 0); rot.x = a3.x; }
-        if (motiontype & kLYR) { axis(0, deltaQ2.y, 0); rot.y = a3.y; }
-        if (motiontype & kLZR) {
-            axis(0, 0, deltaQ2.z);
-            // a rotation past 180 degrees looks like the short way round, so
-            // check the halfway point and unwrap if it disagrees
-            Quaternion q5{0, 0, deltaQ1.z, deltaQ1.w};
-            pm::QuaternionNormalize(q5);
-            RadianEuler a5;
-            pm::QuaternionAngles(q5, a5);
-            const float pi = static_cast<float>(kPiD);
-            if (a3.z > pi) a5.z -= 2 * pi;
-            if (a3.z < -pi) a5.z += 2 * pi;
-            if (a5.z > pi) a5.z -= 2 * pi;
-            if (a5.z < -pi) a5.z += 2 * pi;
-            if (a5.z > pi / 4 && a3.z < 0) a3.z += 2 * pi;
-            if (a5.z < -pi / 4 && a3.z > 0) a3.z -= 2 * pi;
-            rot.z = a3.z;
-        }
-    }
+    const RadianEuler rot =
+        ExtractedRootRotation(panim, refAnim, root, iRefFrame, iMidFrame, iSrcFrame, motiontype);
 
     matrix3x4 adjmatrix;
     pm::AngleMatrix(rot, adjmatrix);
-    const Vector3 p0 = pm::VectorRotate(refAnim.sanim[iRefFrame][root].pos, adjmatrix);
+    const Vector3 refPos = pm::VectorRotate(refAnim.sanim[iRefFrame][root].pos, adjmatrix);
 
-    Vector3 p2 = panim.sanim[iSrcFrame][root].pos;
+    // Travel from the reference to the midpoint (p1) and to the end frame (p2), per enabled axis.
     const Vector3& mid0 = panim.sanim[iMidFrame][root].pos;
     const Vector3& mid1 = panim.sanim[iMidFrame + 1][root].pos;
-    Vector3 p1{mid0.x * (1 - s) + mid1.x * s, mid0.y * (1 - s) + mid1.y * s,
-               mid0.z * (1 - s) + mid1.z * s};
-
-    p2 = {p2.x - p0.x, p2.y - p0.y, p2.z - p0.z};
-    p1 = {p1.x - p0.x, p1.y - p0.y, p1.z - p0.z};
-    if (!(motiontype & kLX)) { p2.x = 0; p1.x = 0; }
-    if (!(motiontype & kLY)) { p2.y = 0; p1.y = 0; }
-    if (!(motiontype & kLZ)) { p2.z = 0; p1.z = 0; }
-
-    auto length = [](const Vector3& v) {
-        return static_cast<float>(sqrt(v.x * v.x + v.y * v.y + v.z * v.z));
-    };
-    const float d1 = length(p1);
-    const float d2 = length(p2);
-    float v0 = -1 * d2 + 4 * d1;
-    float v1 = 3 * d2 - 4 * d1;
+    const Vector3 endPos = panim.sanim[iSrcFrame][root].pos;
+    Vector3 p1{mid0.x * (1 - midBlend) + mid1.x * midBlend - refPos.x,
+               mid0.y * (1 - midBlend) + mid1.y * midBlend - refPos.y,
+               mid0.z * (1 - midBlend) + mid1.z * midBlend - refPos.z};
+    Vector3 p2{endPos.x - refPos.x, endPos.y - refPos.y, endPos.z - refPos.z};
+    if (!(motiontype & kMotionMoveX)) p1.x = p2.x = 0;
+    if (!(motiontype & kMotionMoveY)) p1.y = p2.y = 0;
+    if (!(motiontype & kMotionMoveZ)) p1.z = p2.z = 0;
 
     const int numframes = iEndFrame - iStartFrame + 1;
     if (numframes < 1)
         return true;
-    const float n = static_cast<float>(numframes - 1);
+    const float lastFrame = static_cast<float>(numframes - 1);
 
-    if (motiontype & kLinear) {
-        v0 = v1 = length(p2);
-    } else if (v0 < 0.0f) {
-        v0 = 0.0f;
-        v1 = length(p2) * 2.0f;
-    } else if (v1 < 0.0f) {
-        v0 = length(p2) * 2.0f;
-        v1 = 0.0f;
-    } else if ((v0 + v1) > 0.01f && (std::fabs(v0 - v1) / (v0 + v1)) < 0.2f) {
-        // within 10% of each other - assume no acceleration
-        v0 = v1 = length(p2);
-    }
+    const float endDistance = VectorLength(p2);
+    const MotionSpeeds speeds =
+        EstimateMotionSpeeds(VectorLength(p1), endDistance, (motiontype & kMotionLinear) != 0);
 
-    Vector3 v = p2;
-    {
-        const float len = length(v);
-        if (len > 0.0f) { v.x /= len; v.y /= len; v.z /= len; }
-        else { v = {0, 0, 0}; }
-    }
+    Vector3 direction{0, 0, 0};
+    if (endDistance > 0.0f)
+        direction = {p2.x / endDistance, p2.y / endDistance, p2.z / endDistance};
 
+    // Quadratic motion fits a path per axis through the start, midpoint and end.
     Vector3 A{}, B{}, C{};
-    if (motiontype & kQuadratic) {
+    if (motiontype & kMotionQuadratic) {
         SolveInverseQuadratic(0, 0, 0.5f, p1.x, 1.0f, p2.x, A.x, B.x, C.x);
         SolveInverseQuadratic(0, 0, 0.5f, p1.y, 1.0f, p2.y, A.y, B.y, C.y);
         SolveInverseQuadratic(0, 0, 0.5f, p1.z, 1.0f, p2.z, A.z, B.z, C.z);
@@ -5884,70 +5910,54 @@ bool ExtractLinearMotion(Ctx& ctx, Anim& panim, int motiontype, int iStartFrame,
 
     Vector3 adjpos{};
     RadianEuler adjangle{};
-    matrix3x4 bonematrix;
-    int j = 0;
-    for (; j < numframes; j++) {
-        const float t = (j / n);
-        if (motiontype & kQuadratic) {
+    int frame = 0;
+    for (; frame < numframes; frame++) {
+        const float t = frame / lastFrame;
+
+        if (motiontype & kMotionQuadratic) {
             adjpos = {t * t * A.x + t * B.x + C.x, t * t * A.y + t * B.y + C.y,
                       t * t * A.z + t * B.z + C.z};
         } else {
-            const float d = v0 * t + 0.5f * (v1 - v0) * t * t;
-            adjpos = {v.x * d, v.y * d, v.z * d};
+            const float distance = speeds.start * t + 0.5f * (speeds.end - speeds.start) * t * t;
+            adjpos = {direction.x * distance, direction.y * distance, direction.z * distance};
         }
         adjangle = {rot.x * t, rot.y * t, rot.z * t};
 
         pm::AngleMatrix(adjangle, adjpos, adjmatrix);
         adjmatrix = pm::MatrixInvert(adjmatrix);
-
-        for (size_t k = 0; k < m.bones.size(); k++) {
-            if (m.bones[k].parent != -1)
-                continue;
-            src::SrcBonePose& bp = panim.sanim[j + iStartFrame][k];
-            pm::AngleMatrix(bp.rot, bp.pos, bonematrix);
-            bonematrix = pm::ConcatTransforms(adjmatrix, bonematrix);
-            pm::MatrixAngles(bonematrix, bp.rot, bp.pos);
-        }
+        RemoveRootMotion(m, panim, frame + iStartFrame, adjmatrix);
     }
-    // everything past the extracted range keeps the final adjustment
-    for (; j + iStartFrame < panim.numframes; j++) {
-        for (size_t k = 0; k < m.bones.size(); k++) {
-            if (m.bones[k].parent != -1)
-                continue;
-            src::SrcBonePose& bp = panim.sanim[j + iStartFrame][k];
-            pm::AngleMatrix(bp.rot, bp.pos, bonematrix);
-            bonematrix = pm::ConcatTransforms(adjmatrix, bonematrix);
-            pm::MatrixAngles(bonematrix, bp.rot, bp.pos);
-        }
-    }
+    // frames past the extracted span keep the final adjustment
+    for (; frame + iStartFrame < panim.numframes; frame++)
+        RemoveRootMotion(m, panim, frame + iStartFrame, adjmatrix);
 
-    // piecewise motion path: each key concatenates onto the previous one
+    // Each key continues from the pose the previous key ended on.
     panim.piecewisemove.emplace_back();
-    LinearMove& pmove = panim.piecewisemove.back();
-    const size_t nkeys = panim.piecewisemove.size();
-    pmove.endframe = iEndFrame;
-    pmove.flags = motiontype;
-    if (nkeys > 1) {
-        const LinearMove& prev = panim.piecewisemove[nkeys - 2];
-        pm::AngleMatrix(adjangle, adjpos, bonematrix);
-        pm::AngleMatrix(prev.rot, prev.pos, adjmatrix);
-        bonematrix = pm::ConcatTransforms(adjmatrix, bonematrix);
-        pm::MatrixAngles(bonematrix, pmove.rot, pmove.pos);
-        pmove.vector = {pmove.pos.x - prev.pos.x, pmove.pos.y - prev.pos.y,
-                        pmove.pos.z - prev.pos.z};
+    LinearMove& key = panim.piecewisemove.back();
+    const size_t keyCount = panim.piecewisemove.size();
+    key.endframe = iEndFrame;
+    key.flags = motiontype;
+    if (keyCount > 1) {
+        const LinearMove& prev = panim.piecewisemove[keyCount - 2];
+        matrix3x4 spanPose, prevPose;
+        pm::AngleMatrix(adjangle, adjpos, spanPose);
+        pm::AngleMatrix(prev.rot, prev.pos, prevPose);
+
+        const matrix3x4 total = pm::ConcatTransforms(prevPose, spanPose);
+        pm::MatrixAngles(total, key.rot, key.pos);
+        key.vector = {key.pos.x - prev.pos.x, key.pos.y - prev.pos.y, key.pos.z - prev.pos.z};
     } else {
-        pmove.pos = adjpos;
-        pmove.rot = adjangle;
-        pmove.vector = pmove.pos;
+        key.pos = adjpos;
+        key.rot = adjangle;
+        key.vector = key.pos;
     }
-    const float vlen = length(pmove.vector);
-    if (vlen > 0.0f) {
-        pmove.vector.x /= vlen;
-        pmove.vector.y /= vlen;
-        pmove.vector.z /= vlen;
-    }
-    pmove.v0 = v0;
-    pmove.v1 = v1;
+
+    const float travel = VectorLength(key.vector);
+    if (travel > 0.0f)
+        key.vector = {key.vector.x / travel, key.vector.y / travel, key.vector.z / travel};
+
+    key.v0 = speeds.start;
+    key.v1 = speeds.end;
     return true;
 }
 
@@ -6159,9 +6169,9 @@ void FixupIkErrors(Ctx& ctx, Anim& panim, IkRule rule) {
         if (t >= panim.numframes && !looping)
             break;
 
-        // the reference throws this ramp away (it scores frame numbers against
-        // a cycle-space weight, so every frame reads 0) and hard-locks at 1.0.
-        // Score it in frame space instead, like every other range in this file.
+        // stock studiomdl throws this ramp away (it scores frame numbers against a cycle-space
+        // weight, so every frame reads 0) and hard-locks at 1.0. Score it in frame space instead,
+        // like every other range in this file.
         float s = 1.0f;
         if (t < rule.peak && rule.peak > rule.start)
             s = static_cast<float>(t - rule.start) / (rule.peak - rule.start);
@@ -6217,8 +6227,8 @@ static bool CheckAnimFrame(const Anim& a, int frame, const char* what,
 bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std::string* err) {
     CompiledModel& m = *ctx.out;
 
-    // $root: the bone motion extraction and alignment work from. An unknown
-    // name falls back to bone 0, like the reference.
+    // $root: the bone motion extraction and alignment work from. An unknown name falls back to bone
+    // 0, like stock studiomdl.
     if (!ctx.in->primaryRootBone.empty()) {
         ctx.rootIndex = FindGlobalBone(m, ctx.in->primaryRootBone);
         if (ctx.rootIndex == -1) {
@@ -6234,9 +6244,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
         // default weightlist
         SetAnimationWeight(ctx, weightlists, panim, 0);
 
-        // fixupMissingFrame: the source has no duplicate end
-        // frame, so extrapolate one from the last delta and take frame 0's
-        // rotation. Runs before the cmds, like the reference.
+        // fixupMissingFrame: the source has no duplicate end frame, so extrapolate one from the
+        // last delta and take frame 0's rotation. Runs before the cmds, like stock studiomdl.
         if (panim.fudgeloop && panim.numframes > 1 &&
             panim.sanim.size() >= static_cast<size_t>(panim.numframes)) {
             const int j = panim.numframes;
@@ -6268,10 +6277,9 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                     return false;
                 break;
             case AnimCmd::NumFrames: {
-                // CMD_NUMFRAMES -> forceNumframes: clip or
-                // pad the clip to a fixed length, padding with copies of its
-                // last frame. Clipping just shortens it; the frames past the
-                // new end are left alone, like the reference.
+                // CMD_NUMFRAMES -> forceNumframes: clip or pad the clip to a fixed length, padding
+                // with copies of its last frame. Clipping just shortens it; the frames past the new
+                // end are left alone, like stock studiomdl.
                 if (cmd.numframes > panim.numframes) {
                     if (panim.sanim.size() < static_cast<size_t>(cmd.numframes))
                         panim.sanim.resize(cmd.numframes);
@@ -6538,10 +6546,9 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 break;
             }
             case AnimCmd::WorldspaceBlend: {
-                // worldspaceBlend: slerp each bone's WORLD
-                // orientation toward the reference by its animation weight,
-                // then back-solve to local space. Bone lengths blend separately
-                // by posweight.
+                // worldspaceBlend: slerp each bone's WORLD orientation toward the reference
+                // animation by its animation weight, then back-solve to local space. Bone
+                // lengths blend separately by posweight.
                 Anim& ref = m.anims[cmd.refAnim];
                 if (cmd.worldLoops && ref.numframes < 2) {
                     if (err) *err = "worldspaceblendloop: reference " + ref.name +
@@ -6567,8 +6574,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
 
                 for (int j = 0; j < panim.numframes; j++) {
                     if (cmd.worldLoops) {
-                        // CalcBoneTransformsCycle: sample the reference at this
-                        // frame's cycle, offset by the start frame
+                        // CalcBoneTransformsCycle: sample the reference animation at this frame's
+                        // cycle, offset by the start frame
                         float cycle = static_cast<float>(j) / (panim.numframes - 1);
                         cycle += static_cast<float>(cmd.srcframe) / (ref.numframes - 1);
                         const float fFrame = cycle * (ref.numframes - 1);
@@ -6619,9 +6626,9 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                             Quaternion destQ, targetQ;
                             pm::MatrixAngles(destBoneToWorld[k], destQ, tmp);
                             pm::QuaternionSlerp(destQ, srcQ[k], panim.weight[k], targetQ);
-                            // NOTE: tmp still holds the position MatrixAngles
-                            // just wrote - the reference reuses it here, so the
-                            // rebuilt matrix keeps the dest translation
+                            // NOTE: tmp still holds the position MatrixAngles just wrote - stock
+                            // studiomdl reuses it here, so the rebuilt matrix keeps the dest
+                            // translation
                             RadianEuler e;
                             pm::QuaternionAngles(targetQ, e);
                             pm::AngleMatrix(e, tmp, destBoneToWorld[k]);
@@ -6646,9 +6653,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 break;
             }
             case AnimCmd::MatchBlend: {
-                // matchBlend: correct this clip toward the
-                // reference at one frame, ramped in over pre/post frames. The
-                // ramp wraps around the clip, so a looping animation also gets
+                // matchBlend: correct this clip toward the reference animation at one frame, ramped in over
+                // pre/post frames. The ramp wraps around the clip, so a looping animation also gets
                 // its duplicate last frame updated.
                 Anim& ref = m.anims[cmd.refAnim];
                 if (!CheckAnimFrame(ref, cmd.srcframe, "source frame", "matchblend", err) ||
@@ -6677,9 +6683,9 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 for (int j = pre; j <= post; j++) {
                     float s = (j < 0) ? j / static_cast<float>(pre - 1)
                                       : j / static_cast<float>(post + 1);
-                    // SimpleSpline(1 - s): 3v^2 - 2*(v^2)*v. The squaring is
-                    // hoisted in the reference, and re-associating it changes
-                    // the low bits - keep this shape exactly.
+                    // SimpleSpline(1 - s): 3v^2 - 2*(v^2)*v. The squaring is hoisted in stock
+                    // studiomdl, and re-associating it changes the low bits - keep this shape
+                    // exactly.
                     const float v = 1.0f - s;
                     const float v2 = v * v;
                     s = 3 * v2 - 2 * v2 * v;
@@ -6715,14 +6721,12 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 }
                 const size_t nb = m.bones.size();
 
-                // The source pose in world space. $deltaproportions
-                // copies world transforms and
-                // back-solves to local, and this has to match: a bone's LOCAL
-                // pose only reproduces the source if every ancestor was copied
-                // too, so a weightlist masking the parent out would otherwise
-                // leave the child hanging off the dest clip's parent. Bones the
-                // copy does not touch keep their local pose and ride the new
-                // parent - the reference's fallback for an `ignore`d bone.
+                // The source pose in world space. $deltaproportions copies world transforms and
+                // back-solves to local, and this has to match: a bone's LOCAL pose only reproduces
+                // the source if every ancestor was copied too, so a weightlist masking the parent
+                // out would otherwise leave the child hanging off the dest clip's parent. Bones the
+                // copy does not touch keep their local pose and ride the new parent - stock
+                // studiomdl's fallback for an `ignore`d bone.
                 std::vector<matrix3x4> srcWorld(nb), dstWorld(nb);
                 std::vector<char> exactRot(nb, 0), exactPos(nb, 0);
                 for (size_t k = 0; k < nb; k++) {
@@ -6898,9 +6902,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 break;
             }
             case AnimCmd::Align: {
-                // processAutoorigin: find the transform that
-                // puts this clip's bone where the reference clip has it, then
-                // apply it to every root bone across every frame.
+                // processAutoorigin: find the transform that puts this clip's bone where stock
+                // studiomdl clip has it, then apply it to every root bone across every frame.
                 Anim& ref = m.anims[cmd.refAnim];
                 int bone = ctx.rootIndex; // $root unless the command names one
                 if (!cmd.alignBone.empty()) {
@@ -7012,9 +7015,9 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 break;
             }
             case AnimCmd::Angle: {
-                // makeAngle: yaw the whole clip so the root
-                // bone's travel direction ends up at the given angle. We have no
-                // motion extraction, so this is the reference's root-bone branch.
+                // makeAngle: yaw the whole clip so the root bone's travel direction ends up at the
+                // given angle. We have no motion extraction, so this is stock studiomdl's root-bone
+                // branch.
                 const int root = ctx.rootIndex;
                 float da = 0.0f;
                 const Vector3 travel{
@@ -7154,9 +7157,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
             motionStartFrame = panim.numframes - 1;
         }
 
-        // realignLooping: rotate the clip so it restarts at
-        // looprestart. The last frame is a copy of the restart frame, matching
-        // the reference's separate handling of numframes-1.
+        // realignLooping: rotate the clip so it restarts at looprestart. The last frame is a copy
+        // of the restart frame, matching stock studiomdl's separate handling of numframes-1.
         if (panim.numframes > 1 &&
             (panim.looprestart != 0 || panim.looprestartpercent != 0.0f)) {
             int restart = panim.looprestart;
@@ -7376,65 +7378,54 @@ void CompressAnimations(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
     int numbones = static_cast<int>(m.bones.size());
 
-    // find scales for all bones
+    // Per bone and channel (3 position, 3 rotation): the 16-bit scale that covers every value
+    // the animations take, and for position the bone's absolute range of travel.
     for (int j = 0; j < numbones; j++) {
-        for (int k = 0; k < 6; k++) {
-            float minv, maxv, scale;
-            // total_* tracks the bone's absolute travel, for posrange
-            float total_minv, total_maxv;
-            if (k < 3) {
-                minv = -128.0f;
-                maxv = 128.0f;
-                total_minv = total_maxv = (&m.bones[j].pos.x)[k];
-            } else {
-                minv = static_cast<float>(-kPiD / 8.0);
-                maxv = static_cast<float>(kPiD / 8.0);
-                total_minv = total_maxv = (&m.bones[j].rot.x)[k - 3];
-            }
+        auto& bone = m.bones[j];
+
+        for (int channel = 0; channel < 6; channel++) {
+            const bool isPosition = channel < 3;
+            const int axis = channel % 3;
+            const float rest = isPosition ? (&bone.pos.x)[axis] : (&bone.rot.x)[axis];
+
+            float lo = isPosition ? -128.0f : static_cast<float>(-kPiD / 8.0);
+            float hi = isPosition ? 128.0f : static_cast<float>(kPiD / 8.0);
+            float travelLo = rest, travelHi = rest;
 
             for (Anim& a : m.anims) {
+                const bool isDelta = (a.flags & STUDIO_DELTA) != 0;
+
                 for (int n = 0; n < a.numframes; n++) {
-                    float v = 0.0f;
-                    const float* pos = &a.sanim[n][j].pos.x;
-                    const float* rot = &a.sanim[n][j].rot.x;
-                    const float* bpos = &m.bones[j].pos.x;
-                    const float* brot = &m.bones[j].rot.x;
-                    if (k < 3) {
-                        if (a.flags & STUDIO_DELTA) {
-                            v = pos[k];
-                        } else {
-                            v = pos[k] - bpos[k];
-                            if (pos[k] < total_minv) total_minv = pos[k];
-                            if (pos[k] > total_maxv) total_maxv = pos[k];
+                    const src::SrcBonePose& pose = a.sanim[n][j];
+                    const float raw = isPosition ? (&pose.pos.x)[axis] : (&pose.rot.x)[axis];
+                    float v = isDelta ? raw : raw - rest;
+
+                    if (isPosition) {
+                        if (!isDelta) {
+                            travelLo = std::min(travelLo, raw);
+                            travelHi = std::max(travelHi, raw);
                         }
                     } else {
-                        if (a.flags & STUDIO_DELTA)
-                            v = rot[k - 3];
-                        else
-                            v = rot[k - 3] - brot[k - 3];
-                        // PARITY: double-op wrap, see ClipRotations
+                        // fold into [-pi, pi) with the double-precision step
                         while (v >= kPiD)
                             v = static_cast<float>(v - kPiD * 2);
                         while (v < -kPiD)
                             v = static_cast<float>(v + kPiD * 2);
                     }
-                    if (v < minv) minv = v;
-                    if (v > maxv) maxv = v;
+                    lo = std::min(lo, v);
+                    hi = std::max(hi, v);
                 }
             }
-            if (minv < maxv) {
-                if (-minv > maxv)
-                    scale = minv / -32768.0f;
-                else
-                    scale = maxv / 32767.0f;
+
+            float scale = 1.0f / 32.0f;
+            if (lo < hi)
+                scale = (-lo > hi) ? lo / -32768.0f : hi / 32767.0f;
+
+            if (isPosition) {
+                (&bone.posscale.x)[axis] = scale;
+                (&bone.posrange.x)[axis] = travelHi - travelLo;
             } else {
-                scale = 1.0f / 32.0f;
-            }
-            if (k < 3) {
-                (&m.bones[j].posscale.x)[k] = scale;
-                (&m.bones[j].posrange.x)[k] = total_maxv - total_minv;
-            } else {
-                (&m.bones[j].rotscale.x)[k - 3] = scale;
+                (&bone.rotscale.x)[axis] = scale;
             }
         }
     }
@@ -7496,7 +7487,7 @@ void CompressAnimations(Ctx& ctx) {
                                 v = rot[k - 3];
                             else
                                 v = rot[k - 3] - brot[k - 3];
-                            // PARITY: double-op wrap, see ClipRotations
+                            // double-op wrap, see ClipRotations
                             while (v >= kPiD)
                                 v = static_cast<float>(v - kPiD * 2);
                             while (v < -kPiD)
@@ -7505,7 +7496,7 @@ void CompressAnimations(Ctx& ctx) {
                         }
                     }
 
-                    // build the RLE (exact reference algorithm, on 16-bit words)
+                    // build the RLE
                     std::vector<uint16_t> data(value.size() * 2 + 2, 0);
                     size_t pcount = 0;
                     size_t pvalue = 1;
@@ -7708,8 +7699,8 @@ bool SetupHitBoxes(Ctx& ctx, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// CalcBoneTransforms - delta anims blend onto the base animation
-// (anim 0) frame 0 via QuaternionMA, like the reference.
+// CalcBoneTransforms - delta anims blend onto the base animation (anim 0) frame 0 via QuaternionMA,
+// like stock studiomdl.
 // ---------------------------------------------------------------------------
 void CalcBoneTransforms(Ctx& ctx, Anim& panim, Anim* pbaseanim, int frame,
                         std::vector<matrix3x4>& boneToWorld) {
@@ -7745,8 +7736,8 @@ void CalcBoneTransforms(Ctx& ctx, Anim& panim, Anim* pbaseanim, int frame,
 
             float s = panim.weight[k];
             pm::QuaternionMA(q1, s, q2, q3);
-            // reference quirk kept: pbaseanimation deref even on this path is
-            // impossible here (pbaseanim null), reference adds bind pos instead
+            // pbaseanimation deref even on this path is impossible here (pbaseanim null), stock
+            // studiomdl adds bind pos instead
             Vector3 p3{m.bones[k].pos.x, m.bones[k].pos.y, m.bones[k].pos.z};
 
             RadianEuler e3;
@@ -7762,7 +7753,7 @@ void CalcBoneTransforms(Ctx& ctx, Anim& panim, Anim* pbaseanim, int frame,
 }
 
 void CalcBoneTransforms(Ctx& ctx, Anim& panim, int frame, std::vector<matrix3x4>& boneToWorld) {
-    // reference 3-arg overload bases delta anims on g_panimation[0]
+    // stock studiomdl 3-arg overload bases delta anims on g_panimation[0]
     Anim* base = ctx.out->anims.empty() ? nullptr : &ctx.out->anims[0];
     CalcBoneTransforms(ctx, panim, base, frame, boneToWorld);
 }
@@ -8189,9 +8180,9 @@ static int WrapFrame(int f, int numframes) {
     return f;
 }
 
-// Detect numSteps foot-contact intervals from a per-frame foot height curve.
-// Returns {firstFrame, belowFrameCount} per contact, or empty + *err on failure.
-// Clean-room reimplementation of the reference autosteps detector.
+// Detect numSteps foot-contact intervals from a per-frame foot height curve. Returns {firstFrame,
+// belowFrameCount} per contact, or empty + *err on failure. Clean-room reimplementation of stock
+// studiomdl autosteps detector.
 std::vector<std::pair<int, int>> DetectFootsteps(const std::vector<float>& footZ, int numSteps,
                                                  std::string* err) {
     const float kGrid = 0.3f;     // quantization step, kills jitter
@@ -8337,17 +8328,90 @@ struct AutostepsSelfCheck {
 } // namespace
 #endif
 
+// Fills in the unset (-1) frames of an IK rule from the ones that are given.
+static void DefaultIkRuleRange(IkRule& r, int numframes) {
+    const int last = numframes - 1;
+
+    if (r.start == 0 && r.peak == 0 && r.tail == 0 && r.end == 0)
+        r.tail = r.end = last;
+
+    if (r.start != -1 && r.peak == -1 && r.tail == -1 && r.end != -1)
+        r.peak = r.tail = (r.start + r.end) / 2;
+    if (r.start != -1 && r.peak == -1 && r.tail != -1)
+        r.peak = (r.start + r.tail) / 2;
+    if (r.peak != -1 && r.tail == -1 && r.end != -1)
+        r.tail = (r.peak + r.end) / 2;
+
+    if (r.peak == -1)
+        r.start = r.peak = 0;
+    if (r.tail == -1)
+        r.tail = r.end = last;
+    if (r.contact == -1)
+        r.contact = r.peak;
+}
+
+// The rule before (step -1) or after (+1) `index` on the same chain, wrapping around the
+// list; the rule itself when it is alone on its chain.
+static IkRule* NeighborOnChain(std::vector<IkRule>& rules, int index, int step) {
+    const int count = static_cast<int>(rules.size());
+
+    for (int i = 1; i < count; ++i) {
+        IkRule& candidate = rules[(index + step * i + count) % count];
+        if (candidate.chain == rules[index].chain)
+            return &candidate;
+    }
+    return &rules[index];
+}
+
+// Places the boundary between two consecutive rules on one chain: writes right.start and
+// left.end. Rules on the same slot split the gap evenly across the clip's loop point.
+static void BridgeIkRuleGap(IkRule& left, IkRule& right, int numframes) {
+    const int cycle = numframes - 1;
+
+    if (left.slot != right.slot) {
+        right.start = left.tail;
+        left.end = right.peak;
+        return;
+    }
+
+    const int gap = (right.peak < left.tail) ? left.tail - right.peak : left.tail - right.peak + cycle;
+    right.start = (right.peak + gap / 2 + numframes / 2) % cycle;
+    left.end = (right.start + cycle) % cycle;
+}
+
+// Frames must rise start <= peak <= tail <= end; a rule that wraps past the loop point
+// is lifted by one cycle.
+static void UnwrapIkRuleRange(IkRule& r, int numframes) {
+    const int cycle = numframes - 1;
+    int* ordered[] = {&r.start, &r.peak, &r.tail, &r.end};
+
+    for (int i = 1; i < 4; ++i)
+        if (*ordered[i] < *ordered[i - 1])
+            *ordered[i] += cycle;
+
+    if (r.contact < r.start)
+        r.contact += cycle;
+}
+
+static float SmoothStep(float s) {
+    return 3 * s * s - 2 * s * s * s;
+}
+
+static Vector3 MixVectors(const Vector3& a, const Vector3& b, float t) {
+    return {a.x * (1 - t) + b.x * t, a.y * (1 - t) + b.y * t, a.z * (1 - t) + b.z * t};
+}
+
+
 // ---------------------------------------------------------------------------
-// ProcessIKRules minus localhierarchy. Rules were attached to anims at
-// input-build time (the reference copies them from cmds here); autosteps rules
-// fan out first via ExpandAutosteps.
+// ProcessIKRules minus localhierarchy. Rules were attached to anims at input-build time; autosteps
+// rules fan out first via ExpandAutosteps.
 // ---------------------------------------------------------------------------
 bool ProcessIKRules(Ctx& ctx, std::string* err) {
     CompiledModel& m = *ctx.out;
 
-    // `ikfixup` bakes here, not at its position in the command list: the
-    // reference no-ops the command during processAnimations so the bake sees
-    // the finished clip, motion extraction included.
+    // `ikfixup` bakes here, not at its position in the command list: stock studiomdl no-ops the
+    // command during processAnimations so the bake sees the finished clip, motion extraction
+    // included.
     for (Anim& panim : m.anims)
         for (const AnimCmd& cmd : panim.cmds)
             if (cmd.kind == AnimCmd::IkFixup)
@@ -8371,106 +8435,35 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
         for (size_t j = 0; j < panim.ikrules.size(); j++) {
             IkRule* pRule = &panim.ikrules[j];
 
-            // range default cascade
-            if (pRule->start == 0 && pRule->peak == 0 && pRule->tail == 0 && pRule->end == 0) {
-                pRule->tail = panim.numframes - 1;
-                pRule->end = panim.numframes - 1;
-            }
-            if (pRule->start != -1 && pRule->peak == -1 && pRule->tail == -1 && pRule->end != -1) {
-                pRule->peak = (pRule->start + pRule->end) / 2;
-                pRule->tail = (pRule->start + pRule->end) / 2;
-            }
-            if (pRule->start != -1 && pRule->peak == -1 && pRule->tail != -1)
-                pRule->peak = (pRule->start + pRule->tail) / 2;
-            if (pRule->peak != -1 && pRule->tail == -1 && pRule->end != -1)
-                pRule->tail = (pRule->peak + pRule->end) / 2;
-            if (pRule->peak == -1) {
-                pRule->start = 0;
-                pRule->peak = 0;
-            }
-            if (pRule->tail == -1) {
-                pRule->tail = panim.numframes - 1;
-                pRule->end = panim.numframes - 1;
-            }
-            if (pRule->contact == -1)
-                pRule->contact = pRule->peak;
+            DefaultIkRuleRange(*pRule, panim.numframes);
 
-            // make up start/end from neighboring rules on the same chain
-            // (7386-7421; FindPrev/NextIKRule are circular chain-matched scans)
-            auto findPrev = [&](int iRule) -> IkRule* {
-                int nRules = static_cast<int>(panim.ikrules.size());
-                for (int i = 1; i < nRules; i++) {
-                    int jj = (iRule - i + nRules) % nRules;
-                    if (panim.ikrules[jj].chain == panim.ikrules[iRule].chain)
-                        return &panim.ikrules[jj];
-                }
-                return &panim.ikrules[iRule];
-            };
-            auto findNext = [&](int iRule) -> IkRule* {
-                int nRules = static_cast<int>(panim.ikrules.size());
-                for (int i = 1; i < nRules; i++) {
-                    int jj = (iRule + i) % nRules;
-                    if (panim.ikrules[jj].chain == panim.ikrules[iRule].chain)
-                        return &panim.ikrules[jj];
-                }
-                return &panim.ikrules[iRule];
-            };
-
+            // A rule with no explicit start/end borrows it from its neighbours on the chain.
+            const int ruleIndex = static_cast<int>(j);
             if (pRule->start == -1) {
-                IkRule* pPrev = findPrev(static_cast<int>(j));
-                if (pPrev->slot == pRule->slot) {
-                    if (pRule->peak < pPrev->tail)
-                        pRule->start = pRule->peak + (pPrev->tail - pRule->peak) / 2;
-                    else
-                        pRule->start =
-                            pRule->peak + (pPrev->tail - pRule->peak + panim.numframes - 1) / 2;
-                    pRule->start = (pRule->start + panim.numframes / 2) % (panim.numframes - 1);
-                    pPrev->end = (pRule->start + panim.numframes - 1) % (panim.numframes - 1);
-                } else {
-                    pRule->start = pPrev->tail;
-                    pPrev->end = pRule->peak;
-                }
+                IkRule* prev = NeighborOnChain(panim.ikrules, ruleIndex, -1);
+                BridgeIkRuleGap(*prev, *pRule, panim.numframes);
             }
             if (pRule->end == -1) {
-                IkRule* pNext = findNext(static_cast<int>(j));
-                if (pNext->slot == pRule->slot) {
-                    if (pNext->peak < pRule->tail)
-                        pNext->start = pNext->peak + (pRule->tail - pNext->peak) / 2;
-                    else
-                        pNext->start =
-                            pNext->peak + (pRule->tail - pNext->peak + panim.numframes - 1) / 2;
-                    pNext->start = (pNext->start + panim.numframes / 2) % (panim.numframes - 1);
-                    pRule->end = (pNext->start + panim.numframes - 1) % (panim.numframes - 1);
-                } else {
-                    pNext->start = pRule->tail;
-                    pRule->end = pNext->peak;
-                }
+                IkRule* next = NeighborOnChain(panim.ikrules, ruleIndex, +1);
+                BridgeIkRuleGap(*pRule, *next, panim.numframes);
             }
 
-            // check for wrapping
-            if (pRule->peak < pRule->start)
-                pRule->peak += panim.numframes - 1;
-            if (pRule->tail < pRule->peak)
-                pRule->tail += panim.numframes - 1;
-            if (pRule->end < pRule->tail)
-                pRule->end += panim.numframes - 1;
-            if (pRule->contact < pRule->start)
-                pRule->contact += panim.numframes - 1;
+            UnwrapIkRuleRange(*pRule, panim.numframes);
 
+            // The error track spans start..end, plus two spare frames when it runs past the clip.
+            const int errorFrames =
+                pRule->end - pRule->start + 1 + (pRule->end >= panim.numframes ? 2 : 0);
             pRule->errorData.error.clear();
-            int numerror = pRule->end - pRule->start + 1;
-            if (pRule->end >= panim.numframes)
-                numerror += 2;
-            pRule->errorData.error.resize(numerror);
+            pRule->errorData.error.resize(errorFrames);
 
-            // usesequence back-pointer
+            // A sequence-driven rule samples the sequence that owns this animation.
             int nSeq = 0;
             if (pRule->usesequence) {
-                for (nSeq = 0; nSeq < static_cast<int>(m.sequences.size()); nSeq++) {
-                    if (!m.sequences[nSeq].animIndices.empty() &&
-                        m.sequences[nSeq].animIndices[0] == static_cast<int>(iAnim))
-                        break;
-                }
+                const int seqCount = static_cast<int>(m.sequences.size());
+                while (nSeq < seqCount &&
+                       !(!m.sequences[nSeq].animIndices.empty() &&
+                         m.sequences[nSeq].animIndices[0] == static_cast<int>(iAnim)))
+                    ++nSeq;
             }
 
             // `usesource` samples the raw source clip, which a bind-pose (or
@@ -8483,167 +8476,141 @@ bool ProcessIKRules(Ctx& ctx, std::string* err) {
             }
 
             std::vector<matrix3x4> boneToWorld;
-            auto sample = [&](int t) {
+
+            // Pose at frame t. Source-driven rules read sourceFrame of the clip instead;
+            // rawSource skips the clip's scale, adjust and rotation.
+            auto samplePose = [&](int t, int sourceFrame, bool rawSource) {
                 if (pRule->usesequence) {
                     CalcSeqTransforms(ctx, nSeq, t, boneToWorld);
-                } else if (pRule->usesource) {
-                    std::vector<matrix3x4> srcBoneToWorld;
-                    BuildRawTransforms(panim.src, pSourceAnim,
-                                       t + panim.startframe - pSourceAnim->startframe,
-                                       panim.ignorescale ? panim.scale / ctx.in->scale
-                                                         : panim.scale,
-                                       panim.adjust, panim.rotation, srcBoneToWorld);
-                    TranslateAnimationSource(ctx, panim.src, srcBoneToWorld, boneToWorld);
-                } else {
-                    CalcBoneTransforms(ctx, panim, t, boneToWorld);
+                    return;
                 }
+                if (!pRule->usesource) {
+                    CalcBoneTransforms(ctx, panim, t, boneToWorld);
+                    return;
+                }
+
+                float scale = panim.ignorescale ? panim.scale / ctx.in->scale : panim.scale;
+                Vector3 adjust = panim.adjust;
+                RadianEuler rotation = panim.rotation;
+                if (rawSource) {
+                    scale = 1.0f;
+                    adjust = Vector3{0, 0, 0};
+                    rotation = RadianEuler{0, 0, 0};
+                }
+
+                std::vector<matrix3x4> rawPose;
+                BuildRawTransforms(panim.src, pSourceAnim,
+                                   sourceFrame + panim.startframe - pSourceAnim->startframe, scale,
+                                   adjust, rotation, rawPose);
+                TranslateAnimationSource(ctx, panim.src, rawPose, boneToWorld);
             };
+
+            auto lookupRuleBone = [&]() {
+                pRule->bone = FindGlobalBone(m, pRule->bonename);
+                if (pRule->bone != -1)
+                    return true;
+
+                if (err) *err = "unknown bone '" + pRule->bonename + "' in ikrule";
+                return false;
+            };
+
+            // Error of the bone's current pose against the rule's target (pos + q),
+            // stored as frame k of the track.
+            auto storeError = [&](int k, const Vector3& pos, int bone) {
+                RadianEuler targetAngles;
+                pm::QuaternionAngles(pRule->q, targetAngles);
+
+                matrix3x4 target;
+                pm::AngleMatrix(targetAngles, pos, target);
+
+                const matrix3x4 error = pm::ConcatTransforms(pm::MatrixInvert(target), boneToWorld[bone]);
+                pm::MatrixAngles(error, pRule->errorData.error[k].q, pRule->errorData.error[k].pos);
+            };
+
+            // Target position carried along with the motion extracted from the clip.
+            auto targetAt = [&](int t) {
+                const Vector3 move = CalcMovement(panim, t, pRule->contact);
+                return Vector3{pRule->pos.x + move.x, pRule->pos.y + move.y, pRule->pos.z + move.z};
+            };
+
+            int chainBone = -1;
 
             switch (pRule->type) {
             case 1: { // IK_SELF
+                chainBone = m.ikchains[pRule->chain].link[2].bone;
                 if (pRule->bonename.empty()) {
                     pRule->bone = -1;
-                } else {
-                    pRule->bone = FindGlobalBone(m, pRule->bonename);
-                    if (pRule->bone == -1) {
-                        if (err) *err = "unknown bone '" + pRule->bonename + "' in ikrule";
-                        return false;
-                    }
+                } else if (!lookupRuleBone()) {
+                    return false;
                 }
 
-                for (int k = 0; k < numerror; k++) {
-                    sample(k + pRule->start);
+                for (int k = 0; k < errorFrames; k++) {
+                    const int t = pRule->start + k;
+                    samplePose(t, t, false);
 
-                    matrix3x4 local;
-                    if (pRule->bone != -1) {
-                        matrix3x4 worldToBone = pm::MatrixInvert(boneToWorld[pRule->bone]);
-                        local = pm::ConcatTransforms(
-                            worldToBone, boneToWorld[m.ikchains[pRule->chain].link[2].bone]);
-                    } else {
-                        local = boneToWorld[m.ikchains[pRule->chain].link[2].bone];
-                    }
+                    matrix3x4 local = boneToWorld[chainBone];
+                    if (pRule->bone != -1)
+                        local = pm::ConcatTransforms(pm::MatrixInvert(boneToWorld[pRule->bone]), local);
+
                     pm::MatrixAngles(local, pRule->errorData.error[k].q,
                                      pRule->errorData.error[k].pos);
                 }
                 break;
             }
             case 5: { // IK_ATTACHMENT
-                int bone = m.ikchains[pRule->chain].link[2].bone;
-                CalcBoneTransforms(ctx, panim, pRule->contact, boneToWorld);
-
+                chainBone = m.ikchains[pRule->chain].link[2].bone;
                 if (pRule->bonename.empty()) {
                     if (pRule->bone != -1)
-                        pRule->bone = bone;
-                } else {
-                    pRule->bone = FindGlobalBone(m, pRule->bonename);
-                    if (pRule->bone == -1) {
-                        if (err) *err = "unknown bone '" + pRule->bonename + "' in ikrule";
-                        return false;
-                    }
+                        pRule->bone = chainBone;
+                } else if (!lookupRuleBone()) {
+                    return false;
                 }
 
+                // The target is the named bone's pose at the contact frame.
                 if (pRule->bone != -1) {
                     CalcBoneTransforms(ctx, panim, pRule->contact, boneToWorld);
                     pm::MatrixAngles(boneToWorld[pRule->bone], pRule->q, pRule->pos);
                 }
 
-                for (int k = 0; k < numerror; k++) {
-                    int t = k + pRule->start;
-                    // reference quirk: the usesource branch here uses the
-                    // 4-arg BuildRawTransforms (no scale/shift/rotation)
-                    if (pRule->usesequence) {
-                        CalcSeqTransforms(ctx, nSeq, t, boneToWorld);
-                    } else if (pRule->usesource) {
-                        std::vector<matrix3x4> srcBoneToWorld;
-                        BuildRawTransforms(panim.src, pSourceAnim,
-                                           t + panim.startframe - pSourceAnim->startframe, 1.0f,
-                                           Vector3{0, 0, 0}, RadianEuler{0, 0, 0}, srcBoneToWorld);
-                        TranslateAnimationSource(ctx, panim.src, srcBoneToWorld, boneToWorld);
-                    } else {
-                        CalcBoneTransforms(ctx, panim, t, boneToWorld);
-                    }
-
-                    const Vector3 mv = CalcMovement(panim, t, pRule->contact);
-                    Vector3 pos{pRule->pos.x + mv.x, pRule->pos.y + mv.y, pRule->pos.z + mv.z};
-
-                    RadianEuler qe;
-                    pm::QuaternionAngles(pRule->q, qe);
-                    matrix3x4 local;
-                    pm::AngleMatrix(qe, pos, local);
-                    matrix3x4 worldToBone = pm::MatrixInvert(local);
-                    local = pm::ConcatTransforms(worldToBone, boneToWorld[bone]);
-                    pm::MatrixAngles(local, pRule->errorData.error[k].q,
-                                     pRule->errorData.error[k].pos);
+                for (int k = 0; k < errorFrames; k++) {
+                    const int t = pRule->start + k;
+                    samplePose(t, t, true);
+                    storeError(k, targetAt(t), chainBone);
                 }
                 break;
             }
             case 3: { // IK_GROUND
-                int bone = m.ikchains[pRule->chain].link[2].bone;
+                chainBone = m.ikchains[pRule->chain].link[2].bone;
+                samplePose(pRule->contact, pRule->contact, false);
 
-                sample(pRule->contact);
-
+                // Plant the target under the chain's centre at the contact frame.
                 Vector3 footfall =
-                    pm::VectorTransform(m.ikchains[pRule->chain].center, boneToWorld[bone]);
+                    pm::VectorTransform(m.ikchains[pRule->chain].center, boneToWorld[chainBone]);
                 footfall.z = pRule->floor;
-
                 pRule->pos = footfall;
                 pRule->q = Quaternion{0, 0, 0, 1};
-                {
-                    RadianEuler zero{0, 0, 0};
-                    pm::AngleQuaternion(zero, pRule->q);
-                }
 
-                for (int k = 0; k < numerror; k++) {
-                    int t = k + pRule->start;
-                    // reference quirk kept: the usesource branch samples the
-                    // CONTACT frame every iteration
-                    if (pRule->usesequence) {
-                        CalcSeqTransforms(ctx, nSeq, t, boneToWorld);
-                    } else if (pRule->usesource) {
-                        std::vector<matrix3x4> srcBoneToWorld;
-                        BuildRawTransforms(panim.src, pSourceAnim,
-                                           pRule->contact + panim.startframe -
-                                               pSourceAnim->startframe,
-                                           panim.ignorescale ? panim.scale / ctx.in->scale
-                                                             : panim.scale,
-                                           panim.adjust, panim.rotation, srcBoneToWorld);
-                        TranslateAnimationSource(ctx, panim.src, srcBoneToWorld, boneToWorld);
-                    } else {
-                        CalcBoneTransforms(ctx, panim, t, boneToWorld);
-                    }
+                for (int k = 0; k < errorFrames; k++) {
+                    const int t = pRule->start + k;
+                    samplePose(t, pRule->contact, false);
 
-                    // the footfall was captured at the contact frame, so it has
-                    // to travel with whatever motion extraction pulled out
-                    const Vector3 mv = CalcMovement(panim, t, pRule->contact);
-                    Vector3 pos{pRule->pos.x + mv.x, pRule->pos.y + mv.y, pRule->pos.z + mv.z};
-                    float s;
+                    Vector3 target = targetAt(t);
+                    Vector3 current =
+                        pm::VectorTransform(m.ikchains[pRule->chain].center, boneToWorld[chainBone]);
+                    current.z = target.z;
 
-                    Vector3 cur =
-                        pm::VectorTransform(m.ikchains[pRule->chain].center, boneToWorld[bone]);
-                    cur.z = pos.z;
-
+                    // Ease from the planted target to the live pose outside the held range.
                     if (t < pRule->start || t >= pRule->end) {
-                        pos = cur;
+                        target = current;
                     } else if (t < pRule->peak) {
-                        s = static_cast<float>(pRule->peak - t) / (pRule->peak - pRule->start);
-                        s = 3 * s * s - 2 * s * s * s;
-                        pos = {pos.x * (1 - s) + cur.x * s, pos.y * (1 - s) + cur.y * s,
-                               pos.z * (1 - s) + cur.z * s};
+                        const float s = static_cast<float>(pRule->peak - t) / (pRule->peak - pRule->start);
+                        target = MixVectors(target, current, SmoothStep(s));
                     } else if (t > pRule->tail) {
-                        s = static_cast<float>(t - pRule->tail) / (pRule->end - pRule->tail);
-                        s = 3 * s * s - 2 * s * s * s;
-                        pos = {pos.x * (1 - s) + cur.x * s, pos.y * (1 - s) + cur.y * s,
-                               pos.z * (1 - s) + cur.z * s};
+                        const float s = static_cast<float>(t - pRule->tail) / (pRule->end - pRule->tail);
+                        target = MixVectors(target, current, SmoothStep(s));
                     }
 
-                    RadianEuler qe;
-                    pm::QuaternionAngles(pRule->q, qe);
-                    matrix3x4 local;
-                    pm::AngleMatrix(qe, pos, local);
-                    matrix3x4 worldToBone = pm::MatrixInvert(local);
-                    local = pm::ConcatTransforms(worldToBone, boneToWorld[bone]);
-                    pm::MatrixAngles(local, pRule->errorData.error[k].q,
-                                     pRule->errorData.error[k].pos);
+                    storeError(k, target, chainBone);
                 }
                 break;
             }
@@ -8756,7 +8723,7 @@ void CompressSingle(AnimStream& stream) {
             } else {
                 pm::QuaternionAngles(stream.error[n].q, ang);
                 v = (&ang.x)[k - 3];
-                // PARITY: double-op wrap, see ClipRotations
+                // double-op wrap, see ClipRotations
                 while (v >= kPiD)
                     v = static_cast<float>(v - kPiD * 2);
                 while (v < -kPiD)
@@ -8783,7 +8750,7 @@ void CompressSingle(AnimStream& stream) {
             } else {
                 pm::QuaternionAngles(stream.error[n].q, ang);
                 float v = (&ang.x)[k - 3];
-                // PARITY: double-op wrap, see ClipRotations
+                // double-op wrap, see ClipRotations
                 while (v >= kPiD)
                     v = static_cast<float>(v - kPiD * 2);
                 while (v < -kPiD)
@@ -9018,25 +8985,22 @@ void CalcSequenceBoundingBoxes(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// RemapVertexAnimationsNewVersion: map every flexkey's
-// source-space morph deltas onto the model's final vertex pool. The reference
-// nearest-neighbor search uses a CUtlSphereTree, but its leaf test is an exact
-// float `distSq <= radius*radius` (an exact sphere-vs-sphere test with
-// point leaves), so a brute-force scan with the same float math yields the
-// IDENTICAL candidate set; candidate order doesn't matter (the update is a
-// per-index scatter). The shrinking searchRadius couples consecutive j
-// iterations - preserved exactly.
+// RemapVertexAnimationsNewVersion: map every flexkey's source-space morph deltas onto the model's
+// final vertex pool. stock studiomdl nearest-neighbor search uses a CUtlSphereTree, but its leaf
+// test is an exact float `distSq <= radius*radius` (an exact sphere-vs-sphere test with point
+// leaves), so a brute-force scan with the same float math yields the IDENTICAL candidate set;
+// candidate order doesn't matter (the update is a per-index scatter). The shrinking searchRadius
+// couples consecutive j iterations - preserved exactly.
 // ---------------------------------------------------------------------------
 constexpr float kMaxVAnimDist = 0.3873f; // MAX_VANIM_DIST
 constexpr uint8_t kVertAnimNormal = 0;   // STUDIO_VERT_ANIM_NORMAL
 constexpr uint8_t kVertAnimWrinkle = 1;  // STUDIO_VERT_ANIM_WRINKLE
 
-// reference ComputeSideAndScale. `split` masks a delta to one side of the
-// midline: base vertex X - the reference's axis, not a choice - smoothstepped
-// across the 2*|split| band, sign picking the side.
+// `split` masks a delta to one side of the midline: base vertex X - stock studiomdl's axis, not a
+// choice - smoothstepped across the 2*|split| band, sign picking the side.
 //
-// A paired key spends it as balance at full scale instead. One clamped t: the
-// reference's two branches are the same formula with flipped bounds.
+// A paired key spends it as balance at full scale instead. One clamped t: stock studiomdl's two
+// branches are the same formula with flipped bounds.
 void ComputeSideAndScale(const FlexKey& key, float baseX, float* side, float* scale) {
     float t = (key.split - baseX) / (2.0f * key.split);
     t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
@@ -9055,20 +9019,17 @@ src::SrcMorphAnim* FindSourceMorph(src::Source* pSource, const char* name) {
     return nullptr;
 }
 
-// per-(source, morph) mapping data (reference s_sourceanim_t vanim_flag /
-// vanim_mapcount / vanim_map)
-// Depends only on the source's modelToVAnim, so every morph of one source
-// gets the same maps - built once per source and shared.
+// per-(source, morph) mapping data Depends only on the source's modelToVAnim, so every morph of one
+// source gets the same maps - built once per source and shared.
 struct MorphMaps {
     std::vector<int> mapcount;          // per source vertex
     std::vector<std::vector<int>> map;  // per source vertex -> model verts
 };
 
-// Uniform-grid accelerator for the vertex-anim nearest-neighbor search (the
-// reference uses a CUtlSphereTree). Every query scans the cells its sphere
-// touches, widened past float rounding, so no candidate can be missed; each
-// candidate then passes the same exact float test and comes out in ascending
-// index order, so the list matches a brute-force scan.
+// Uniform-grid accelerator for the vertex-anim nearest-neighbor search. Every query scans the cells
+// its sphere touches, widened past float rounding, so no candidate can be missed; each candidate
+// then passes the same exact float test and comes out in ascending index order, so the list matches
+// a brute-force scan.
 class VertexGrid {
 public:
     explicit VertexGrid(const std::vector<LodVertex>& verts) : m_verts(verts) {
@@ -9142,13 +9103,11 @@ private:
     std::unordered_map<Cell, std::pair<int, int>, CellHash> m_cells;  // cell -> (start, count)
 };
 
-// Pin the root LOD's vertices to the source vertex they were actually built
-// from. The spatial search below cannot tell two coincident vertices apart: it
-// awards both to whichever source vertex it reached first and drops the other's
-// delta entirely, so a flex that should pull the pair apart moves them together
-// (the reference BuildModelToVAnimMap has the same hole). A negative pinned
-// distance keeps the search off them; verts only a lower LOD introduced have no
-// root-LOD counterpart and are left to it.
+// Pin the root LOD's vertices to the source vertex they were actually built from. The spatial
+// search below cannot tell two coincident vertices apart: it awards both to whichever source vertex
+// it reached first and drops the other's delta entirely, so a flex that should pull the pair apart
+// moves them together. A negative pinned distance keeps the search off them; verts only a lower LOD
+// introduced have no root-LOD counterpart and are left to it.
 bool PinRootLodVertices(const src::Source* pVSource, const Model& lodModel,
                         std::vector<int>& pModelToVAnim, std::vector<float>& imapdist) {
     if (lodModel.lodSources.empty() || lodModel.lodSources[0] != pVSource)
@@ -9179,8 +9138,7 @@ bool PinRootLodVertices(const src::Source* pVSource, const Model& lodModel,
     return true;
 }
 
-// reference BuildModelToVAnimMap, new-style path
-// (positions/normals from m_GlobalVertices)
+// new-style path (positions/normals from m_GlobalVertices)
 void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
                           std::vector<int>& pModelToVAnim) {
     const size_t nModelVerts = lodModel.vertices.size();
@@ -9224,13 +9182,11 @@ void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
         for (int index : candidates) {
             const LodVertex& vertex = lodModel.vertices[index];
             // VectorSubtract(vertex.position, vecModelPos) + LengthSqr
-            float dx = vertex.position.x - vecModelPos.x;
-            float dy = vertex.position.y - vecModelPos.y;
-            float dz = vertex.position.z - vecModelPos.z;
-            float flDist = dx * dx + dy * dy + dz * dz;
-            float flDot = vertex.normal.x * vecModelNormal.x +
-                          vertex.normal.y * vecModelNormal.y +
-                          vertex.normal.z * vecModelNormal.z;
+            const Vector3 offset{vertex.position.x - vecModelPos.x,
+                                 vertex.position.y - vecModelPos.y,
+                                 vertex.position.z - vecModelPos.z};
+            const float flDist = DotProduct(offset, offset);
+            const float flDot = DotProduct(vertex.normal, vecModelNormal);
 
             if (flDist < flMinDist)
                 flMinDist = flDist;
@@ -9257,7 +9213,6 @@ void BuildModelToVAnimMap(const src::Source* pVSource, const Model& lodModel,
     }
 }
 
-// reference BuildVAnimMap
 void BuildVAnimMap(const src::Source* pVSource, MorphMaps& maps,
                    const std::vector<int>& pModelToVAnim) {
     const size_t nSrcVerts = pVSource->vertex.size();
@@ -9272,9 +9227,7 @@ void BuildVAnimMap(const src::Source* pVSource, MorphMaps& maps,
             maps.map[pModelToVAnim[j]].push_back(static_cast<int>(j));
 }
 
-// C-qsort comparator (reference FlexKeysSortFunc sorts by source POINTER
-// then stricmp; allocation order == load order, so the load-order index is
-// the deterministic equivalent)
+// C qsort comparator; ties break by load order, which is the allocation order.
 struct FlexSortEntry {
     FlexKey* key;
     int sourceOrder;
@@ -9331,7 +9284,7 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
             continue;
         const Model& lodModel = m.models[pFlexKey->imodel];
         if (lodModel.vertices.empty())
-            continue; // reference: no m_pLodData
+            continue; // no m_pLodData
 
         if (pVSource != pVLastSource) {
             PULSE_PERF("remap vanim", "  BuildModelToVAnimMap");
@@ -9360,8 +9313,7 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
     for (const Model& model : m.models)
         if (model.vertices.size() > nMaxModelVerts)
             nMaxModelVerts = model.vertices.size();
-    // reference pDoesMove is ONE static array indexed by model-relative
-    // vertex - collisions across models are part of the counted behavior
+    // collisions across models are part of the counted behavior
     std::vector<uint8_t> pDoesMove(nMaxModelVerts, 0);
 
     for (FlexKey& key : m.flexkeys) {
@@ -9455,24 +9407,19 @@ bool RemapVertexAnimations(Ctx& ctx, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// $flexcullmethod - CullUnreferencedFlexes / CullOrphanFlex / CullOrphanFlexDescs
-// (in the reference these are driven by the
-// -cullmorphs and -cullflex launch options; both are folded into "aggressive").
+// $flexcullmethod - CullUnreferencedFlexes / CullOrphanFlex / CullOrphanFlexDescs.
 //
-// Runs at the very end of the compile stage: RemapVertexAnimations has filled
-// FlexKey::vanim (the "backing delta verts" signal the reference reads as
-// numvanims, and the same one the writer uses to decide an mstudioflex_t is
-// emitted at all) and the eyeball/mouth flexdescs are resolved.
+// Runs at the very end of the compile stage: RemapVertexAnimations has filled FlexKey::vanim and
+// the eyeball/mouth flexdescs are resolved.
 //
 // Duplicates: merge flex controllers whose names collide case-insensitively -
 // the AddCombination path matches with strcmp, so a rig naming a control that
 // the script also declares under different casing registers it twice - and drop
 // a flexrule that repeats an earlier rule's target. Nothing unused is removed.
 //
-// Aggressive: the above, then three reachability culls in the reference's order:
-// delta shapes (a morph no rule, eyeball or mouth can reach), rules and their
-// controllers (nothing behind them moves a vertex), then the flexdescs left
-// unreferenced by either.
+// Aggressive: the above, then three reachability culls in stock studiomdl's order: delta shapes (a
+// morph no rule, eyeball or mouth can reach), rules and their controllers (nothing behind them
+// moves a vertex), then the flexdescs left unreferenced by either.
 //
 // Rules_only (the default): aggressive with every flex controller held live, so
 // the orphan rules go but the slider set stays whole.
@@ -9765,9 +9712,8 @@ void CullOrphanRulesAndControllers(Ctx& ctx, bool keepControllers) {
         }
     }
 
-    // 3b. a bone morph driver reaches its controller without any rule, and its
-    //     resolved index has to stay valid (the reference has no such link -
-    //     it resolves g_boneflexdriver against the final table after the cull)
+    // 3b. a bone morph driver reaches its controller without any rule, and its resolved index has
+    // to stay valid
     for (const BoneFlexDriver& d : m.boneflexdrivers)
         for (const BoneFlexDriverControl& c : d.controls)
             if (c.flexControllerIndex >= 0 &&
@@ -9968,8 +9914,7 @@ void CullFlex(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// $animationcullmethod - reference CullUnreferencedAnimations, there driven
-// by the -cullanims launch option.
+// $animationcullmethod: culls unreferenced animations.
 //
 // Removes animations and nothing else. Everything holding an animation index at
 // this point gets renumbered: a sequence's blend grid, its blendref/blendcomp/
@@ -10194,17 +10139,15 @@ void CullAnimations(Ctx& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// $attachment flexgroup/flexmorph/material (reference
-// GenerateAttachmentByVertsAttachments, there its own
-// $attachmentbyverts command): average the position of every vertex the
-// selectors match and put the attachment there, offset by `origin`.
+// $attachment flexgroup/flexmorph/material: average the position of every vertex the selectors
+// match and put the attachment there, offset by `origin`.
 //
 // Runs after RemapVertexAnimations - a flexkey's vanim indexes its model's
 // vertex pool only once that pass has run - and before LinkAttachments, which
 // still does the bone-space conversion for the absolute case.
 //
-// Every match contributes one sample, so a vertex two selectors both hit counts
-// twice; that is the reference's union-of-selectors behavior.
+// Every match contributes one sample, so a vertex two selectors both hit counts twice; that is
+// stock studiomdl's union-of-selectors behavior.
 // ---------------------------------------------------------------------------
 bool GenerateVertexAveragedAttachments(Ctx& ctx, std::string* err) {
     CompiledModel& m = *ctx.out;
@@ -10449,8 +10392,8 @@ int CompiledModel::FindBone(const char* name) const {
     return -1;
 }
 
-// InIkRule -> IkRule (reference Option_IKRule). Shared by `ikrule` and the
-// `ikfixup` command, which bakes the same rule instead of shipping it.
+// InIkRule -> IkRule. Shared by `ikrule` and the `ikfixup` command, which bakes the same rule
+// instead of shipping it.
 bool ConvertIkRule(const CompileInput& input, const CompileInput::InIkRule& ir,
                    const std::string& animName, IkRule& rule, std::string* err) {
     int chainIdx = -1;
@@ -10651,7 +10594,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         out.bodyparts.push_back(std::move(part));
     }
 
-    // $modelgrouppreset -> baked mixed-radix value/mask (Cmd_BodygroupPreset)
+    // $modelgrouppreset -> baked mixed-radix value/mask
     for (const auto& ip : input.bodygrouppresets) {
         BodyGroupPreset preset;
         preset.name = ip.name;
@@ -10691,9 +10634,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         out.bodygrouppresets.push_back(std::move(preset));
     }
 
-    // Option_Eyeball runs at parse time in the reference, against the source
-    // bone table - so it must precede TagUsedBones (which tags eyeball bones)
-    // and any collapse.
+    // runs at parse time in stock studiomdl, against the source bone table - so it must precede
+    // TagUsedBones (which tags eyeball bones) and any collapse.
     if (!SetupEyeballs(ctx, err))
         return false;
     out.mouths = input.mouths;
@@ -10978,9 +10920,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             a.cmds.push_back(cmd);
         }
 
-        // ik rules -> rule protos (reference Option_IKRule). `ikrule` is an
-        // animation option, so a sequence body's rules already landed on its
-        // blend anim 0 (and its implied grid anims) by the time we get here.
+        // ik rules -> rule protos. `ikrule` is an animation option, so a sequence body's rules
+        // already landed on its blend anim 0 (and its implied grid anims) by the time we get here.
         for (const auto& ir : ia.ikrules) {
             IkRule rule;
             if (!ConvertIkRule(input, ir, a.name, rule, err))
@@ -11053,10 +10994,9 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         seq.nodeflags = is.nodeflags;
 
         if (is.isDeclare) {
-            // $declaresequence: empty STUDIO_OVERRIDE slot. The reference only
-            // memsets + names it (Cmd_DeclareSequence) - NONE of the
-            // ProcessCmdSequence defaults apply: activity 0 (not -1),
-            // paramindex 0 (not -1), fades 0 (not 0.2), groupsize 0x0.
+            // $declaresequence: empty STUDIO_OVERRIDE slot. stock studiomdl only memsets + names it
+            // - NONE of the ProcessCmdSequence defaults apply: activity 0 (not -1), paramindex 0
+            // (not -1), fades 0 (not 0.2), groupsize 0x0.
             seq.groupsize[0] = 0;
             seq.groupsize[1] = 0;
             seq.numblends = 0;
@@ -11248,10 +11188,9 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         out.sequences.push_back(std::move(seq));
     }
 
-    // $animationcullmethod: every animation index is resolved now, so the cull
-    // can renumber them. Must precede TagUsedBones/CollapseBones - a culled
-    // animation is not allowed to keep a bone alive (reference runs its
-    // CullUnreferencedAnimations before SimplifyModel).
+    // $animationcullmethod: every animation index is resolved now, so the cull can renumber them.
+    // Must precede TagUsedBones/CollapseBones - a culled animation is not allowed to keep a bone
+    // alive.
     { PULSE_TIME_PASS("CullAnimations"); CullAnimations(ctx); }
 
     // ---- LODs ----
@@ -11286,17 +11225,15 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     }
     { PULSE_TIME_PASS("LoadLodSources"); LoadLodSources(ctx); }
 
-    // ---- bone pipeline (RemapBones) ----
-    // $setbindpose / $setflex bake into the rest mesh first, so an archetype
-    // that collapses the skeleton collapses the already-posed geometry
-    // (reference RemapBones head, ApplyStaticPropPose)
+    // bone pipeline (RemapBones) ---- $setbindpose / $setflex bake into the rest mesh first, so an
+    // archetype that collapses the skeleton collapses the already-posed geometry
     {
         PULSE_TIME_PASS("ApplyBindPoseBake");
         if (!ApplyBindPoseBake(ctx, err))
             return false;
     }
 
-    // archetype passes run next (reference RemapBones head)
+    // archetype passes run next
     if (input.autoCenter && input.archetype != Archetype::Static)
         std::fprintf(stderr,
                      "warning: ignoring $autocenter; it is only supported on $staticprop models\n");
@@ -11308,9 +11245,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         out.jigglebones.clear();
         out.proceduralbones.clear();
         out.aimatbones.clear();
-        // anims were truncated to the single BindPose anim. Sequences pointing
-        // at dropped anims write blend index 0 (the reference's dropped anims
-        // keep calloc'd index 0).
+        // anims were truncated to the single BindPose anim. Sequences pointing at dropped anims
+        // write blend index 0.
         for (Sequence& seq : out.sequences)
             for (int& ai : seq.animIndices)
                 if (ai >= 1)
@@ -11319,9 +11255,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         MakeSimpleProp(ctx);
     }
 
-    // driver pruning must precede TagUsedBones: a driver dropped for naming an
-    // unknown morph controller must not keep its bone alive (reference does
-    // both inside the same per-source TagFlexDriverBones call).
+    // driver pruning must precede TagUsedBones: a driver dropped for naming an unknown morph
+    // controller must not keep its bone alive.
     PruneFlexDriverBones(ctx);
     CullUnskinnedJiggleBones(ctx);
 
@@ -11347,18 +11282,16 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     { PULSE_TIME_PASS("RebuildLocalPose"); RebuildLocalPose(ctx); }
     { PULSE_TIME_PASS("MapSources"); MapSources(ctx); }
 
-    // bone morph driver names -> global bone indices (reference RemapBones tail -
-    // immediately after MapSourcesToGlobalBonetable)
+    // bone morph driver names -> global bone indices
     MapFlexDriverBonesToGlobalBoneTable(ctx);
 
     // jigglebone names -> global bone indices, tagging BONE_ALWAYS_PROCEDURAL.
     // Must precede CompressAnimations, which skips procedural bones.
     MapJiggleBones(ctx);
 
-    // animconstraint helper/driver names -> global bone indices, same tagging
-    // (reference TagProceduralBones handles both in one pass). Folds the bind
-    // pose into the authored deltas, so it must run BEFORE RealignBones - the
-    // bind pose it reads is the pre-realign one the script authored against.
+    // animconstraint helper/driver names -> global bone indices, same tagging. Folds the bind pose
+    // into the authored deltas, so it must run BEFORE RealignBones - the bind pose it reads is the
+    // pre-realign one the script authored against.
     if (!MapProceduralBones(ctx, err))
         return false;
 
@@ -11368,8 +11301,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         return false;
 
     // ik chains/locks link against the final bone table BEFORE RealignBones
-    // (reference: RemapBones -> LinkIKChains -> LinkIKLocks ->
-    // RealignBones; the chain links seed the realign)
     if (!LinkIKChains(ctx, err))
         return false;
     if (!LinkIKLocks(ctx, err))
@@ -11378,10 +11309,9 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     { PULSE_TIME_PASS("RealignBones"); // unconditional; rebuilds boneToPose + srcRealign
       if (!RealignBones(ctx, err)) return false; }
 
-    // Push the animconstraint triggers/poses through the realign. The reference
-    // defers this to a later stage, but nothing between there and here
-    // touches srcRealign/boneToPose/parent, so the earliest correct point is
-    // straight after the realign that produced them.
+    // Push the animconstraint triggers/poses through the realign. stock studiomdl defers this to a
+    // later stage, but nothing between there and here touches srcRealign/boneToPose/parent, so the
+    // earliest correct point is straight after the realign that produced them.
     if (!RemapProceduralBones(ctx, err))
         return false;
 
@@ -11392,7 +11322,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // ---- geometry ----
     // LOD collapse options expand against the final bone table, and the
     // resulting replacebone chains are flattened before any vertex is remapped
-    // (reference: after RealignBones)
     ExpandLodBoneCollapses(ctx);
     FixupReplacedBones(ctx);
 
@@ -11445,9 +11374,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     if (!FindAutolayers(ctx, err))
         return false;
 
-    // $attachment vertex selectors resolve against the finished vertex pools,
-    // then link attachments (reference order: after animation processing,
-    // before ProcessIKRules)
+    // $attachment vertex selectors resolve against the finished vertex pools, then link attachments
     if (!GenerateVertexAveragedAttachments(ctx, err))
         return false;
     if (!LinkAttachments(ctx, err))
@@ -11455,7 +11382,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     WarnAimAtTargetOrder(ctx);
     WarnAimAtFlickRisk(ctx);
 
-    // $lockbonelengths, immediately before the rules like the reference
+    // $lockbonelengths, immediately before the rules like stock studiomdl
     { PULSE_TIME_PASS("LockBoneLengths");
       LockBoneLengths(ctx); }
 
@@ -11468,17 +11395,15 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     if (!CalcPoseParameters(ctx, err))
         return false;
 
-    // ReLinkAttachments' eyeball tail + mouth links, then the missing-lid
-    // fallback - reference order is ReLinkAttachments, CheckEyeballSetup,
-    // SetupHitBoxes.
+    // ReLinkAttachments' eyeball tail + mouth links, then the missing-lid fallback - stock
+    // studiomdl order is ReLinkAttachments, CheckEyeballSetup, SetupHitBoxes.
     ReLinkEyeballs(ctx);
     if (!LinkMouths(ctx, err))
         return false;
     CheckEyeballSetup(ctx);
 
-    // $flexcullmethod: prune the flex tables now that the vanims are built and
-    // the eyeball/mouth flexdescs are resolved (reference order: after
-    // SimplifyModel, before write).
+    // $flexcullmethod: prune the flex tables now that the vanims are built and the eyeball/mouth
+    // flexdescs are resolved.
     { PULSE_TIME_PASS("CullFlex"); CullFlex(ctx); }
 
     // Freeze the writers' mesh list, splitting any material too big for a
@@ -11513,8 +11438,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 at(seq.exitnode - 1, seq.entrynode - 1) = static_cast<uint8_t>(seq.entrynode);
         }
 
-        // the reference marks a freshly routed hop negative so it cannot be
-        // chained again inside the same pass, then takes abs() between passes
+        // stock studiomdl marks a freshly routed hop negative so it cannot be chained again inside
+        // the same pass, then takes abs between passes
         bool hit = input.multistageGraph;
         std::vector<int> pass(static_cast<size_t>(n) * n, 0);
         while (hit) {
@@ -11544,8 +11469,7 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
             at(skip.first - 1, skip.second - 1) = 0;
     }
 
-    // rootdriver: resolve against the final bone table (the reference does this
-    // at write time; doing it here gets a better error message)
+    // rootdriver: resolve against the final bone table
     for (Sequence& seq : out.sequences) {
         if (seq.rootdriverBone.empty())
             continue;
@@ -11558,9 +11482,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         seq.rootDriverBone = bone;
     }
 
-    // event frames become a cycle fraction of blend anim 0 at write time, so an
-    // out-of-range frame is fatal (the reference warns then exits). Checked here
-    // against the same numframes the writer divides by.
+    // event frames become a cycle fraction of blend anim 0 at write time, so an out-of-range frame
+    // is fatal. Checked here against the same numframes the writer divides by.
     for (const Sequence& seq : out.sequences) {
         if (seq.events.empty() || seq.animIndices.empty() || seq.animIndices[0] < 0)
             continue;
@@ -11617,18 +11540,15 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     }
     out.maxEyeDeflection = input.maxEyeDeflection;
 
-    // SetSkinValues + Cmd_CDMaterials
-    // cdtextures is the material search-path list:
-    //   1. every $cdmaterials path (appended during parse in the reference),
-    //      slash-fixed with a trailing separator;
-    //   2. if ANY texture is relative-path flagged (all DMX textures are), a
-    //      single empty "prepend" entry - so a relative texture resolves against
-    //      its own stored path. This is why the DMX suite writes exactly [""];
-    //   3. only when neither of the above produced an entry (a pure-SMD model
-    //      with no $cdmaterials) derive a "models/<outname>/" path.
+    // SetSkinValues + cdtextures is the material search-path list: 1. every $cdmaterials path,
+    // slash-fixed with a trailing separator; 2. if ANY texture is relative-path flagged (all DMX
+    // textures are), a single empty "prepend" entry - so a relative texture resolves against its
+    // own stored path. This is why the DMX suite writes exactly [""]; 3. only when neither of the
+    // above produced an entry (a pure-SMD model with no $cdmaterials) derive a "models/<outname>/"
+    // path.
     //
-    // (3) is the reference's else branch; its primary branch derives from where
-    // the SCRIPT sits on disk and is deliberately not ported.
+    // (3) is stock studiomdl's else branch; its primary branch derives from where the SCRIPT sits
+    // on disk and is deliberately not ported.
     for (const std::string& cd : input.cdmaterials) {
         std::string p = cd;
         for (char& ch : p)
@@ -11826,8 +11746,8 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         }
     }
 
-    // reference SetSkinValues: the row is one entry per MATERIAL, and every
-    // family starts as the identity so an unlisted material keeps its own.
+    // the row is one entry per MATERIAL, and every family starts as the identity so an unlisted
+    // material keeps its own.
     const int nummaterials = static_cast<int>(input.mats.materialToTexture.size());
     if (nummaterials > input.budgetMaterials) {
         if (err)

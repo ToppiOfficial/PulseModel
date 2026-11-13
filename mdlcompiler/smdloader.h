@@ -28,14 +28,11 @@ namespace pulse::source {
 
 struct MeshFilter; // meshedit.h
 
-// Load one .smd from `path` into `out`. `mats` is the compile-wide material
-// registry (unused until `triangles` lands). `scale` is the per-source import
-// scale (reference g_currentscale, applied to every position). `morphSource` is
-// accepted for signature parity with LoadDmxSource; SMD carries no flex rig.
-// `filter` is accepted for the same parity; an SMD has no named meshes to filter.
-// `animOnly` = loaded as an animation source ($animation / $sequence): `nodes`
-// and `skeleton` only, so a `triangles` block contributes no geometry and no
-// materials (same rule as LoadDmxSource).
+// Load one .smd from `path` into `out`. `mats` is the compile-wide material registry (unused until
+// `triangles` lands). `scale` is the per-source import scale. SMD carries no flex rig. an SMD has
+// no named meshes to filter. `animOnly` = loaded as an animation source ($animation / $sequence):
+// `nodes` and `skeleton` only, so a `triangles` block contributes no geometry and no materials
+// (same rule as LoadDmxSource).
 bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats,
                    float scale, std::string* err, bool morphSource = false,
                    const MeshFilter* filter = nullptr, bool animOnly = false);
@@ -47,7 +44,7 @@ bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats,
 struct VtaFlexOption {
     std::string name;      // delta state / flexdesc name
     int frame = 0;         // `time N` in the vertexanimation block; 0 is the basis
-    float position = 1.0f; // s_flexkey_t.target1
+    float position = 1.0f;
     float decay = 1.0f;    // per-vertex morph speed falloff; 0 = flat 1.0
 };
 

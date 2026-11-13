@@ -1,8 +1,7 @@
 // compile.h - PulseMDL
 //
-// The compile stage: mirrors the reference SimplifyModel() pipeline
-// Consumes the per-file Sources + script data, produces the
-// CompiledModel the writers serialize.
+// The compile stage: mirrors stock studiomdl SimplifyModel pipeline Consumes the per-file Sources +
+// script data, produces the CompiledModel the writers serialize.
 
 #ifndef PULSEMDL_COMPILE_H
 #define PULSEMDL_COMPILE_H
@@ -33,7 +32,7 @@ inline constexpr int kAttachIsFromSource = 0x0004; // came from a source DMX, no
 inline constexpr int kAttachIsDeclared   = 0x0008; // reserved by $declareattachment
 inline constexpr int kAttachFlagWorldAlign = 0x10000; // ATTACHMENT_FLAG_WORLD_ALIGN
 
-// one attachment point (reference s_attachment_t)
+// one attachment point
 struct Attachment {
     std::string name;
     std::string bonename;
@@ -55,9 +54,8 @@ struct Attachment {
     }
 };
 
-// one eyeball (reference s_eyeball_t). Authored values are the raw script
-// numbers; the compile stage derives radius/zoffset/iris_scale and transforms
-// org/up/forward into bone space.
+// one eyeball. Authored values are the raw script numbers; the compile stage derives
+// radius/zoffset/iris_scale and transforms org/up/forward into bone space.
 struct Eyeball {
     std::string name;
     std::string bonename;
@@ -83,7 +81,6 @@ struct Eyeball {
     int lowerlidflexdesc = -1;
 };
 
-// one mouth (reference s_mouth_t)
 struct Mouth {
     std::string controller; // flexdesc name
     std::string bonename;
@@ -92,7 +89,7 @@ struct Mouth {
     Vector3 forward{};
 };
 
-// one $definebone entry (reference s_importbone_t)
+// one $definebone entry
 struct ImportBone {
     std::string name;
     std::string parent; // "" = root
@@ -135,13 +132,12 @@ inline constexpr int kJiggleHasLengthConstraint = 0x20;
 inline constexpr int kJiggleHasBaseSpring = 0x40;
 inline constexpr int kJiggleIsBoing = 0x80;
 
-// one `jigglebonelist` entry (QC $jigglebone, reference s_jigglebone_t). The
-// bone is simulated by the engine, so it is tagged BONE_ALWAYS_PROCEDURAL:
-// nothing animates it and it is skipped by the srcbonetransform table.
+// one `jigglebonelist` entry. The bone is simulated by the engine, so it is tagged
+// BONE_ALWAYS_PROCEDURAL: nothing animates it and it is skipped by the srcbonetransform table.
 //
-// Field names and defaults mirror mstudiojigglebone_t / Cmd_JiggleBone exactly;
-// the writer copies them straight across. Angles are stored in RADIANS (the
-// script authors degrees), and boingImpactAngle is stored as a cosine.
+// Field names and defaults mirror mstudiojigglebone_t / exactly; the writer copies them straight
+// across. Angles are stored in RADIANS (the script authors degrees), and boingImpactAngle is stored
+// as a cosine.
 struct JiggleBone {
     std::string bonename;
     int bone = -1; // resolved against the final bone table by MapJiggleBones
@@ -183,9 +179,9 @@ struct JiggleBone {
     float baseMaxForward = 100.0f;
     float baseForwardFriction = 0.0f;
 
-    // Boing stays ZERO unless the script gives a `boing` block. Cmd_JiggleBone
-    // seeds the fields above unconditionally but seeds these five inside
-    // ParseBoingJiggle, so a non-boing jigglebone writes zeros here.
+    // Boing stays ZERO unless the script gives a `boing` block. seeds the fields above
+    // unconditionally but seeds these five inside ParseBoingJiggle, so a non-boing jigglebone
+    // writes zeros here.
     float boingImpactSpeed = 0.0f;
     float boingImpactAngle = 0.0f; // a cosine, not an angle
     float boingDampingRate = 0.0f;
@@ -193,8 +189,7 @@ struct JiggleBone {
     float boingAmplitude = 0.0f;
 };
 
-// one `triggerlist` entry (reference s_quatinterpbone_t's parallel arrays).
-// Everything here is already RADIANS/quaternions - the loader converts the
+// one `triggerlist` entry. Everything here is already RADIANS/quaternions - the loader converts the
 // authored degrees.
 struct ProceduralBoneTrigger {
     // angular width of this trigger's influence, radians. The writer stores
@@ -214,10 +209,8 @@ struct ProceduralBoneTrigger {
     bool absolutePose = false;
 };
 
-// one `animconstraintlist` entry (QC $driverbone / VRD <helper>, reference
-// s_quatinterpbone_t). The helper bone's pose is interpolated between the
-// triggers according to how closely the driver bone matches each trigger
-// orientation.
+// one `animconstraintlist` entry. The helper bone's pose is interpolated between the triggers
+// according to how closely the driver bone matches each trigger orientation.
 //
 // Like a jigglebone the helper is tagged BONE_ALWAYS_PROCEDURAL - the engine
 // owns it, so it carries no animation data and no srcbonetransform.
@@ -241,13 +234,11 @@ struct ProceduralBone {
     std::vector<ProceduralBoneTrigger> triggers;
 };
 
-// one aim-at procedural bone (QC $driveraimat / VRD <aimconstraint>, reference
-// s_aimatbone_t). The engine rotates the bone so its aimvector points at a
-// target attachment or bone, so like the other procedural kinds it is tagged
-// BONE_ALWAYS_PROCEDURAL.
+// one aim-at procedural bone. The engine rotates the bone so its aimvector points at a target
+// attachment or bone, so like the other procedural kinds it is tagged BONE_ALWAYS_PROCEDURAL.
 //
-// The reference's g_aimatbones is a zero-initialized global, so an absent
-// <aimvector>/<upvector> really does write zeros - the defaults below match.
+// stock studiomdl's g_aimatbones is a zero-initialized global, so an absent <aimvector>/<upvector>
+// really does write zeros - the defaults below match.
 struct AimAtBone {
     std::string bonename;   // the driven bone
     std::string parentname; // "" = derive from the resolved skeleton
@@ -263,9 +254,8 @@ struct AimAtBone {
     Vector3 aimvector{};
     Vector3 upvector{};
     Vector3 basepos{};
-    // $driveraimat does not ask for a base position: MapAimAtBones seeds it
-    // from the bone's rest pose once the skeleton is final. The VRD form states
-    // it outright, so it opts out. (Reference s_aimatbone_t::autobasepos.)
+    // $driveraimat does not ask for a base position: MapAimAtBones seeds it from the bone's rest
+    // pose once the skeleton is final. The VRD form states it outright, so it opts out.
     bool autobasepos = false;
     // see ProceduralBone::strictName
     bool strictName = true;
@@ -283,7 +273,7 @@ enum class BoneCullType {
     Skinned = 3,    // aggressive, but a bone with vertex weights is always kept
 };
 
-// global bone table entry (reference s_bonetable_t subset)
+// global bone table entry
 struct Bone {
     std::string name;
     int parent = -1;
@@ -314,14 +304,14 @@ struct Bone {
     int contents = 0;        // resolved word, filled by ApplyJointContents
 };
 
-// per-channel RLE data for one bone in one section (reference s_animanim_t)
+// per-channel RLE data for one bone in one section
 struct AnimChannels {
     int num[6] = {};
     std::vector<uint16_t> data[6]; // raw mstudioanimvalue_t words
 };
 
-// $weightlist (reference s_weightlist_t). Entries as authored; the resolved
-// per-global-bone arrays are built by buildAnimationWeights.
+// $weightlist. Entries as authored; the resolved per-global-bone arrays are built by
+// buildAnimationWeights.
 struct WeightList {
     std::string name;
     struct Entry {
@@ -335,7 +325,6 @@ struct WeightList {
     std::vector<float> posweight;
 };
 
-// $poseparameter (reference s_poseparameter_t)
 struct PoseParam {
     std::string name;
     float min = 0;
@@ -344,7 +333,7 @@ struct PoseParam {
     float loop = 0;
 };
 
-// $ikchain (reference s_ikchain_t); numlinks fixed at 3 by LinkIKChains
+// $ikchain; numlinks fixed at 3 by LinkIKChains
 struct IkChain {
     std::string name;
     std::string bonename; // end bone (ankle/foot); links walk parents
@@ -359,7 +348,7 @@ struct IkChain {
     Vector3 center;
 };
 
-// sequence iklock / $ikautoplaylock (reference s_iklock_t)
+// sequence iklock / $ikautoplaylock
 struct IkLock {
     std::string name; // chain name until resolved
     int chain = -1;
@@ -367,8 +356,7 @@ struct IkLock {
     float flLocalQWeight = 0;
 };
 
-// per-frame ik error samples + compressed streams (reference
-// s_animationstream_t / s_streamdata_t)
+// per-frame ik error samples + compressed streams
 struct AnimStream {
     struct Sample {
         Vector3 pos;
@@ -380,7 +368,7 @@ struct AnimStream {
     std::vector<uint16_t> data[6]; // raw mstudioanimvalue_t words
 };
 
-// one ik rule on an animation (reference s_ikrule_t)
+// one ik rule on an animation
 struct IkRule {
     int chain = 0;
     int index = 0;
@@ -388,11 +376,8 @@ struct IkRule {
     int slot = 0;
     std::string bonename;   // touch target (IK_SELF); "" = worldspace
     std::string attachment; // IK_ATTACHMENT world attachment name
-    // calloc parity: the reference rules live in a calloc'd array, so bone/q/
-    // contact stay ZERO unless a code path assigns them (IK_SELF and
-    // fakeorigin/fakerotate set bone = -1; the QC parser sets contact = -1 on
-    // every PARSED rule - mirrored by InIkRule - while auto IK_RELEASE rules
-    // keep the zeros).
+    // the QC parser sets contact = -1 on every PARSED rule - mirrored by InIkRule - while auto
+    // IK_RELEASE rules keep the zeros).
     int bone = 0;
     Vector3 pos;
     Quaternion q{0, 0, 0, 0};
@@ -420,13 +405,12 @@ struct LocalHierarchy {
     AnimStream localData;
 };
 
-// autolayer spec (reference s_autolayer_t)
 struct AutoLayer {
     std::string name; // target sequence name
     int sequence = -1;
     int flags = 0; // STUDIO_AL_*
-    // pose parameter index when STUDIO_AL_POSE; the reference callocs the
-    // sequence, so a layer without a pose parameter writes iPose = 0 (not -1)
+    // pose parameter index when STUDIO_AL_POSE; stock studiomdl callocs the sequence, so a layer
+    // without a pose parameter writes iPose = 0 (not -1)
     int pose = 0;
     float start = 0, peak = 0, tail = 0, end = 0; // frames until write-time conversion
 };
@@ -441,7 +425,7 @@ struct AnimBoneTransform {
     bool originSet = false, anglesSet = false;
 };
 
-// per-animation command (reference s_animcmd_t subset)
+// per-animation command
 struct AnimCmd {
     enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
@@ -502,8 +486,8 @@ struct AnimCmd {
     Vector3 forcePos, forceRot;
 };
 
-// one extracted motion segment (reference s_linearmove_t) - written as
-// mstudiomovement_t. Produced by motion extraction, one per motion command.
+// one extracted motion segment - written as mstudiomovement_t. Produced by motion extraction, one
+// per motion command.
 struct LinearMove {
     int endframe = 0;
     int flags = 0;      // the motiontype that produced it
@@ -514,9 +498,9 @@ struct LinearMove {
     Vector3 vector{};   // normalized direction of travel
 };
 
-// $animationcullmethod: which $animations are dropped before the pipeline runs.
-// Replaces the reference's -cullanims launch option, whose cull is what
-// Aggressive does. See CullAnimations() in compile.cpp.
+// $animationcullmethod: which $animations are dropped before the pipeline runs. Replaces stock
+// studiomdl's -cullanims launch option, whose cull is what Aggressive does. See CullAnimations in
+// compile.cpp.
 //
 // Only animations are ever removed - a cull never drops a sequence, and a
 // sequence whose animations all survive is bit-identical to an unculled build.
@@ -526,7 +510,6 @@ enum class AnimCullMethod {
     None = 2,       // ship every animation the script declared
 };
 
-// one $animation (reference s_animation_t subset)
 struct Anim {
     std::string name;     // "@<seq>" for implied animations
     source::Source* src = nullptr;
@@ -632,13 +615,12 @@ struct Sequence {
     Vector3 bmin, bmax;
 };
 
-// ---- flex / morph (reference g_flexdesc / g_flexcontroller / g_flexrule /
-// g_flexkey; built by the loader's registration pass, consumed by
-// RemapVertexAnimations in the compile stage and the mdl writer) ----
+// built by the loader's registration pass, consumed by RemapVertexAnimations in the compile stage
+// and the mdl writer)
 
-// $flexcullmethod: how hard the flex tables are pruned after registration.
-// Replaces the reference's -cullmorphs / -cullflex launch options, which are
-// both folded into Aggressive. See CullFlex() in compile.cpp.
+// $flexcullmethod: how hard the flex tables are pruned after registration. Replaces stock
+// studiomdl's -cullmorphs / -cullflex launch options, which are both folded into Aggressive. See
+// CullFlex in compile.cpp.
 //
 // Aggressive is reachability-based, and a morph is only reachable through a
 // flex rule: a model whose delta states carry no rig (no $datamodelflexes, no
@@ -675,7 +657,7 @@ struct FlexRule {
     std::vector<FlexOp> ops;
 };
 
-// one flexkey = one morph target on one model (reference s_flexkey_t)
+// one flexkey = one morph target on one model
 struct FlexKey {
     source::Source* source = nullptr;
     std::string animationname; // delta state (morph) name
@@ -694,8 +676,8 @@ struct FlexKey {
     uint8_t vanimtype = 0; // STUDIO_VERT_ANIM_NORMAL/WRINKLE
 };
 
-// one `BoneMorphDriverControl` (reference CDmeBoneFlexDriverControl): a bone
-// translation component drives a flex controller over [min,max] -> [0,1].
+// one `BoneMorphDriverControl`: a bone translation component drives a flex controller over
+// [min,max] -> [0,1].
 struct BoneFlexDriverControl {
     std::string controllername;
     int component = 0; // fmt::STUDIO_BONE_FLEX_TX/TY/TZ
@@ -704,7 +686,7 @@ struct BoneFlexDriverControl {
     int flexControllerIndex = -1; // resolved by TagFlexDriverBones
 };
 
-// one `BoneMorphDriver` (reference CDmeBoneFlexDriver), keyed by bone name
+// one `BoneMorphDriver`, keyed by bone name
 struct BoneFlexDriver {
     std::string bonename;
     int bone = -1; // resolved by MapFlexDriverBonesToGlobalBoneTable
@@ -849,10 +831,9 @@ struct PhysicsSolid {
     float drag = -1.0f;   // -1 = omit the key entirely
     std::string surfaceprop;
     std::vector<uint8_t> blob; // serialized IVP compact surface
-    // ragdoll constraint on the joint between this body and its parent,
-    // resolved from physicsjointlist (reference BuildRagdollConstraint).
-    // An axis nobody constrained stays 0/0/0 - locked, matching the
-    // reference's memset - so the defaults here are NOT "free".
+    // ragdoll constraint on the joint between this body and its parent, resolved from
+    // physicsjointlist. An axis nobody constrained stays 0/0/0 - locked, matching stock studiomdl's
+    // memset - so the defaults here are NOT "free".
     float axisMin[3] = {0, 0, 0};
     float axisMax[3] = {0, 0, 0};
     float axisFriction[3] = {0, 0, 0};
@@ -873,7 +854,7 @@ struct HitboxSet {
     std::vector<HitBox> hitboxes;
 };
 
-// final per-model render data (reference s_loddata_t)
+// final per-model render data
 struct LodVertex {
     source::SrcBoneWeight boneweight; // capped to kMaxBoneWeights, sorted desc
     Vector3 position;
@@ -883,8 +864,7 @@ struct LodVertex {
     int lodFlag = 1; // bit per LOD that references this vertex
 };
 
-// one entry of a $lod / $shadowlod block (reference CLodScriptReplacement_t).
-// Which fields matter depends on the list it lives in.
+// one entry of a $lod / $shadowlod block. Which fields matter depends on the list it lives in.
 struct LodReplacement {
     std::string src;                  // as authored, for messages
     std::string dst;
@@ -893,8 +873,7 @@ struct LodReplacement {
     float decimation = 1.0f;             // decimatemodel factor
 };
 
-// one $lod / $shadowlod block (reference LodScriptData_t). Index 0 is the
-// implicit root LOD the loader always creates.
+// one $lod / $shadowlod block. Index 0 is the implicit root LOD the loader always creates.
 struct ScriptLod {
     float switchValue = 0.0f; // -1 = $shadowlod
     std::vector<LodReplacement> modelReplacements;
@@ -938,7 +917,7 @@ struct OutMesh {
 struct Model {
     std::string name; // "blank" for the empty choice
     source::Source* source = nullptr;
-    // vertex dictionary shared by every LOD (reference s_loddata_t::vertex)
+    // vertex dictionary shared by every LOD
     std::vector<LodVertex> vertices;
     std::vector<source::SrcFace> faces;                 // LOD 0, mesh-relative
     std::vector<source::SrcMesh> meshes;                // by material, sized to kMaxSkins
@@ -948,8 +927,8 @@ struct Model {
     float boundingradius = 0.0f;
     // per script LOD: the geometry that LOD draws (null = model removed there)
     std::vector<source::Source*> lodSources;
-    // per script LOD: source vertex index -> mesh-relative dictionary index,
-    // sized to that LOD source's globalVertices (reference pMeshVertIndexMaps)
+    // per script LOD: source vertex index -> mesh-relative dictionary index, sized to that LOD
+    // source's globalVertices
     std::vector<std::vector<int>> meshVertIndexMaps;
 };
 
@@ -1051,7 +1030,6 @@ struct CompiledModel {
     // physics, built by BuildCollisionModel. Empty = no .phy is written.
     std::vector<PhysicsSolid> physSolids;
     // collision hull bounds, applied to hull_min/hull_max by the .mdl writer
-    // (reference CollisionModel_ExpandBBox, called from WriteModelFiles)
     Vector3 physCollideMins{}, physCollideMaxs{};
     bool physCollideBoundsSet = false;
     float physTotalMass = 1.0f;
@@ -1104,7 +1082,7 @@ struct CompileInput {
     bool dx80 = false;
     float scale = 1.0f;      // $scale
     Vector3 adjust;          // $origin translation (translatemodel)
-    // rotatemodel, pre-converted to the reference's g_defaultrotation radians:
+    // rotatemodel, pre-converted to stock studiomdl's g_defaultrotation radians:
     // RadianEuler(DEG2RAD(x), DEG2RAD(y), DEG2RAD(z + 90)). (0,0,pi/2) = stock.
     RadianEuler rotation{0, 0, math::kPiF / 2.0f};
     bool rotationSet = false; // script gave rotatemodel (wins over upAxisY)
@@ -1127,8 +1105,7 @@ struct CompileInput {
     // $lockbonelengths: pin every bone to its bind-pose local translation, then
     // re-solve each ik chain so its end bone keeps its authored world position
     bool lockBoneLengths = false;
-    // $skipboneinbbox (reference useBoneInBBox): the auto-hitbox bone extents
-    // start empty instead of at the bone origin
+    // $skipboneinbbox: the auto-hitbox bone extents start empty instead of at the bone origin
     bool skipBoneInBBox = false;
 
     // $modelbudget: per-model ceilings, capped at the pulselimits.h values (a
@@ -1137,8 +1114,7 @@ struct CompileInput {
     int budgetBones = 255;
     int budgetMaterials = lim::kMaxSkins;
 
-    // $bbox / $cbox, raw script values - no scale or rotation is applied
-    // (Cmd_BBox/Cmd_CBox just read six floats). Unset leaves the writer's
+    // $bbox / $cbox, raw script values - no scale or rotation is applied. Unset leaves the writer's
     // defaults: the hull comes from sequence 0, the view box stays zero.
     Vector3 bbox[2];
     bool bboxSet = false;
@@ -1159,8 +1135,8 @@ struct CompileInput {
     Vector3 eyeposition;
     // `autoheight`: Z is an offset from the rounded mean |z| of the eyeballs
     bool eyepositionAutoHeight = false;
-    // $maxeyedeflection, pre-converted to the cosine the header stores
-    // (Cmd_MaxEyeDeflection). 0 = unset, which the engine reads as cos(30).
+    // $maxeyedeflection, pre-converted to the cosine the header stores. 0 = unset, which the engine
+    // reads as cos(30).
     float maxEyeDeflection = 0.0f;
 
     std::vector<Attachment> attachments;   // script order
@@ -1215,9 +1191,8 @@ struct CompileInput {
     // $flexcullmethod, applied by CullFlex() at the end of the compile stage
     FlexCullMethod flexCullMethod = FlexCullMethod::RulesOnly;
 
-    // $animationcullmethod, applied by CullAnimations() right after the script
-    // build - before the bone pipeline, so a dropped animation cannot keep a
-    // bone alive (reference culls before RemapBones for the same reason)
+    // $animationcullmethod, applied by CullAnimations right after the script build - before the
+    // bone pipeline, so a dropped animation cannot keep a bone alive
     AnimCullMethod animCullMethod = AnimCullMethod::Aggressive;
 
     // $setbindpose <file> <frame> [meshonly] [blockname <clip>]: bake the mesh and
@@ -1259,9 +1234,8 @@ struct CompileInput {
     bool physLegacyConcave = false;
     bool physLegacyConcavePerJoint = false;
     bool physConvexHullCountOverride = false;
-    // physicsmarkuplist container scalars - the per-body DEFAULTS a child
-    // overrides, so they share the child's spelling. Values match the
-    // reference CJointedModel constructor.
+    // physicsmarkuplist container scalars - the per-body DEFAULTS a child overrides, so they share
+    // the child's spelling. Values match stock studiomdl CJointedModel constructor.
     float physMass = 1.0f;
     bool physAutoMass = false;
     Vector3 physMassCenter{};
@@ -1290,12 +1264,11 @@ struct CompileInput {
     // gamedatalist - model-level game data
     std::string surfaceprop;
     std::string keyvalues; // $keyvalues, copied to the studiohdr verbatim
-    // $contents, resolved to the flag word by the loader. Starts at
-    // CONTENTS_SOLID (0x1) like the reference's s_nDefaultContents.
+    // $contents, resolved to the flag word by the loader. Starts at CONTENTS_SOLID (0x1) like stock
+    // studiomdl's s_nDefaultContents.
     int contents = 1;
-    // $jointcontents: bone name -> flag word, also resolved by the loader
-    // (reference s_JointContents). Applied once the bone table is final; a
-    // bone with no entry of its own inherits the nearest parent that has one,
+    // $jointcontents: bone name -> flag word, also resolved by the loader. Applied once the bone
+    // table is final; a bone with no entry of its own inherits the nearest parent that has one,
     // else the model word.
     std::vector<std::pair<std::string, int>> jointContents;
     std::vector<std::pair<std::string, std::string>> jointSurfaceProps;
@@ -1377,8 +1350,8 @@ struct CompileInput {
         // $bindposeanimation / $bindposesequence: no source file - the clip is
         // the compile's own bind pose, held for the whole frame range.
         bool bindpose = false;
-        // ordered command list, script order (studiomdl s_animation_t::cmds).
-        // Weights/Subtract carry names, resolved in the compile stage.
+        // ordered command list, script order. Weights/Subtract carry names, resolved in the compile
+        // stage.
         struct InCmd {
             enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
@@ -1539,7 +1512,7 @@ struct CompileInput {
     std::vector<InAnim> anims;
     std::vector<InSequence> sequences;
 
-    std::string mdlPath; // full output path, for cdtexture derivation parity
+    std::string mdlPath;
 };
 
 // The studio name a bodygroup choice gets when the script does not spell one

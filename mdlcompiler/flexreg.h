@@ -79,9 +79,8 @@ struct ManualFlex {
 bool RegisterFlex(compile::CompileInput& in, const ManualFlex& manual, std::string* err,
                   const FaceMarkup* face = nullptr);
 
-// reference Add_Flexdesc: find (stricmp) or append. Exposed for the face-markup
-// pass, which registers eyelid/mouth descs of its own during registration.
-// Returns the index, or -1 + err past kMaxFlexDesc.
+// find (stricmp) or append. Exposed for the face-markup pass, which registers eyelid/mouth descs of
+// its own during registration. Returns the index, or -1 + err past kMaxFlexDesc.
 int AddFlexdesc(compile::CompileInput& in, const std::string& name, std::string* err);
 
 } // namespace pulse::loader

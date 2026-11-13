@@ -1,8 +1,7 @@
 // smdloader.cpp - PulseMDL
 //
-// See smdloader.h. Behavior port of the reference studiomdl SMD reader
-// (Load_SMD/Grab_Triangles, Grab_Nodes/Grab_Animation/Build_Reference).
-// Studied for behavior, re-typed clean.
+// See smdloader.h. Behavior port of stock studiomdl studiomdl SMD reader (Load_SMD/Grab_Triangles,
+// Grab_Nodes/Grab_Animation/Build_Reference). Studied for behavior, re-typed clean.
 
 #include "strcompat.h"
 #include "diagnostic.h"
@@ -30,16 +29,15 @@ namespace lim = pulse::limits;
 
 namespace pulse::source {
 
-// reference normal_blend default = cos(DEG2RAD(2.0)); studiomdl's -a flag can
-// change it, but the default is what decompiled assets are built with.
+// studiomdl's -a flag can change it, but the default is what decompiled assets are built with.
 static const float kNormalBlend = std::cos(2.0f * pm::kDeg2Rad);
 
 namespace {
 
 // ---------------------------------------------------------------------------
-// Line reader - the reference reads with fgets + GetLineInput, which skips only
-// `//` comment lines and counts every physical line. We mirror both: lineNo
-// advances on skipped comment lines too, so error line numbers match.
+// Line reader - stock studiomdl reads with fgets + GetLineInput, which skips only `//` comment
+// lines and counts every physical line. We mirror both: lineNo advances on skipped comment lines
+// too, so error line numbers match.
 // ---------------------------------------------------------------------------
 struct LineReader {
     std::string text;
@@ -60,7 +58,7 @@ struct LineReader {
             if (length > 0 && start[length - 1] == '\r')
                 --length;
             if (length >= 2 && start[0] == '/' && start[1] == '/')
-                continue; // reference GetLineInput skips "//" lines
+                continue; // skips "//" lines
             current.assign(start, length);
             return &current;
         }
@@ -96,10 +94,9 @@ bool OpenLines(const std::string& path, LineReader& r, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// nodes (reference Grab_Nodes): lines `index "name" parent`. numbones is the
-// highest index + 1; a gap keeps parent -1 (never created as a joint). No
-// trailing "defaultRoot" - that is a DMX-loader autoskin artifact the SMD path
-// does not have. A non-matching line ends the block (and is consumed).
+// nodes: lines `index "name" parent`. numbones is the highest index + 1; a gap keeps parent -1
+// (never created as a joint). No trailing "defaultRoot" - that is a DMX-loader autoskin artifact
+// the SMD path does not have. A non-matching line ends the block (and is consumed).
 // ---------------------------------------------------------------------------
 bool GrabNodes(LineReader& r, Source& out, std::string* err) {
     std::vector<LocalBone> bones;
@@ -140,12 +137,10 @@ bool GrabNodes(LineReader& r, Source& out, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// skeleton (reference Grab_Animation, always into "BindPose"): `time N` blocks,
-// each a set of `boneindex px py pz rx ry rz` lines. Positions are scaled;
-// rotations are stored as the raw authored radian Euler (the reference's
-// clip_rotations acts on a dead local copy - downstream code clips). A `time`
-// block need only list changed bones; missing ones inherit the previous frame.
-// Build_Reference then folds the frame-0 poses into boneToPose.
+// skeleton: `time N` blocks, each a set of `boneindex px py pz rx ry rz` lines. Positions are
+// scaled; rotations are stored as the raw authored radian Euler. A `time` block need only list
+// changed bones; missing ones inherit the previous frame. Build_Reference then folds the frame-0
+// poses into boneToPose.
 // ---------------------------------------------------------------------------
 bool GrabAnimation(LineReader& r, float scale, Source& out, std::string* err) {
     const int numbones = out.numbones;
@@ -261,22 +256,19 @@ bool GrabAnimation(LineReader& r, float scale, Source& out, std::string* err) {
 }
 
 // ---------------------------------------------------------------------------
-// triangles (reference Grab_Triangles/ParseFaceData/lookup_index). Unlike the
-// DMX loader's exact-index unify, SMD merges corners that share (material, exact
-// pos, exact uv0) AND whose normals dot above kNormalBlend AND whose bone
-// weights match. `lastref` is set on every touch and drives the material sort.
-// The post-unify sort/build mirrors the shared reference BuildIndividualMeshes.
+// triangles. Unlike the DMX loader's exact-index unify, SMD merges corners that share (material,
+// exact pos, exact uv0) AND whose normals dot above kNormalBlend AND whose bone weights match.
+// `lastref` is set on every touch and drives the material sort.
 // ---------------------------------------------------------------------------
 
-// one unified vertex + its dedup-chain bookkeeping (reference v_unify_t +
-// g_StudioMdlContext streams, folded together since SMD stores per unique vert)
+// one unified vertex + its dedup-chain bookkeeping
 struct UVert {
     pm::Vector3 pos;
     pm::Vector3 normal;
     pm::Vector2 tc;
     SrcBoneWeight bone;
     int m = 0;        // material
-    int lastref = 0;  // reference v_unify_t.lastref (last g_numvlist that touched it)
+    int lastref = 0;
     int next = -1;    // next unique vert in the same hash bucket
 };
 
@@ -289,8 +281,8 @@ struct TriFace {
 struct TriState {
     std::vector<UVert> verts;
     std::vector<TriFace> faces;
-    // hash bucket head keyed by (material, pos bits, uv0 bits) - reference
-    // SmdVertKey/s_smdVertMap; the chain walk does the fuzzy/weight compare.
+    // hash bucket head keyed by (material, pos bits, uv0 bits); the chain walk does the
+    // fuzzy/weight compare.
     struct Key {
         int mat;
         uint32_t px, py, pz, u, v;
@@ -316,7 +308,6 @@ uint32_t Bits(float f) {
     return u;
 }
 
-// reference lookup_index: find-or-add a unique vertex.
 int LookupIndex(TriState& st, int material, const pm::Vector3& pos, const pm::Vector3& normal,
                 const pm::Vector2& tc, const SrcBoneWeight& bone) {
     TriState::Key key{material, Bits(pos.x), Bits(pos.y), Bits(pos.z), Bits(tc.x), Bits(tc.y)};
@@ -339,7 +330,7 @@ int LookupIndex(TriState& st, int material, const pm::Vector3& pos, const pm::Ve
                 }
             if (!same)
                 continue;
-            st.verts[i].lastref = numvlist; // reference: set on re-reference
+            st.verts[i].lastref = numvlist; // set on re-reference
             return i;
         }
     }
@@ -364,8 +355,8 @@ int LookupIndex(TriState& st, int material, const pm::Vector3& pos, const pm::Ve
     return numvlist;
 }
 
-// reference ParseFaceData: read the 3 corner lines of one triangle. The unify
-// itself is deferred to BuildUnifiedMeshes, which the FBX loader shares.
+// read the 3 corner lines of one triangle. The unify itself is deferred to BuildUnifiedMeshes,
+// which the FBX loader shares.
 bool ParseFaceData(LineReader& r, int numbones, int version, float scale, int material,
                    TriInput& out, std::string* err) {
     for (int j = 0; j < 3; ++j) {
@@ -445,7 +436,7 @@ bool ParseFaceData(LineReader& r, int numbones, int version, float scale, int ma
     return true;
 }
 
-// strip trailing non-graph chars (reference isgraph trim of the texture line)
+// strip trailing non-graph chars
 std::string TrimTextureName(const std::string& line) {
     int i = static_cast<int>(line.size()) - 1;
     while (i >= 0) {
@@ -456,8 +447,7 @@ std::string TrimTextureName(const std::string& line) {
     return line.substr(0, i + 1);
 }
 
-// qsort context (reference uses libc qsort with globals; match it for the same
-// unstable ordering the DMX path relies on)
+// qsort context: libc qsort on purpose, for the same unstable ordering the DMX path relies on.
 const std::vector<UVert>* g_sortVerts = nullptr;
 const std::vector<TriFace>* g_sortFaces = nullptr;
 
@@ -485,8 +475,8 @@ bool IsEndLine(const std::string& line) {
            (line.size() == 3 || line[3] == '\r' || line[3] == ' ');
 }
 
-// swallow a block an animation reference has no use for, so its contents are
-// not read back as commands
+// swallow a block an animation stock studiomdl has no use for, so its contents are not read back as
+// commands
 void SkipBlock(LineReader& r) {
     for (;;) {
         const std::string* line = r.Next();
@@ -503,7 +493,7 @@ bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
     for (;;) {
         const std::string* line = r.Next();
         if (!line)
-            break; // reference: loop ends on EOF too
+            break; // loop ends on EOF too
         if (IsEndLine(*line))
             break;
 
@@ -518,7 +508,7 @@ bool GrabTriangles(LineReader& r, int version, float scale, MaterialTable& mats,
             continue;
         }
 
-        // reference LookupTexture(name, version==2): v1/v3 non-relative.
+        // (name, version==2): v1/v3 non-relative.
         const int texture = mats.LookupTexture(tex.c_str(), version == 2);
         const int material = mats.UseTextureAsMaterial(texture);
 
@@ -558,7 +548,6 @@ void BuildUnifiedMeshes(const std::vector<TriInput>& tris, Source& out,
         st.faces.push_back(TriFace{t.material, t.tag, idx[0], idx[2], idx[1]}); // winding: a, c, b
     }
 
-    // ---- sort + build (reference BuildIndividualMeshes) --------------------
     const int numvlist = static_cast<int>(st.verts.size());
     const int numfaces = static_cast<int>(st.faces.size());
 
@@ -651,7 +640,7 @@ bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, fl
         return false;
 
     bool sawNodes = false;
-    int version = 1; // reference Load_SMD default
+    int version = 1;
 
     for (;;) {
         const std::string* line = r.Next();
@@ -696,10 +685,10 @@ bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, fl
         } else if (_stricmp(cmd, "vertexanimation") == 0) {
             SkipBlock(r); // morphs arrive through $vta -> LoadVtaMorphs, not here
         } else if (cmd[0] == '/' || cmd[0] == ';' || cmd[0] == '#') {
-            continue; // source comment (reference ProcessSourceComment is a no-op)
+            continue; // source comment
         } else {
-            // reference only warns; we accept-and-ignore unknown commands to
-            // stay tolerant of exporter noise, matching that leniency.
+            // stock studiomdl only warns; we accept-and-ignore unknown commands to stay tolerant of
+            // exporter noise, matching that leniency.
             continue;
         }
     }
@@ -712,15 +701,13 @@ bool LoadSmdSource(const std::string& path, Source& out, MaterialTable& mats, fl
 }
 
 // ---------------------------------------------------------------------------
-// VTA morphs. Parse: reference Grab_Vertexanimation. The
-// frames hold ABSOLUTE positions against the VTA's OWN vertex numbering, which
-// is the pre-unify export order and so does not line up with the mesh's; frame 0
-// is the basis and every model vertex is matched to it spatially (reference
-// BuildModelToVAnimMap / RemapVertexAnimations).
+// VTA morphs. The frames hold ABSOLUTE positions against the VTA's OWN vertex numbering, which is
+// the pre-unify export order and so does not line up with the mesh's; frame 0 is the basis and
+// every model vertex is matched to it spatially.
 // ---------------------------------------------------------------------------
 namespace {
 
-const float kMaxVAnimDist = 0.3873f; // reference MAX_VANIM_DIST
+const float kMaxVAnimDist = 0.3873f;
 
 struct VtaVert {
     pm::Vector3 pos;
@@ -791,10 +778,10 @@ bool GrabVertexAnimation(LineReader& r, float scale, std::vector<VtaFrame>& out,
     }
 }
 
-// Nearest basis vertex per model vertex within kMaxVAnimDist; ties go to the
-// bigger normal dot, then to the lower basis index. The reference walks a sphere
-// tree with a shrinking radius - a uniform grid over the (much smaller) model
-// vertex list is the same answer without the shrink's order sensitivity.
+// Nearest basis vertex per model vertex within kMaxVAnimDist; ties go to the bigger normal dot,
+// then to the lower basis index. stock studiomdl walks a sphere tree with a shrinking radius - a
+// uniform grid over the (much smaller) model vertex list is the same answer without the shrink's
+// order sensitivity.
 void BuildModelToVAnim(const Source& src, const std::vector<VtaVert>& base,
                        std::vector<int>& modelToVAnim) {
     PULSE_PERF("vta", "match basis verts");
@@ -846,7 +833,6 @@ void BuildModelToVAnim(const Source& src, const std::vector<VtaVert>& base,
     }
 }
 
-// reference ComputeVertexAnimationSpeed
 void ComputeVertexAnimationSpeed(std::vector<SrcVertAnim>& vanims, float decay) {
     float maxLen = 0.0f;
     for (const SrcVertAnim& va : vanims) {
@@ -951,7 +937,7 @@ int ImportFrame(const VtaBind& bind, const VtaFrame& frame, const std::string& n
                             e.second.pos.z - b.pos.z};
         const pm::Vector3 nd{e.second.normal.x - b.normal.x, e.second.normal.y - b.normal.y,
                              e.second.normal.z - b.normal.z};
-        // reference float16-min cutoff
+        // stock studiomdl float16-min cutoff
         if (d.x * d.x + d.y * d.y + d.z * d.z <= 0.001f * 0.001f &&
             nd.x * nd.x + nd.y * nd.y + nd.z * nd.z <= 0.001f)
             continue;
@@ -995,8 +981,8 @@ bool LoadVtaMorphs(const std::string& path, Source& out, float scale,
             if (err) *err = "flex \"" + opt.name + "\": frame 0 is the basis";
             return false;
         }
-        // a flex naming a frame the file does not have just makes no deltas -
-        // the reference leaves the empty flexkey to be pruned later
+        // a flex naming a frame the file does not have just makes no deltas - stock studiomdl
+        // leaves the empty flexkey to be pruned later
         const VtaFrame* frame = bind.Frame(opt.frame);
         if (!frame) {
             pulse::diag::Warnf("flex \"%s\": no frame %d in %s - skipped\n",
@@ -1016,11 +1002,10 @@ bool LoadVtaMorphs(const std::string& path, Source& out, float scale,
     return true;
 }
 
-// reference Option_VertexCacheAnimationFile: the
-// same file a $vta reads, played back rather than posed. Every non-basis frame
-// becomes flexdesc "f<i>" and ONE NWAY controller sweeps the whole run over
-// 0..1. Stock also emits a "default" flexkey on the basis; it is an empty morph
-// that only exists to make its indices line up, so we leave it out.
+// the same file a $vta reads, played back rather than posed. Every non-basis frame becomes flexdesc
+// "f<i>" and ONE NWAY controller sweeps the whole run over 0..1. Stock also emits a "default"
+// flexkey on the basis; it is an empty morph that only exists to make its indices line up, so we
+// leave it out.
 bool LoadVcaMorphs(const std::string& path, Source& out, float scale, const std::string& name,
                    std::string* err) {
     if (!out.morphs.empty() || !out.flexkeys.empty()) {

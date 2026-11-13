@@ -17,8 +17,8 @@ namespace lim = pulse::limits;
 
 namespace {
 
-// The reference converts through DOUBLE; a float pi/180 is off by 1 ULP on
-// values like 35 deg and that lands in the .mdl (same helper as qcloader).
+// stock studiomdl converts through DOUBLE; a float pi/180 is off by 1 ULP on values like 35 deg and
+// that lands in the .mdl (same helper as qcloader).
 float DegToRad(float deg) {
     return static_cast<float>(deg * 3.14159265358979323846 / 180.0);
 }
@@ -29,8 +29,8 @@ float Clamp(float v, float lo, float hi) {
 
 pm::Vector3 ToVec(const dmx::Vector3& v) { return {v.x, v.y, v.z}; }
 
-// DmeJiggleBone. The struct defaults in compile.h already match the reference's
-// seed values, so only the attributes the element carries are read.
+// DmeJiggleBone. The struct defaults in compile.h already match stock studiomdl's seed values, so
+// only the attributes the element carries are read.
 void AddJiggleBone(const dmx::Element* dag, cm::CompileInput& in) {
     for (const cm::JiggleBone& prev : in.jigglebones)
         if (_stricmp(prev.bonename.c_str(), dag->name.c_str()) == 0)
@@ -74,8 +74,8 @@ void AddJiggleBone(const dmx::Element* dag, cm::CompileInput& in) {
         if (dag->GetBool("pitchConstrained", false))
             jb.flags |= cm::kJiggleHasPitchConstraint;
 
-        // stiffness [0,1000], damping [0,10] - the DMX path's own ranges
-        // (HandleDmeJiggleBone), tighter than $jigglebone's
+        // stiffness [0,1000], damping [0,10] - the DMX path's own ranges,
+        // tighter than $jigglebone's
         jb.yawStiffness = Clamp(dag->GetFloat("yawStiffness", 100.0f), 0.0f, 1000.0f);
         jb.yawDamping = Clamp(dag->GetFloat("yawDamping", 0.0f), 0.0f, 10.0f);
         jb.pitchStiffness = Clamp(dag->GetFloat("pitchStiffness", 100.0f), 0.0f, 1000.0f);
@@ -248,15 +248,12 @@ pm::matrix3x4 DagLocal(const dmx::Element* dag, float scale) {
     return pm::QuaternionMatrix(rot, {p.x * scale, p.y * scale, p.z * scale});
 }
 
-// A DMX attachment is a dag whose SHAPE is a DmeAttachment: the shape names the
-// attachment. The BONE is the dag itself when the shape hangs on a joint, and
-// otherwise the nearest ancestor joint, with the plain-dag chain below it baked
-// into the local transform - an exporter that writes attachments as locators
-// parented under the joint would otherwise link to a bone that only exists if
-// this same DMX also supplies the mesh (every dag becomes one there, which is
-// all reference LoadAttachments relies on). The static-prop case needs no
-// special handling, because LinkAttachments already rebases onto the surviving
-// bone when the named one collapses.
+// A DMX attachment is a dag whose SHAPE is a DmeAttachment: the shape names the attachment. The
+// BONE is the dag itself when the shape hangs on a joint, and otherwise the nearest ancestor joint,
+// with the plain-dag chain below it baked into the local transform - an exporter that writes
+// attachments as locators parented under the joint would otherwise link to a bone that only exists
+// if this same DMX also supplies the mesh. The static-prop case needs no special handling, because
+// LinkAttachments already rebases onto the surviving bone when the named one collapses.
 void WalkAttachments(const dmx::Element* dag, float scale, cm::CompileInput& in,
                      const std::string& boneName, const pm::matrix3x4& boneToDag) {
     // a procedural joint (DmeJiggleBone / DmeQuatInterpBone / DmeAimAtBone) is
@@ -294,11 +291,9 @@ void WalkAttachments(const dmx::Element* dag, float scale, cm::CompileInput& in,
                 WalkAttachments(c, scale, in, bone, local);
 }
 
-// root."hitboxSetList" -> DmeHitboxSetList."hitboxSetList" -> DmeHitboxSet
-// ("hitboxList" of DmeHitbox). Reference LoadDmxHitboxes: hitboxes are
-// model-global and first-to-populate wins, so an existing $hboxset makes the
-// whole DMX list a no-op. An EMPTY set is skipped - a stray "default" set would
-// suppress the compile stage's auto-generation.
+// root."hitboxSetList" -> DmeHitboxSetList."hitboxSetList" -> DmeHitboxSet ("hitboxList" of
+// DmeHitbox). An EMPTY set is skipped - a stray "default" set would suppress the compile stage's
+// auto-generation.
 void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
     const dmx::Element* list = root->GetElement("hitboxSetList");
     if (!list)
@@ -336,7 +331,7 @@ void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
             if (const std::string* bone = box->GetString("boneName"))
                 hb.bonename = *bone;
             hb.group = box->GetInt("groupId", 0);
-            // scaled like Cmd_Hitbox's scale_vertex, so DMX hitboxes respect $scale
+            // scaled like 's scale_vertex, so DMX hitboxes respect $scale
             const dmx::Vector3 lo = box->GetVector3("minBounds");
             const dmx::Vector3 hi = box->GetVector3("maxBounds");
             hb.bmin = {lo.x * in.scale, lo.y * in.scale, lo.z * in.scale};
@@ -344,16 +339,16 @@ void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
             hb.capsuleRadius = box->GetFloat("radius", -1.0f); // <= 0 = a box
             if (hb.capsuleRadius > 0.0f) hb.capsuleRadius *= in.scale;
             hb.angOffset = ToVec(box->GetVector3("orientation"));
-            // the DmeHitbox element's own name is not the hitbox name - the
-            // reference leaves these unnamed, like an $hbox with no `name`
+            // the DmeHitbox element's own name is not the hitbox name - stock studiomdl leaves
+            // these unnamed, like an $hbox with no `name`
             hs.hitboxes.push_back(std::move(hb));
         }
         in.hitboxsets.push_back(std::move(hs));
     }
 }
 
-// Walk the dag tree the way the skeleton load does (reference AddDagJoint): a
-// dag with no transform is not a joint, and neither it nor its subtree counts.
+// Walk the dag tree the way the skeleton load does: a dag with no transform is not a joint, and
+// neither it nor its subtree counts.
 void WalkDag(const dmx::Element* dag, float scale, cm::CompileInput& in, bool jigglebones,
              bool proceduralbones) {
     if (!dag->GetElement("transform"))

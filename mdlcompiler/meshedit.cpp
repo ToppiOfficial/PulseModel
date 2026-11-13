@@ -432,7 +432,7 @@ void InflationVectors(const Source& src, float thickness, float thicknessClamp,
             const Vector3 &p0 = src.vertex[c[0]].position, &p1 = src.vertex[c[1]].position,
                           &p2 = src.vertex[c[2]].position;
             const Vector3 e1{p1.x - p0.x, p1.y - p0.y, p1.z - p0.z}, e2{p2.x - p0.x, p2.y - p0.y, p2.z - p0.z};
-            // e2 x e1: faces are stored in the reference's (v1, v3, v2) winding
+            // e2 x e1: faces are stored in stock studiomdl's (v1, v3, v2) winding
             Vector3 fn{e2.y * e1.z - e2.z * e1.y, e2.z * e1.x - e2.x * e1.z, e2.x * e1.y - e2.y * e1.x};
             if (pm::VectorNormalize(fn) <= 0.0f)
                 continue;
@@ -548,8 +548,8 @@ const Source::EditStream* FindEditStream(const Source& src, const std::string& n
     return nullptr;
 }
 
-// CalcModelTangentSpaces's basis without its reference vertex 0 accumulation.
-// Per vertex T and handedness; w = 0 when the UVs give no tangent.
+// CalcModelTangentSpaces's basis without its stock studiomdl vertex 0 accumulation. Per vertex T
+// and handedness; w = 0 when the UVs give no tangent.
 std::vector<Vector4> UnskewedTangents(const Source& src) {
     auto cross = [](const Vector3& a, const Vector3& b) {
         return Vector3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -1415,9 +1415,8 @@ void CullUnskinnedBones(Source& src, SkinnedBoneCull mode) {
 
 void SimplifyFaces(Source& dst, const Source& src, float factor, bool lockBorder,
                    const std::vector<bool>* skipMaterial, int onlyTag, bool rigAware) {
-    // globalVertices is empty until RemapVerticesToGlobalBones, so the
-    // simplifier normally sees bind-space positions - the same input the
-    // reference LOD path feeds it.
+    // globalVertices is empty until RemapVerticesToGlobalBones, so the simplifier normally sees
+    // bind-space positions - the same input stock studiomdl LOD path feeds it.
     const bool haveGlobal = src.globalVertices.size() >= src.vertex.size();
     const SrcVertex* pVertBase =
         haveGlobal ? src.globalVertices.data() : src.vertex.data();

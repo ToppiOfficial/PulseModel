@@ -78,9 +78,9 @@ private:
 //   ev >= 9 : scalars 1..14 (Time still 7; 15/16 are uint64/uint8, unsupported),
 //             arrays encoded as (scalar | 0x20). modeldoc/Source-2 style.
 AttrType TypeFromId(uint8_t id, int ev) {
-    // Datamodel.NET Binary.cs SupportedAttributes: slot 7 is ObjectID (a 16-byte
-    // guid) below ev 3, Time (int32) from ev 3. The reference has no ObjectID
-    // reader either - fail instead of desyncing on the width difference.
+    // Datamodel.NET Binary.cs SupportedAttributes: slot 7 is ObjectID (a 16-byte guid) below ev 3,
+    // Time (int32) from ev 3. stock studiomdl has no ObjectID reader either - fail instead of
+    // desyncing on the width difference.
     if (ev < 3 && (id == 7 || id == 14 + 7)) return AttrType::Unknown;
     if (ev >= 9) {
         bool is_array = (id & 0x20) != 0;

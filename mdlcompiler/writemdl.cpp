@@ -63,12 +63,11 @@ size_t VvdBufferSize(size_t numVerts, size_t numBlocks, size_t numFixups) {
            numVerts * (sizeof(fmt::mstudiovertex_t) + 4 * sizeof(float)) + (numBlocks + 4) * 32;
 }
 
-// Reference console report (plus the nested
-// flexcontrollers/ik-pose/eyeballs/flexes lines): one
-// byte count per block as the file is laid down. The reference prints these
-// inline while writing because it knows the output path up front; this writer
-// resolves the path at save time, so the lines are collected here and flushed
-// under the "writing <path>:" header instead. Same output, same order.
+// stock studiomdl console report (plus the nested flexcontrollers/ik-pose/eyeballs/flexes lines):
+// one byte count per block as the file is laid down. stock studiomdl prints these inline while
+// writing because it knows the output path up front; this writer resolves the path at save time, so
+// the lines are collected here and flushed under the "writing <path>:" header instead. Same output,
+// same order.
 std::vector<std::string> g_mdlReport;
 std::vector<std::string> g_vvdReport;
 
@@ -107,7 +106,6 @@ bool MapCommit(uint8_t*, size_t) { return true; }
 void MapRelease(uint8_t* base, size_t bytes) { munmap(base, bytes); }
 #endif
 
-// Linear append buffer with reference ALIGN semantics.
 //
 // Callers hold raw pointers into it across the whole write, so it can never
 // move: it reserves a large range up front and commits more as `pos` advances.
@@ -189,7 +187,7 @@ struct Buf {
     bool overflowed() const { return failed || cur > committed; }
 };
 
-// reference session string table
+// stock studiomdl session string table
 struct StringTable {
     struct Entry {
         size_t base;     // offset of owning struct in the buffer
@@ -253,11 +251,10 @@ StringTable g_strings;
 cm::CompiledModel* g_m = nullptr;
 
 // ---------------------------------------------------------------------------
-// $animblocksize bookkeeping (reference g_animblock / g_numanimblocks).
-// Entry 0 is the pseudo-block meaning "in the .mdl, relative to the animdesc",
-// so its `start` is re-pointed at each animdesc as WriteAnimations walks them.
-// Entries 1.. are byte ranges of the external .ani buffer. `count` mirrors
-// g_numanimblocks: 0 until the first animation with a .ani, then >= 2.
+// $animblocksize bookkeeping. Entry 0 is the pseudo-block meaning "in the .mdl, relative to the
+// animdesc", so its `start` is re-pointed at each animdesc as WriteAnimations walks them. Entries
+// 1.. are byte ranges of the external .ani buffer. `count` mirrors g_numanimblocks: 0 until the
+// first animation with a .ani, then >= 2.
 // ---------------------------------------------------------------------------
 struct AnimBlockTable {
     struct Block {
@@ -289,7 +286,7 @@ struct AnimBlockTable {
 };
 AnimBlockTable g_animblocks;
 
-// bone-table-by-name qsort comparator (C qsort, strcmpi - parity)
+// bone-table-by-name qsort comparator
 int BoneNameCompare(const void* elem1, const void* elem2) {
     int index1 = *static_cast<const uint8_t*>(elem1);
     int index2 = *static_cast<const uint8_t*>(elem2);
@@ -343,10 +340,9 @@ void WriteBoneInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
     buf.pos += numbones * sizeof(fmt::mstudiobone_t);
     buf.Align4();
 
-    // procedural bones. The reference writes them by kind in a
-    // fixed order - axisinterp, quatinterp, jiggle - and each one back-patches
-    // its bone's proctype/procindex, where procindex is a byte offset RELATIVE
-    // to the owning mstudiobone_t. We produce quatinterp and jiggle.
+    // procedural bones. stock studiomdl writes them by kind in a fixed order - axisinterp,
+    // quatinterp, jiggle - and each one back-patches its bone's proctype/procindex, where procindex
+    // is a byte offset RELATIVE to the owning mstudiobone_t. We produce quatinterp and jiggle.
     if (!m.proceduralbones.empty()) {
         fmt::mstudioquatinterpbone_t* pProc =
             reinterpret_cast<fmt::mstudioquatinterpbone_t*>(buf.p());
@@ -375,8 +371,8 @@ void WriteBoneInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
 
             for (size_t t = 0; t < pb.triggers.size(); t++) {
                 const cm::ProceduralBoneTrigger& tr = pb.triggers[t];
-                // computed in DOUBLE, then narrowed, per the reference. The loader
-                // guarantees tolerance > 0.
+                // computed in DOUBLE, then narrowed, per stock studiomdl. The loader guarantees
+                // tolerance > 0.
                 pTrigger[t].inv_tolerance =
                     static_cast<float>(1.0 / static_cast<double>(tr.tolerance));
                 CopyQ(pTrigger[t].trigger, tr.trigger);
@@ -384,9 +380,9 @@ void WriteBoneInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
                 CopyQ(pTrigger[t].quat, tr.quat);
             }
         }
-        // no Align4 here: the reference leaves pData where the last trigger ended
-        // mstudioquatinterpinfo_t is 48 bytes off a 4-aligned
-        // base, so the next block is aligned regardless.
+        // no Align4 here: stock studiomdl leaves pData where the last trigger ended
+        // mstudioquatinterpinfo_t is 48 bytes off a 4-aligned base, so the next block is aligned
+        // regardless.
     }
 
     if (!m.jigglebones.empty()) {
@@ -744,6 +740,12 @@ void WriteFrameAnimationData(cm::CompiledModel& m, cm::Anim& srcanim, Buf& buf, 
 // compressed error header + streams + raw attachment string. Every offset is
 // rule-relative, so this works in either the .mdl or the .ani buffer.
 // ---------------------------------------------------------------------------
+// A frame index as a fraction of the clip; a one-frame clip has no span, so the
+// caller supplies the stored value.
+static float FrameFraction(int frame, int numframes, float oneFrameValue) {
+    return numframes > 1 ? frame / (numframes - 1.0f) : oneFrameValue;
+}
+
 void WriteIkErrors(cm::Anim& srcanim, Buf& buf) {
     if (srcanim.ikrules.empty())
         return;
@@ -767,19 +769,11 @@ void WriteIkErrors(cm::Anim& srcanim, Buf& buf) {
         pikrule->floor = rule.floor;
         pikrule->radius = rule.radius;
 
-        if (srcanim.numframes > 1) {
-            pikrule->start = rule.start / (srcanim.numframes - 1.0f);
-            pikrule->peak = rule.peak / (srcanim.numframes - 1.0f);
-            pikrule->tail = rule.tail / (srcanim.numframes - 1.0f);
-            pikrule->end = rule.end / (srcanim.numframes - 1.0f);
-            pikrule->contact = rule.contact / (srcanim.numframes - 1.0f);
-        } else {
-            pikrule->start = 0.0f;
-            pikrule->peak = 0.0f;
-            pikrule->tail = 1.0f;
-            pikrule->end = 1.0f;
-            pikrule->contact = 0.0f;
-        }
+        pikrule->start = FrameFraction(rule.start, srcanim.numframes, 0.0f);
+        pikrule->peak = FrameFraction(rule.peak, srcanim.numframes, 0.0f);
+        pikrule->tail = FrameFraction(rule.tail, srcanim.numframes, 1.0f);
+        pikrule->end = FrameFraction(rule.end, srcanim.numframes, 1.0f);
+        pikrule->contact = FrameFraction(rule.contact, srcanim.numframes, 0.0f);
         pikrule->iStart = rule.start;
 
         // skip the compressed header if there's no IK data
@@ -838,17 +832,10 @@ void WriteLocalHierarchy(cm::Anim& srcanim, Buf& buf) {
 
         pHierarchy->iBone = rule.bone;
         pHierarchy->iNewParent = rule.newparent;
-        if (srcanim.numframes > 1) {
-            pHierarchy->start = rule.start / (srcanim.numframes - 1.0f);
-            pHierarchy->peak = rule.peak / (srcanim.numframes - 1.0f);
-            pHierarchy->tail = rule.tail / (srcanim.numframes - 1.0f);
-            pHierarchy->end = rule.end / (srcanim.numframes - 1.0f);
-        } else {
-            pHierarchy->start = 0.0f;
-            pHierarchy->peak = 0.0f;
-            pHierarchy->tail = 1.0f;
-            pHierarchy->end = 1.0f;
-        }
+        pHierarchy->start = FrameFraction(rule.start, srcanim.numframes, 0.0f);
+        pHierarchy->peak = FrameFraction(rule.peak, srcanim.numframes, 0.0f);
+        pHierarchy->tail = FrameFraction(rule.tail, srcanim.numframes, 1.0f);
+        pHierarchy->end = FrameFraction(rule.end, srcanim.numframes, 1.0f);
         pHierarchy->iStart = rule.start;
 
         int k = 0;
@@ -947,9 +934,8 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
     buf.pos += m.anims.size() * sizeof(fmt::mstudioanimdesc_t);
     buf.Align4();
 
-    // the .ani write head. blockBuf->pos is rewound to it per animation and
-    // runs ahead as that animation's data is written (reference pBlockData vs
-    // pBlockEnd); it only catches up once the animation is fully placed.
+    // the .ani write head. blockBuf->pos is rewound to it per animation and runs ahead as that
+    // animation's data is written; it only catches up once the animation is fully placed.
     size_t blockData = blockBuf ? blockBuf->pos : 0;
 
     for (size_t i = 0; i < m.anims.size(); i++) {
@@ -1106,8 +1092,8 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
                     break;
                 }
             if (j == -1) {
-                // the bone was collapsed or never existed - the reference errors
-                // out here; a warning keeps the model compiling
+                // the bone was collapsed or never existed - stock studiomdl errors out here; a
+                // warning keeps the model compiling
                 pulse::diag::Warnf("unknown $bonesaveframe \"%s\"\n", bsf.name.c_str());
                 continue;
             }
@@ -1201,13 +1187,17 @@ void WriteAnimations(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m, Buf
                           blockBuf->start() + g_animblocks.blocks[destanim->animblock].start +
                           destanim->animblockikruleindex);
 
-            for (int j = 0; j < destanim->numikrules; j++, psrcikrule++, pdestikrule++) {
-                pdestikrule->slot = static_cast<int16_t>(psrcikrule->slot);
-                pdestikrule->chain = static_cast<int16_t>(psrcikrule->chain);
-                pdestikrule->start.SetFloat(psrcikrule->start);
-                pdestikrule->peak.SetFloat(psrcikrule->peak);
-                pdestikrule->tail.SetFloat(psrcikrule->tail);
-                pdestikrule->end.SetFloat(psrcikrule->end);
+            // the block copy keeps the rule's slot/chain and stores the four frames as half floats
+            for (int j = 0; j < destanim->numikrules; j++) {
+                const auto& from = psrcikrule[j];
+                auto& to = pdestikrule[j];
+
+                to.slot = static_cast<int16_t>(from.slot);
+                to.chain = static_cast<int16_t>(from.chain);
+                to.start.SetFloat(from.start);
+                to.peak.SetFloat(from.peak);
+                to.tail.SetFloat(from.tail);
+                to.end.SetFloat(from.end);
             }
         }
         buf.Align4();
@@ -1273,10 +1263,9 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
         CopyV3(pseqdesc->bbmax, seq.bmax);
         pseqdesc->fadeintime = seq.fadeintime;
         pseqdesc->fadeouttime = seq.fadeouttime;
-        // entryphase/exitphase are deliberately NOT written: the reference's
-        // assignments are commented out, so stock always leaves
-        // both at 0 even when the script sets `exitphase`. Writing ours would
-        // break byte parity for no gain - the engine never sees a value here.
+        // entryphase/exitphase are deliberately NOT written: stock studiomdl's assignments are
+        // commented out, so stock always leaves both at 0 even when the script sets `exitphase`.
+        // the engine never sees a value here.
         pseqdesc->localentrynode = seq.entrynode;
         pseqdesc->localexitnode = seq.exitnode;
         pseqdesc->nodeflags = seq.nodeflags;
@@ -1317,10 +1306,9 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
 
         pseqdesc->numikrules = seq.numikrules;
 
-        // autolayers: frame values convert to cycle fractions
-        // of THIS sequence's first anim, unless STUDIO_AL_POSE (raw pose units).
-        // A one-frame anim divides by 1; the reference writes NaN/inf, and a NaN
-        // layer cycle makes the engine sample a multi-frame layer out of bounds.
+        // autolayers: frame values convert to cycle fractions of THIS sequence's first anim, unless
+        // STUDIO_AL_POSE (raw pose units). A one-frame anim divides by 1; stock studiomdl writes
+        // NaN/inf, and a NaN layer cycle makes the engine sample a multi-frame layer out of bounds.
         pseqdesc->numautolayers = static_cast<int32_t>(seq.autolayers.size());
         pseqdesc->autolayerindex = static_cast<int32_t>(buf.p() - pSequenceStart);
         {
@@ -1482,8 +1470,8 @@ void WriteSequenceInfo(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
 // WriteModel - bodyparts, models, meshes (no flex/eyeballs)
 // ---------------------------------------------------------------------------
 void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
-    // the reference's "ik/pose" line covers everything from here through the
-    // pose parameters - bodyparts, flex tables, ik chains, mouths
+    // stock studiomdl's "ik/pose" line covers everything from here through the pose parameters -
+    // bodyparts, flex tables, ik chains, mouths
     const size_t ikPoseStart = buf.pos;
     fmt::mstudiobodyparts_t* pbodypart = reinterpret_cast<fmt::mstudiobodyparts_t*>(buf.p());
     phdr->numbodyparts = static_cast<int32_t>(m.bodyparts.size());
@@ -1537,7 +1525,7 @@ void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
             pflexcontroller[j].max = m.flexcontrollers[j].max;
             pflexcontroller[j].localToGlobal = -1; // remapped at load time
         }
-        // a computed size, not a delta - the reference reports the table only
+        // a computed size, not a delta - stock studiomdl reports the table only
         Report(g_mdlReport, "flexcontrollers  %7zu bytes (%d)",
                m.flexcontrollers.size() * sizeof(fmt::mstudioflexcontroller_t),
                static_cast<int>(m.flexcontrollers.size()));
@@ -1788,15 +1776,15 @@ void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
     size_t externalVertexIndex = 0;
     size_t externalTangentsIndex = 0;
 
-    // the reference reports eyeball and flex bytes per model as it goes
+    // stock studiomdl reports eyeball and flex bytes per model as it goes
     size_t cur = buf.pos;
 
     for (size_t i = 0; i < m.models.size(); i++) {
         cm::Model& model = m.models[i];
         uint8_t* pModelStart = reinterpret_cast<uint8_t*>(&pmodel[i]);
 
-        // the reference writes the model FILENAME (or $rendermesh alias); a
-        // blank model has an empty filename -> name stays zeroed
+        // stock studiomdl writes the model FILENAME (or $rendermesh alias); a blank model has an
+        // empty filename -> name stays zeroed
         if (model.source)
             strncpy(pmodel[i].name, model.name.c_str(), sizeof(pmodel[i].name) - 1);
 
@@ -1833,8 +1821,8 @@ void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
         pmodel[i].tangentsindex = static_cast<int32_t>(externalTangentsIndex);
         externalTangentsIndex += numvertices * sizeof(fmt::Vector3) + numvertices * sizeof(float);
 
-        // eyeballs. sznameindex and texture are deliberately
-        // NOT written - the reference never sets them, so they stay zero.
+        // eyeballs. sznameindex and texture are deliberately NOT written - stock studiomdl never
+        // sets them, so they stay zero.
         {
             std::vector<const cm::Eyeball*> mine;
             for (const cm::Eyeball& eye : m.eyeballs)
@@ -1899,7 +1887,7 @@ void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
             }
 
             if (!pmesh[mm].numflexes)
-                continue; // numflexes/flexindex stay zero (calloc parity)
+                continue; // numflexes/flexindex stay zero
 
             pmesh[mm].flexindex = static_cast<int32_t>(
                 buf.p() - reinterpret_cast<uint8_t*>(&pmesh[mm]));
@@ -1937,7 +1925,7 @@ void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
                         continue;
                     auto* pva = reinterpret_cast<fmt::mstudiovertanim_t*>(pvertanim);
                     pva->index = static_cast<uint16_t>(n);
-                    // float -> byte assignment truncates (reference cast)
+                    // float -> byte assignment truncates
                     pva->speed = static_cast<uint8_t>(255.0f * va.speed);
                     pva->side = static_cast<uint8_t>(255.0f * va.side);
                     pva->delta[0].SetFloat(va.pos.x);
@@ -1967,8 +1955,8 @@ void WriteModel(Buf& buf, fmt::studiohdr_t* phdr, cm::CompiledModel& m) {
 
     buf.Align4();
 
-    // include models ($includemodel). Only sznameindex is filled - the
-    // reference leaves szlabelindex at its calloc'd zero.
+    // include models ($includemodel). Only sznameindex is filled - stock studiomdl leaves
+    // szlabelindex at its calloc'd zero.
     const int numinclude = static_cast<int>(m.includeModels.size());
     phdr->numincludemodels = numinclude;
     phdr->includemodelindex = static_cast<int32_t>(buf.pos);
@@ -2039,13 +2027,11 @@ void WriteBoneTransforms(Buf& buf, fmt::studiohdr2_t* phdr2, fmt::mstudiobone_t*
                          cm::CompiledModel& m) {
     int numbones = static_cast<int>(m.bones.size());
 
-    // srcbonetransform: one entry per bone where its own OR its parent's
-    // srcRealign is non-identity. The identity test is
-    // the reference's MatricesAreEqual (tolerance 1e-5) - the unconditional
-    // RealignBones noise stays below it, so plain models still emit zero.
-    // A procedural bone (jigglebone or animconstraint helper) is skipped
-    // outright - the engine drives it, so there is no source transform to
-    // record.
+    // srcbonetransform: one entry per bone where its own OR its parent's srcRealign is
+    // non-identity. The identity test is stock studiomdl's MatricesAreEqual (tolerance 1e-5) - the
+    // unconditional RealignBones noise stays below it, so plain models still emit zero. A
+    // procedural bone (jigglebone or animconstraint helper) is skipped outright - the engine drives
+    // it, so there is no source transform to record.
     const pm::matrix3x4 identity;
     auto needsTransform = [&](int i) {
         if (m.bones[i].flags & fmt::BONE_ALWAYS_PROCEDURAL)
@@ -2476,11 +2462,10 @@ bool FixupBuffers(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf,
     if (numVertexes > 0)
         qsort(vertexList.data(), numVertexes, sizeof(UsedVertex), CompareUsedVertexes);
 
-    // map (vertexOffset, meshVertID) -> sorted index.
-    // Indexed rather than scanned: the reference scans vertexList for every
-    // vertex, which is O(numVertexes^2) and dominated write time on character
-    // models. Building the index k-ascending and keeping the first entry per
-    // key reproduces the scan's first-match-wins result exactly.
+    // map (vertexOffset, meshVertID) -> sorted index. Indexed rather than scanned: stock studiomdl
+    // scans vertexList for every vertex, which is O(numVertexes^2) and dominated write time on
+    // character models. Building the index k-ascending and keeping the first entry per key
+    // reproduces the scan's first-match-wins result exactly.
     {
         std::unordered_map<uint64_t, int> sortedIndex;
         sortedIndex.reserve(static_cast<size_t>(numVertexes) * 2);
@@ -2883,7 +2868,7 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     strncpy(phdr->name, outname.c_str(), sizeof(phdr->name) - 1);
     g_strings.Add(buf, phdr2, &phdr2->sznameindex, outname.c_str());
 
-    // per-block byte accounting, in the reference's own order and wording
+    // per-block byte accounting, in stock studiomdl's own order and wording
     g_mdlReport.clear();
     size_t sec = buf.pos;
     auto section = [&](const char* fmt, ...) {
@@ -2960,8 +2945,8 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
 
     size_t total = buf.pos;
 
-    // the reference takes this delta AFTER the string table, so it is the
-    // collision block's size in the .mdl - always zero, the hulls live in .phy
+    // stock studiomdl takes this delta AFTER the string table, so it is the collision block's size
+    // in the .mdl - always zero, the hulls live in .phy
     section("collision  %7zu bytes", buf.pos - total);
 
     // checksum over the whole buffer, BEFORE AssignMeshIDs and the fixup pass
@@ -3001,9 +2986,9 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
         std::fflush(stdout);
     };
 
-    // the reference gates the vertex/strip write on numbodyparts != 0: an
-    // animation-only model gets no .vvd/.vtx. Build them anyway for the fixup
-    // pass, and save the empty files only under $forcewritevertexdata.
+    // stock studiomdl gates the vertex/strip write on numbodyparts != 0: an animation-only model
+    // gets no .vvd/.vtx. Build them anyway for the fixup pass, and save the empty files only under
+    // $forcewritevertexdata.
     const bool hasGeometry = !m.bodyparts.empty() || m.forceWriteVertexData;
 
     // .vvd first pass
@@ -3044,8 +3029,8 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     tPhy.Stop();
     PULSE_PERF("write", "save files");
 
-    // save. Reference hardcodes a "models/" root in the disk path (not in the
-    // header name), so $modelname stays prefix-free and the .mdl bytes match.
+    // save. stock studiomdl hardcodes a "models/" root in the disk path (not in the header name),
+    // so $modelname stays prefix-free and the .mdl bytes match.
     std::filesystem::path base =
         pulse::FilePath(outDir.empty() ? "." : outDir) / "models";
     auto outputStem = [&](std::string name) {
@@ -3053,10 +3038,9 @@ bool WriteModelFiles(cm::CompiledModel& m, const std::string& outDir, bool legac
     };
     std::filesystem::path stem = outputStem(m.outname);
 
-    // reference console format: a "writing <path>:" line
-    // per output file, then its stats. GUI front ends scrape these lines for
-    // the full paths, so the separator must be native - $modelname carries
-    // forward slashes that make_preferred() flips.
+    // stock studiomdl console format: a "writing <path>:" line per output file, then its stats. GUI
+    // front ends scrape these lines for the full paths, so the separator must be native -
+    // $modelname carries forward slashes that make_preferred flips.
     auto announce = [&](const char* ext) {
         std::string path = stem.string() + ext;
         std::printf("---------------------\n");

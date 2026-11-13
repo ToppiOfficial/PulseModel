@@ -100,10 +100,9 @@ static int Usage() {
     return 1;
 }
 
-// -definebones: dump the final bone table in $definebone form so it can be
-// pasted back into the script and pin the skeleton (reference DumpDefineBones).
-// Both sextets are the compiled matrices, so the second one marks every bone
-// pre-aligned - a re-compile must not realign an already-realigned rig.
+// definebones: dump the final bone table in $definebone form so it can be pasted back into the
+// script and pin the skeleton. Both sextets are the compiled matrices, so the second one marks
+// every bone pre-aligned - a re-compile must not realign an already-realigned rig.
 static void DumpDefineBones(const pulse::compile::CompiledModel& model) {
     std::printf("\n--- $definebone (%zu bones) ---------------------------------\n\n",
                 model.bones.size());

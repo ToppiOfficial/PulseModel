@@ -171,10 +171,9 @@ int ParseFloats(const std::string& s, float* out, int n) {
     return ParseFloats(s.data(), s.data() + s.size(), out, n);
 }
 
-// Valve's text unserializer normalizes every parsed quaternion
-// (tier1 utlbufferutil Unserialize(CUtlBuffer&, Quaternion&) calls
-// QuaternionNormalize). Binary DMX does NOT do this - keyvalues2 only.
-// Same arithmetic as the reference: float sum, double sqrt, w-z-y-x order.
+// Valve's text unserializer normalizes every parsed quaternion (tier1 utlbufferutil
+// Unserialize(CUtlBuffer&, Quaternion&) calls QuaternionNormalize). Binary DMX does NOT do this -
+// keyvalues2 only. Same arithmetic as stock studiomdl: float sum, double sqrt, w-z-y-x order.
 Quaternion NormalizeParsedQuat(Quaternion q) {
     float radius = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
     if (radius) {

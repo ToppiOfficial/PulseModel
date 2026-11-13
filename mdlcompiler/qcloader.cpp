@@ -614,10 +614,8 @@ std::string WithSourceExtension(const Ctx& c, const std::string& s) {
     return s + ".dmx";
 }
 
-// legacy SMD is picked purely by extension (.smd/.sma/.phys, matching the
-// reference studiomdl loader table); everything else routes through the DMX
-// reader. An extensionless reference got its extension from
-// WithSourceExtension.
+// legacy SMD is picked purely by extension; everything else routes through the DMX reader. An
+// extensionless reference got its extension from WithSourceExtension.
 bool IsSmdPath(const std::string& s) {
     auto ends = [&](const char* ext) {
         const size_t n = std::strlen(ext);
@@ -1432,10 +1430,9 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            // $vca "file.vca" [<controller name>] - vertex cache animation. Same
-            // file format as $vta; the frames are a playback sequence, not named
-            // shapes, so nothing is listed. The controller name defaults to the
-            // file's basename (reference Option_VertexCacheAnimationFile).
+            // $vca "file.vca" [<controller name>] - vertex cache animation. Same file format as
+            // $vta; the frames are a playback sequence, not named shapes, so nothing is listed. The
+            // controller name defaults to the file's basename.
             if (o == "$vca") {
                 if (!edit.vca.empty())
                     return c.Fail(t->line, where + ": $vca written twice");
@@ -1692,9 +1689,8 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
 
 // $modelgrouppreset <name> { <modelgroup> <choice index> ... }
 //
-// A named body value the engine can switch to (Cmd_BodygroupPreset). The
-// group names are resolved in Compile, not here, so the presets may sit above
-// the $modelgroup blocks they name.
+// A named body value the engine can switch to. The group names are resolved in Compile, not here,
+// so the presets may sit above the $modelgroup blocks they name.
 bool CmdModelGroupPreset(Ctx& c, const Token& cmd) {
     cm::CompileInput::InBodyGroupPreset preset;
     if (!c.Want("a name", cmd, preset.name))
@@ -2105,8 +2101,8 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         }
     }
 
-    // A '{' block? Pre-scan it for noautodmxrules before the rig import decides
-    // whether to pull the flex rig (the reference does the same lookahead).
+    // A '{' block? Pre-scan it for noautodmxrules before the rig import decides whether to pull the
+    // flex rig.
     const bool hasBlock = !c.Eof() && !c.Cur().quoted && c.Cur().text == "{";
     bool importFlexRig = true;
     if (hasBlock) {
@@ -2222,7 +2218,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
                 !c.Want("a material name", t, e.eyeball.material) ||
                 !c.WantFloat("a diameter", t, e.eyeball.diameter) ||
                 !c.WantFloat("an angle in degrees", t, e.eyeball.angle) ||
-                !c.Want("an iris material", t, iris) || // read and discarded, like the reference
+                !c.Want("an iris material", t, iris) || // read and discarded, like stock studiomdl
                 !c.WantFloat("a pupil scale", t, e.eyeball.pupilscale))
                 return false;
             c.face.entries.push_back(std::move(e));
@@ -2474,7 +2470,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
                                               kLidSlot[i] + " <frame> <target>`");
             if (e.eyelid.eyeball.empty())
                 return c.Fail(t.line, where + ": the VTA eyelid form needs `eyeball <name>`");
-            e.eyelid.basedesc = type; // e.g. "upper_right" - the reference's lid desc base
+            e.eyelid.basedesc = type; // e.g. "upper_right" - stock studiomdl's lid desc base
             for (int i = 0; i < 3; ++i) {
                 if (frame[i] <= 0)
                     continue; // "-" or frame 0 (the basis) = a pose with no vertex data
@@ -2491,7 +2487,7 @@ bool CmdModel(Ctx& c, const Token& cmd) {
         if (o == "noautodmxrules")
             continue; // handled by the pre-scan above
         if (o == "attachment")
-            continue; // no-op inside $model, as in the reference
+            continue; // no-op inside $model, as in stock studiomdl
         if (o == "spherenormals") {
             std::string mat;
             float x, y, z;
@@ -2781,12 +2777,11 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         return 1;
     }
 
-    // clip trim. `framestart` sets only the start, leaving the end at the
-    // source clip's (ParseAnimationToken's bUseDefaultEndFrame); both ends are
-    // clamped to the clip in the compile stage.
-    // blockname <name>: sample a specific clip out of a multi-clip source. The
-    // reference also resets the frame range to that clip's, which the compile
-    // stage does by clamping to whichever clip is picked.
+    // clip trim. `framestart` sets only the start, leaving the end at the source clip's
+    // (ParseAnimationToken's bUseDefaultEndFrame); both ends are clamped to the clip in the compile
+    // stage. blockname <name>: sample a specific clip out of a multi-clip source. stock studiomdl
+    // also resets the frame range to that clip's, which the compile stage does by clamping to
+    // whichever clip is picked.
     if (_stricmp(o.c_str(), "blockname") == 0) {
         if (!c.Want("a source clip name", t, a.blockname))
             return -1;
@@ -3137,11 +3132,10 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         a.cmds.push_back(std::move(cmd));
         return 1;
     }
-    // worldspaceblend <anim>              (CMD_WORLDSPACEBLEND)
+    // worldspaceblend <anim>
     // worldspaceblendloop <anim> <frame>
-    // Blend this clip toward the reference in WORLD space, per bone, weighted by
-    // the weightlist. The loop form samples the reference by cycle from <frame>
-    // instead of holding one frame.
+    // Blend this clip toward the reference animation in WORLD space, per bone, weighted by the
+    // weightlist. The loop form samples it by cycle from <frame> instead of holding one frame.
     if (_stricmp(o.c_str(), "worldspaceblend") == 0 ||
         _stricmp(o.c_str(), "worldspaceblendloop") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
@@ -3289,9 +3283,8 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
     return 0;
 }
 
-// $cmdlist <name> { <animation options> ... }  (Cmd_Cmdlist). The body is kept
-// as raw tokens, not parsed here - `cmdlist <name>` splices it into an
-// $animation / $sequence option stream verbatim.
+// $cmdlist <name> { <animation options> ... }. The body is kept as raw tokens, not parsed here -
+// `cmdlist <name>` splices it into an $animation / $sequence option stream verbatim.
 bool CmdCmdList(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
@@ -3359,10 +3352,9 @@ bool ParseAnimBody(Ctx& c, const Token& cmd, const std::string& name,
     return true;
 }
 
-// $animation <name> <file> [options]   (studiomdl Cmd_Animation + ParseAnimation)
-// $bindposeanimation <name> [options]: the same command without the file - the
-// clip is the compile's own bind pose (loaded skeletons + $definebone), one
-// frame unless `numframes` asks for more.
+// $animation <name> <file> [options] $bindposeanimation <name> [options]: the same command without
+// the file - the clip is the compile's own bind pose (loaded skeletons + $definebone), one frame
+// unless `numframes` asks for more.
 bool CmdAnimationCommon(Ctx& c, const Token& cmd, bool bindpose) {
     std::string name, file;
     if (!c.Want("a name", cmd, name))
@@ -3397,9 +3389,8 @@ bool CmdAnimationCommon(Ctx& c, const Token& cmd, bool bindpose) {
 bool CmdAnimation(Ctx& c, const Token& cmd) { return CmdAnimationCommon(c, cmd, false); }
 bool CmdBindPoseAnimation(Ctx& c, const Token& cmd) { return CmdAnimationCommon(c, cmd, true); }
 
-// $declareanimation <name>  (studiomdl Cmd_DeclareAnimation): an empty
-// STUDIO_OVERRIDE slot, filled in later by an $includemodel's animation. Must
-// appear before anything that references it, matching stock file order.
+// $declareanimation <name>: an empty STUDIO_OVERRIDE slot, filled in later by an $includemodel's
+// animation. Must appear before anything that references it, matching stock file order.
 bool CmdDeclareAnimation(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
@@ -3415,7 +3406,7 @@ bool CmdDeclareAnimation(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $declaresequence <name>  (studiomdl Cmd_DeclareSequence): empty override slot.
+// $declaresequence <name>: empty override slot.
 bool CmdDeclareSequence(Ctx& c, const Token& cmd) {
     cm::CompileInput::InSequence seq;
     seq.fadeintime = c.defaultFadeIn;
@@ -3428,10 +3419,9 @@ bool CmdDeclareSequence(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $includemodel "path/name.mdl"  (studiomdl Cmd_IncludeModel): borrow an
-// already-compiled model's sequences. Stored "models/"-prefixed and nothing is
-// read at compile time - the engine links it on load. Suppresses the automatic
-// "reference" bind-pose sequence a script with no $sequence would otherwise get.
+// $includemodel "path/name.mdl": borrow an already-compiled model's sequences. Stored
+// "models/"-prefixed and nothing is read at compile time - the engine links it on load. Suppresses
+// the automatic "reference" bind-pose sequence a script with no $sequence would otherwise get.
 bool CmdIncludeModel(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a compiled .mdl path", cmd, name))
@@ -3447,13 +3437,13 @@ bool CmdIncludeModel(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// ikrule <chain> <type> [type-args] [options]  (studiomdl Option_IKRule subset).
-// Fills InIkRule, whose chain/type are resolved later in the compile stage.
+// ikrule <chain> <type> [type-args] [options]. Fills InIkRule, whose chain/type are resolved later
+// in the compile stage.
 bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRule>& out) {
     cm::CompileInput::InIkRule rule;
-    // stock Option_IKRule leaves the ramp frames at calloc's 0 (only `range`
-    // or autosteps move them) and sets contact to -1. Override the struct's
-    // -1 frame defaults so an unspecified range matches the reference.
+    // stock leaves the ramp frames at calloc's 0 (only `range` or autosteps move them) and sets
+    // contact to -1. Override the struct's -1 frame defaults so an unspecified range matches stock
+    // studiomdl.
     rule.startframe = rule.peakframe = rule.tailframe = rule.endframe = 0;
     rule.contact = -1;
     if (!c.Want("an ik chain name", cmd, rule.chain))
@@ -3487,8 +3477,7 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
                                 "(expected touch/footstep/attachment/release/unlatch/autosteps)");
     }
 
-    // trailing options, in any order (Option_IKRule stops at the first token it
-    // does not recognize - so does this)
+    // trailing options, in any order
     for (;;) {
         if (c.AtCommand())
             break;
@@ -3562,9 +3551,8 @@ bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRul
     return true;
 }
 
-// event <name> <frame> [options]  (studiomdl Option_Event). `<name>` is either
-// a numeric id or an event name; `[options]` is the free-form string the game
-// reads (a sound name, a particle name, ...).
+// event <name> <frame> [options]. `<name>` is either a numeric id or an event name; `[options]` is
+// the free-form string the game reads (a sound name, a particle name, ...).
 bool ParseEvent(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq) {
     cm::SeqEvent ev;
     if (!c.Want("an event name or id", cmd, ev.name) ||
@@ -3616,9 +3604,8 @@ int LookupXNode(Ctx& c, const std::string& name) {
     return static_cast<int>(c.in.xnodes.size());
 }
 
-// $skiptransition <node> <node> [<node> ...]  (Cmd_Skiptransition): every
-// ordered pair of the named nodes gets a direct route, so the graph does not
-// route them through an intermediate node.
+// $skiptransition <node> <node> [<node> ...]: every ordered pair of the named nodes gets a direct
+// route, so the graph does not route them through an intermediate node.
 bool CmdSkipTransition(Ctx& c, const Token& cmd) {
     std::vector<int> list;
     while (!c.AtCommand())
@@ -3632,17 +3619,15 @@ bool CmdSkipTransition(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $calctransitions  (Cmd_CalcTransitions): fill in multi-stage routes between
-// nodes that have no direct transition.
+// $calctransitions: fill in multi-stage routes between nodes that have no direct transition.
 bool CmdCalcTransitions(Ctx& c, const Token&) {
     c.in.multistageGraph = true;
     return true;
 }
 
-// keyvalues { ... }  (studiomdl Option_KeyValues), shared by the $keyvalues
-// command and the $sequence option. The block between braces is re-emitted as
-// text and copied into the .mdl unchanged; nesting is preserved and tokens
-// inside a nested block come back out quoted, exactly like the reference.
+// keyvalues { ... }, shared by the $keyvalues command and the $sequence option. The block between
+// braces is re-emitted as text and copied into the .mdl unchanged; nesting is preserved and tokens
+// inside a nested block come back out quoted, exactly like stock studiomdl.
 bool ParseKeyValues(Ctx& c, const Token& cmd, std::string& out,
                     bool normalizeModelPaths = false) {
     const Token* brace = c.Next();
@@ -3693,9 +3678,8 @@ bool ParseKeyValues(Ctx& c, const Token& cmd, std::string& out,
     return true;
 }
 
-// $boneflexdriver <bone> <tx|ty|tz> <flexcontroller> <min> <max>
-// (Cmd_BoneFlexDriver): a bone's translation along one axis drives a flex
-// controller. Both the bone and the controller are find-or-create, so repeating
+// $boneflexdriver <bone> <tx|ty|tz> <flexcontroller> <min> <max>: a bone's translation along one
+// axis drives a flex controller. Both the bone and the controller are find-or-create, so repeating
 // the command for the same bone adds another control rather than replacing it.
 bool CmdBoneFlexDriver(Ctx& c, const Token& cmd) {
     std::string bone, component, controller;
@@ -3742,7 +3726,7 @@ bool CmdBoneFlexDriver(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $keyvalues { ... }  (Cmd_KeyValues): the model-level block.
+// $keyvalues { ... }: the model-level block.
 bool CmdKeyValues(Ctx& c, const Token& cmd) {
     return ParseKeyValues(c, cmd, c.in.keyvalues);
 }
@@ -3756,9 +3740,9 @@ bool CmdCollisionText(Ctx& c, const Token& cmd) {
 // Ctx::manual is registered after parsing, in finished bodygroup order.
 // ---------------------------------------------------------------------------
 
-// $flexcontroller <group> [range <min> <max>] <name> [<name>...]
-// (Option_Flexcontroller). `range` applies to every name AFTER it, so one line
-// can mix ranges. Redefining an existing controller warns and keeps the first.
+// $flexcontroller <group> [range <min> <max>] <name> [<name>...]. `range` applies to every name
+// AFTER it, so one line can mix ranges. Redefining an existing controller warns and keeps the
+// first.
 bool CmdFlexController(Ctx& c, const Token& cmd) {
     std::string group;
     if (!c.Want("a controller group", cmd, group))
@@ -3806,10 +3790,9 @@ bool CmdFlexLocalVar(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $flexrule <result> = <expression>   (the `%rule` model option, Option_Flexrule)
-// The expression runs to the next $command. It is re-joined into one string and
-// handed to the shunting-yard parser, which does its own tokenizing - so
-// "(1 - %x)" and "(1-%x)" parse the same however this file's lexer split them.
+// $flexrule <result> = <expression> The expression runs to the next $command. It is re-joined into
+// one string and handed to the shunting-yard parser, which does its own tokenizing - so "(1 - %x)"
+// and "(1-%x)" parse the same however this file's lexer split them.
 bool CmdFlexRule(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a morph name", cmd, name))
@@ -3854,13 +3837,11 @@ bool CmdFlexRule(Ctx& c, const Token& cmd) {
 // $eyeball indices, and $mouth/$eyelid append to the global flexdesc table.
 // ---------------------------------------------------------------------------
 
-// $eyeball <name> bone <b> origin <x y z> material <m> [diameter <d>]
-//          [angle <deg>] [pupilscale <s>] [center] (Option_Eyeball). Named
-// clauses, unlike QC's positional form. Binds to every body whose mesh uses
-// `material`; matching no body at all is a hard error, same as stock.
-// `center` puts the eyeball at the bbox center of the material's verts and
-// makes `origin` an offset from it, in final (post-$translatemodel, post-90-Z)
-// axes - so it is optional there.
+// $eyeball <name> bone <b> origin <x y z> material <m> [diameter <d>] [angle <deg>] [pupilscale
+// <s>] [center]. Named clauses, unlike QC's positional form. Binds to every body whose mesh uses
+// `material`; matching no body at all is a hard error, same as stock. `center` puts the eyeball at
+// the bbox center of the material's verts and makes `origin` an offset from it, in final
+// (post-$translatemodel, post-90-Z) axes - so it is optional there.
 bool CmdEyeball(Ctx& c, const Token& cmd) {
     FaceMarkup::Entry entry;
     entry.kind = FaceMarkup::Kind::Eyeball;
@@ -3909,9 +3890,8 @@ bool CmdEyeball(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $mouth <controller> <bone> <forward x y z>  (Option_Mouth). The index is
-// implicit - declaration order. The controller registers a flexdesc and the
-// bone is force-kept, because the mouth shader reads it.
+// $mouth <controller> <bone> <forward x y z>. The index is implicit - declaration order. The
+// controller registers a flexdesc and the bone is force-kept, because the mouth shader reads it.
 bool CmdMouth(Ctx& c, const Token& cmd) {
     FaceMarkup::Entry entry;
     entry.kind = FaceMarkup::Kind::Mouth;
@@ -4249,20 +4229,17 @@ bool CmdAnimationCullMethod(Ctx& c, const Token& cmd) {
 // studiomdl sequence options we deliberately do not accept. Returns the reason,
 // or null if `o` is not one of them.
 const char* UnsupportedSeqOption(const std::string& o) {
-    // `deform` never shipped: the only call site is inside a comment block and
-    // Option_Deform does not exist.
+    // `deform` never shipped: the only call site is inside a comment block and does not exist.
     if (_stricmp(o.c_str(), "deform") == 0)
         return "never implemented in studiomdl either";
     return nullptr;
 }
 
-// $sequence <name> <animref...> [options] or $sequence <name> { ... }
-// (studiomdl Cmd_Sequence + ParseSequence). $bindposesequence takes the same
-// options minus animation refs - its one animation is the bind pose, so a
-// non-option token is an error, not a file to load. `blends` collects
-// discovered animation indices for the caller's post-processing. `isAppend`
-// ($append/$prepend/$continue reopening a finished sequence) still applies
-// options but adds no further blend animation.
+// $sequence <name> <animref...> [options] or $sequence <name> { ... }. $bindposesequence takes the
+// same options minus animation refs - its one animation is the bind pose, so a non-option token is
+// an error, not a file to load. `blends` collects discovered animation indices for the caller's
+// post-processing. `isAppend` ($append/$prepend/$continue reopening a finished sequence) still
+// applies options but adds no further blend animation.
 bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                   std::vector<int>& blends, bool bindpose, bool isAppend) {
     bool braced = false;
@@ -4323,7 +4300,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                                               seq.activityname + "\" in \"" + seq.name +
                                               "\" (not in $allowactivityname)");
                 }
-                // optional integer weight; absent -> -1 (Option_Activity)
+                // optional integer weight; absent -> -1
                 if (c.NextIsInt()) {
                     if (!c.WantInt("an activity weight", t, seq.actweight))
                         return false;
@@ -4491,8 +4468,8 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     return false;
                 continue;
             }
-            // animtag <name> <cycle>  (Option_AnimTag): a named marker at a
-            // cycle fraction, resolved to a tag id at runtime.
+            // animtag <name> <cycle>: a named marker at a cycle fraction, resolved to a tag id at
+            // runtime.
             if (_stricmp(o.c_str(), "animtag") == 0) {
                 cm::SeqAnimTag tag;
                 if (!c.Want("a tag name", t, tag.name) ||
@@ -4529,8 +4506,7 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
                     seq.nodeflags |= 1;
                 continue;
             }
-            // activitymodifier <name> | activitymodifier { <name> ... }
-            // (Option_ActivityModifier). Names are lowercased.
+            // activitymodifier <name> | activitymodifier { <name> ... }. Names are lowercased.
             if (_stricmp(o.c_str(), "activitymodifier") == 0 ||
                 _stricmp(o.c_str(), "actmod") == 0) {
                 std::string first;
@@ -4595,8 +4571,8 @@ bool ParseSeqBody(Ctx& c, const Token& cmd, cm::CompileInput::InSequence& seq,
             blends.push_back(named->second);
         } else {
             cm::CompileInput::InAnim a;
-            // implied name is always "@<seq>" - the reference names every
-            // implied blend identically; the string table dedups them
+            // implied name is always "@<seq>" - stock studiomdl names every implied blend
+            // identically; the string table dedups them
             a.name = "@" + seq.name;
             a.fps = c.defaultFps;
             a.motionrollback = c.defaultMotionRollback;
@@ -4617,7 +4593,7 @@ bool CmdSequenceCommon(Ctx& c, const Token& cmd, bool bindpose) {
     seq.fadeouttime = c.defaultFadeOut;
     if (!c.Want("a name", cmd, seq.name))
         return false;
-    // $lcaseallsequences lowercases the $sequence name only (Cmd_Sequence)
+    // $lcaseallsequences lowercases the $sequence name only
     if (c.lcaseSequences)
         for (char& ch : seq.name)
             ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -4679,12 +4655,11 @@ bool CmdSequenceCommon(Ctx& c, const Token& cmd, bool bindpose) {
 bool CmdSequence(Ctx& c, const Token& cmd) { return CmdSequenceCommon(c, cmd, false); }
 bool CmdBindPoseSequence(Ctx& c, const Token& cmd) { return CmdSequenceCommon(c, cmd, true); }
 
-// $append / $prepend / $continue <name> [options] (studiomdl Cmd_Append/
-// Cmd_Prepend/Cmd_Continue). Re-opens a $sequence or $animation - sequence
-// looked up first, so a name shared between the two resolves to the sequence.
-// $append puts new animation commands after the existing ones, $prepend
-// before, $continue is $append with an optional body. A sequence append can
-// edit blend animation 0 but not add blend animations (grid fixed at close).
+// $append / $prepend / $continue <name> [options]. Re-opens a $sequence or $animation - sequence
+// looked up first, so a name shared between the two resolves to the sequence. $append puts new
+// animation commands after the existing ones, $prepend before, $continue is $append with an
+// optional body. A sequence append can edit blend animation 0 but not add blend animations (grid
+// fixed at close).
 enum class AppendMode { Append, Prepend, Continue };
 
 bool CmdAppendCommon(Ctx& c, const Token& cmd, AppendMode mode) {
@@ -4907,9 +4882,8 @@ bool CmdSurfaceProp(Ctx& c, const Token& cmd) {
     return c.Want("a surface property name", cmd, c.in.surfaceprop);
 }
 
-// The token list shared by $contents and $jointcontents (reference
-// ParseContents). Each token adds bits and may clear others; a bare number
-// (decimal or 0x hex) sets raw bits. At least one token is required.
+// The token list shared by $contents and $jointcontents. Each token adds bits and may clear others;
+// a bare number (decimal or 0x hex) sets raw bits. At least one token is required.
 bool ParseContentsTokens(Ctx& c, const Token& cmd, int& add, int& remove) {
     std::string tok;
     if (!c.Want("a contents value", cmd, tok))
@@ -4956,10 +4930,9 @@ bool CmdContents(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $jointcontents <bone> <token>... - the same word for one bone and, through
-// the parent walk in ApplyJointContents, its descendants. Unlike $contents
-// each command starts fresh from CONTENTS_SOLID, and a second command for the
-// same bone REPLACES the word (reference Cmd_JointContents).
+// $jointcontents <bone> <token>... - the same word for one bone and, through the parent walk in
+// ApplyJointContents, its descendants. Unlike $contents each command starts fresh from
+// CONTENTS_SOLID, and a second command for the same bone REPLACES the word.
 bool CmdJointContents(Ctx& c, const Token& cmd) {
     std::string bone;
     if (!c.Want("a bone name", cmd, bone))
@@ -5046,9 +5019,8 @@ bool CmdTransformModel(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $origin <x> <y> <z> [z rotation]  (legacy Cmd_Origin)
-// Old-QC alias writing the same slots as $transformmodel origin/angles; last of
-// the two in the script wins. The optional 4th value is a yaw in degrees,
+// $origin <x> <y> <z> [z rotation] Old-QC alias writing the same slots as $transformmodel
+// origin/angles; last of the two in the script wins. The optional 4th value is a yaw in degrees,
 // composed with the built-in +90 like $transformmodel angles.
 bool CmdOrigin(Ctx& c, const Token& cmd) {
     float x = 0, y = 0, z = 0;
@@ -5066,10 +5038,9 @@ bool CmdOrigin(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $scale <float>  (legacy Cmd_ScaleUp)
-// Old-QC alias for $transformmodel scale. Scale is baked as each source loads,
-// so sources placed before this keep the previous scale (legacy g_currentscale
-// per-file behavior) - warn, but do not stop; last write wins for later ones.
+// $scale <float> Old-QC alias for $transformmodel scale. Scale is baked as each source loads, so
+// sources placed before this keep the previous scale (legacy g_currentscale per-file behavior) -
+// warn, but do not stop; last write wins for later ones.
 bool CmdScale(Ctx& c, const Token& cmd) {
     if (!c.WantFloat("a scale", cmd, c.in.scale))
         return false;
@@ -5081,11 +5052,9 @@ bool CmdScale(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $upaxis <x|-x|y|-y|z|-z> (Cmd_UpAxis): names the up direction of the art
-// space so the compiler can rotate it into Source's Z-up space. It writes the
-// same slot as $transformmodel angles (reference g_defaultrotation), so
-// whichever comes last wins. -x/-y are untested upstream, and z/-z both just
-// leave the built-in +90 yaw.
+// $upaxis <x|-x|y|-y|z|-z>: names the up direction of the art space so the compiler can rotate it
+// into Source's Z-up space. It writes the same slot as $transformmodel angles, so whichever comes
+// last wins. -x/-y are untested upstream, and z/-z both just leave the built-in +90 yaw.
 bool CmdUpAxis(Ctx& c, const Token& cmd) {
     std::string axis;
     if (!c.WantOption("an axis", cmd, axis))
@@ -5115,21 +5084,19 @@ bool CmdUpAxis(Ctx& c, const Token& cmd) {
 // `inherit <name>` seeds every setting from an earlier attachment; any clause
 // after it overrides. Put it first.
 //
-// Also accepts the legacy studiomdl positional form (Cmd_Attachment):
-//   $attachment <name> <bone> [<x> <y> <z>] [absolute] [rigid] [rotate p y r]
-// telling the two apart is a peek: a token after the name that is not a clause
-// keyword is the parent bone. `position` and `rotate` are aliases of `origin`
-// and `angles`.
+// Also accepts the legacy studiomdl positional form: $attachment <name> <bone> [<x> <y> <z>]
+// [absolute] [rigid] [rotate p y r] telling the two apart is a peek: a token after the name that is
+// not a clause keyword is the parent bone. `position` and `rotate` are aliases of `origin` and
+// `angles`.
 //
 // Everything after the name is optional and order-independent. A missing
 // origin/angles is (0,0,0). With no `bone` clause the attachment is tied to
 // MODEL space: it is flagged absolute and the compile stage anchors it to the
 // model's root bone.
 //
-// The three selector clauses repeat and replace the reference's separate
-// $attachmentbyverts: they average the position of every vertex they match,
-// origin becomes an offset from that average, and a bone-less attachment takes
-// the bone those vertices weight to most (compile.cpp,
+// The three selector clauses repeat and replace stock studiomdl's separate $attachmentbyverts: they
+// average the position of every vertex they match, origin becomes an offset from that average, and
+// a bone-less attachment takes the bone those vertices weight to most (compile.cpp,
 // GenerateVertexAveragedAttachments).
 bool CmdAttachment(Ctx& c, const Token& cmd) {
     Ctx::PendingAttachment a;
@@ -5267,8 +5234,8 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
     if (a.bone.empty() && !byVerts)
         a.type |= cm::kAttachIsAbsolute;
 
-    // fill a $declareattachment slot of the same name in place so its pinned
-    // index holds; otherwise append (reference Cmd_Attachment)
+    // fill a $declareattachment slot of the same name in place so its pinned index holds; otherwise
+    // append
     for (Ctx::PendingAttachment& slot : c.attachments) {
         if (!slot.filled && _stricmp(slot.name.c_str(), a.name.c_str()) == 0) {
             slot = std::move(a);
@@ -5280,13 +5247,11 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $declareattachment <name>  (studiomdl Cmd_DeclareAttachment): reserve an
-// ordering slot so this attachment's final index is pinned here, the same idea
-// as $declaresequence. A later $attachment of the same name, or a DMX source
-// attachment imported by $datamodeljoints, fills the slot in place - that is
-// the only way to sit a DMX attachment between two scripted ones. Useful when
-// a game or mod addresses attachments by index instead of by name. A slot
-// nothing ever fills is dropped with a warning.
+// $declareattachment <name>: reserve an ordering slot so this attachment's final index is pinned
+// here, the same idea as $declaresequence. A later $attachment of the same name, or a DMX source
+// attachment imported by $datamodeljoints, fills the slot in place - that is the only way to sit a
+// DMX attachment between two scripted ones. Useful when a game or mod addresses attachments by
+// index instead of by name. A slot nothing ever fills is dropped with a warning.
 bool CmdDeclareAttachment(Ctx& c, const Token& cmd) {
     Ctx::PendingAttachment a;
     if (!c.Want("a name", cmd, a.name))
@@ -5364,8 +5329,8 @@ void FinishAttachments(Ctx& c) {
         scripted.push_back(std::move(att));
     }
 
-    // $datamodeljoints may already have appended DMX-sourced attachments;
-    // scripted ones always come first (reference ReorderSourceAttachmentsLast)
+    // $datamodeljoints may already have appended DMX-sourced attachments; scripted ones always come
+    // first
     c.in.attachments.insert(c.in.attachments.begin(), scripted.begin(), scripted.end());
 }
 
@@ -5394,23 +5359,23 @@ bool CmdBoneCullMethod(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $realignbones (Cmd_RealignBones): realign every single-child bone chain so
-// each bone points at its child. Skips $definebone bones given a realign pair.
+// $realignbones: realign every single-child bone chain so each bone points at its child. Skips
+// $definebone bones given a realign pair.
 bool CmdRealignBones(Ctx& c, const Token&) {
     c.in.realignBones = true;
     return true;
 }
 
-// $lockbonelengths (Cmd_LockBoneLengths): stop source animation from stretching
-// bones - every frame gets the bind-pose local translation back, and each ik
-// chain is re-solved so its end bone stays where the animation put it.
+// $lockbonelengths: stop source animation from stretching bones - every frame gets the bind-pose
+// local translation back, and each ik chain is re-solved so its end bone stays where the animation
+// put it.
 bool CmdLockBoneLengths(Ctx& c, const Token&) {
     c.in.lockBoneLengths = true;
     return true;
 }
 
-// $limitrotation <bone> [sequence names...]: the reference accepts the
-// sequence names but calculates the alignment from every eligible animation.
+// $limitrotation <bone> [sequence names...]: stock studiomdl accepts the sequence names but
+// calculates the alignment from every eligible animation.
 bool CmdLimitRotation(Ctx& c, const Token& cmd) {
     std::string bone;
     if (!c.Want("a bone name", cmd, bone))
@@ -5421,24 +5386,22 @@ bool CmdLimitRotation(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $root <bone> (Cmd_Root): the bone motion extraction, $alignto and $angle
-// work from. Resolved after the bone table exists; unknown falls back to bone 0.
+// $root <bone>: the bone motion extraction, $alignto and $angle work from. Resolved after the bone
+// table exists; unknown falls back to bone 0.
 bool CmdRoot(Ctx& c, const Token& cmd) {
     return c.Want("a bone name", cmd, c.in.primaryRootBone);
 }
 
-// $unlockdefinebones (Cmd_UnlockDefineBones): flips the default lock state for
-// every $definebone after it. An unlocked bone is appended AFTER the source
-// union instead of replacing a source bone's bind pose.
+// $unlockdefinebones: flips the default lock state for every $definebone after it. An unlocked bone
+// is appended AFTER the source union instead of replacing a source bone's bind pose.
 bool CmdUnlockDefineBones(Ctx& c, const Token&) {
     c.unlockDefineBones = true;
     return true;
 }
 
-// $definebone <name> <parent> [locked|unlocked] <x y z> <p y r>
-//                             [<x y z> <p y r>]                (Cmd_DefineBone)
-// The optional second sextet is the realign transform; supplying it marks the
-// bone pre-aligned, so RealignBones leaves it alone.
+// $definebone <name> <parent> [locked|unlocked] <x y z> <p y r> [<x y z> <p y r>] The optional
+// second sextet is the realign transform; supplying it marks the bone pre-aligned, so RealignBones
+// leaves it alone.
 bool CmdDefineBone(Ctx& c, const Token& cmd) {
     cm::ImportBone ib;
     if (!c.Want("a bone name", cmd, ib.name) ||
@@ -5510,8 +5473,8 @@ bool WantBoneNames(Ctx& c, const Token& cmd, std::vector<std::string>& names) {
     return true;
 }
 
-// $bonemerge <bone>... (Cmd_BoneMerge): tag BONE_USED_BY_BONE_MERGE so the bone
-// survives the cull and a bonemerged child model can find it.
+// $bonemerge <bone>...: tag BONE_USED_BY_BONE_MERGE so the bone survives the cull and a bonemerged
+// child model can find it.
 bool CmdBoneMerge(Ctx& c, const Token& cmd) {
     std::vector<std::string> names;
     if (!WantBoneNames(c, cmd, names))
@@ -5521,8 +5484,7 @@ bool CmdBoneMerge(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $donotcollapse <bone>... (Cmd_DoNotCollapse): force-keep the bones. Beats
-// $alwayscollapse.
+// $donotcollapse <bone>...: force-keep the bones. Beats $alwayscollapse.
 bool CmdDoNotCollapse(Ctx& c, const Token& cmd) {
     std::vector<std::string> names;
     if (!WantBoneNames(c, cmd, names))
@@ -5609,8 +5571,7 @@ bool CmdRenameBone(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $alwayscollapse <bone>... (Cmd_AlwaysCollapse): force-collapse the bones even
-// when something would normally keep them.
+// $alwayscollapse <bone>...: force-collapse the bones even when something would normally keep them.
 bool CmdAlwaysCollapse(Ctx& c, const Token& cmd) {
     std::vector<std::string> names;
     if (!WantBoneNames(c, cmd, names))
@@ -5627,10 +5588,9 @@ bool CmdCullJiggleBones(Ctx& c, const Token&) {
     return true;
 }
 
-// $hierarchy <child> <parent> (Cmd_ForcedHierarchy, "$heirarchy" is stock's own
-// misspelling and works too): reparent a bone. Applied once the global bone
-// table exists, so it can join two source skeletons that were exported apart.
-// A quoted empty parent makes the child a root bone.
+// $hierarchy <child> <parent>: reparent a bone. Applied once the global bone table exists, so it
+// can join two source skeletons that were exported apart. A quoted empty parent makes the child a
+// root bone.
 bool CmdHierarchy(Ctx& c, const Token& cmd) {
     cm::CompileInput::ForcedHierarchy fh;
     if (!c.Want("a bone name", cmd, fh.child) ||
@@ -5647,9 +5607,8 @@ bool CmdHierarchy(Ctx& c, const Token& cmd) {
 // animation data.
 // ---------------------------------------------------------------------------
 
-// The reference converts through DOUBLE (`verify_atof(token) * M_PI / 180.0f`).
-// Rounding a float pi/180 instead is off by 1 ULP on values like 35 deg, and
-// that lands in the .mdl.
+// stock studiomdl converts through DOUBLE (`verify_atof(token) * M_PI / 180.0f`). Rounding a float
+// pi/180 instead is off by 1 ULP on values like 35 deg, and that lands in the .mdl.
 float DegToRad(float deg) {
     return static_cast<float>(deg * 3.14159265358979323846 / 180.0);
 }
@@ -5674,8 +5633,8 @@ bool WantDegrees(Ctx& c, const Token& cmd, float& outRad) {
     return true;
 }
 
-// reference ParseJiggleStiffness: stiffness AND damping both clamp to [0,1000]
-// (ParseJiggleDamping's tighter range is never actually called)
+// stiffness AND damping both clamp to [0,1000] (ParseJiggleDamping's tighter range is never
+// actually called)
 bool WantStiffness(Ctx& c, const Token& cmd, float& out) {
     float v = 0.0f;
     if (!c.WantFloat("a stiffness value", cmd, v))
@@ -5775,8 +5734,7 @@ bool ParseJiggleSection(Ctx& c, const Token& cmd, const std::string& sect, cm::J
             handled = false; // is_rigid takes only the common options
         }
 
-        // is_boing is the one section that does NOT fall through to the common
-        // options (reference ParseBoingJiggle errors instead)
+        // is_boing is the one section that does NOT fall through to the common options
         if (!handled && !boing) {
             const int r = ParseCommonJiggle(c, sub, o, jb);
             if (r < 0) return false;
@@ -5787,8 +5745,8 @@ bool ParseJiggleSection(Ctx& c, const Token& cmd, const std::string& sect, cm::J
     }
 }
 
-// $jigglebone <bone> { is_flexible|is_rigid|has_base_spring|is_boing { ... } }
-// (Cmd_JiggleBone). Re-declaring a bone overwrites its definition in place.
+// $jigglebone <bone> { is_flexible|is_rigid|has_base_spring|is_boing { ... } }. Re-declaring a bone
+// overwrites its definition in place.
 bool CmdJiggleBone(Ctx& c, const Token& cmd) {
     cm::JiggleBone jb;
     if (!c.Want("a bone name", cmd, jb.bonename))
@@ -5812,9 +5770,9 @@ bool CmdJiggleBone(Ctx& c, const Token& cmd) {
             jb.flags |= cm::kJiggleHasBaseSpring;
         else if (sect == "is_boing") {
             jb.flags |= cm::kJiggleIsBoing;
-            // seeded only here, matching where ParseBoingJiggle seeds them - a
-            // non-boing jigglebone writes zeros. 0.7071f is the reference's
-            // literal, NOT cos(45 deg), and the two differ in the .mdl bytes.
+            // seeded only here, matching where ParseBoingJiggle seeds them - a non-boing jigglebone
+            // writes zeros. 0.7071f is stock studiomdl's literal, NOT cos(45 deg), and the two
+            // differ in the .mdl bytes.
             jb.boingImpactSpeed = 100.0f;
             jb.boingImpactAngle = 0.7071f;
             jb.boingDampingRate = 0.25f;
@@ -5839,9 +5797,9 @@ bool CmdJiggleBone(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// Append one trigger. Rotations arrive in degrees, the position in model units.
-// The writer stores 1/tolerance, so a zero tolerance would put an inf on disk -
-// the reference divides unguarded, we refuse.
+// Append one trigger. Rotations arrive in degrees, the position in model units. The writer stores
+// 1/tolerance, so a zero tolerance would put an inf on disk - stock studiomdl divides unguarded, we
+// refuse.
 bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
                 const pm::Vector3& driverRotDeg, const pm::Vector3& helperRotDeg,
                 const pm::Vector3& pos, bool absolutePose) {
@@ -5855,12 +5813,12 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
                          DegToRad(driverRotDeg.z)}, tr.trigger);
     pm::AngleQuaternion({DegToRad(helperRotDeg.x), DegToRad(helperRotDeg.y),
                          DegToRad(helperRotDeg.z)}, tr.quat);
-    // scaled at parse time, where the reference applies g_currentscale
+    // scaled at parse time, where stock studiomdl applies g_currentscale
     tr.pos = {pos.x * c.in.scale, pos.y * c.in.scale, pos.z * c.in.scale};
 
-    // hard cap: the .mdl reader walks exactly numtriggers entries. The
-    // reference truncates with a warning rather than failing, as does the
-    // .pulsemdl loader - both front ends must land in the same place.
+    // hard cap: the .mdl reader walks exactly numtriggers entries. stock studiomdl truncates with a
+    // warning rather than failing, as does the .pulsemdl loader - both front ends must land in the
+    // same place.
     if (pb.triggers.size() >= static_cast<size_t>(pulse::limits::kMaxProceduralTriggers)) {
         std::fprintf(stderr, "animconstraint \"%s\": more than %d triggers; "
                              "dropping the rest\n",
@@ -6100,11 +6058,10 @@ bool CmdDriverAimAt(Ctx& c, const Token& cmd) {
 //   <trigger>  tol  trigX trigY trigZ  angX angY angZ  posX posY posZ
 //   <display>  ignored - it is modelling-tool decoration
 //
-// An <aimconstraint> opens an aim-at block instead ($driveraimat's file form).
-// Its <aimvector>/<upvector>/<basepos> lines belong to that block, so <basepos>
-// means the aimat's own base position there and the file-scoped one everywhere
-// else - the reference gets the same split by handing the file to
-// Grab_AimAtBones until it hits a line it does not recognize.
+// An <aimconstraint> opens an aim-at block instead ($driveraimat's file form). Its
+// <aimvector>/<upvector>/<basepos> lines belong to that block, so <basepos> means the aimat's own
+// base position there and the file-scoped one everywhere else - stock studiomdl gets the same split
+// by handing the file to Grab_AimAtBones until it hits a line it does not recognize.
 //
 //   <aimconstraint> <bone> <parent> <aimname>
 //   <aimvector> / <upvector>  x y z    (normalized on read)
@@ -6243,8 +6200,8 @@ bool CmdProceduralBones(Ctx& c, const Token& cmd) {
                 !vec(5, helperRot) || !vec(8, pos))
                 return c.Fail(cmd.line, at.text + ": <trigger> expects tolerance + "
                                         "9 floats");
-            // basepos is added before the scale, like the reference's
-            // `(basepos + pos) * g_currentscale`
+            // basepos is added before the scale, like stock studiomdl's `(basepos + pos) *
+            // g_currentscale`
             pos = {basepos.x + pos.x, basepos.y + pos.y, basepos.z + pos.z};
             if (!AddTrigger(c, at, *cur, tol, driverRot, helperRot, pos, true))
                 return false;
@@ -6281,16 +6238,14 @@ bool CmdAmbientBoost(Ctx& c, const Token&) {
     return true;
 }
 
-// $donotcastshadows (Cmd_DoNotCastShadows): sets
-// STUDIOHDR_FLAGS_DO_NOT_CAST_SHADOWS, no arguments.
+// $donotcastshadows: sets STUDIOHDR_FLAGS_DO_NOT_CAST_SHADOWS, no arguments.
 bool CmdDoNotCastShadows(Ctx& c, const Token&) {
     c.in.doNotCastShadows = true;
     return true;
 }
 
-// $forcephonemecrossfade (Cmd_ForcePhonemeCrossfade): sets
-// STUDIOHDR_FLAGS_FORCE_PHONEME_CROSSFADE so
-// the viseme check always spans two phonemes. No arguments.
+// $forcephonemecrossfade: sets STUDIOHDR_FLAGS_FORCE_PHONEME_CROSSFADE so the viseme check always
+// spans two phonemes. No arguments.
 bool CmdForcePhonemeCrossfade(Ctx& c, const Token&) {
     c.in.forcePhonemeCrossfade = true;
     return true;
@@ -6318,10 +6273,9 @@ bool CmdConstantDirectionalLight(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $skipboneinbbox (Cmd_SkipBoneInBBox): clears
-// useBoneInBBox, so the auto-generated hitboxes (and the sequence boxes derived
-// from them) grow from the bone's vertices alone instead of always containing
-// the bone origin. No arguments, no effect when $hboxset is authored.
+// $skipboneinbbox: clears useBoneInBBox, so the auto-generated hitboxes (and the sequence boxes
+// derived from them) grow from the bone's vertices alone instead of always containing the bone
+// origin. No arguments, no effect when $hboxset is authored.
 bool CmdSkipBoneInBBox(Ctx& c, const Token&) {
     c.in.skipBoneInBBox = true;
     return true;
@@ -6361,8 +6315,8 @@ bool CmdBBox(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $cbox <minx miny minz> <maxx maxy maxz> (Cmd_CBox): the view clipping box.
-// Zero unless given, which is what every stock model ships.
+// $cbox <minx miny minz> <maxx maxy maxz>: the view clipping box. Zero unless given, which is what
+// every stock model ships.
 bool CmdCBox(Ctx& c, const Token& cmd) {
     if (!c.WantFloat("a min x", cmd, c.in.cbox[0].x) ||
         !c.WantFloat("a min y", cmd, c.in.cbox[0].y) ||
@@ -6375,15 +6329,13 @@ bool CmdCBox(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $illumposition <x> <y> <z> [<bone>] (Cmd_Illumposition): the point the
-// engine samples the lighting environment at, instead of sequence 0's box
-// center. Neither form is scaled by $transformmodel - like $bbox the numbers
-// are taken as written.
+// $illumposition <x> <y> <z> [<bone>]: the point the engine samples the lighting environment at,
+// instead of sequence 0's box center. Neither form is scaled by $transformmodel - like $bbox the
+// numbers are taken as written.
 //
-// Bone-less, the point is static and gets the reference's source -> model
-// swizzle, which is the default rotatemodel (+90 yaw) applied to it. With a
-// bone the numbers are bone space and the command also emits a rigid
-// "__illumPosition" attachment, which the header then points at so the
+// Bone-less, the point is static and gets stock studiomdl's source -> model swizzle, which is the
+// default rotatemodel (+90 yaw) applied to it. With a bone the numbers are bone space and the
+// command also emits a rigid "__illumPosition" attachment, which the header then points at so the
 // position follows that bone.
 bool CmdIllumPosition(Ctx& c, const Token& cmd) {
     if (c.in.illumpositionSet)
@@ -6420,10 +6372,9 @@ bool CmdIllumPosition(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $eyeposition <x> <y> <z> [autoheight] (Cmd_Eyeposition): the ideal eye point,
-// used by the engine to aim eyes and by tools as the view origin. Same source ->
-// model swizzle as the static $illumposition, but this one IS scaled by $scale,
-// which the compile stage applies. `autoheight` derives Z from the eyeballs
+// $eyeposition <x> <y> <z> [autoheight]: the ideal eye point, used by the engine to aim eyes and by
+// tools as the view origin. Same source -> model swizzle as the static $illumposition, but this one
+// IS scaled by $scale, which the compile stage applies. `autoheight` derives Z from the eyeballs
 // (rounded mean of their |z|) and treats the authored Z as an offset from it.
 bool CmdEyePosition(Ctx& c, const Token& cmd) {
     pm::Vector3 pos;
@@ -6441,9 +6392,8 @@ bool CmdEyePosition(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $maxeyedeflection <degrees> (Cmd_MaxEyeDeflection): how far off center the
-// eyes may turn before the head takes over. Stored as its cosine; 0 means the
-// engine's own cos(30) default.
+// $maxeyedeflection <degrees>: how far off center the eyes may turn before the head takes over.
+// Stored as its cosine; 0 means the engine's own cos(30) default.
 bool CmdMaxEyeDeflection(Ctx& c, const Token& cmd) {
     float deg;
     if (!c.WantFloat("an angle in degrees", cmd, deg))
@@ -6463,9 +6413,9 @@ bool CmdCdMaterials(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $renamematerial <from> <to> - rewrite one loaded texture's name, so it must
-// come after the $body/$model that loaded it. Exact (case-insensitive) match
-// first, then a substring fallback, matching the reference.
+// $renamematerial <from> <to> - rewrite one loaded texture's name, so it must come after the
+// $body/$model that loaded it. Exact (case-insensitive) match first, then a substring fallback,
+// matching stock studiomdl.
 bool CmdRenameMaterial(Ctx& c, const Token& cmd) {
     std::string from, to;
     if (!c.Want("a material name", cmd, from) ||
@@ -6562,11 +6512,9 @@ bool ParseTextureSet(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::Ski
 }
 
 // ---------------------------------------------------------------------------
-// $lod / $shadowlod (reference Cmd_LOD)
 // ---------------------------------------------------------------------------
 
-// Path- and extension-stripped name, the comparison form every LOD command
-// uses for a model (reference GetModelBaseName).
+// Path- and extension-stripped name, the comparison form every LOD command uses for a model.
 std::string ModelBaseName(const std::string& s) {
     const std::string noExt = StripExtension(s);
     const size_t slash = noExt.find_last_of("/\\");
@@ -6597,8 +6545,7 @@ bool ParseReplaceModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
         !c.Want("a replacement mesh", cmd, r.dst))
         return false;
 
-    // "blank" means the LOD system was told to replace nothing - forget the
-    // entry entirely (reference Cmd_ReplaceModel)
+    // "blank" means the LOD system was told to replace nothing - forget the entry entirely
     if (_stricmp(r.src.c_str(), "blank") == 0) {
         c.MarkOption(c.pos - 2);
         return true;
@@ -6619,8 +6566,8 @@ bool ParseReplaceModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
     return true;
 }
 
-// removemodel <model> - this LOD stops drawing the model entirely. Stored as a
-// model replacement with no replacement geometry (reference Cmd_RemoveModel).
+// removemodel <model> - this LOD stops drawing the model entirely. Stored as a model replacement
+// with no replacement geometry.
 bool ParseRemoveModel(Ctx& c, const Token& cmd, cm::ScriptLod& lod) {
     cm::LodReplacement r;
     if (!c.Want("a model name", cmd, r.src))
@@ -6765,10 +6712,9 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             if (!c.Want("a material name", t, r.src) ||
                 !c.Want("a replacement material", t, r.dst))
                 return false;
-            // The replacement is named by string in the .vtx replacement list,
-            // never by material id, so it does NOT join the material table. The
-            // reference registers it here and then culls it right back out in
-            // CullUnusedMaterials - same result, one less step.
+            // The replacement is named by string in the .vtx replacement list, never by material
+            // id, so it does NOT join the material table. stock studiomdl registers it here and
+            // then culls it right back out in CullUnusedMaterials - same result, one less step.
             lod.materialReplacements.push_back(std::move(r));
         } else if (opt == "replacematerialsubstring") {
             cm::LodReplacement r;
@@ -6795,8 +6741,8 @@ bool CmdLod(Ctx& c, const Token& cmd) {
         } else if (opt == "use_skeletalaware_decimation") {
             lod.skeletalAwareDecimation = true;
         } else if (opt == "use_shadowlod_materials") {
-            // silently ignored on a plain $lod, the way the reference does it -
-            // the flag is model-wide and only means anything for the shadow LOD
+            // silently ignored on a plain $lod, the way stock studiomdl does it - the flag is
+            // model-wide and only means anything for the shadow LOD
             if (isShadow)
                 lod.useShadowLodMaterials = true;
         } else {
@@ -7091,7 +7037,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
         }
     }
 
-    // scaled at parse time, where the reference calls scale_vertex
+    // scaled at parse time, where stock studiomdl calls scale_vertex
     hb.bmin = {hb.bmin.x * c.in.scale, hb.bmin.y * c.in.scale, hb.bmin.z * c.in.scale};
     hb.bmax = {hb.bmax.x * c.in.scale, hb.bmax.y * c.in.scale, hb.bmax.z * c.in.scale};
     if (hb.capsuleRadius > 0.0f) hb.capsuleRadius *= c.in.scale;
@@ -7187,8 +7133,8 @@ bool CmdRenameHboxSet(Ctx& c, const Token& cmd) {
 // options reference by name, so they conventionally precede the sequences.
 // ---------------------------------------------------------------------------
 
-// $poseparameter <name> <min> <max> [wrap | loop <value>]  (Cmd_PoseParameter).
-// Re-declaring a name updates it in place, matching LookupPoseParameter.
+// $poseparameter <name> <min> <max> [wrap | loop <value>]. Re-declaring a name updates it in place,
+// matching LookupPoseParameter.
 bool CmdPoseParameter(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
@@ -7230,8 +7176,8 @@ bool CmdPoseParameter(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $ikchain <name> <endbone> [control value] [knee x y z] [height h]
-//          [pad p] [floor f] [center x y z] (Cmd_IKChain).
+// $ikchain <name> <endbone> [control value] [knee x y z] [height h] [pad p] [floor f] [center x y
+// z].
 bool CmdIkChain(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
@@ -7288,7 +7234,7 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $ikautoplaylock <chain> <position_weight> <rotation_weight>  (Cmd_IKAutoplayLock).
+// $ikautoplaylock <chain> <position_weight> <rotation_weight>.
 bool CmdIkAutoplayLock(Ctx& c, const Token& cmd) {
     cm::IkLock lock;
     if (!c.Want("an ik chain name", cmd, lock.name) ||
@@ -7302,10 +7248,9 @@ bool CmdIkAutoplayLock(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// Shared body for $weightlist / $defaultweightlist (studiomdl Option_Weightlist),
-// inline or braced. Each `<bone> <weight>` adds an entry whose position weight
-// defaults to the rotation weight; a following `posweight <val>` overrides the
-// last entry's position weight. A nonzero posweight needs a nonzero weight.
+// Shared body for $weightlist / $defaultweightlist, inline or braced. Each `<bone> <weight>` adds
+// an entry whose position weight defaults to the rotation weight; a following `posweight <val>`
+// overrides the last entry's position weight. A nonzero posweight needs a nonzero weight.
 bool ParseWeightEntries(Ctx& c, const Token& cmd, const std::string& listname,
                         std::vector<cm::WeightList::Entry>& entries) {
     bool braced = false;
@@ -7348,7 +7293,7 @@ bool ParseWeightEntries(Ctx& c, const Token& cmd, const std::string& listname,
     return true;
 }
 
-// $weightlist <name> { <bone> <weight> [posweight <val>] ... }  (Cmd_Weightlist).
+// $weightlist <name> { <bone> <weight> [posweight <val>] ... }.
 bool CmdWeightList(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
@@ -7367,8 +7312,8 @@ bool CmdWeightList(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $defaultweightlist { <bone> <weight> [posweight <val>] ... }  (Cmd_DefaultWeightlist).
-// Fills weightlist slot 0; re-declaring replaces it (Option_Weightlist resets).
+// $defaultweightlist { <bone> <weight> [posweight <val>] ... }. Fills weightlist slot 0;
+// re-declaring replaces it.
 bool CmdDefaultWeightList(Ctx& c, const Token& cmd) {
     c.in.defaultWeights.clear();
     return ParseWeightEntries(c, cmd, "<default>", c.in.defaultWeights);
@@ -7379,7 +7324,7 @@ bool CmdDefaultWeightList(Ctx& c, const Token& cmd) {
 // $animation / $sequence declared after it, matching studiomdl's globals.
 // ---------------------------------------------------------------------------
 
-// $defaultfps <fps>  (Cmd_SetDefaultFPS): the fps a new animation starts with.
+// $defaultfps <fps>: the fps a new animation starts with.
 bool CmdDefaultFps(Ctx& c, const Token& cmd) {
     float fps = 0.0f;
     if (!c.WantFloat("a frame rate", cmd, fps))
@@ -7390,8 +7335,8 @@ bool CmdDefaultFps(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $motionrollback <sec>  (Cmd_MotionExtractionRollBack): the motionrollback a
-// new animation starts with. Per-anim `motionrollback` still overrides it.
+// $motionrollback <sec>: the motionrollback a new animation starts with. Per-anim `motionrollback`
+// still overrides it.
 bool CmdMotionRollback(Ctx& c, const Token& cmd) {
     float sec = 0.0f;
     if (!c.WantFloat("a rollback in seconds", cmd, sec))
@@ -7402,12 +7347,11 @@ bool CmdMotionRollback(Ctx& c, const Token& cmd) {
     return true;
 } // Not sure what does this do.
 
-// $nosequence  (Cmd_NoSequence): accepted for stock-QC compatibility. A
-// sequence-less model already compiles by default (auto reference bind pose),
-// so this is a no-op.
+// $nosequence: accepted for stock-QC compatibility. A sequence-less model already compiles by
+// default, so this is a no-op.
 bool CmdNoSequence(Ctx&, const Token&) { return true; }
 
-// $defaultfadein / $defaultfadeout <seconds>  (Cmd_SetDefaultFadeIn/OutTime).
+// $defaultfadein / $defaultfadeout <seconds>.
 bool CmdDefaultFadeIn(Ctx& c, const Token& cmd) {
     return c.WantFloat("a time", cmd, c.defaultFadeIn);
 }
@@ -7415,15 +7359,13 @@ bool CmdDefaultFadeOut(Ctx& c, const Token& cmd) {
     return c.WantFloat("a time", cmd, c.defaultFadeOut);
 }
 
-// $lcaseallsequences  (Cmd_LCaseAllSequences).
 bool CmdLCaseAllSequences(Ctx& c, const Token&) {
     c.lcaseSequences = true;
     return true;
 }
 
-// $allowactivityname <name>  (Cmd_AllowActivityName): opt-in whitelist. Declare
-// one and every $sequence activity must be on the list, so a typo'd ACT_ name
-// fails the compile instead of silently becoming a new activity.
+// $allowactivityname <name>: opt-in whitelist. Declare one and every $sequence activity must be on
+// the list, so a typo'd ACT_ name fails the compile instead of silently becoming a new activity.
 bool CmdAllowActivityName(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("an activity name", cmd, name))
@@ -7432,8 +7374,8 @@ bool CmdAllowActivityName(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $sectionframes <frames> <minframelimit>  (Cmd_SectionFrames): animation
-// compression sectioning. Stock's defaults are 30 120.
+// $sectionframes <frames> <minframelimit>: animation compression sectioning. Stock's defaults are
+// 30 120.
 bool CmdSectionFrames(Ctx& c, const Token& cmd) {
     int frames = 0, minLimit = 0;
     if (!c.WantInt("a section length in frames", cmd, frames) ||
@@ -7448,11 +7390,10 @@ bool CmdSectionFrames(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $animblocksize <size> [nostall] [highres|lowres] [numframes <1..4>]
-//                       [cachehighres] [posdelta <f>]   (Cmd_AnimBlockSize)
-// Turns on demand-loaded animation: the payload moves to models/<name>.ani in
-// chunks of roughly <size> bytes. A value under 1024 is read as kilobytes, the
-// way stock does, so "$animblocksize 8" means 8 KB.
+// $animblocksize <size> [nostall] [highres|lowres] [numframes <1..4>] [cachehighres] [posdelta <f>]
+// Turns on demand-loaded animation: the payload moves to models/<name>.ani in chunks of roughly
+// <size> bytes. A value under 1024 is read as kilobytes, the way stock does, so "$animblocksize 8"
+// means 8 KB.
 bool CmdAnimBlockSize(Ctx& c, const Token& cmd) {
     int size = 0;
     if (!c.WantInt("a block size in bytes", cmd, size))
@@ -7491,11 +7432,10 @@ bool CmdAnimBlockSize(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $bonesaveframe <bone> [position] [rotation] [rotation64]  (Cmd_BoneSaveFrame)
-// Names a bone whose pose is cached in the .mdl so the model can be posed
-// before its .ani block finishes loading. Stating any entry replaces the
-// writer's automatic choice for EVERY bone, so a script that uses this must
-// list all the bones it wants cached.
+// $bonesaveframe <bone> [position] [rotation] [rotation64] Names a bone whose pose is cached in the
+// .mdl so the model can be posed before its .ani block finishes loading. Stating any entry replaces
+// the writer's automatic choice for EVERY bone, so a script that uses this must list all the bones
+// it wants cached.
 bool CmdBoneSaveFrame(Ctx& c, const Token& cmd) {
     cm::BoneSaveFrame bsf;
     if (!c.Want("a bone name", cmd, bsf.name))
@@ -8327,11 +8267,10 @@ bool CmdPopD(Ctx& c, const Token&) {
     return true;
 }
 
-// $addsearchdir <dir>  (Cmd_AddSearchDir). A fallback directory for SOURCE
-// files - the .dmx/.smd a $rendermesh or $animation names, and $proceduralbones'
-// .vrd. Registration order, searched after the current $pushd directory, so only
-// dirs registered ABOVE a reference can serve it. A relative dir is relative to
-// the ROOT script, the same rule the source paths it serves follow (stock joins
+// $addsearchdir <dir>. A fallback directory for SOURCE files - the .dmx/.smd a $rendermesh or
+// $animation names, and $proceduralbones' .vrd. Registration order, searched after the current
+// $pushd directory, so only dirs registered ABOVE a reference can serve it. A relative dir is
+// relative to the ROOT script, the same rule the source paths it serves follow (stock joins
 // cddir[0] here for exactly that reason).
 //
 // This is NOT $addincludesearchdir - source files and $include scripts keep
@@ -8362,10 +8301,9 @@ bool CmdAddIncludeSearchDir(Ctx& c, const Token& cmd) {
     return true;
 }
 
-// $break [<message>]  (Cmd_Break). Stops reading the script here: everything
-// below is ignored, in this file and in every parent that $included it, but the
-// model still compiles from what was read so far. The flag is sticky because
-// each RunCommands level would otherwise carry on at its own next token.
+// $break [<message>]. Stops reading the script here: everything below is ignored, in this file and
+// in every parent that $included it, but the model still compiles from what was read so far. The
+// flag is sticky because each RunCommands level would otherwise carry on at its own next token.
 bool CmdBreak(Ctx& c, const Token& cmd) {
     if (!c.AtCommand()) {
         const Token& msg = c.toks[c.pos++];
@@ -8446,10 +8384,10 @@ bool CmdQcAssert(Ctx& c, const Token& cmd) {
 // Script preprocessing - $definevariable / $redefinevariable / $definemacro
 // ---------------------------------------------------------------------------
 
-// A "$name$" reference starting at s[i] (s[i] is '$'): the index of the closing
-// '$', or npos when this is a plain word like $modelname. Mirrors the reference
-// scriplib's ExpandVariableToken - the scan stops at whitespace, so only a
-// closed, non-empty pair counts and a $command never looks like a reference.
+// A "$name$" reference starting at s[i] (s[i] is '$'): the index of the closing '$', or npos when
+// this is a plain word like $modelname. Mirrors stock studiomdl scriplib's ExpandVariableToken -
+// the scan stops at whitespace, so only a closed, non-empty pair counts and a $command never looks
+// like a reference.
 size_t VarRefEnd(const std::string& s, size_t i) {
     size_t j = i + 1;
     while (j < s.size() && static_cast<unsigned char>(s[j]) > 32 && s[j] != '$')

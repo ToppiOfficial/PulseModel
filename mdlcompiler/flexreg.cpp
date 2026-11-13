@@ -1,10 +1,8 @@
 // flexreg.cpp - flex / morph registration. See flexreg.h.
 //
-// Ports of the reference's flex tables: Add_Flexdesc,
-// FindOrAddFlexController, the AddCombination normal path,
-// AddBodyFlexData/AddFlexControllers/AddBodyFlexRemaps/AddBodyFlexRules,
-// AddBodyFlexRule + AddBodyFlexFetchRule and the Option_Flexrule
-// shunting-yard parser.
+// Ports of stock studiomdl's flex tables: Add_Flexdesc, FindOrAddFlexController, the AddCombination
+// normal path, AddBodyFlexData/AddFlexControllers/AddBodyFlexRemaps/AddBodyFlexRules,
+// AddBodyFlexRule + AddBodyFlexFetchRule and the shunting-yard parser.
 //
 // Registration ORDER defines flexdesc/controller/rule indices and the string
 // table - it mirrors the QC: per body (bodygroup order): [first use of the
@@ -28,7 +26,7 @@ namespace pulse::loader {
 namespace cm = pulse::compile;
 namespace lim = pulse::limits;
 
-// reference Add_Flexdesc: find (stricmp) or append
+// find (stricmp) or append
 int AddFlexdesc(cm::CompileInput& in, const std::string& name, std::string* err) {
     for (size_t i = 0; i < in.flexdescs.size(); ++i)
         if (_stricmp(in.flexdescs[i].name.c_str(), name.c_str()) == 0)
@@ -94,8 +92,7 @@ std::string JoinNames(const std::vector<std::string>& names, const char* sep) {
     return out;
 }
 
-// reference FindOrAddFlexController - exact-name find
-// (strcmp) with a mismatch warning; used by the AddCombination path
+// exact-name find (strcmp) with a mismatch warning; used by the AddCombination path
 void FindOrAddFlexController(cm::CompileInput& in, const std::string& name,
                              const std::string& type, float flMin, float flMax) {
     for (const cm::FlexController& fc : in.flexcontrollers) {
@@ -165,9 +162,8 @@ bool RuleExists(const cm::CompileInput& in, const cm::FlexRule& rule) {
     return false;
 }
 
-// reference Option_Flexrule: infix -> RPN via shunting-yard. One rule per
-// (flexdesc, ops) - an identical later rule is skipped (LOD/multi-body dedup),
-// a different formula for the same desc stacks as a staged rule.
+// infix -> RPN via shunting-yard. One rule per (flexdesc, ops) - an identical later rule is skipped
+// (LOD/multi-body dedup), a different formula for the same desc stacks as a staged rule.
 bool ParseMorphRuleExpr(cm::CompileInput& in, const std::string& flexName,
                         const std::string& expr, std::string* err) {
     static const int precedence[32] = {
@@ -358,9 +354,9 @@ bool ParseMorphRuleExpr(cm::CompileInput& in, const std::string& flexName,
         return false;
     }
 
-    // Dedup on target AND ops: a byte-identical rule is the LOD/multi-body
-    // reprocess duplicate the reference drops; a different formula for the same
-    // desc is a staged rule (alyx's FACS AUs) and stacks, evaluated in order.
+    // Dedup on target AND ops: a byte-identical rule is the LOD/multi-body reprocess duplicate
+    // stock studiomdl drops; a different formula for the same desc is a staged rule (alyx's FACS
+    // AUs) and stacks, evaluated in order.
     if (RuleExists(in, rule)) {
         PrintFlexRule("rule", flexName, "= " + expr + " (duplicate, skipped)");
         return true;
@@ -442,9 +438,8 @@ bool RegisterCorrective(cm::CompileInput& in, const ManualFlex::Rule& r, std::st
     return true;
 }
 
-// reference AddCombination normal path: runs once per
-// source that carries DmeFlexRules - controllers from the combo controls,
-// flexdescs for every rule name, %name delta registration, then the
+// normal path: runs once per source that carries DmeFlexRules - controllers from the combo
+// controls, flexdescs for every rule name, %name delta registration, then the
 // expression/passthrough rules.
 bool RegisterSourceCombination(cm::CompileInput& in, source::Source* src, std::string* err) {
     if (!src->hasDmeFlexRules)
@@ -521,9 +516,8 @@ bool RegisterSourceCombination(cm::CompileInput& in, source::Source* src, std::s
     return true;
 }
 
-// reference AddFlexControllers: resolve the
-// source's remaps to global controllers, creating right_/left_, multi_ and
-// blink controllers as needed; fills the raw->remap and remap->global maps.
+// resolve the source's remaps to global controllers, creating right_/left_, multi_ and blink
+// controllers as needed; fills the raw->remap and remap->global maps.
 void AddFlexControllersForSource(cm::CompileInput& in, source::Source* src) {
     std::vector<int>& r2s = src->rawToRemapSource;
     std::vector<int>& r2l = src->rawToRemapLocal;
@@ -541,8 +535,8 @@ void AddFlexControllersForSource(cm::CompileInput& in, source::Source* src) {
     for (int i = 0; i < nRemappedControlCount; ++i) {
         source::ControllerRemap& remap = src->controllerRemaps[i];
 
-        // raw -> (remap, local) map; the name match is case-SENSITIVE like
-        // the reference's CUtlString ==
+        // raw -> (remap, local) map; the name match is case-SENSITIVE like stock studiomdl's
+        // CUtlString ==
         for (size_t jj = 0; jj < remap.rawControls.size(); ++jj) {
             for (int k = 0; k < nRawControlCount; ++k) {
                 if (remap.rawControls[jj] == src->combinationControls[k].name) {
@@ -633,7 +627,6 @@ void AddFlexControllersForSource(cm::CompileInput& in, source::Source* src) {
     }
 }
 
-// reference AddBodyFlexData
 bool AddBodyFlexData(cm::CompileInput& in, source::Source* src, int imodel, std::string* err) {
     src->keyStartIndex = static_cast<int>(in.flexkeys.size());
 
@@ -674,7 +667,6 @@ bool AddBodyFlexData(cm::CompileInput& in, source::Source* src, int imodel, std:
     return true;
 }
 
-// reference AddBodyFlexFetchRule
 void AddBodyFlexFetchRule(source::Source* src, cm::FlexRule& rule, int rawIndex,
                           const std::vector<int>& remapToGlobal) {
     const int remapSourceIndex = src->rawToRemapSource[rawIndex];
@@ -741,7 +733,6 @@ void AddBodyFlexFetchRule(source::Source* src, cm::FlexRule& rule, int rawIndex,
     }
 }
 
-// reference AddBodyFlexRule
 bool AddBodyFlexRuleForKey(cm::CompileInput& in, source::Source* src,
                            const source::CombinationRule& srcRule, int nFlexDesc,
                            const std::vector<int>& remapToGlobal, std::string* err) {
@@ -794,7 +785,6 @@ bool AddBodyFlexRuleForKey(cm::CompileInput& in, source::Source* src,
     return true;
 }
 
-// reference AddBodyFlexRules
 bool AddBodyFlexRulesForSource(cm::CompileInput& in, source::Source* src, std::string* err) {
     // resolve the EYELID remaps' eyes-updown controller (exact-name match)
     for (source::ControllerRemap& remap : src->controllerRemaps) {
@@ -828,8 +818,7 @@ bool AddBodyFlexRulesForSource(cm::CompileInput& in, source::Source* src, std::s
 // rules/localvars/correctives in authored order.
 bool RegisterManualLists(cm::CompileInput& in, const ManualFlex& manual, std::string* err) {
     for (const ManualFlex::Controller& mc : manual.controllers) {
-        // QC Option_Flexcontroller reuses an existing name with a warning and
-        // does NOT update it
+        // QC reuses an existing name with a warning and does NOT update it
         if (FindFlexControllerByName(in, mc.name.c_str()) >= 0) {
             std::fprintf(stderr,
                          "warning: morph controller '%s' already defined, reusing existing "
@@ -864,9 +853,8 @@ bool RegisterManualLists(cm::CompileInput& in, const ManualFlex& manual, std::st
     return true;
 }
 
-// reference IsDeltaStateStereo against an
-// imported rig: ParseDeltaName splits on '_' and EVERY part must name a raw
-// control, then the delta is stereo if any part's input control is stereo.
+// against an imported rig: ParseDeltaName splits on '_' and EVERY part must name a raw control,
+// then the delta is stereo if any part's input control is stereo.
 bool RigDeltaIsStereo(const source::FlexRig& rig, const std::string& deltaName) {
     bool stereo = false;
     size_t start = 0;
@@ -944,13 +932,11 @@ void ApplyDataModelFlex(cm::CompileInput& in, const source::FlexRig& rig) {
     }
 }
 
-// $morphsplitstereo splitfactor: synthesize the balance a mesh does not carry.
-// reference ComputeSideAndScale for a paired flexkey - the
-// side comes from the BASE vertex X, smoothstepped across the 2*factor band at
-// the midline; a negative factor mirrors it. Unified into one clamped t because
-// the reference's two branches are the same formula with flipped bounds.
-// OVERWRITES a painted DMX balance for this delta - explicit command wins, the
-// caller warns once when the mesh had real balance to lose.
+// $morphsplitstereo splitfactor: synthesize the balance a mesh does not carry. the side comes from
+// the BASE vertex X, smoothstepped across the 2*factor band at the midline; a negative factor
+// mirrors it. Unified into one clamped t because stock studiomdl's two branches are the same
+// formula with flipped bounds. OVERWRITES a painted DMX balance for this delta - explicit command
+// wins, the caller warns once when the mesh had real balance to lose.
 void GenerateBalance(source::Source& src, const std::string& name, float factor) {
     for (source::SrcMorphAnim& morph : src.morphs) {
         if (_stricmp(morph.name.c_str(), name.c_str()) != 0)
@@ -1013,12 +999,11 @@ bool ApplyStereoSplits(cm::CompileInput& in, const ManualFlex& manual, std::stri
     return true;
 }
 
-// per the reference - a stereo split needs per-vertex balance to
-// blend against, so without it the L/R descs exist and nothing ever drives them
-// apart. Deferred to here because the split can come from the mesh's own
-// combination operator, an imported rig, or a manual MorphSplitStereo, and only
-// the mesh knows whether it carries balance data. Once per source, and only for
-// sources a body actually uses.
+// per stock studiomdl - a stereo split needs per-vertex balance to blend against, so without it the
+// L/R descs exist and nothing ever drives them apart. Deferred to here because the split can come
+// from the mesh's own combination operator, an imported rig, or a manual MorphSplitStereo, and only
+// the mesh knows whether it carries balance data. Once per source, and only for sources a body
+// actually uses.
 void WarnStereoWithoutBalance(source::Source* src) {
     if (src->hasBalanceData)
         return;

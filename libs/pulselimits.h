@@ -50,9 +50,8 @@ inline constexpr int kMaxTexCoords       = 8;
 
 inline constexpr int kMaxBonesPerVert  = 3; // [format] mstudioboneweight_t arrays are [3]
 inline constexpr int kMaxBoneWeights   = 3; // [format] same
-// [tool] Pre-collapse per-vertex cap, clipped to kMaxBoneWeights after bone
-// collapse. Sizes a fixed array on every SrcVertex - raising costs memory per
-// vertex, so it stays a budget. Reference MAXSTUDIOSRCBONEWEIGHTS.
+// [tool] Pre-collapse per-vertex cap, clipped to kMaxBoneWeights after bone collapse. Sizes a fixed
+// array on every SrcVertex - raising costs memory per vertex, so it stays a budget.
 inline constexpr int   kMaxSrcBoneWeights = 16;
 inline constexpr float kMinBoneWeight     = 0.0001f;
 // [tool] Random poses sampled by the $fitboneweights solve: default and ceiling.
@@ -62,9 +61,9 @@ inline constexpr int   kMaxWeightFitPoses = 4096;
 // [tool] Largest base-spring or boing displacement, in model units, the fit poses
 // a jigglebone with. A guess: the real excursion depends on the simulation.
 inline constexpr float kWeightFitNudge    = 1.0f;
-// [tool] Above the format: vtx::Vertex_t::boneID is uint8, so a vertex can
-// only name palette slot 0-255. Kept at the reference's 512 rather than
-// lowered - hardware palettes never approach either number.
+// [tool] Above the format: vtx::Vertex_t::boneID is uint8, so a vertex can only name palette slot
+// 0-255. Kept at stock studiomdl's 512 rather than lowered - hardware palettes never approach
+// either number.
 inline constexpr int kMaxBonesPerStrip = 512;
 inline constexpr int kMaxNumLods       = 8; // [format] numLODVertexes[8]
 
@@ -81,8 +80,7 @@ inline constexpr int kMaxJiggleBones = kMaxBones; // one per bone
 inline constexpr int kMaxHitboxSets     = kUncapped; // [file] 12 bytes each
 inline constexpr int kMaxHitboxesPerSet = kUncapped; // [file] 68 bytes each
 inline constexpr int kMaxProceduralBones = kMaxBones; // one per bone
-// [tool] s_quatinterpbone_t trigger arrays are [32] and the .mdl reader walks
-// exactly numtriggers entries - authored ceiling, not a soft budget.
+// authored ceiling, not a soft budget.
 inline constexpr int kMaxProceduralTriggers = 32;
 
 // --- Textures / materials -------------------------------------------------
@@ -98,7 +96,7 @@ inline constexpr int kMaxSkinFamilies = kUncapped; // [file] one short per skin 
 inline constexpr int kMaxFlexDesc = kUncapped; // [file] 4 bytes each
 inline constexpr int kMaxFlexCtrl = kUncapped; // [file] 20 bytes each
 inline constexpr int kMaxFlexRules = kUncapped; // [file] 12 bytes each
-inline constexpr int kMaxFlexKeys = kMaxFlexDesc / 2; // reference: always half of FlexDesc
+inline constexpr int kMaxFlexKeys = kMaxFlexDesc / 2; // always half of FlexDesc
 inline constexpr int kMaxFlexOps = kUncapped; // [file] 8 bytes each
 inline constexpr int kBudgetFlexMorphVerts = 32768; // [tool] checked before kMaxFlexVerts
 inline constexpr int kMaxEyeballs = 4; // [tool] engine-side eyeball arrays are fixed
@@ -151,12 +149,12 @@ inline constexpr int kMaxHitboxSetName   = 64;
 
 // --- Physics / collision ---------------------------------------------------
 inline constexpr int kMaxPhysSolids      = kMaxBones; // one per physics bone
-inline constexpr int kMaxConvexPieces    = kUncapped; // [tool] reference m_maxConvex default was 40
+inline constexpr int kMaxConvexPieces    = kUncapped;
 // [format] Convex hull of V verts has 2V-4 tris; 1536 verts -> 3068 tris,
 // clearing the 12-bit triangle index below (the real ceiling here).
 inline constexpr int kMaxHullVerts       = 1536;
 inline constexpr int kMaxHullTris        = 4095; // [format] IVP tri/pierce_index are 12-bit
-inline constexpr int kMaxPhysShapes      = kUncapped; // [tool] reference MAX_EXTRA_COLLISION_MODELS + 1
+inline constexpr int kMaxPhysShapes      = kUncapped;
 inline constexpr int kMaxExtraSkinnedBones = kUncapped; // compile-time cost only
 // [tool] Budgets, not format ceilings - the format caps per-hull, not per-solid.
 inline constexpr int kMaxGeneratedHulls = 128;   // VHACD merge target when max_hulls is 0

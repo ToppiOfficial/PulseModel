@@ -24,9 +24,8 @@
 namespace pulse::loader {
 
 struct FaceMarkup {
-    // QC `eyeball <name> <bone> <x y z> <material> <diameter> <angle>
-    // <irismaterial> <pupilscale>`; the iris material is dropped (the reference
-    // parses and discards it).
+    // QC `eyeball <name> <bone> <x y z> <material> <diameter> <angle> <irismaterial> <pupilscale>`;
+    // the iris material is dropped.
     struct Eyeball {
         std::string name;
         std::string bonename; // the HEAD bone, not a dedicated eye bone

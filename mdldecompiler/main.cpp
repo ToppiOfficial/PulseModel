@@ -534,8 +534,8 @@ void WriteBodyParts(Qc& q, const Mdl& m, const std::vector<std::vector<std::stri
         if (!g_studiomdl) {
             q.Line("$modelgroup \"" + part + "\" {");
             for (const std::string& name : meshNames[i])
-                // the reference is quoted too - a model name with a space in it
-                // is one token only when it is
+                // stock studiomdl is quoted too - a model name with a space in it is one token only
+                // when it is
                 q.Line(name.empty() ? "    blank"
                                     : "    mesh name \"" + name + "\" \"" + name + "\"");
             q.Line("}");

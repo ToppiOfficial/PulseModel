@@ -104,9 +104,8 @@ struct WrinkleScaleOption {
     bool matched = false; // a name no source has is a hard error
 };
 
-// Bake wrinkle onto every matching morph, per vertex: |posDelta| * scale /
-// maxDeflection (reference GenerateWrinkleDelta). Runs after every source is
-// loaded, so it overwrites whatever the file itself carried or generated.
+// Bake wrinkle onto every matching morph, per vertex: |posDelta| * scale / maxDeflection. Runs
+// after every source is loaded, so it overwrites whatever the file itself carried or generated.
 void ApplyWrinkleScales(Source& src, std::vector<WrinkleScaleOption>& opts);
 
 // $skinnedbonecull <aggressive|tree> - drop every bone no vertex of this source

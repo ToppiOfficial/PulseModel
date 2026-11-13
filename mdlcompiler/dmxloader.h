@@ -1,9 +1,9 @@
 // dmxloader.h - PulseMDL
 //
-// Maps a parsed DMX document into the compiler's per-file Source (source.h).
-// Behavior port of the reference LoadModelAndSkeleton/LoadBindPose/
-// LoadMeshes/LoadAnimations + UnifyIndices/BuildIndividualMeshes.
-// Handles both geometry DMX and animation DMX; `animOnly` skips geometry.
+// Maps a parsed DMX document into the compiler's per-file Source (source.h). Behavior port of stock
+// studiomdl LoadModelAndSkeleton/LoadBindPose/ LoadMeshes/LoadAnimations +
+// UnifyIndices/BuildIndividualMeshes. Handles both geometry DMX and animation DMX; `animOnly` skips
+// geometry.
 
 #ifndef PULSEMDL_DMXLOADER_H
 #define PULSEMDL_DMXLOADER_H
@@ -17,26 +17,22 @@
 
 namespace pulse::source {
 
-// Data the loader would crash on is an error; a stream the reference would skip
-// is a warning. `file` names the DMX in messages.
+// Data the loader would crash on is an error; a stream stock studiomdl would skip is a warning.
+// `file` names the DMX in messages.
 bool ValidateDmxModel(const pulse::dmx::Datamodel& dm, const std::string& file, std::string* err);
 // The attribute in `e` holding standard stream `legacyName` ("positions", or
 // "positionsIndices" for its indices), or "" when `e` does not register it.
 std::string DmxStreamName(const pulse::dmx::Element& e, int modelVersion, const char* legacyName);
 const pulse::dmx::Element* DmxMeshBindState(const pulse::dmx::Element* mesh);
 
-// `mats` = compile-wide material registry (face materials index it).
-// `scale` = per-source import scale (reference g_currentscale).
-// `morphSource` = delta states become morphs/flexkeys (reference LoadingModelBody
-// gate); the combination-operator rig itself is $datamodelflexes' job, see
-// LoadDmxFlexRig.
-// `filter` = $rendermesh $exceptionlist: rejected mesh dags contribute nothing
-// and are written back through so the caller can flag names that matched nothing.
-// `animOnly` = skeleton + channel clips only, no mesh dags read at all (materials
-// never reach `mats`, no morphs).
-// `physicsShapes` = $datamodelphysics: read the DmePhysicsShape dags instead of
-// the DmeMesh ones, each connected piece pinned to its most-weighted bone, plus
-// the root's physicsPrimitiveList as one rigid hull per merge group.
+// `mats` = compile-wide material registry (face materials index it). `scale` = per-source import
+// scale. `morphSource` = delta states become morphs/flexkeys; the combination-operator rig itself
+// is $datamodelflexes' job, see LoadDmxFlexRig. `filter` = $rendermesh $exceptionlist: rejected
+// mesh dags contribute nothing and are written back through so the caller can flag names that
+// matched nothing. `animOnly` = skeleton + channel clips only, no mesh dags read at all (materials
+// never reach `mats`, no morphs). `physicsShapes` = $datamodelphysics: read the DmePhysicsShape
+// dags instead of the DmeMesh ones, each connected piece pinned to its most-weighted bone, plus the
+// root's physicsPrimitiveList as one rigid hull per merge group.
 bool LoadDmxSource(const pulse::dmx::Datamodel& dm, Source& out,
                    MaterialTable& mats, float scale, std::string* err,
                    bool morphSource = false, MeshFilter* filter = nullptr,
@@ -56,9 +52,9 @@ void TessellateCapsule(const math::Vector3& p0, const math::Vector3& p1, float r
 void TessellateBox(const math::Vector3& mins, const math::Vector3& maxs,
                    const math::Vector3& orientation, std::vector<math::Vector3>& pts);
 
-// True when the loaded DmeModel declared upAxis "Y*" (reference sets
-// g_defaultrotation = (pi/2, 0, pi/2) in that case). Sticky across loads,
-// mirroring the reference's set-once bSetUpAxis behavior.
+// True when the loaded DmeModel declared upAxis "Y*" (stock studiomdl sets g_defaultrotation =
+// (pi/2, 0, pi/2) in that case). Sticky across loads, mirroring stock studiomdl's set-once
+// bSetUpAxis behavior.
 bool DmxUpAxisY();
 void ResetDmxUpAxis(); // test hook
 

@@ -1,8 +1,8 @@
 // dmxvalidate.cpp - model DMX checks run before a file is loaded, and the
 // standard vertex-stream lookup the loader shares with them.
 //
-// A stream counts only when the reference CDmeVertexData would register it: listed
-// in vertexFormat, values present, and an int Indices array (skinning excepted).
+// A stream counts only when it is listed in vertexFormat, has values, and has an int Indices array
+// (skinning excepted).
 
 #include "dmxloader.h"
 #include "diagnostic.h"

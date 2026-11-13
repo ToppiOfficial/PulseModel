@@ -1,6 +1,6 @@
 // facemarkup.cpp - eyeball / mouth / eyelid registration. See facemarkup.h.
 //
-// Ports of Option_Eyeball, Option_Mouth and Option_DmxEyelid.
+// Ports of, and.
 
 #include "strcompat.h"
 #include "diagnostic.h"
@@ -22,10 +22,9 @@ namespace {
 
 const char* const kLidSuffix[3] = {"lowerer", "neutral", "raiser"};
 
-// Option_Eyeball: radius is HALF the diameter, zoffset is the raw
-// angle (the compile stage takes tan()), iris_scale is the raw pupil scale (the
-// compile stage takes the reciprocal). Model scale is applied there too, where
-// g_currentscale is known.
+// radius is HALF the diameter, zoffset is the raw angle (the compile stage takes tan), iris_scale
+// is the raw pupil scale (the compile stage takes the reciprocal). Model scale is applied there
+// too, where g_currentscale is known.
 bool RegisterEyeball(cm::CompileInput& in, const FaceMarkup::Eyeball& src, std::string* err) {
     if (src.bonename.empty()) {
         if (err) *err = "eyeball \"" + src.name + "\" has no bone";
@@ -48,7 +47,7 @@ bool RegisterEyeball(cm::CompileInput& in, const FaceMarkup::Eyeball& src, std::
     return true;
 }
 
-// Option_Mouth: the controller is registered as a flexdesc.
+// the controller is registered as a flexdesc.
 bool RegisterMouth(cm::CompileInput& in, const FaceMarkup::Mouth& src, std::string* err) {
     if (src.controller.empty()) {
         if (err) *err = "mouth has no controller";
@@ -69,9 +68,8 @@ bool RegisterMouth(cm::CompileInput& in, const FaceMarkup::Mouth& src, std::stri
     return true;
 }
 
-// Lid poses are addressed by delta NAME, never a VTA frame index. Stereo binds
-// both eyeballs to one <type>_right/<type>_left desc pair (Option_DmxEyelid);
-// mono gives one eyeball its own lid desc and targets (Option_Eyelid).
+// Lid poses are addressed by delta NAME, never a VTA frame index. Stereo binds both eyeballs to one
+// <type>_right/<type>_left desc pair; mono gives one eyeball its own lid desc and targets.
 bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::string* err) {
     const std::string type = src.upper ? "upper" : "lower";
 
@@ -205,8 +203,8 @@ bool RegisterEyelid(cm::CompileInput& in, const FaceMarkup::Eyelid& src, std::st
             continue;
         }
 
-        // radius is still unscaled here (SetupEyeballs scales it), so scale it
-        // for the comparison the reference makes
+        // radius is still unscaled here (SetupEyeballs scales it), so scale it for the comparison
+        // stock studiomdl makes
         for (int i = 0; i < 3; ++i) {
             if (std::fabs(target[i]) > eye.radius * in.scale) {
                 if (err) *err = "eyelid \"" + type + "\" " + kLidSuffix[i] +

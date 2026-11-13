@@ -81,8 +81,8 @@ struct HardwareMatrixState {
         }
         return false;
     }
-    // flush the whole palette (reference CHardwareMatrixState::DeallocateAll);
-    // the LRU counter keeps running, matching the reference's allocation ids
+    // flush the whole palette; the LRU counter keeps running, matching stock studiomdl's allocation
+    // ids
     void DeallocateAll() {
         for (MatrixState& s : state) {
             if (s.allocated)
@@ -123,7 +123,6 @@ struct HardwareMatrixState {
 };
 
 // ---------------------------------------------------------------------------
-// working structures (reference Strip_t/StripGroup_t/Mesh_t/...)
 // ---------------------------------------------------------------------------
 struct Face {
     int vertID[4] = {-1, -1, -1, -1};
@@ -197,7 +196,6 @@ struct Builder {
         return reinterpret_cast<fmt::mstudiomesh_t*>(
                    reinterpret_cast<uint8_t*>(mdl) + mdl->meshindex) + i;
     }
-    // vvd accessors (cached copy the builder may mutate, like the reference)
     fmt::mstudiovertex_t* vvdVertex(fmt::mstudiomodel_t* mdl, int i) {
         fmt::vertexFileHeader_t* vh =
             reinterpret_cast<fmt::vertexFileHeader_t*>(vvdBuf->data());
@@ -235,42 +233,46 @@ void MergeLikeBoneIndicesWithinVert(fmt::mstudioboneweight_t* bw) {
     bw->numbones = static_cast<uint8_t>(realNumBones);
 }
 
-// TryToReduceBoneInfluence
+// Drops negligible influences (lightest first) until the vertex fits maxBones, then
+// rescales the survivors if they no longer sum to one.
 void TryToReduceBoneInfluence(fmt::vtx::Vertex_t& v, fmt::mstudioboneweight_t& bw, int maxBones) {
-    int i;
+    auto used = [&](int slot) { return v.boneID[slot] != 255; };
+    auto weightOf = [&](int slot) -> float& { return bw.weight[v.boneWeightIndex[slot]]; };
+
     while (v.numBones > maxBones) {
-        float minWeight = 2.0f;
-        int minIndex = -1;
-        for (i = 0; i < kMaxBonesPerVert; ++i) {
-            if (v.boneID[i] != 255) {
-                float weight = bw.weight[v.boneWeightIndex[i]];
-                if (weight < minWeight) {
-                    minWeight = weight;
-                    minIndex = i;
-                }
+        int lightest = -1;
+        float lightestWeight = 2.0f;
+        for (int slot = 0; slot < kMaxBonesPerVert; ++slot) {
+            if (used(slot) && weightOf(slot) < lightestWeight) {
+                lightest = slot;
+                lightestWeight = weightOf(slot);
             }
         }
-        if (minWeight >= 0.0001f)
+        if (lightest < 0 || lightestWeight >= 0.0001f)
             break;
-        for (i = minIndex; i < kMaxBonesPerVert - 1; ++i) {
-            v.boneID[i] = v.boneID[i + 1];
-            v.boneWeightIndex[i] = v.boneWeightIndex[i + 1];
+
+        // close the gap and free the last slot
+        for (int slot = lightest; slot + 1 < kMaxBonesPerVert; ++slot) {
+            v.boneID[slot] = v.boneID[slot + 1];
+            v.boneWeightIndex[slot] = v.boneWeightIndex[slot + 1];
         }
         v.boneID[kMaxBonesPerVert - 1] = 255;
         v.boneWeightIndex[kMaxBonesPerVert - 1] = 0;
         --v.numBones;
     }
 
-    float t = 0.0f;
-    for (i = 0; i < kMaxBonesPerVert; ++i)
-        if (v.boneID[i] != 255)
-            t += bw.weight[v.boneWeightIndex[i]];
-    if (t > 0.0f && fabsf(t - 1.0f) > 0.001f) {
-        t = 1.0f / t;
-        for (i = 0; i < kMaxBonesPerVert; ++i)
-            if (v.boneID[i] != 255)
-                bw.weight[v.boneWeightIndex[i]] *= t;
-    }
+    float total = 0.0f;
+    for (int slot = 0; slot < kMaxBonesPerVert; ++slot)
+        if (used(slot))
+            total += weightOf(slot);
+
+    if (total <= 0.0f || fabsf(total - 1.0f) <= 0.001f)
+        return;
+
+    const float rescale = 1.0f / total;
+    for (int slot = 0; slot < kMaxBonesPerVert; ++slot)
+        if (used(slot))
+            weightOf(slot) *= rescale;
 }
 
 // Which mesh-relative vertices any of the mesh's flexes touch. Built at VTX
@@ -300,8 +302,7 @@ std::vector<bool> BuildFlexedVertexFlags(fmt::mstudiomesh_t* pStudioMesh) {
     return flexed;
 }
 
-// returns true when ANY vertex of the face is flexed (reference returns the
-// same from GenerateStripGroupVerticesFromFace)
+// returns true when ANY vertex of the face is flexed
 bool GenerateStripGroupVerticesFromFace(Builder& b, const source::SrcFace& face,
                                         fmt::mstudiomodel_t* pStudioModel,
                                         fmt::mstudiomesh_t* pStudioMesh, int maxPreferredBones,
@@ -314,11 +315,10 @@ bool GenerateStripGroupVerticesFromFace(Builder& b, const source::SrcFace& face,
         bFaceIsFlexed = bFaceIsFlexed ||
                         (vertex >= 0 && static_cast<size_t>(vertex) < flexedVerts.size() &&
                          flexedVerts[vertex]);
-        // face vertex ids are MESH-relative; vvdVertex indexes the model's
-        // vertex block, so the mesh's vertexoffset has to be added (the
-        // reference goes through pStudioMesh->GetVertexData(), which is
-        // already mesh-relative). Only meshes after the first have a nonzero
-        // offset.
+        // face vertex ids are MESH-relative; vvdVertex indexes the model's vertex block, so the
+        // mesh's vertexoffset has to be added (stock studiomdl goes through
+        // pStudioMesh->GetVertexData, which is already mesh-relative). Only meshes after the first
+        // have a nonzero offset.
         fmt::mstudioboneweight_t* bw =
             &b.vvdVertex(pStudioModel, pStudioMesh->vertexoffset + vertex)->m_BoneWeights;
         int bonesAffectingVertex = bw->numbones;
@@ -397,7 +397,7 @@ void BuildNeighborInfo(std::vector<Face>& faceList, int numVerts) {
             edges.erase(edges.begin() + e);
             return;
         }
-        // reference links new edges at the head of the per-vertex list
+        // stock studiomdl links new edges at the head of the per-vertex list
         edges.insert(edges.begin(), EdgeInfo{connectedVertId, edgeIndex, faceId});
     };
 
@@ -485,9 +485,8 @@ struct SeedIndex {
     }
 };
 
-// reference GetNextUntouchedWithoutBoneStateChange, then (allowNewStrip)
-// GetNextUntouchedWithLeastBoneStateChanges. PARITY: the reference flushes the
-// whole palette there (its USE_FLUSH branch), not just enough LRU slots.
+// then (allowNewStrip) GetNextUntouchedWithLeastBoneStateChanges. stock studiomdl flushes the whole
+// palette there (its USE_FLUSH branch), not just enough LRU slots.
 Face* GetNextFace(Builder& b, std::vector<Face>& faceList, SeedIndex& index, bool allowNewStrip) {
     int id = index.Lowest(b.hwState.FreeMatrixCount());
     if (id < 0 && allowNewStrip) {
@@ -595,11 +594,10 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
             int nVerts = static_cast<int>(vertices.size());
             std::vector<float> positions(nVerts * 3);
             for (int vi = 0; vi < nVerts; vi++) {
-                // origMeshVertID is MESH-relative; the reference reads it through
-                // pStudioMesh->GetVertexData()->Position(), which adds the mesh's
-                // vertexoffset. Without it every mesh after the first feeds
-                // meshopt_optimizeOverdraw the wrong positions -> different
-                // triangle order -> different strip-group vertex order.
+                // origMeshVertID is MESH-relative; stock studiomdl reads it through
+                // pStudioMesh->GetVertexData->Position, which adds the mesh's vertexoffset. Without
+                // it every mesh after the first feeds meshopt_optimizeOverdraw the wrong positions
+                // -> different triangle order -> different strip-group vertex order.
                 fmt::mstudiovertex_t* pv = b.vvdVertex(
                     pStudioModel, pStudioMesh->vertexoffset + vertices[vi].origMeshVertID);
                 positions[vi * 3 + 0] = pv->m_vecPosition.x;
@@ -633,7 +631,7 @@ void BuildHWSkinnedStrips(Builder& b, std::vector<Face>& faceList,
 
 // BuildSWSkinnedStrips - one software-skinned tri-list strip: no hardware bone
 // palette, no bone-state changes, every group vert copied. dx80 flexed groups
-// (clamped to 1 bone) land here. Reference tri-list path only; SubD is unused.
+// (clamped to 1 bone) land here. Tri-list path only; SubD is unused.
 void BuildSWSkinnedStrips(std::vector<Face>& faceList,
                           std::vector<fmt::vtx::Vertex_t>& vertices, StripGroup* pStripGroup) {
     pStripGroup->strips.emplace_back();
@@ -710,8 +708,8 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
         bool bFaceIsFlexed = GenerateStripGroupVerticesFromFace(
             b, face, pStudioModel, pStudioMesh, preferredBones, flexedVerts, stripGroupVert);
 
-        // nomorphs/nofacial: this LOD ignores the morphs entirely, so every
-        // face lands in the non-flexed group (reference bForceNoFlex)
+        // nomorphs/nofacial: this LOD ignores the morphs entirely, so every face lands in the
+        // non-flexed group
         if (bForceNoFlex)
             bFaceIsFlexed = false;
 
@@ -784,13 +782,12 @@ int CountStripVerts(const Strip& strip) {
 // PostProcessStripGroup, packing `src`'s strips into the
 // groups appended to `out`.
 //
-// Strip group indices are uint16, so a group tops out at kMaxStripGroupVerts.
-// The reference never splits here because stock studiomdl rejects any model big
-// enough to reach it; we do split meshes (BuildOutputMeshes), and a mesh right
-// at the cap still overflows once its strips duplicate shared verts - which is
-// what many bones (jigglebones, procedural bones) causes, since a full hardware
-// bone palette ends the current strip and starts another. Overflowing wrapped
-// the indices, folding the tail verts onto live ones as stretched triangles.
+// Strip group indices are uint16, so a group tops out at kMaxStripGroupVerts. stock studiomdl never
+// splits here because stock studiomdl rejects any model big enough to reach it; we do split meshes
+// (BuildOutputMeshes), and a mesh right at the cap still overflows once its strips duplicate shared
+// verts - which is what many bones (jigglebones, procedural bones) causes, since a full hardware
+// bone palette ends the current strip and starts another. Overflowing wrapped the indices, folding
+// the tail verts onto live ones as stretched triangles.
 void PostProcessStripGroup(StripGroup* src, std::vector<StripGroup>& out) {
     const size_t firstGroup = out.size();
     for (Strip& strip : src->strips) {
@@ -851,8 +848,8 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
     // dx80: tighter hardware limit (more, smaller strips) and no hardware flex.
     b.maxBonesPerStrip = dx80 ? 16 : 53;
     const bool hwFlex = !dx80;
-    // work on a COPY of the vvd: the reference mutates its cached vvd (bone
-    // weight merge / renormalize) but the on-disk vvd keeps the original bytes
+    // work on a COPY of the vvd: stock studiomdl mutates its cached vvd (bone weight merge /
+    // renormalize) but the on-disk vvd keeps the original bytes
     std::vector<uint8_t> vvdCopy = vvdBuf;
     b.vvdBuf = &vvdCopy;
     b.numBones = static_cast<int>(m.bones.size());
@@ -931,13 +928,11 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
             // $mouth teeth material matching, which is not implemented.
             newMesh.flags = pStudioMesh->materialtype != 0 ? kMeshIsEyes : 0;
 
-            // removemodel / removemesh leave the mesh header in place
-            // with no strip groups: the per-LOD mesh count has to stay
-            // equal to the .mdl's or FixupToSortedLODVertexes rejects
-            // the pair. (The reference `continue`s the whole LOD here,
-            // writing zero meshes - which only holds together for a
-            // blank model, and is why its removemodel produces nothing.)
-            // BuildOutputMeshes already left the list empty for both.
+            // removemodel / removemesh leave the mesh header in place with no strip groups: the
+            // per-LOD mesh count has to stay equal to the .mdl's or FixupToSortedLODVertexes
+            // rejects the pair. (stock studiomdl `continue`s the whole LOD here, writing zero
+            // meshes - which only holds together for a blank model, and is why its removemodel
+            // produces nothing.) BuildOutputMeshes already left the list empty for both.
             if (!pLodSource || lodID >= static_cast<int>(outMesh.lodFaces.size()))
                 continue;
             const std::vector<source::SrcFace>& meshFaces = outMesh.lodFaces[lodID];
@@ -1030,11 +1025,10 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
         }
     }
 
-    // hmm: totalMeshes must count ALL studio meshes (even for blank models the
-    // LOD has zero meshes). The reference counts per ProcessModel iteration:
-    // stats.m_TotalMeshes increments per studio mesh visited; blank models are
-    // skipped before the mesh loop (no lod source). The tally above already
-    // matches that (meshes only added for non-blank models).
+    // hmm: totalMeshes must count ALL studio meshes (even for blank models the LOD has zero
+    // meshes). stock studiomdl counts per ProcessModel iteration: stats.m_TotalMeshes increments
+    // per studio mesh visited; blank models are skipped before the mesh loop (no lod source). The
+    // tally above already matches that (meshes only added for non-blank models).
 
     size_t bodyPartsOffset = sizeof(fmt::vtx::FileHeader_t);
     size_t modelsOffset = bodyPartsOffset + sizeof(fmt::vtx::BodyPartHeader_t) * totalBodyParts;
@@ -1082,7 +1076,7 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
         materialReplacementsListOffset + numLODs * sizeof(fmt::vtx::MaterialReplacementListHeader_t);
     size_t endOfFile = topologyOffset; // legacy: no topology block
 
-    // reference section report, deferred to save time
+    // stock studiomdl section report, deferred to save time
     {
         auto line = [](const char* label, size_t bytes) {
             char b[128];
@@ -1397,15 +1391,14 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
                                 for (int vID = 0; vID < stNumVerts; vID++) {
                                     auto* vert = reinterpret_cast<fmt::vtx::Vertex_t*>(
                                         sgRaw + sgVertOffset) + (vID + stVertOffset);
-                                    for (int boneID = 0; boneID < header->maxBonesPerVert;
-                                         boneID++) {
-                                        int globalBoneID = vert->boneID[boneID];
-                                        if (globalBoneID == 255) {
-                                            vert->boneID[boneID] = 0;
-                                            continue;
-                                        }
-                                        vert->boneID[boneID] =
-                                            static_cast<uint8_t>(globalToHardware[globalBoneID]);
+                                    // 255 marks an unused slot; it points at hardware bone 0
+                                    for (int slot = 0; slot < header->maxBonesPerVert; slot++) {
+                                        const int globalBone = vert->boneID[slot];
+
+                                        vert->boneID[slot] =
+                                            globalBone == 255
+                                                ? 0
+                                                : static_cast<uint8_t>(globalToHardware[globalBone]);
                                     }
                                 }
                             }
@@ -1417,11 +1410,8 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
         }
     }
 
-    // ZeroNumBones, gated on g_staticprop && !g_bLegacyVTX
-    // It hits every vert and strip of every strip group,
-    // so walking the flat verts/strips blocks is the same set.
-    // (RemoveRedundantBoneStateChanges runs here too, but its whole mutation
-    // body is commented out in the reference - it is a no-op)
+    // ZeroNumBones, gated on g_staticprop && !g_bLegacyVTX It hits every vert and strip of every
+    // strip group, so walking the flat verts/strips blocks is the same set.
     if (!legacyVtx && (phdr->flags & fmt::STUDIOHDR_FLAGS_STATIC_PROP)) {
         for (int i = 0; i < totalVerts; i++)
             (reinterpret_cast<fmt::vtx::Vertex_t*>(out.data() + vertsOffset) + i)->numBones = 0;

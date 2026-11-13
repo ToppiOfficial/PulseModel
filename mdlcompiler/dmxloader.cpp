@@ -48,8 +48,7 @@ const std::vector<dmx::Quaternion>* DmxQuatArray(const dmx::Element* e, const ch
     return a ? std::get_if<std::vector<dmx::Quaternion>>(&a->value) : nullptr;
 }
 
-// DmeTransform -> matrix (reference CDmeTransform::GetTransform =
-// QuaternionMatrix(orientation, position)).
+// DmeTransform -> matrix: QuaternionMatrix(orientation, position).
 pm::matrix3x4 TransformMatrix(const dmx::Element* t) {
     pm::Vector3 pos{0, 0, 0};
     pm::Quaternion rot{0, 0, 0, 1};
@@ -58,14 +57,13 @@ pm::matrix3x4 TransformMatrix(const dmx::Element* t) {
     return pm::QuaternionMatrix(rot, pos);
 }
 
-// sticky upAxis-Y detection (reference bSetUpAxis handling)
+// sticky upAxis-Y detection
 bool s_bUpAxisY = false;
 bool s_bUpAxisChecked = false;
 
 // ---------------------------------------------------------------------------
-// Skeleton walk (reference AddDagJoint/LoadSkeleton). Creates a localBone for
-// every child dag of the skeleton root (mesh dags included), then appends the
-// weightless "defaultRoot".
+// Skeleton walk. Creates a localBone for every child dag of the skeleton root (mesh dags included),
+// then appends the weightless "defaultRoot".
 // ---------------------------------------------------------------------------
 struct BoneMap {
     std::vector<const dmx::Element*> transforms; // per mdl bone: its DmeTransform
@@ -89,8 +87,8 @@ const dmx::Element* JointTransform(const dmx::Element* j) {
     return j->className == "DmeTransform" ? j : j->GetElement("transform");
 }
 
-// joint lookup by element identity (reference CDmeModel::GetJointIndex); matches
-// the dag or its transform so one pass covers both spellings
+// joint lookup by element identity; matches the dag or its transform so one pass covers both
+// spellings
 int GetJointIndex(const std::vector<dmx::ElementPtr>* jointList, const dmx::Element* dag) {
     if (!jointList) return -1;
     const dmx::Element* xform = dag ? dag->GetElement("transform") : nullptr;
@@ -155,9 +153,8 @@ int LoadSkeleton(const dmx::Element* skeletonRoot, const dmx::Element* model,
 }
 
 // ---------------------------------------------------------------------------
-// Bind pose (reference LoadBindPose): "BindPose" anim, one frame; per bone the
-// bind base-state transform when the joint is in jointList, else the live dag
-// transform. defaultRoot stays zeroed.
+// Bind pose: "BindPose" anim, one frame; per bone the bind base-state transform when the joint is
+// in jointList, else the live dag transform. defaultRoot stays zeroed.
 // ---------------------------------------------------------------------------
 const dmx::Element* FindBaseState(const dmx::Element* model, const char* name) {
     if (!model) return nullptr;
@@ -222,9 +219,8 @@ void LoadBindPose(const dmx::Element* model, float flScale, const BoneMap& boneM
 }
 
 // ---------------------------------------------------------------------------
-// Animations (reference LoadAnimations/ComputeFramePose): sample every
-// DmeChannelsClip at exact reference frame times; unchanneled transforms keep
-// their static value.
+// Animations: sample every DmeChannelsClip at exact reference frame times; unchanneled transforms
+// keep their static value.
 // ---------------------------------------------------------------------------
 
 // DmeTime helpers (tier1/timeutils facts): times are int ticks of 1/10000 s.
@@ -257,7 +253,7 @@ std::vector<int> ReadTimesTicks(const dmx::Element* layer) {
     return out;
 }
 
-// last key with time <= t (reference CDmeLogLayer::FindKey)
+// last key with time <= t
 int FindKey(const std::vector<int>& times, int t) {
     for (int i = static_cast<int>(times.size()) - 1; i >= 0; --i)
         if (times[i] <= t) return i;
@@ -271,10 +267,8 @@ struct SampledChannel {
     const std::vector<dmx::Vector3>* vpos = nullptr;
     const std::vector<dmx::Quaternion>* vrot = nullptr;
 
-    // Reference CDmeTypedLogLayer::GetValue: no
-    // exact-key early-out - a key hit interpolates with t=0. Interpolate<T>:
-    // Vector is `t*b + (1-t)*a` (that op order);
-    // Quaternion is QuaternionSlerp FOLLOWED BY QuaternionNormalize.
+    // no exact-key early-out - a key hit interpolates with t=0. Interpolate<T>: Vector is `t*b +
+    // (1-t)*a` (that op order); Quaternion is QuaternionSlerp FOLLOWED BY QuaternionNormalize.
     pm::Vector3 SamplePos(int t, const pm::Vector3& def) const {
         if (!vpos || vpos->empty()) return def;
         int k = FindKey(times, t);
@@ -431,9 +425,8 @@ void LoadAnimations(const dmx::Element* animationList, float flScale,
 }
 
 // ---------------------------------------------------------------------------
-// Mesh loading (reference LoadMeshes/LoadMesh/LoadVertices + UnifyIndices +
-// BuildIndividualMeshes). Temp streams accumulate across every mesh dag of the
-// source, then get unified + material-sorted.
+// Mesh loading. Temp streams accumulate across every mesh dag of the source, then get unified +
+// material-sorted.
 // ---------------------------------------------------------------------------
 struct TmpFace {
     int material;
@@ -455,11 +448,9 @@ struct MeshTemp {
 };
 
 // ---------------------------------------------------------------------------
-// Flex/morph intermediates (reference statics s_DeltaStates /
-// s_Balance / s_Speed / s_UniqueVertices / s_UniqueVerticesMap - reset per
-// DMX in LoadModelAndSkeleton, here local to LoadDmxSource).
+// Flex/morph intermediates, rebuilt for each DMX and local to LoadDmxSource.
 // ---------------------------------------------------------------------------
-struct DeltaIndexEntry { // reference DeltaIndex_t
+struct DeltaIndexEntry {
     int pos = -1;     // into DeltaTempState::posDeltas
     int normal = -1;  // into DeltaTempState::normalDeltas
     int wrinkle = -1; // into DeltaTempState::wrinkleDeltas
@@ -467,7 +458,7 @@ struct DeltaIndexEntry { // reference DeltaIndex_t
     bool inList = false;
 };
 
-struct DeltaTempState { // reference DeltaState_t
+struct DeltaTempState {
     std::string name;
     std::vector<pm::Vector3> posDeltas;
     std::vector<pm::Vector3> normalDeltas;
@@ -476,7 +467,7 @@ struct DeltaTempState { // reference DeltaState_t
     int firstDelta = -1;
 };
 
-struct UniqueVert { // reference VertIndices_t (single UV channel)
+struct UniqueVert { // (single UV channel)
     int v = -1, n = -1, t = -1; // global temp-stream indices
     int balance = 0, speed = 0; // into FlexTemp::balance / speed
 };
@@ -496,7 +487,7 @@ struct FlexTemp {
     std::vector<WrinkleScale> wrinkleScales;
 };
 
-// reference FindOrAddDeltaState (stricmp find, grow the parallel index array)
+// (stricmp find, grow the parallel index array)
 DeltaTempState* FindOrAddDeltaState(FlexTemp& flex, const std::string& name, size_t indexCount) {
     for (auto& ds : flex.deltaStates) {
         if (_stricmp(ds.name.c_str(), name.c_str()) == 0) {
@@ -512,8 +503,8 @@ DeltaTempState* FindOrAddDeltaState(FlexTemp& flex, const std::string& name, siz
     return &ds;
 }
 
-// reference AddToDeltaList (list is PREPEND - traversal order is reverse
-// first-touch order, and the written vanim order depends on it)
+// (list is PREPEND - traversal order is reverse first-touch order, and the written vanim order
+// depends on it)
 void AddToDeltaList(DeltaTempState& ds, int nUniqueVertex) {
     DeltaIndexEntry& e = ds.indices[nUniqueVertex];
     if (!e.inList) {
@@ -523,8 +514,7 @@ void AddToDeltaList(DeltaTempState& ds, int nUniqueVertex) {
     }
 }
 
-// data index -> corner indices, ascending (reference
-// CDmeVertexDataBase::FindVertexIndicesFromDataIndex inverse map), stored flat
+// data index -> corner indices, ascending, stored flat
 struct InverseMap {
     struct Corners {
         const int* first;
@@ -563,69 +553,65 @@ InverseMap BuildInverseMap(const std::vector<int32_t>& indices, int dataCount) {
 
 } // namespace
 
-// reference SortAndBalanceBones; declared in source.h
+// Declared in source.h. Returns the surviving influence count.
 int SortAndBalanceBones(int iCount, int iMaxCount, int bones[], float weights[]) {
-    int i;
+    // A repeated bone folds into its first occurrence.
+    for (int i = 0; i + 1 < iCount; ++i) {
+        for (int j = i + 1; j < iCount; ++j) {
+            if (bones[i] != bones[j])
+                continue;
 
-    // collapse duplicate bone weights
-    for (i = 0; i < iCount - 1; i++) {
-        for (int j = i + 1; j < iCount; j++) {
-            if (bones[i] == bones[j]) {
-                weights[i] += weights[j];
-                weights[j] = 0.0;
-            }
+            weights[i] += weights[j];
+            weights[j] = 0.0f;
         }
     }
 
-    // do sleazy bubble sort
-    int bShouldSort;
-    do {
-        bShouldSort = false;
-        for (i = 0; i < iCount - 1; i++) {
-            if (weights[i + 1] > weights[i]) {
-                int j = bones[i + 1]; bones[i + 1] = bones[i]; bones[i] = j;
-                float w = weights[i + 1]; weights[i + 1] = weights[i]; weights[i] = w;
-                bShouldSort = true;
-            }
+    // Heaviest first; equal weights keep their order (stable insertion sort).
+    for (int i = 1; i < iCount; ++i) {
+        const int bone = bones[i];
+        const float weight = weights[i];
+
+        int slot = i;
+        while (slot > 0 && weights[slot - 1] < weight) {
+            bones[slot] = bones[slot - 1];
+            weights[slot] = weights[slot - 1];
+            --slot;
         }
-    } while (bShouldSort);
-
-    // throw away insignificant weights
-    while (iCount > 1 && weights[iCount - 1] < lim::kMinBoneWeight) {
-        iCount--;
+        bones[slot] = bone;
+        weights[slot] = weight;
     }
 
-    // clip to the top iMaxCount bones
-    if (iCount > iMaxCount) {
-        iCount = iMaxCount;
-    }
+    // Drop negligible trailing weights, keeping at least one, then cap the count.
+    while (iCount > 1 && weights[iCount - 1] < lim::kMinBoneWeight)
+        --iCount;
 
-    float t = 0;
-    for (i = 0; i < iCount; i++) {
-        t += weights[i];
-    }
-    if (t <= 0.0f) {
-        // missing weights - evenly share
-        t = 1.0f / iCount;
-        for (i = 0; i < iCount; i++) {
-            weights[i] = t;
-        }
+    iCount = std::min(iCount, iMaxCount);
+    if (iCount <= 0)
+        return iCount;
+
+    float sum = 0.0f;
+    for (int i = 0; i < iCount; ++i)
+        sum += weights[i];
+
+    if (sum <= 0.0f) {
+        const float even = 1.0f / iCount;
+
+        for (int i = 0; i < iCount; ++i)
+            weights[i] = even;
     } else {
-        // scale to sum 1
-        t = 1.0f / t;
-        for (i = 0; i < iCount; i++) {
-            weights[i] = weights[i] * t;
-        }
+        const float inverse = 1.0f / sum;
+
+        for (int i = 0; i < iCount; ++i)
+            weights[i] = weights[i] * inverse;
     }
     return iCount;
 }
 
 namespace {
 
-// reference CDmeMesh::CollapseRedundantNormals. The no-delta
-// mesh takes the AGGRESSIVE pure-value dedup; a mesh with delta states takes
-// the per-position collapse that produces a normalMap so the delta states'
-// normal indices can be remapped consistently.
+// The no-delta mesh takes the AGGRESSIVE pure-value dedup; a mesh with delta states takes the
+// per-position collapse that produces a normalMap so the delta states' normal indices can be
+// remapped consistently.
 
 inline float NormalDot(const dmx::Vector3& a, const dmx::Vector3& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
@@ -690,7 +676,6 @@ struct NormalGrid {
     }
 };
 
-// reference CollapseRedundantBaseNormalsAggressive
 void CollapseBaseNormalsAggressive(std::vector<dmx::Vector3>& normals,
                                    std::vector<int32_t>& normalIndices,
                                    float flNormalBlend) {
@@ -717,10 +702,9 @@ void CollapseBaseNormalsAggressive(std::vector<dmx::Vector3>& normals,
     normals = std::move(newNormals);
 }
 
-// reference CollapseRedundantBaseNormals: merge normals
-// that are similar AROUND EACH POSITION. Produces outNormalMap (old normal
-// data index -> new) for the delta remap. Returns false (and changes nothing)
-// if the result would not be smaller.
+// merge normals that are similar AROUND EACH POSITION. Produces outNormalMap (old normal data index
+// -> new) for the delta remap. Returns false (and changes nothing) if the result would not be
+// smaller.
 bool CollapseBaseNormalsWithMap(const InverseMap& posInverse,
                                 std::vector<dmx::Vector3>& normals,
                                 std::vector<int32_t>& normalIndices,
@@ -782,9 +766,8 @@ bool CollapseBaseNormalsWithMap(const InverseMap& posInverse,
     return true;
 }
 
-// reference CollapseRedundantDeltaNormals: remap a delta
-// state's normal entries through the base normalMap, keeping the FIRST entry
-// per new index.
+// remap a delta state's normal entries through the base normalMap, keeping the FIRST entry per new
+// index.
 void CollapseDeltaNormals(const std::vector<int>& normalMap,
                           std::vector<dmx::Vector3>& deltaNormals,
                           std::vector<int32_t>& deltaNormalIndices) {
@@ -808,8 +791,7 @@ void CollapseDeltaNormals(const std::vector<int>& normalMap,
     deltaNormalIndices = std::move(newIndices);
 }
 
-// reference CDmeMesh::ComputeTriangulatedIndices: pick the fan corner with the
-// smallest summed distance to the non-adjacent verts, fan from there.
+// pick the fan corner with the smallest summed distance to the non-adjacent verts, fan from there.
 void ComputeTriangulatedIndices(const std::vector<dmx::Vector3>& positions,
                                 const std::vector<int32_t>& positionIndices,
                                 const std::vector<int32_t>& faceCorners, int firstIndex,
@@ -874,11 +856,9 @@ struct LoadMeshInfo {
     }
 };
 
-// reference DefineUniqueVertices: register this mesh's
-// corner tuples into the source-wide unique-vertex list. Offsets are the
-// GLOBAL temp-stream starts captured before this mesh's data is appended;
-// balance/speed bases are the array sizes before this mesh appends its data
-// (or the single 1.0f default).
+// register this mesh's corner tuples into the source-wide unique-vertex list. Offsets are the
+// GLOBAL temp-stream starts captured before this mesh's data is appended; balance/speed bases are
+// the array sizes before this mesh appends its data (or the single 1.0f default).
 void DefineUniqueVertices(FlexTemp& flex,
                           const std::vector<int32_t>& positionIndices,
                           const std::vector<int32_t>& normalIndices,
@@ -894,8 +874,8 @@ void DefineUniqueVertices(FlexTemp& flex,
     const bool bHasBalance = balanceIndices && !balanceIndices->empty();
     const bool bHasSpeed = speedIndices && !speedIndices->empty();
 
-    // (v, n, t) -> unique index; first-seen insertion order matches the
-    // reference's AddToTail order (the lookup only accelerates the find)
+    // (v, n, t) -> unique index; first-seen insertion order matches stock studiomdl's AddToTail
+    // order (the lookup only accelerates the find)
     struct KeyHash {
         size_t operator()(const std::tuple<int, int, int>& k) const {
             uint64_t h = 0xcbf29ce484222325ull;
@@ -929,7 +909,7 @@ void DefineUniqueVertices(FlexTemp& flex,
     }
 }
 
-// reference LoadVertices: positions/weights/normals/uvs into the temp streams
+// positions/weights/normals/uvs into the temp streams
 void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Element* bindState,
                   const pm::matrix3x4& mat, int nBoneAssign,
                   const std::vector<dmx::Vector3>& normals /*post-collapse*/) {
@@ -965,8 +945,7 @@ void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::
     }
 
     if (nJointCount <= 0 && nBoneAssign == boneMap.defaultRootNode && dag) {
-        // use the bone created for the DmeDag node of the DmeMesh (name lookup,
-        // case-sensitive like the reference CUtlDict)
+        // use the bone created for the DmeDag node of the DmeMesh
         for (size_t i = 0; i < info.source->localBone.size(); ++i) {
             if (info.source->localBone[i].name == dag->name) {
                 nBoneAssign = static_cast<int>(i);
@@ -1014,7 +993,7 @@ void LoadVertices(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::
     // normals: normalize (already done by collapse pass) then rotate
     for (const dmx::Vector3& nsrc : normals) {
         pm::Vector3 v = ToV3(nsrc);
-        pm::VectorNormalize(v); // reference normalizes again inside LoadVertices
+        pm::VectorNormalize(v); // stock studiomdl normalizes again inside LoadVertices
         tmp.normal.push_back(pm::VectorRotate(v, normalMat));
     }
 
@@ -1034,10 +1013,9 @@ inline float DeltaLength(const dmx::Vector3& v) {
     return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
-// reference CDmeVertexDeltaData::GenerateWrinkleDelta
-// with bOverwrite = false, bUseNormalForSign = false: wrinkle value per unique
-// bind TEXCOORD data index = |posDelta| * scale / maxDeflection. Only called
-// when the delta has no authored wrinkle field.
+// with bOverwrite = false, bUseNormalForSign = false: wrinkle value per unique bind TEXCOORD data
+// index = |posDelta| * scale / maxDeflection. Only called when the delta has no authored wrinkle
+// field.
 void GenerateWrinkleDelta(const std::vector<dmx::Vector3>& deltaPositions,
                           const std::vector<int32_t>& deltaPositionIndices,
                           float flScale,
@@ -1084,10 +1062,9 @@ void GenerateWrinkleDelta(const std::vector<dmx::Vector3>& deltaPositions,
     }
 }
 
-// reference LoadDeltaState: move one delta state's
-// pos/normal/wrinkle entries into the source-wide DeltaTempState, keyed by
-// unique vertex index. Deltas are direction vectors: VectorRotate (not
-// Transform), positions additionally scaled.
+// move one delta state's pos/normal/wrinkle entries into the source-wide DeltaTempState, keyed by
+// unique vertex index. Deltas are direction vectors: VectorRotate (not Transform), positions
+// additionally scaled.
 void LoadDeltaState(FlexTemp& flex, const std::string& deltaName,
                     const std::vector<dmx::Vector3>& positions,
                     const std::vector<int32_t>& positionIndices,
@@ -1397,8 +1374,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
 
     tStreams.Stop();
 
-    // balance/speed data follows the mesh's vertices (reference LoadVertices
-    // tail: whole array, or a single 1.0f so the 0-index default hits it)
+    // balance/speed data follows the mesh's vertices
     if (flex) {
         const std::vector<float>* balances = 
             bindState->GetFloatArray(info.Stream(*bindState, "balance"));
@@ -1413,7 +1389,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
             flex->speed.push_back(1.0f);
     }
 
-    // load the delta states (reference LoadMesh tail)
+    // load the delta states
     if (flex && hasDeltas && positions && positionIndices) {
         PULSE_PERF("mesh", "delta states");
         pm::matrix3x4 normalMat = pm::MatrixInverseTranspose(mat);
@@ -1536,7 +1512,7 @@ bool LoadMesh(const LoadMeshInfo& info, const dmx::Element* dag, const dmx::Elem
                                            nVertexCount, triangulated);
                 for (size_t ii = 0; ii + 2 < triangulated.size() + 1 && ii < triangulated.size();
                      ii += 3) {
-                    // reference winding: (v1, v3, v2)
+                    // stock studiomdl winding: (v1, v3, v2)
                     int corners[3] = {triangulated[ii], triangulated[ii + 2], triangulated[ii + 1]};
                     TmpFace f{};
                     f.material = material;
@@ -1620,7 +1596,7 @@ void PinToDominantBone(MeshTemp& tmp, size_t firstVertex, size_t firstFace) {
     }
 }
 
-// reference LoadMeshes recursion: aggregate dag-to-bind-pose transform
+// recursion: aggregate dag-to-bind-pose transform
 bool LoadMeshesRecursive(const LoadMeshInfo& info, const dmx::Element* dag,
                          const pm::matrix3x4& parentToBindPose, int nBoneAssign) {
     pm::matrix3x4 dagToBindPose;
@@ -1757,8 +1733,8 @@ int AddToVlist(UnifyState& st, int v, int m, int n, uint32_t t,
     return idx;
 }
 
-// qsort comparators (C qsort on purpose - reference uses libc qsort and the
-// sort is unstable; matching the implementation matches the order)
+// qsort comparators: libc qsort on purpose, since the order of equal keys depends on its unstable
+// sort.
 const std::vector<VUnify>* g_sortListData = nullptr;
 const std::vector<TmpFace>* g_sortFaces = nullptr;
 
@@ -1784,7 +1760,6 @@ int FaceCompare(const void* elem1, const void* elem2) {
 
 } // namespace (anon)
 
-// reference CalcTriangleTangentSpace (mathlib)
 void CalcTriangleTangentSpace(const pm::Vector3& p0, const pm::Vector3& p1, const pm::Vector3& p2,
                               const pm::Vector2& t0, const pm::Vector2& t1, const pm::Vector2& t2,
                               pm::Vector3& sVect, pm::Vector3& tVect) {
@@ -1822,20 +1797,17 @@ void CalcTriangleTangentSpace(const pm::Vector3& p0, const pm::Vector3& p1, cons
         tVect.z += -c.z / c.x;
     }
 
-    // normalize sVect and tVect (reference does this per face)
+    // normalize sVect and tVect
     pm::VectorNormalize(sVect);
     pm::VectorNormalize(tVect);
 }
 
-// reference CalcModelTangentSpaces
 void CalcModelTangentSpaces(Source& src) {
     for (int meshID = 0; meshID < src.nummeshes; meshID++) {
         SrcMesh* pMesh = &src.mesh[src.meshindex[meshID]];
-        // vert -> face lists, CSR (counts, prefix sum, fill) rather than a
-        // vector per vertex: same ascending-faceID order, one allocation.
-        // REFERENCE QUIRK (parity): s_face_t.d is 0 for triangles (calloc),
-        // but the quad check is `d != 0xFFFFFFFF` - so EVERY triangle face is
-        // also appended to vertex 0's map, skewing its tangent.
+        // vert -> face lists, CSR (counts, prefix sum, fill) rather than a vector per vertex: same
+        // ascending-faceID order, one allocation. so EVERY triangle face is also appended to vertex
+        // 0's map, skewing its tangent.
         std::vector<int> mapStart(static_cast<size_t>(pMesh->numvertices) + 1, 0);
         std::vector<int> mapFaces;
         {
@@ -1907,10 +1879,9 @@ void CalcModelTangentSpaces(Source& src) {
 
 namespace { // reopen anon namespace for the rest of the loader internals
 
-// reference BuildVertexAnimations: each delta state
-// becomes one 1-frame morph anim. Runs AFTER UnifyIndices (needs the vlist)
-// and BEFORE the material sort - vanim.vertex is the CREATION-ORDER listdata
-// index, remapped through v_ilistsort by BuildIndividualMeshes like faces are.
+// each delta state becomes one 1-frame morph anim. Runs AFTER UnifyIndices (needs the vlist) and
+// BEFORE the material sort - vanim.vertex is the CREATION-ORDER listdata index, remapped through
+// v_ilistsort by BuildIndividualMeshes like faces are.
 void BuildVertexAnimations(const FlexTemp& flex, const UnifyState& st, Source& out) {
     if (flex.deltaStates.empty())
         return;
@@ -1920,7 +1891,6 @@ void BuildVertexAnimations(const FlexTemp& flex, const UnifyState& st, Source& o
         morph.name = state.name;
 
         // traverse the linked list of unique vertices that have a delta
-        // (prepend order - matches the reference's written vanim order)
         for (int j = state.firstDelta; j >= 0; j = state.indices[j].next) {
             const DeltaIndexEntry& delta = state.indices[j];
             const UniqueVert& uniqueVert = flex.uniqueVertices[j];
@@ -1967,7 +1937,7 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
         ufaces[i].c = AddToVlist(st, f.c, f.material, f.nc, f.tc, f.sc, tmp);
     } }
 
-    // reference order: UnifyIndices -> BuildVertexAnimations -> sort/remap
+    // stock studiomdl order: UnifyIndices -> BuildVertexAnimations -> sort/remap
     if (flex)
         BuildVertexAnimations(*flex, st, out);
 
@@ -2066,19 +2036,13 @@ void BuildIndividualMeshes(const MeshTemp& tmp, FlexTemp* flex, Source& out) {
 }
 
 // ---------------------------------------------------------------------------
-// Combination operator (reference CDmeCombinationOperator + AddCombination /
-// BuildCombinationSourceData). The KV2 layout:
-//   root."combinationOperator" -> DmeCombinationOperator
-//     "controls"   element_array of DmeCombinationInputControl:
-//                  "rawControlNames" str[], "stereo" bool, "eyelid" bool,
-//                  "flexgroup" str, "wrinkleScales" float[] (padded to raw
-//                  count with 0), optional "flexMin"/"flexMax" floats,
-//                  optional "eyesUpDownFlex" str (eyelid)
-//     "dominators" element_array of DmeCombinationDominationRule:
-//                  "dominators" str[], "suppressed" str[]
-//     "targets"    element_array: DmeMesh(es) + DmeFlexRules
-// The operation list is COMPUTED from delta state names: "A_B" combines raw
-// controls A and B (reference ParseDeltaName).
+// Combination operator. The KV2 layout: root."combinationOperator" -> DmeCombinationOperator
+// "controls" element_array of DmeCombinationInputControl: "rawControlNames" str[], "stereo" bool,
+// "eyelid" bool, "flexgroup" str, "wrinkleScales" float[] (padded to raw count with 0), optional
+// "flexMin"/"flexMax" floats, optional "eyesUpDownFlex" str (eyelid) "dominators" element_array of
+// DmeCombinationDominationRule: "dominators" str[], "suppressed" str[] "targets" element_array:
+// DmeMesh(es) + DmeFlexRules The operation list is COMPUTED from delta state names: "A_B" combines
+// raw controls A and B.
 // ---------------------------------------------------------------------------
 struct ComboControlTemp {
     std::string name;
@@ -2114,7 +2078,7 @@ int FindRawControlIndex(const ComboTemp& combo, const char* name) {
     return -1;
 }
 
-// reference ParseDeltaName: split on '_', ALL parts must resolve or return 0
+// split on '_', ALL parts must resolve or return 0
 int ParseDeltaName(const ComboTemp& combo, const std::string& deltaName,
                    std::vector<int>& outControls) {
     outControls.clear();
@@ -2136,7 +2100,6 @@ int ParseDeltaName(const ComboTemp& combo, const std::string& deltaName,
     return static_cast<int>(outControls.size());
 }
 
-// reference IsDeltaStateStereo
 bool IsDeltaStateStereo(const ComboTemp& combo, const std::string& deltaName) {
     std::vector<int> parts;
     int n = ParseDeltaName(combo, deltaName, parts);
@@ -2167,7 +2130,6 @@ void ParseComboControls(const dmx::Element* comboOp, ComboTemp& combo, FlexTemp&
             ct.flexMax = c->GetFloat("flexMax", 1.0f);
 
             // wrinkleScales parallel rawControlNames; short arrays pad 0.0f
-            // (CDmeCombinationInputControl::OnElementUnserialized)
             const std::vector<float>* scales = c->GetFloatArray("wrinkleScales");
             int nControlIndex = static_cast<int>(combo.controls.size());
             for (size_t j = 0; j < ct.rawControls.size(); ++j) {
@@ -2241,9 +2203,8 @@ void AddFlexKeys(const ComboTemp& combo, const FlexTemp& flex, Source& out) {
         out.flexkeys.push_back(std::move(key));
     }
 
-    // reference bHasRealBalance - the whole mesh's
-    // FIELD_BALANCE, not just the morphed verts. flexreg pairs it with the
-    // stereo signal, which an imported rig can still change.
+    // the whole mesh's FIELD_BALANCE, not just the morphed verts. flexreg pairs it with the stereo
+    // signal, which an imported rig can still change.
     for (float b : flex.balance)
         if (b != 1.0f) { out.hasBalanceData = true; break; }
 }
@@ -2253,7 +2214,7 @@ void AddFlexKeys(const ComboTemp& combo, const FlexTemp& flex, Source& out) {
 // indexing a source's flexkeys, so the rig can be stamped onto a mesh that came
 // out of a different file.
 void CaptureFlexRig(const dmx::Element* comboOp, const ComboTemp& combo, FlexRig& out) {
-    // raw control name list (s_combinationcontrol_t)
+    // raw control name list
     for (const ComboTemp::RawControl& rc : combo.raws) {
         CombinationControl cc;
         cc.name = rc.name;
@@ -2370,8 +2331,8 @@ void CaptureFlexRig(const dmx::Element* comboOp, const ComboTemp& combo, FlexRig
 // ---------------------------------------------------------------------------
 
 int MaterialTable::LookupTexture(const char* name, bool relative) {
-    // reference LookupTexture: names are stored extension-stripped (path kept).
-    // Q_StripExtension: drop the extension, keep any directory.
+    // names are stored extension-stripped (path kept). Q_StripExtension: drop the extension, keep
+    // any directory.
     std::string noExt = name;
     {
         size_t dot = noExt.find_last_of('.');
@@ -2650,7 +2611,7 @@ void LoadPhysicsPrimitives(const dmx::Element* root, float scale, MaterialTable&
             tmp.normal.push_back(nl > 0.0f ? pm::Vector3{n.x / nl, n.y / nl, n.z / nl}
                                            : pm::Vector3{0, 0, 1});
         }
-        // hull is CCW from outside; the loader stores the reference (v1, v3, v2) winding
+        // hull is CCW from outside; the loader stores stock studiomdl (v1, v3, v2) winding
         for (size_t i = 0; i + 2 < hull.indices.size(); i += 3) {
             TmpFace f{};
             f.material = material;
@@ -2696,7 +2657,7 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
     }
     if (!model) model = skeleton;
 
-    // upAxis (set-once): reference switches g_defaultrotation for Y-up DMX
+    // upAxis (set-once): stock studiomdl switches g_defaultrotation for Y-up DMX
     if (!s_bUpAxisChecked) {
         if (auto up = model->GetString("upAxis")) {
             if (!up->empty() && ((*up)[0] == 'Y' || (*up)[0] == 'y'))
@@ -2705,9 +2666,8 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
         s_bUpAxisChecked = true;
     }
 
-    // Morphs are model data: only parse them for render-mesh loads so a DMX
-    // referenced solely as an animation source contributes none (reference
-    // LoadingModelBody gate).
+    // Morphs are model data: only parse them for render-mesh loads so a DMX referenced solely as an
+    // animation source contributes none.
     //
     // The combination operator is OPTIONAL - it only supplies wrinkle scales and
     // the per-delta stereo signal. Without one the delta states still load and
@@ -2753,8 +2713,8 @@ bool LoadDmxSource(const dmx::Datamodel& dm, Source& out, MaterialTable& mats, f
                 out.editStreams.push_back({stream.name, {}, stream.component, stream.kind});
     }
 
-    // one flexkey per delta state (reference AddFlexKeys). With no combination
-    // operator the ComboTemp is empty, so every key is mono.
+    // one flexkey per delta state. With no combination operator the ComboTemp is empty, so every
+    // key is mono.
     if (flexTemp.enabled) {
         PULSE_PERF("load", "AddFlexKeys");
         AddFlexKeys(comboTemp, flexTemp, out);

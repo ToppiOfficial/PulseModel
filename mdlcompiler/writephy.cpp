@@ -1,8 +1,7 @@
 // writephy.cpp - PulseMDL .phy writer
 //
-// Mirrors the reference CollisionModel_Write. The
-// binary hulls were already serialized into PhysicsSolid::blob by
-// BuildCollisionModel; this file only frames them and appends the plaintext
+// Mirrors stock studiomdl CollisionModel_Write. The binary hulls were already serialized into
+// PhysicsSolid::blob by BuildCollisionModel; this file only frames them and appends the plaintext
 // keyvalues tail.
 
 #include "writer.h"
@@ -29,9 +28,9 @@ void AppendText(std::vector<uint8_t>& buf, const char* text) {
     Append(buf, text, std::strlen(text));
 }
 
-// The reference writes every key with printf and these exact format strings;
-// the engine's parser is whitespace-tolerant but tools that diff .phy text are
-// not, so the formats are kept identical ("%f" -> 6 decimal places).
+// stock studiomdl writes every key with printf and these exact format strings; the engine's parser
+// is whitespace-tolerant but tools that diff .phy text are not, so the formats are kept identical
+// ("%f" -> 6 decimal places).
 void KeyInt(std::vector<uint8_t>& buf, const char* key, int v) {
     char tmp[256];
     std::snprintf(tmp, sizeof(tmp), "\"%s\" \"%d\"\n", key, v);
@@ -104,10 +103,9 @@ std::vector<uint8_t> BuildPhy(cm::CompiledModel& m, int32_t checksum) {
         Append(buf, s.blob.data(), s.blob.size());
     }
 
-    // ---- solid keyvalue sections ----
-    // Mass is distributed by volume share, so it can only be resolved once
-    // every solid is built. A zero total would divide by zero on a degenerate
-    // model, so it falls back to 1 exactly like the reference.
+    // solid keyvalue sections ---- Mass is distributed by volume share, so it can only be resolved
+    // once every solid is built. A zero total would divide by zero on a degenerate model, so it
+    // falls back to 1 exactly like stock studiomdl.
     ResolveFixedMasses(m);
     float totalVolume = 0.0f;
     for (const cm::PhysicsSolid& s : m.physSolids)

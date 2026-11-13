@@ -18,14 +18,12 @@
 
 namespace pulse::source {
 
-// Load one .fbx from `path` into `out`. `mats` is the compile-wide material
-// registry, `scale` the per-source import scale (reference g_currentscale).
-// `morphSource` = blend shapes become morphs/flexkeys (the $rendermesh gate).
-// `filter` = $rendermesh $exceptionlist, matched against the mesh element's
-// name and its node's; a rejected mesh contributes no geometry and no
-// materials, but its node still becomes a bone (same rule as the DMX loader).
-// `animOnly` = skeleton only, so meshes contribute no geometry and no
-// materials (same rule as LoadDmxSource / LoadSmdSource).
+// Load one .fbx from `path` into `out`. `mats` is the compile-wide material registry, `scale` the
+// per-source import scale. `morphSource` = blend shapes become morphs/flexkeys (the $rendermesh
+// gate). `filter` = $rendermesh $exceptionlist, matched against the mesh element's name and its
+// node's; a rejected mesh contributes no geometry and no materials, but its node still becomes a
+// bone (same rule as the DMX loader). `animOnly` = skeleton only, so meshes contribute no geometry
+// and no materials (same rule as LoadDmxSource / LoadSmdSource).
 bool LoadFbxSource(const std::string& path, Source& out, MaterialTable& mats, float scale,
                    std::string* err, bool morphSource = false, MeshFilter* filter = nullptr,
                    bool animOnly = false);

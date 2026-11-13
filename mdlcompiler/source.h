@@ -1,6 +1,5 @@
-// source.h - one loaded source file (mirrors the reference s_source_t layout).
-// The compile stage walks these in load order and the writers depend on that
-// order, so the layout stays close to the reference rather than "clean".
+// source.h - one loaded source file. The compile stage walks these in load order and the writers
+// depend on that order, so the layout stays close to stock studiomdl rather than "clean".
 
 #ifndef PULSEMDL_SOURCE_H
 #define PULSEMDL_SOURCE_H
@@ -200,7 +199,7 @@ enum class LoadKind {
 struct Source {
     std::string filename;
     LoadKind kind = LoadKind::Model; // set by the front end, the only thing
-                                     // that knows the reference's role
+                                     // that knows stock studiomdl's role
 
     // skeleton
     std::vector<LocalBone> localBone; // includes trailing "defaultRoot"

@@ -1,9 +1,8 @@
 // mdl.h - PulseMDL
 //
-// On-disk .mdl (studio model, version 49) structures, re-declared from format
-// facts (SDK-2013 / CS:GO-era studio.h studied as reference; typed fresh, not
-// pasted). Field order, widths and padding are interface facts of the binary
-// format - every struct size is locked by a static_assert.
+// On-disk .mdl (studio model, version 49) structures, re-declared from format facts. Field order,
+// widths and padding are interface facts of the binary format - every struct size is locked by a
+// static_assert.
 //
 // Conventions:
 // - All "index" fields are byte offsets. Offsets in studiohdr_t are relative
@@ -181,7 +180,7 @@ inline constexpr int32_t STUDIO_PROC_JIGGLE = 5;
 // of the trigger's angular influence in RADIANS, so a wider tolerance yields a
 // smaller value.
 struct mstudioquatinterpinfo_t {
-    float inv_tolerance; // 1 / radian angle of trigger influence
+    float inv_tolerance; // reciprocal of the trigger's reach, in radians
     Quaternion trigger;  // control orientation to match
     Vector3 pos;         // driven bone position at full influence
     Quaternion quat;     // driven bone orientation at full influence
@@ -402,7 +401,7 @@ struct mstudioanimdesc_t {
     int32_t ikrulezeroframeindex;
     int32_t unused1[5];
     int32_t animblock;
-    int32_t animindex; // non-zero when anim data isn't in sections
+    int32_t animindex; // offset of the frame data; 0 when it is split into sections
     int32_t numikrules;
     int32_t ikruleindex;
     int32_t animblockikruleindex;
@@ -439,11 +438,11 @@ static_assert(sizeof(mstudioiklock_t) == 32, "mstudioiklock_t layout");
 
 // autolayer flags (mstudioautolayer_t.flags)
 inline constexpr int32_t STUDIO_AL_POST = 0x0010;
-inline constexpr int32_t STUDIO_AL_SPLINE = 0x0040;  // convert layer ramp in/out curve is a spline instead of linear
-inline constexpr int32_t STUDIO_AL_XFADE = 0x0080;   // pre-bias the ramp curve to compense for a non-1 weight
-inline constexpr int32_t STUDIO_AL_NOBLEND = 0x0200; // animation always blends at 1.0 (ignores weight)
-inline constexpr int32_t STUDIO_AL_LOCAL = 0x1000;   // layer is a local context sequence
-inline constexpr int32_t STUDIO_AL_POSE = 0x4000;    // layer blends using a pose parameter instead of parent cycle
+inline constexpr int32_t STUDIO_AL_SPLINE = 0x0040;  // ramp in/out follows a spline, not a line
+inline constexpr int32_t STUDIO_AL_XFADE = 0x0080;   // ramp curve is biased to offset a weight other than 1
+inline constexpr int32_t STUDIO_AL_NOBLEND = 0x0200; // always blends fully; the weight is ignored
+inline constexpr int32_t STUDIO_AL_LOCAL = 0x1000;   // the layer is a local-context sequence
+inline constexpr int32_t STUDIO_AL_POSE = 0x4000;    // blend amount comes from a pose parameter, not the parent cycle
 
 // mstudioevent_t.type: set when the event is named rather than a numeric id
 inline constexpr int32_t NEW_EVENT_STYLE = 1 << 10;
@@ -461,13 +460,13 @@ struct mstudioposeparamdesc_t {
     int32_t flags;
     float start; // starting value
     float end;   // ending value
-    float loop;  // looping range, 0 for no looping, 360 for rotations
+    float loop;  // wrap range; 0 disables wrapping, 360 for angles
 };
 static_assert(sizeof(mstudioposeparamdesc_t) == 20, "mstudioposeparamdesc_t layout");
 
 struct mstudioiklink_t {
     int32_t bone;
-    Vector3 kneeDir; // ideal bending direction (per link, if applicable)
+    Vector3 kneeDir; // preferred bend direction for this link
     Vector3 unused0;
 };
 static_assert(sizeof(mstudioiklink_t) == 28, "mstudioiklink_t layout");
@@ -491,7 +490,7 @@ struct mstudioikrule_t {
     int32_t type;
     int32_t chain;
     int32_t bone;
-    int32_t slot; // iktarget slot, usually same as chain
+    int32_t slot; // target slot index; normally equal to chain
     float height;
     float radius;
     float floor;
@@ -552,7 +551,7 @@ struct mstudioevent_t {
 static_assert(sizeof(mstudioevent_t) == 80, "mstudioevent_t layout");
 
 struct mstudioanimtag_t {
-    int32_t tag; // runtime-resolved; 0 on disk like the reference's calloc
+    int32_t tag; // runtime-resolved; 0 on disk like stock studiomdl's calloc
     float cycle;
     int32_t sztagindex;
 };
@@ -812,10 +811,8 @@ struct mstudiomodel_t {
 };
 static_assert(sizeof(mstudiomodel_t) == 148, "mstudiomodel_t layout");
 
-// Eyeball. NOTE: `unused[4]` is documented in the SDK as "These were used
-// before, so not guaranteed to be 0" - the reference leaves whatever the
-// calloc'd s_eyeball_t carried, so treat it as a leaked-bytes site like the
-// other runtime-pointer slots rather than assuming zero.
+// Eyeball. NOTE: `unused[4]` is documented in the SDK as "These were used before, so not guaranteed
+// to be 0".
 struct mstudioeyeball_t {
     int32_t sznameindex;
     int32_t bone;
@@ -900,8 +897,8 @@ struct studiohdr2_t {
 };
 static_assert(sizeof(studiohdr2_t) == 252, "studiohdr2_t layout");
 
-// $includemodel entry. The reference only ever fills sznameindex; szlabelindex
-// stays 0 (the block is calloc'd).
+// $includemodel entry. stock studiomdl only ever fills sznameindex; szlabelindex stays 0 (the block
+// is calloc'd).
 struct mstudiomodelgroup_t {
     int32_t szlabelindex;
     int32_t sznameindex;
