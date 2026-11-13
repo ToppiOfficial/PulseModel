@@ -83,6 +83,12 @@ static int Usage() {
     std::printf("  -forcewritevertexdata\n");
     std::printf("                save .vvd/.vtx even when the model has no geometry;\n");
     std::printf("                same as $forcewritevertexdata in the script\n");
+    std::printf("  -ignorealwayscollapse\n");
+    std::printf("                ignore every $alwayscollapse bone in the script\n");
+    std::printf("  -fitboneweights [poses]\n");
+    std::printf("                refit the 3 kept weights of vertices with 4+ influences to\n");
+    std::printf("                match the full skin over [poses] random poses (default 256);\n");
+    std::printf("                overrides $fitboneweights in the script\n");
     std::printf("  -minlod <lod> discard higher-detail LODs and promote this LOD to root;\n");
     std::printf("                overrides $minlod in the script\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and stop\n");
@@ -164,6 +170,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     int launchMinLod = -1;
     bool stripLods = false;
     bool forceWriteVertexData = false;
+    int fitBoneWeights = 0; // -fitboneweights pose count; 0 = not given
+    bool ignoreAlwaysCollapse = false;
     bool legacySequenceBounds = false;
     bool definebones = false;
     bool verify = false;
@@ -225,6 +233,24 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
             stripLods = true;
         } else if (std::strcmp(argv[i], "-forcewritevertexdata") == 0) {
             forceWriteVertexData = true;
+        } else if (std::strcmp(argv[i], "-ignorealwayscollapse") == 0) {
+            ignoreAlwaysCollapse = true;
+        } else if (std::strcmp(argv[i], "-fitboneweights") == 0) {
+            fitBoneWeights = pulse::limits::kWeightFitPoses;
+            if (i + 1 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 1][0]))) {
+                const std::string value = argv[++i];
+                try {
+                    size_t used = 0;
+                    fitBoneWeights = std::stoi(value, &used);
+                    if (used != value.size() || fitBoneWeights < 1 ||
+                        fitBoneWeights > pulse::limits::kMaxWeightFitPoses)
+                        throw std::invalid_argument("invalid pose count");
+                } catch (const std::exception&) {
+                    return Fail("bad option", "-fitboneweights needs a pose count from 1 to " +
+                                                  std::to_string(pulse::limits::kMaxWeightFitPoses) +
+                                                  ", got \"" + value + "\"");
+                }
+            }
         } else if (std::strcmp(argv[i], "-definebones") == 0) {
             if (api) return Fail("bad API option", std::string("standalone-only option ") + argv[i]);
             definebones = true;
@@ -288,6 +314,10 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     input.legacySequenceBounds = legacySequenceBounds;
     if (forceWriteVertexData)
         input.forceWriteVertexData = true;
+    if (fitBoneWeights)
+        input.fitBoneWeightPoses = fitBoneWeights;
+    if (ignoreAlwaysCollapse)
+        input.alwaysCollapse.clear();
     if (stripLods)
         input.minLod = 0;
     else if (launchMinLod >= 0)

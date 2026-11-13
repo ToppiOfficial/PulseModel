@@ -17,6 +17,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <optional>
+#include <random>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -2727,14 +2729,233 @@ void RemapVertices(Ctx& ctx) {
     }
 }
 
+// min a'Ga - 2b'a over a >= 0, sum a = 1: best of the interior point, edges and corners.
+void SolveSimplex3(const double G[3][3], const double b[3], double a[3]) {
+    auto quad = [&](const double u[3], const double w[3]) {
+        double s = 0;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) s += u[i] * G[i][j] * w[j];
+        return s;
+    };
+    auto cost = [&](const double x[3]) {
+        return quad(x, x) - 2 * (b[0] * x[0] + b[1] * x[1] + b[2] * x[2]);
+    };
+    double bestCost = 1e300;
+    auto consider = [&](const double x[3]) {
+        if (x[0] < -1e-12 || x[1] < -1e-12 || x[2] < -1e-12) return;
+        const double c = cost(x);
+        if (c < bestCost) { bestCost = c; a[0] = x[0]; a[1] = x[1]; a[2] = x[2]; }
+    };
+    for (int i = 0; i < 3; ++i) {
+        double x[3] = {0, 0, 0};
+        x[i] = 1;
+        consider(x);
+    }
+    for (int i = 0; i < 3; ++i) {
+        const int j = (i + 1) % 3;
+        double d[3] = {0, 0, 0}, ej[3] = {0, 0, 0};
+        d[i] = 1; d[j] = -1; ej[j] = 1;
+        const double dGd = quad(d, d);
+        if (dGd < 1e-18) continue;
+        const double t = std::min(1.0, std::max(0.0, (b[i] - b[j] - quad(d, ej)) / dGd));
+        double x[3] = {0, 0, 0};
+        x[i] = t; x[j] = 1 - t;
+        consider(x);
+    }
+    const double d1[3] = {1, 0, -1}, d2[3] = {0, 1, -1}, e3[3] = {0, 0, 1};
+    const double h11 = quad(d1, d1), h12 = quad(d1, d2), h22 = quad(d2, d2);
+    const double r1 = b[0] - b[2] - quad(d1, e3), r2 = b[1] - b[2] - quad(d2, e3);
+    const double det = h11 * h22 - h12 * h12;
+    if (std::fabs(det) > 1e-18) {
+        const double x[3] = {(r1 * h22 - r2 * h12) / det, (r2 * h11 - r1 * h12) / det,
+                             1 - (r1 * h22 - r2 * h12) / det - (r2 * h11 - r1 * h12) / det};
+        consider(x);
+    }
+}
+
+// $fitboneweights: re-solves the 3 kept weights so the skinned position matches the
+// full-weight skin over random poses. The pose-summed error is quadratic in the
+// vertex position, so each bone pair is tabulated once and vertices never loop poses.
+class WeightFitter {
+public:
+    WeightFitter(const CompiledModel& model, int poseCount)
+        : nb_(static_cast<int>(model.bones.size())), np_(poseCount) {
+        const std::vector<Bone>& bones = model.bones;
+        for (int b = 0; b < nb_; ++b)
+            if (bones[b].parent >= b) { nb_ = 0; return; }
+        constexpr float kSigmaDeg = 8.0f;
+        std::vector<matrix3x4> local(nb_), world(nb_);
+        for (int b = 0; b < nb_; ++b)
+            local[b] = bones[b].parent >= 0
+                           ? ConcatTransforms(bones[bones[b].parent].poseToBone, bones[b].boneToPose)
+                           : bones[b].boneToPose;
+        // Bones the engine translates: a trigger pose that moves the helper, and
+        // base-spring or boing jigglebones. Every other bone only rotates.
+        std::vector<std::vector<Vector3>> triggerShift(nb_);
+        for (const ProceduralBone& pb : model.proceduralbones) {
+            if (pb.helper < 0 || pb.helper >= nb_) continue;
+            for (const ProceduralBoneTrigger& t : pb.triggers) {
+                const Vector3 d{t.pos.x - local[pb.helper].m[0][3], t.pos.y - local[pb.helper].m[1][3],
+                                t.pos.z - local[pb.helper].m[2][3]};
+                if (d.x * d.x + d.y * d.y + d.z * d.z > 1e-8f) triggerShift[pb.helper].push_back(d);
+            }
+        }
+        std::vector<const JiggleBone*> springy(nb_, nullptr);
+        for (const JiggleBone& jb : model.jigglebones)
+            if (jb.bone >= 0 && jb.bone < nb_ && (jb.flags & (kJiggleHasBaseSpring | kJiggleIsBoing)))
+                springy[jb.bone] = &jb;
+        // uniform on +-sqrt(3)*sigma has the requested deviation; mt19937 output is portable
+        std::mt19937 rng(0x9e3779b9u);
+        auto rand01 = [&] { return (rng() >> 8) * (1.0f / 16777216.0f); };
+        const float amp = 1.7320508f * kSigmaDeg;
+        const float nudge = lim::kWeightFitNudge;
+        poses_.resize(static_cast<size_t>(np_) * nb_);
+        for (int p = 0; p < np_; ++p) {
+            for (int b = 0; b < nb_; ++b) {
+                float e[3];
+                for (float& x : e) x = (rand01() * 2.0f - 1.0f) * amp;
+                matrix3x4 r;
+                AngleMatrixDeg(Vector3{e[0], e[1], e[2]}, r);
+                matrix3x4 l = ConcatTransforms(local[b], r);
+                Vector3 off;
+                if (!triggerShift[b].empty()) {
+                    const Vector3& d = triggerShift[b][rng() % triggerShift[b].size()];
+                    const float t = rand01();
+                    off = {d.x * t, d.y * t, d.z * t};
+                }
+                if (const JiggleBone* jb = springy[b]) {
+                    // bone frame: x forward, y left, z up; limits clamp the nudge
+                    auto within = [&](float lo, float hi) {
+                        lo = std::max(lo, -nudge);
+                        hi = std::min(hi, nudge);
+                        return hi > lo ? lo + rand01() * (hi - lo) : 0.0f;
+                    };
+                    Vector3 o;
+                    if (jb->flags & kJiggleHasBaseSpring)
+                        o = {within(jb->baseMinForward, jb->baseMaxForward),
+                             within(jb->baseMinLeft, jb->baseMaxLeft), within(jb->baseMinUp, jb->baseMaxUp)};
+                    if (jb->flags & kJiggleIsBoing) {
+                        Vector3 dir{rand01() * 2.0f - 1.0f, rand01() * 2.0f - 1.0f, rand01() * 2.0f - 1.0f};
+                        const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+                        if (len > 1e-4f) {
+                            const float s = nudge * rand01() / len;
+                            o.x += dir.x * s; o.y += dir.y * s; o.z += dir.z * s;
+                        }
+                    }
+                    const Vector3 po = VectorRotate(o, local[b]);
+                    off.x += po.x; off.y += po.y; off.z += po.z;
+                }
+                l.m[0][3] += off.x; l.m[1][3] += off.y; l.m[2][3] += off.z;
+                world[b] = bones[b].parent >= 0 ? ConcatTransforms(world[bones[b].parent], l) : l;
+                poses_[static_cast<size_t>(p) * nb_ + b] = ConcatTransforms(world[b], bones[b].poseToBone);
+            }
+        }
+        pairs_.resize(static_cast<size_t>(nb_) * nb_);
+    }
+
+    bool usable() const { return nb_ > 0; }
+
+    // fb/fw: the full influences; tb/tw: the trimmed 3, replaced by the fitted result.
+    void Fit(const Vector3& pos, const int* fb, const float* fw, int n, int* tb, float* tw) {
+        for (int i = 0; i < n; ++i) if (fb[i] < 0 || fb[i] >= nb_) return;
+        for (int i = 0; i < 3; ++i) if (tb[i] < 0 || tb[i] >= nb_) return;
+        double G[3][3], b[3] = {0, 0, 0};
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) G[i][j] = Gram(pos, tb[i], tb[j]);
+            for (int k = 0; k < n; ++k) b[i] += fw[k] * Gram(pos, tb[i], fb[k]);
+        }
+        double a[3] = {tw[0], tw[1], tw[2]};
+        auto cost = [&](const double x[3]) {
+            double s = 0;
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) s += x[i] * G[i][j] * x[j];
+                s -= 2 * b[i] * x[i];
+            }
+            return s;
+        };
+        double fit[3];
+        SolveSimplex3(G, b, fit);
+        if (cost(fit) >= cost(a)) return; // keep the trimmed weights
+        int ob[3] = {tb[0], tb[1], tb[2]};
+        float w[3] = {static_cast<float>(fit[0]), static_cast<float>(fit[1]), static_cast<float>(fit[2])};
+        for (int pass = 0; pass < 2; ++pass)
+            for (int i = 0; i < 2; ++i)
+                if (w[i + 1] > w[i]) { std::swap(w[i], w[i + 1]); std::swap(ob[i], ob[i + 1]); }
+        int cnt = 3;
+        while (cnt > 1 && w[cnt - 1] < lim::kMinBoneWeight) --cnt;
+        float sum = 0;
+        for (int i = 0; i < cnt; ++i) sum += w[i];
+        for (int i = 0; i < 3; ++i) { tb[i] = ob[i]; tw[i] = i < cnt ? w[i] / sum : 0.0f; }
+    }
+
+private:
+    // sum over poses of (M_a v) . (M_b v) = v'Av + q.v + s
+    struct Pair {
+        double axx, ayy, azz, axy, axz, ayz, qx, qy, qz, s;
+        bool ready = false;
+    };
+
+    double Gram(const Vector3& v, int a, int b) {
+        if (a > b) std::swap(a, b);
+        Pair& p = pairs_[static_cast<size_t>(a) * nb_ + b];
+        if (!p.ready) Tabulate(a, b, p);
+        return p.axx * v.x * v.x + p.ayy * v.y * v.y + p.azz * v.z * v.z + p.axy * v.x * v.y +
+               p.axz * v.x * v.z + p.ayz * v.y * v.z + p.qx * v.x + p.qy * v.y + p.qz * v.z + p.s;
+    }
+
+    void Tabulate(int a, int b, Pair& p) const {
+        double m[3][3] = {}, q[3] = {}, s = 0;
+        for (int k = 0; k < np_; ++k) {
+            const matrix3x4& A = poses_[static_cast<size_t>(k) * nb_ + a];
+            const matrix3x4& B = poses_[static_cast<size_t>(k) * nb_ + b];
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j)
+                    for (int r = 0; r < 3; ++r) m[i][j] += A.m[r][i] * B.m[r][j];
+                for (int r = 0; r < 3; ++r) q[i] += A.m[r][i] * B.m[r][3] + B.m[r][i] * A.m[r][3];
+            }
+            for (int r = 0; r < 3; ++r) s += A.m[r][3] * B.m[r][3];
+        }
+        p = {m[0][0], m[1][1], m[2][2], m[0][1] + m[1][0], m[0][2] + m[2][0], m[1][2] + m[2][1],
+             q[0], q[1], q[2], s, true};
+    }
+
+    int nb_ = 0;
+    int np_ = 0;
+    std::vector<matrix3x4> poses_; // [pose][bone] skinning matrices
+    std::vector<Pair> pairs_;      // [lo][hi], filled on first use
+};
+
 // Clip merged, collapsed-bone influences to the hardware limit and normalize.
 void BalanceGlobalBoneWeights(Ctx& ctx) {
+    std::unique_ptr<WeightFitter> fitter;
+    std::optional<pulse::perf::Timer> fitTimer;
+    if (ctx.in->fitBoneWeightPoses > 0) {
+        fitTimer.emplace("pass", "FitBoneWeights");
+        fitter = std::make_unique<WeightFitter>(*ctx.out, ctx.in->fitBoneWeightPoses);
+        if (!fitter->usable()) {
+            pulse::diag::Warnf("$fitboneweights: bones are not parent-first, using the top 3 weights\n");
+            fitter.reset();
+        }
+    }
     for (auto& sp : ctx.in->sources) {
         for (auto& v : sp->globalVertices) {
             if (v.boneweight.numbones <= 0 || v.boneweight.numbones > lim::kMaxSrcBoneWeights)
                 continue;
+            const int n = v.boneweight.numbones;
+            int fb[lim::kMaxSrcBoneWeights];
+            float fw[lim::kMaxSrcBoneWeights];
+            const bool fit = fitter && n > lim::kMaxBoneWeights;
+            if (fit) {
+                std::copy(v.boneweight.bone, v.boneweight.bone + n, fb);
+                std::copy(v.boneweight.weight, v.boneweight.weight + n, fw);
+            }
             v.boneweight.numbones = src::SortAndBalanceBones(
-                v.boneweight.numbones, lim::kMaxBoneWeights, v.boneweight.bone, v.boneweight.weight);
+                n, lim::kMaxBoneWeights, v.boneweight.bone, v.boneweight.weight);
+            if (fit && v.boneweight.numbones == lim::kMaxBoneWeights) {
+                fitter->Fit(v.position, fb, fw, n, v.boneweight.bone, v.boneweight.weight);
+                while (v.boneweight.numbones > 1 && v.boneweight.weight[v.boneweight.numbones - 1] <= 0.0f)
+                    --v.boneweight.numbones;
+            }
         }
     }
 }

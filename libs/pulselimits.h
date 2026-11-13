@@ -55,6 +55,13 @@ inline constexpr int kMaxBoneWeights   = 3; // [format] same
 // vertex, so it stays a budget. Reference MAXSTUDIOSRCBONEWEIGHTS.
 inline constexpr int   kMaxSrcBoneWeights = 16;
 inline constexpr float kMinBoneWeight     = 0.0001f;
+// [tool] Random poses sampled by the $fitboneweights solve: default and ceiling.
+// Only sizes a one-time per-bone-pair table, so raising it costs little per vertex.
+inline constexpr int   kWeightFitPoses    = 256;
+inline constexpr int   kMaxWeightFitPoses = 4096;
+// [tool] Largest base-spring or boing displacement, in model units, the fit poses
+// a jigglebone with. A guess: the real excursion depends on the simulation.
+inline constexpr float kWeightFitNudge    = 1.0f;
 // [tool] Above the format: vtx::Vertex_t::boneID is uint8, so a vertex can
 // only name palette slot 0-255. Kept at the reference's 512 rather than
 // lowered - hardware palettes never approach either number.

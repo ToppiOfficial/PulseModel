@@ -4761,6 +4761,17 @@ bool CmdStaticProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Stati
 bool CmdSimpleProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Simple; return true; }
 bool CmdAutoCenter(Ctx& c, const Token&) { c.in.autoCenter = true; return true; }
 bool CmdForceWriteVertexData(Ctx& c, const Token&) { c.in.forceWriteVertexData = true; return true; }
+// $fitboneweights [poses]
+bool CmdFitBoneWeights(Ctx& c, const Token& cmd) {
+    int poses = lim::kWeightFitPoses;
+    if (c.NextIsInt() && !c.WantInt("a pose count", cmd, poses))
+        return false;
+    if (poses < 1 || poses > lim::kMaxWeightFitPoses)
+        return c.Fail(cmd.line, "$fitboneweights expects a pose count from 1 to " +
+                                    std::to_string(lim::kMaxWeightFitPoses));
+    c.in.fitBoneWeightPoses = poses;
+    return true;
+}
 
 // $vtxformat <int> - which .vtx strip/stripgroup layout to write. 0 = legacy
 // 27/25-byte headers (TF2/L4D2/GMod/HL2), 1 = full 35/33-byte headers with the
@@ -9583,6 +9594,7 @@ constexpr Command kCommands[] = {
     {"$simpleprop", CmdSimpleProp},
     {"$autocenter", CmdAutoCenter},
     {"$forcewritevertexdata", CmdForceWriteVertexData},
+    {"$fitboneweights", CmdFitBoneWeights},
     {"$vtxformat", CmdVtxFormat},
     {"$dx80", CmdDx80},
     {"$modelbudget", CmdModelBudget},

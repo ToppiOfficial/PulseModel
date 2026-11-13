@@ -41,7 +41,8 @@ A successful compile does not guarantee the model will load in the target game.
 mdlcompiler <file.qc|file.qczip> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
             [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
             [-vtxformat <0|1>] [-dx80]
-            [-striplods] [-minlod <lod>] [-definebones] [-verify] [-dumpmaterials]
+            [-striplods] [-minlod <lod>] [-ignorealwayscollapse] [-fitboneweights [poses]]
+            [-definebones] [-verify] [-dumpmaterials]
             [-legacysequencebounds] [-perfmetrics] [-pause]
 mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move] [-pause]
 ```
@@ -61,6 +62,8 @@ mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move] [-pause
 | `-dx80` | Also write the DirectX 8 `.dx80.vtx` output (also `$dx80`). Only written at vtx format 0. |
 | `-striplods` | Ignore all `$lod` and `$shadowlod` commands and compile only the original root LOD. |
 | `-minlod <lod>` | Discard higher-detail LODs and promote the zero-based LOD index to root, overriding `$minlod` in the script. |
+| `-ignorealwayscollapse` | Ignore every `$alwayscollapse` bone in the script. |
+| `-fitboneweights [poses]` | [experimental] Re-solve the three kept weights of vertices with 4+ influences to match the full skin over `[poses]` random poses (default 256, max 4096), instead of keeping the top three. Overrides `$fitboneweights`. |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
 | `-verify` | Compile the model without writing output files. |
 | `-legacysequencebounds` | Use per-frame vertex skinning for sequence bounds. The default precomputes per-bone vertex boxes and transforms those boxes per frame, which is faster but can produce wider bounds. |

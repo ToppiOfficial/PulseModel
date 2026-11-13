@@ -1094,6 +1094,7 @@ struct CompileInput {
     Archetype archetype = Archetype::General;
     bool autoCenter = false; // $autocenter
     bool forceWriteVertexData = false; // $forcewritevertexdata
+    int fitBoneWeightPoses = 0;        // $fitboneweights [poses]: refit the 3 kept weights; 0 = off
     bool legacySequenceBounds = false; // -legacysequencebounds: skin vertices per frame
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.
