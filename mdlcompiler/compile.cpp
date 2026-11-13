@@ -10436,13 +10436,22 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
         preset.name = ip.name;
         for (const auto& ch : ip.choices) {
             const BodyPart* bp = nullptr;
+            int matches = 0;
             for (const BodyPart& b : out.bodyparts)
-                if (b.name == ch.first)
+                if (b.name == ch.first) {
                     bp = &b;
+                    matches++;
+                }
             if (!bp) {
                 if (err)
                     *err = "$modelgrouppreset \"" + ip.name + "\": no $modelgroup named \"" +
                            ch.first + "\"";
+                return false;
+            }
+            if (matches > 1) {
+                if (err)
+                    *err = "$modelgrouppreset \"" + ip.name + "\": \"" + ch.first +
+                           "\" names more than one body part";
                 return false;
             }
             const int nummodels = static_cast<int>(bp->modelIndices.size());

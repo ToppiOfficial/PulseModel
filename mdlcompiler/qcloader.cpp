@@ -1557,11 +1557,6 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a name", cmd, name))
         return false;
-    // duplicates are ambiguous for $modelgrouppreset and for a decompile, so
-    // they are a hard error rather than two groups the tools pick between
-    for (const auto& b : c.in.bodyparts)
-        if (b.name == name)
-            return c.Fail(cmd.line, "$modelgroup \"" + name + "\" already exists");
     const std::string where = "$modelgroup \"" + name + "\"";
     cm::CompileInput::InBodyPart part;
     part.name = name;
@@ -1987,9 +1982,6 @@ bool CmdLegacyBody(Ctx& c, const Token& cmd) {
     if (!c.Want("a name", cmd, part.name))
         return false;
     const std::string where = cmd.text + " \"" + part.name + "\"";
-    for (const auto& b : c.in.bodyparts)
-        if (b.name == part.name)
-            return c.Fail(cmd.line, where + " already exists");
 
     auto studio = [&](const Token& entry, bool inlineBody) -> bool {
         if (c.AtCommand() || (!c.Cur().quoted &&
@@ -2075,9 +2067,6 @@ bool CmdModel(Ctx& c, const Token& cmd) {
     if (!c.Want("a name", cmd, part.name))
         return false;
     const std::string where = cmd.text + " \"" + part.name + "\"";
-    for (const auto& b : c.in.bodyparts)
-        if (b.name == part.name)
-            return c.Fail(cmd.line, where + " already exists");
 
     std::string file;
     if (!c.Want("a source filename", cmd, file))
