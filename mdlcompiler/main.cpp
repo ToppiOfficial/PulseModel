@@ -87,8 +87,8 @@ static int Usage() {
     std::printf("                ignore every $alwayscollapse bone in the script\n");
     std::printf("  -fitboneweights [poses]\n");
     std::printf("                refit the 3 kept weights of vertices with 4+ influences to\n");
-    std::printf("                match the full skin over [poses] random poses (default 256);\n");
-    std::printf("                overrides $fitboneweights in the script\n");
+    std::printf("                match the full skin over [poses] random poses; on by default\n");
+    std::printf("                (2048), 0 keeps the top 3 weights. Overrides $fitboneweights\n");
     std::printf("  -minlod <lod> discard higher-detail LODs and promote this LOD to root;\n");
     std::printf("                overrides $minlod in the script\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and stop\n");
@@ -169,7 +169,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     int launchMinLod = -1;
     bool stripLods = false;
     bool forceWriteVertexData = false;
-    int fitBoneWeights = 0; // -fitboneweights pose count; 0 = not given
+    int fitBoneWeights = -1; // -fitboneweights pose count; -1 = not given
     bool ignoreAlwaysCollapse = false;
     bool legacySequenceBounds = false;
     bool definebones = false;
@@ -241,11 +241,11 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
                 try {
                     size_t used = 0;
                     fitBoneWeights = std::stoi(value, &used);
-                    if (used != value.size() || fitBoneWeights < 1 ||
+                    if (used != value.size() || fitBoneWeights < 0 ||
                         fitBoneWeights > pulse::limits::kMaxWeightFitPoses)
                         throw std::invalid_argument("invalid pose count");
                 } catch (const std::exception&) {
-                    return Fail("bad option", "-fitboneweights needs a pose count from 1 to " +
+                    return Fail("bad option", "-fitboneweights needs a pose count from 0 to " +
                                                   std::to_string(pulse::limits::kMaxWeightFitPoses) +
                                                   ", got \"" + value + "\"");
                 }
@@ -313,7 +313,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     input.legacySequenceBounds = legacySequenceBounds;
     if (forceWriteVertexData)
         input.forceWriteVertexData = true;
-    if (fitBoneWeights)
+    if (fitBoneWeights >= 0)
         input.fitBoneWeightPoses = fitBoneWeights;
     if (ignoreAlwaysCollapse)
         input.alwaysCollapse.clear();

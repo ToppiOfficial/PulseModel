@@ -63,7 +63,7 @@ mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move] [-pause
 | `-striplods` | Ignore all `$lod` and `$shadowlod` commands and compile only the original root LOD. |
 | `-minlod <lod>` | Discard higher-detail LODs and promote the zero-based LOD index to root, overriding `$minlod` in the script. |
 | `-ignorealwayscollapse` | Ignore every `$alwayscollapse` bone in the script. |
-| `-fitboneweights [poses]` | [experimental] Re-solve the three kept weights of vertices with 4+ influences to match the full skin over `[poses]` random poses (default 256, max 4096), instead of keeping the top three. Overrides `$fitboneweights`. |
+| `-fitboneweights [poses]` | Re-solve the three kept weights of vertices with 4+ influences so position and normal match the full skin over `[poses]` random poses (default 2048, max 4096), instead of keeping the top three. On by default; `0` keeps the top three. Static and simple props skip it. Overrides `$fitboneweights`. |
 | `-definebones` | Print the compiled skeleton as `$definebone` lines and stop - nothing is written. |
 | `-verify` | Compile the model without writing output files. |
 | `-legacysequencebounds` | Use per-frame vertex skinning for sequence bounds. The default precomputes per-bone vertex boxes and transforms those boxes per frame, which is faster but can produce wider bounds. |

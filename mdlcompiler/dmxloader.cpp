@@ -335,6 +335,7 @@ void LoadAnimations(const dmx::Element* animationList, float flScale,
             };
             startTms = readTicks("start");
             durTms = readTicks("duration");
+            if (durTms == 0) durTms = readTicks("durationTime"); // model 1 spelling, int ticks
             offsetTms = readTicks("offset");
         }
         int endTms = startTms + durTms;

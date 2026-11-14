@@ -4736,13 +4736,13 @@ bool CmdStaticProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Stati
 bool CmdSimpleProp(Ctx& c, const Token&) { c.in.archetype = cm::Archetype::Simple; return true; }
 bool CmdAutoCenter(Ctx& c, const Token&) { c.in.autoCenter = true; return true; }
 bool CmdForceWriteVertexData(Ctx& c, const Token&) { c.in.forceWriteVertexData = true; return true; }
-// $fitboneweights [poses]
+// $fitboneweights [poses] - 0 turns the fit off
 bool CmdFitBoneWeights(Ctx& c, const Token& cmd) {
     int poses = lim::kWeightFitPoses;
     if (c.NextIsInt() && !c.WantInt("a pose count", cmd, poses))
         return false;
-    if (poses < 1 || poses > lim::kMaxWeightFitPoses)
-        return c.Fail(cmd.line, "$fitboneweights expects a pose count from 1 to " +
+    if (poses < 0 || poses > lim::kMaxWeightFitPoses)
+        return c.Fail(cmd.line, "$fitboneweights expects a pose count from 0 to " +
                                     std::to_string(lim::kMaxWeightFitPoses));
     c.in.fitBoneWeightPoses = poses;
     return true;

@@ -56,8 +56,11 @@ inline constexpr int   kMaxSrcBoneWeights = 16;
 inline constexpr float kMinBoneWeight     = 0.0001f;
 // [tool] Random poses sampled by the $fitboneweights solve: default and ceiling.
 // Only sizes a one-time per-bone-pair table, so raising it costs little per vertex.
-inline constexpr int   kWeightFitPoses    = 256;
+inline constexpr int   kWeightFitPoses    = 2048;
 inline constexpr int   kMaxWeightFitPoses = 4096;
+// [tool] Weight of the skinned-normal error against the position error in the fit, in
+// squared model units per squared radian.
+inline constexpr float kWeightFitNormalWeight = 30.0f;
 // [tool] Largest base-spring or boing displacement, in model units, the fit poses
 // a jigglebone with. A guess: the real excursion depends on the simulation.
 inline constexpr float kWeightFitNudge    = 1.0f;

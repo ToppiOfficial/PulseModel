@@ -2765,8 +2765,8 @@ void SolveSimplex3(const double G[3][3], const double b[3], double a[3]) {
     }
 }
 
-// $fitboneweights: re-solves the 3 kept weights so the skinned position matches the
-// full-weight skin over random poses. The pose-summed error is quadratic in the
+// $fitboneweights: re-solves the 3 kept weights so the skinned position and normal match
+// the full-weight skin over random poses. The pose-summed error is quadratic in the
 // vertex position, so each bone pair is tabulated once and vertices never loop poses.
 class WeightFitter {
 public:
@@ -2848,13 +2848,13 @@ public:
     bool usable() const { return nb_ > 0; }
 
     // fb/fw: the full influences; tb/tw: the trimmed 3, replaced by the fitted result.
-    void Fit(const Vector3& pos, const int* fb, const float* fw, int n, int* tb, float* tw) {
+    void Fit(const Vector3& pos, const Vector3& nrm, const int* fb, const float* fw, int n, int* tb, float* tw) {
         for (int i = 0; i < n; ++i) if (fb[i] < 0 || fb[i] >= nb_) return;
         for (int i = 0; i < 3; ++i) if (tb[i] < 0 || tb[i] >= nb_) return;
         double G[3][3], b[3] = {0, 0, 0};
         for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) G[i][j] = Gram(pos, tb[i], tb[j]);
-            for (int k = 0; k < n; ++k) b[i] += fw[k] * Gram(pos, tb[i], fb[k]);
+            for (int j = 0; j < 3; ++j) G[i][j] = Gram(pos, nrm, tb[i], tb[j]);
+            for (int k = 0; k < n; ++k) b[i] += fw[k] * Gram(pos, nrm, tb[i], fb[k]);
         }
         double a[3] = {tw[0], tw[1], tw[2]};
         auto cost = [&](const double x[3]) {
@@ -2887,12 +2887,17 @@ private:
         bool ready = false;
     };
 
-    double Gram(const Vector3& v, int a, int b) {
+    // Position term plus the weighted normal term; a normal sees the rotation part only.
+    double Gram(const Vector3& v, const Vector3& n, int a, int b) {
         if (a > b) std::swap(a, b);
         Pair& p = pairs_[static_cast<size_t>(a) * nb_ + b];
         if (!p.ready) Tabulate(a, b, p);
-        return p.axx * v.x * v.x + p.ayy * v.y * v.y + p.azz * v.z * v.z + p.axy * v.x * v.y +
-               p.axz * v.x * v.z + p.ayz * v.y * v.z + p.qx * v.x + p.qy * v.y + p.qz * v.z + p.s;
+        auto quad = [&p](const Vector3& u) {
+            return p.axx * u.x * u.x + p.ayy * u.y * u.y + p.azz * u.z * u.z + p.axy * u.x * u.y +
+                   p.axz * u.x * u.z + p.ayz * u.y * u.z;
+        };
+        return quad(v) + p.qx * v.x + p.qy * v.y + p.qz * v.z + p.s +
+               static_cast<double>(lim::kWeightFitNormalWeight) * quad(n);
     }
 
     void Tabulate(int a, int b, Pair& p) const {
@@ -2919,16 +2924,12 @@ private:
 
 // Clip merged, collapsed-bone influences to the hardware limit and normalize.
 void BalanceGlobalBoneWeights(Ctx& ctx) {
+    // Props have a single bone, so only general models fit; the fitter is built on the
+    // first vertex that has more than 3 influences.
+    const bool fitWanted = ctx.in->fitBoneWeightPoses > 0 && ctx.in->archetype == Archetype::General;
+    bool fitStarted = false;
     std::unique_ptr<WeightFitter> fitter;
     std::optional<pulse::perf::Timer> fitTimer;
-    if (ctx.in->fitBoneWeightPoses > 0) {
-        fitTimer.emplace("pass", "FitBoneWeights");
-        fitter = std::make_unique<WeightFitter>(*ctx.out, ctx.in->fitBoneWeightPoses);
-        if (!fitter->usable()) {
-            pulse::diag::Warnf("$fitboneweights: bones are not parent-first, using the top 3 weights\n");
-            fitter.reset();
-        }
-    }
     for (auto& sp : ctx.in->sources) {
         for (auto& v : sp->globalVertices) {
             if (v.boneweight.numbones <= 0 || v.boneweight.numbones > lim::kMaxSrcBoneWeights)
@@ -2936,6 +2937,15 @@ void BalanceGlobalBoneWeights(Ctx& ctx) {
             const int n = v.boneweight.numbones;
             int fb[lim::kMaxSrcBoneWeights];
             float fw[lim::kMaxSrcBoneWeights];
+            if (fitWanted && !fitStarted && n > lim::kMaxBoneWeights) {
+                fitStarted = true;
+                fitTimer.emplace("pass", "FitBoneWeights");
+                fitter = std::make_unique<WeightFitter>(*ctx.out, ctx.in->fitBoneWeightPoses);
+                if (!fitter->usable()) {
+                    pulse::diag::Warnf("$fitboneweights: bones are not parent-first, using the top 3 weights\n");
+                    fitter.reset();
+                }
+            }
             const bool fit = fitter && n > lim::kMaxBoneWeights;
             if (fit) {
                 std::copy(v.boneweight.bone, v.boneweight.bone + n, fb);
@@ -2944,7 +2954,7 @@ void BalanceGlobalBoneWeights(Ctx& ctx) {
             v.boneweight.numbones = src::SortAndBalanceBones(
                 n, lim::kMaxBoneWeights, v.boneweight.bone, v.boneweight.weight);
             if (fit && v.boneweight.numbones == lim::kMaxBoneWeights) {
-                fitter->Fit(v.position, fb, fw, n, v.boneweight.bone, v.boneweight.weight);
+                fitter->Fit(v.position, v.normal, fb, fw, n, v.boneweight.bone, v.boneweight.weight);
                 while (v.boneweight.numbones > 1 && v.boneweight.weight[v.boneweight.numbones - 1] <= 0.0f)
                     --v.boneweight.numbones;
             }
