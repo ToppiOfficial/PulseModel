@@ -3686,8 +3686,10 @@ struct MeshBucket {
 // decimated geometry stays with its full-resolution self. A vertex whose faces
 // land on both sides of a cut is duplicated into both; those few duplicates are
 // the entire cost of the split.
+// wanted, when given, limits which face-less verts this call has to place.
 std::vector<MeshBucket> PartitionMesh(int numvertices,
-                                      const std::vector<std::vector<src::SrcFace>>& lodFaces) {
+                                      const std::vector<std::vector<src::SrcFace>>& lodFaces,
+                                      const std::vector<uint8_t>* wanted = nullptr) {
     const int cap = lim::kMaxMeshVerts;
     std::vector<MeshBucket> buckets;
 
@@ -3759,6 +3761,8 @@ std::vector<MeshBucket> PartitionMesh(int numvertices,
     // Model::vertices becomes, and dropping entries would renumber every flex
     // delta behind them for no gain.
     for (int v = 0; v < numvertices; v++) {
+        if (wanted && !(*wanted)[v])
+            continue;
         bool owned = false;
         for (const MeshBucket& b : buckets) {
             if (b.slot[v] >= 0) {
@@ -3786,9 +3790,110 @@ std::vector<MeshBucket> PartitionMesh(int numvertices,
     return buckets;
 }
 
+// Pool vertices that some flex key of the model moves.
+std::vector<uint8_t> MovingPoolVerts(const CompiledModel& m, size_t modelID) {
+    std::vector<uint8_t> moving(m.models[modelID].vertices.size(), 0);
+    for (const FlexKey& key : m.flexkeys) {
+        if (key.imodel != static_cast<int>(modelID))
+            continue;
+        for (const src::SrcVertAnim& va : key.vanim)
+            if (va.vertex >= 0 && va.vertex < static_cast<int>(moving.size()))
+                moving[va.vertex] = 1;
+    }
+    return moving;
+}
+
+// Whole vertex count of every mesh with flex data, summed over all models (so
+// bodygroup alternatives are over-counted). built = outMeshes exist, else the
+// per-material ranges stand in.
+int FlexCacheCharge(const CompiledModel& m, const std::vector<std::vector<uint8_t>>& moving,
+                    bool built) {
+    auto flexed = [](const std::vector<uint8_t>& mv, int first, int count) {
+        if (first < 0 || count < 0 || static_cast<size_t>(first + count) > mv.size())
+            return false;
+        return std::find(mv.begin() + first, mv.begin() + first + count, uint8_t{1}) !=
+               mv.begin() + first + count;
+    };
+    int charge = 0;
+    for (size_t i = 0; i < m.models.size(); i++) {
+        const Model& model = m.models[i];
+        if (!model.source)
+            continue;
+        if (built) {
+            for (const OutMesh& om : model.outMeshes)
+                if (flexed(moving[i], om.vertexoffset, om.numvertices))
+                    charge += om.numvertices;
+        } else {
+            for (int matID : model.source->meshindex) {
+                const src::SrcMesh& range = model.meshes[matID];
+                if (flexed(moving[i], range.vertexoffset, range.numvertices))
+                    charge += range.numvertices;
+            }
+        }
+    }
+    return charge;
+}
+
+// Splits one material into meshes holding the faces that touch a moving vertex
+// and meshes holding the rest. A moving vertex only ever lands on the flexed
+// side, so the static meshes carry no flex data. False when there is nothing to
+// separate or the split would not shrink the flexed side.
+bool PartitionByFlex(const src::SrcMesh& range, const std::vector<uint8_t>& moving,
+                     const std::vector<std::vector<src::SrcFace>>& lodFaces,
+                     std::vector<MeshBucket>& flexed, std::vector<MeshBucket>& still) {
+    const int n = range.numvertices;
+    auto isMoving = [&](uint32_t v) { return moving[range.vertexoffset + v] != 0; };
+
+    std::vector<std::vector<src::SrcFace>> flexFaces(lodFaces.size()), stillFaces(lodFaces.size());
+    std::vector<uint8_t> used(n, 0);
+    size_t numFlexFaces = 0, numStillFaces = 0;
+    for (size_t lodID = 0; lodID < lodFaces.size(); lodID++) {
+        for (const src::SrcFace& f : lodFaces[lodID]) {
+            used[f.a] = used[f.b] = used[f.c] = 1;
+            if (isMoving(f.a) || isMoving(f.b) || isMoving(f.c)) {
+                flexFaces[lodID].push_back(f);
+                numFlexFaces++;
+            } else {
+                stillFaces[lodID].push_back(f);
+                numStillFaces++;
+            }
+        }
+    }
+    if (!numFlexFaces || !numStillFaces)
+        return false;
+
+    std::vector<uint8_t> wantFlexed(n, 0), wantStill(n, 0);
+    for (int v = 0; v < n; v++)
+        if (!used[v])
+            (isMoving(v) ? wantFlexed : wantStill)[v] = 1;
+
+    flexed = PartitionMesh(n, flexFaces, &wantFlexed);
+    still = PartitionMesh(n, stillFaces, &wantStill);
+    auto empty = [](const MeshBucket& b) { return b.verts.empty(); };
+    flexed.erase(std::remove_if(flexed.begin(), flexed.end(), empty), flexed.end());
+    still.erase(std::remove_if(still.begin(), still.end(), empty), still.end());
+
+    int flexedVerts = 0;
+    for (const MeshBucket& b : flexed)
+        flexedVerts += static_cast<int>(b.verts.size());
+    return flexedVerts < n;
+}
+
 void BuildOutputMeshes(Ctx& ctx) {
     CompiledModel& m = *ctx.out;
     const int numLODs = static_cast<int>(m.scriptLods.size());
+
+    std::vector<std::vector<uint8_t>> moving(m.models.size());
+    bool anyFlex = false;
+    for (size_t i = 0; i < m.models.size(); i++) {
+        moving[i] = MovingPoolVerts(m, i);
+        anyFlex = anyFlex || std::find(moving[i].begin(), moving[i].end(), uint8_t{1}) != moving[i].end();
+    }
+    const int chargeBefore = anyFlex ? FlexCacheCharge(m, moving, false) : 0;
+    const FlexOptimize mode = ctx.in->flexOptimize;
+    const bool flexSplit = anyFlex && (mode == FlexOptimize::On ||
+                                       (mode == FlexOptimize::Auto &&
+                                        chargeBefore > lim::kFlexCacheVerts));
 
     for (size_t modelID = 0; modelID < m.models.size(); modelID++) {
         Model& model = m.models[modelID];
@@ -3856,6 +3961,32 @@ void BuildOutputMeshes(Ctx& ctx) {
                 model.outMeshes.push_back(std::move(om));
             };
 
+            const src::MaterialTable& mats = ctx.in->mats;
+            const std::string matName =
+                matID < static_cast<int>(mats.materialToTexture.size())
+                    ? FileBaseName(mats.textures[mats.materialToTexture[matID]].name)
+                    : std::to_string(matID);
+
+            std::vector<MeshBucket> flexed, still;
+            if (flexSplit && PartitionByFlex(range, moving[modelID], lodFaces, flexed, still)) {
+                split = true;
+                for (std::vector<MeshBucket>* set : {&flexed, &still})
+                    for (MeshBucket& bucket : *set)
+                        emit(static_cast<int>(bucket.verts.size()), bucket.verts.data(),
+                             std::move(bucket.lodFaces));
+                int flexedVerts = 0, stillVerts = 0;
+                for (const MeshBucket& b : flexed)
+                    flexedVerts += static_cast<int>(b.verts.size());
+                for (const MeshBucket& b : still)
+                    stillVerts += static_cast<int>(b.verts.size());
+                std::printf("Flex optimization: material \"%s\" %d vertices -> %d flexed "
+                            "(%d meshes) + %d static (%d meshes)\n",
+                            matName.c_str(), range.numvertices, flexedVerts,
+                            static_cast<int>(flexed.size()), stillVerts,
+                            static_cast<int>(still.size()));
+                continue;
+            }
+
             if (range.numvertices <= lim::kMaxMeshVerts) {
                 emit(range.numvertices, nullptr, std::move(lodFaces));
                 continue;
@@ -3866,12 +3997,6 @@ void BuildOutputMeshes(Ctx& ctx) {
             for (MeshBucket& bucket : buckets)
                 emit(static_cast<int>(bucket.verts.size()), bucket.verts.data(),
                      std::move(bucket.lodFaces));
-
-            const src::MaterialTable& mats = ctx.in->mats;
-            const std::string matName =
-                matID < static_cast<int>(mats.materialToTexture.size())
-                    ? FileBaseName(mats.textures[mats.materialToTexture[matID]].name)
-                    : std::to_string(matID);
 
             std::string pieces;
             int total = 0;
@@ -3911,8 +4036,8 @@ void BuildOutputMeshes(Ctx& ctx) {
             key.vanim.swap(remapped);
         }
 
-        // eyeball->mesh is a mesh ORDINAL and the split renumbered them. An
-        // eyeball mesh is never the one that splits, so its first piece is it.
+        // eyeball->mesh is a mesh ORDINAL and the split renumbered them. Every
+        // piece of a material shares its material, so the first piece stands in.
         for (Eyeball& eye : m.eyeballs) {
             if (eye.model != static_cast<int>(modelID))
                 continue;
@@ -3920,6 +4045,22 @@ void BuildOutputMeshes(Ctx& ctx) {
                 eye.mesh = firstOutMesh[eye.mesh];
         }
     }
+
+    if (!anyFlex)
+        return;
+    std::vector<std::vector<uint8_t>> after(m.models.size());
+    for (size_t i = 0; i < m.models.size(); i++)
+        after[i] = MovingPoolVerts(m, i);
+    const int chargeAfter = FlexCacheCharge(m, after, true);
+    if (flexSplit && chargeAfter != chargeBefore)
+        std::printf("Flex cache: %d -> %d vertices (limit %d)\n", chargeBefore, chargeAfter,
+                    lim::kFlexCacheVerts);
+    else
+        std::printf("Flex cache: %d vertices (limit %d)\n", chargeAfter, lim::kFlexCacheVerts);
+    if (chargeAfter > lim::kFlexCacheVerts)
+        pulse::diag::Warnf("flexed meshes add up to %d vertices, over the %d the flex cache can "
+                           "address; faces may render with another mesh's flex\n",
+                           chargeAfter, lim::kFlexCacheVerts);
 }
 
 // ---------------------------------------------------------------------------

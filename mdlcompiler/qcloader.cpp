@@ -4748,6 +4748,22 @@ bool CmdFitBoneWeights(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $flexoptimize auto|on|off
+bool CmdFlexOptimize(Ctx& c, const Token& cmd) {
+    std::string mode;
+    if (!c.WantOption("auto, on or off", cmd, mode))
+        return false;
+    if (_stricmp(mode.c_str(), "auto") == 0)
+        c.in.flexOptimize = cm::FlexOptimize::Auto;
+    else if (_stricmp(mode.c_str(), "on") == 0)
+        c.in.flexOptimize = cm::FlexOptimize::On;
+    else if (_stricmp(mode.c_str(), "off") == 0)
+        c.in.flexOptimize = cm::FlexOptimize::Off;
+    else
+        return c.Fail(cmd.line, "unknown $flexoptimize \"" + mode + "\" (expected auto/on/off)");
+    return true;
+}
+
 // $vtxformat <int> - which .vtx strip/stripgroup layout to write. 0 = legacy
 // 27/25-byte headers (TF2/L4D2/GMod/HL2), 1 = full 35/33-byte headers with the
 // topology fields (SFM/CS:GO/ASW+). The -vtxformat launch switch overrides it.
@@ -9533,6 +9549,7 @@ constexpr Command kCommands[] = {
     {"$autocenter", CmdAutoCenter},
     {"$forcewritevertexdata", CmdForceWriteVertexData},
     {"$fitboneweights", CmdFitBoneWeights},
+    {"$flexoptimize", CmdFlexOptimize},
     {"$vtxformat", CmdVtxFormat},
     {"$dx80", CmdDx80},
     {"$modelbudget", CmdModelBudget},

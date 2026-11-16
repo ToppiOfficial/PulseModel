@@ -1,4 +1,5 @@
 // vmd2valvebiped - retarget an MMD motion (.vmd) onto a ValveBiped .mdl as a DMX clip.
+// DEPRECATED: no longer developed; kept for existing workflows.
 //
 // Retargeting is done in world space: MMD bones rest with identity orientation
 // and a different rest pose, so local rotations never transfer directly. Legs
@@ -30,6 +31,7 @@
 #include "mdlfile.h"
 #include "pathcompat.h"
 #include "pulselimits.h"
+#include "rigscript.h"
 #include "strcompat.h"
 
 #include <nlohmann/json.hpp>
@@ -777,8 +779,18 @@ struct Target {
     std::vector<int> parent;
     std::vector<matrix3x4> local, world; // bind pose
     std::vector<std::string> names;
+    // Rig script mode: lower-case ValveBiped role -> bone. Empty means ValveBiped names.
+    std::map<std::string, int> roles;
 
     int Find(const std::string& suffix) const {
+        if (!roles.empty()) {
+            std::string key = suffix;
+            std::transform(key.begin(), key.end(), key.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            const auto it = roles.find(key);
+            return it == roles.end() ? -1 : it->second;
+        }
+
         const std::string want = "ValveBiped.Bip01_" + suffix;
         for (int i = 0; i < n; ++i)
             if (_stricmp(names[i].c_str(), want.c_str()) == 0)
@@ -806,6 +818,95 @@ bool LoadMdl(const std::string& path, Mdl& m, std::string& err, const std::vecto
         err = "Invalid target model header";
         return false;
     }
+    return true;
+}
+
+// Rig script mode: names the target's ValveBiped roles after the script's bone list.
+// `summary` lists what the roles landed on.
+bool BindRigRoles(const RigScript& rig, Target& t, std::string& summary, std::string& err) {
+    const auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return s;
+    };
+    const auto boneOf = [&](size_t slot) {
+        for (int i = 0; i < t.n; ++i)
+            if (_stricmp(t.names[i].c_str(), rig.bones[slot].c_str()) == 0)
+                return i;
+        return -1;
+    };
+    std::string missing;
+    const auto bind = [&](const std::string& role, size_t slot, bool required) {
+        const int i = boneOf(slot);
+        if (i >= 0)
+            t.roles[lower(role)] = i;
+        else if (required) {
+            const std::string name = rig.bones[slot].empty() ? "(slot " + std::to_string(slot) + " is None)" : rig.bones[slot];
+            if (missing.find(" " + name) == std::string::npos) missing += " " + name;
+        }
+    };
+
+    bind("Pelvis", 0, true);
+    bind("Neck1", 5, true);
+    bind("Head1", 6, true);
+    for (int side = 0; side < 2; ++side) {
+        const std::string s = side ? "L_" : "R_";
+        const size_t base = side ? 15 : 7;
+        bind(s + "Thigh", base, true);
+        bind(s + "Calf", base + 1, true);
+        bind(s + "Foot", base + 2, true);
+        bind(s + "Toe0", base + 3, rig.toe);
+        bind(s + "Clavicle", base + 4, rig.collar);
+        bind(s + "UpperArm", base + 5, true);
+        bind(s + "Forearm", base + 6, true);
+        bind(s + "Hand", base + 7, true);
+    }
+    if (!missing.empty()) {
+        err = "the rig script names bones the model does not have:" + missing;
+        return false;
+    }
+
+    // Spine slots that sit above the neck; the last one takes the chest (Spine2/Spine4) role.
+    const int neck = t.roles["neck1"];
+    std::vector<int> spine;
+    for (int slot = 1; slot <= rig.spines; ++slot) {
+        const int i = boneOf(static_cast<size_t>(slot));
+        bool above = false;
+        for (int p = t.parent[neck]; p >= 0; p = t.parent[p])
+            above |= p == i;
+        if (above && std::find(spine.begin(), spine.end(), i) == spine.end())
+            spine.push_back(i);
+    }
+    static const char* const kSpineRoles[4][4] = {{"Spine"},
+                                                  {"Spine", "Spine2"},
+                                                  {"Spine", "Spine1", "Spine2"},
+                                                  {"Spine", "Spine1", "Spine2", "Spine4"}};
+    for (size_t j = 0; j < spine.size(); ++j)
+        t.roles[lower(kSpineRoles[spine.size() - 1][j])] = spine[j];
+
+    // Fingers: the hand's children in bone order are thumb first to pinky, each followed down its chain.
+    int fingers[2] = {0, 0};
+    for (int side = 0; side < 2 && rig.fingers; ++side) {
+        const std::string s = side ? "L_" : "R_";
+        const auto firstChild = [&](int parent, int after) {
+            for (int i = after + 1; i < t.n; ++i)
+                if (t.parent[i] == parent)
+                    return i;
+            return -1;
+        };
+        int child = firstChild(t.roles[lower(s + "Hand")], -1);
+        for (int f = 0; f < 5 && child >= 0; ++f, child = firstChild(t.roles[lower(s + "Hand")], child)) {
+            int bone = child;
+            for (int d = 0; d < 3 && bone >= 0; ++d, bone = firstChild(bone, -1))
+                t.roles[lower(s + "Finger" + std::to_string(f) + (d ? std::to_string(d) : ""))] = bone;
+            ++fingers[side];
+        }
+    }
+
+    summary = "pelvis " + t.names[t.roles["pelvis"]] + ", spine";
+    for (const int i : spine)
+        summary += " " + t.names[i];
+    summary += ", fingers L" + std::to_string(fingers[1]) + " R" + std::to_string(fingers[0]);
     return true;
 }
 
@@ -1080,6 +1181,7 @@ struct Leg {
     Vector3 kneeDir; // thigh-local, from the $ikchain
     int ik = -1;     // MMD legik bone
     float bendSign = 1.0f; // which side of the hinge the $ikchain knee faces
+    Vector3 pole;    // world, from the rig script; wins over kneeDir
 };
 
 void PrintHeader() {
@@ -1088,15 +1190,21 @@ void PrintHeader() {
     std::printf("version:   %s\n", PULSEMODEL_VERSION);
     std::printf("developer: ToppiOfficial\n");
     std::printf("-------------------------------\n");
+    std::printf("DEPRECATED: vmd2valvebiped is no longer developed.\n");
 }
 
 int Usage() {
     std::printf(
-        "MMD motion (.vmd) -> ValveBiped DMX animation\n\n"
+        "MMD motion (.vmd) -> ValveBiped DMX animation\n"
+        "DEPRECATED: no longer developed.\n\n"
         "  vmd2valvebiped -vmd <file> [-vmd <file>...] -mdl <file> [options]\n\n"
         "  -vmd <file>      MMD motion to retarget; repeat for several clips, all\n"
         "                   retargeted through the same -mdl and -pmx\n"
         "  -mdl <file>      ValveBiped model giving the proportions; needs leg $ikchains\n"
+        "                   (not with -rig)\n"
+        "  -rig <file>      SFM auto-rigger script (.py) for a model that is not\n"
+        "                   ValveBiped: its bone list names the skeleton, its toe\n"
+        "                   option sets the knee direction; the script is read, not run\n"
         "  -pmx <file>      MMD model the motion was made for; its rest pose replaces\n"
         "                   the built-in standard skeleton\n"
         "  -armangle <deg>  built-in rest arm droop below horizontal (default 35)\n"
@@ -1325,7 +1433,7 @@ bool WriteAnimQc(const std::string& path, const Mdl& m, const std::string& model
 int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     if (!api) PrintHeader();
     std::vector<std::string> vmdPaths;
-    std::string mdlPath, pmxPath, outPath, compileName, gameDir, srcArg, faceMapPath;
+    std::string mdlPath, pmxPath, rigPath, outPath, compileName, gameDir, srcArg, faceMapPath;
     std::string faceSet = "auto", cameraFov;
     float armAngle = 35.0f, eyeRange = 30.0f;
     long startArg = -1, endArg = -1;
@@ -1340,6 +1448,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         if (!_stricmp(a, "-vmd")) vmdPaths.push_back(next());
         else if (!_stricmp(a, "-mdl")) mdlPath = next();
         else if (!_stricmp(a, "-pmx")) pmxPath = next();
+        else if (!_stricmp(a, "-rig")) rigPath = next();
         else if (!_stricmp(a, "-o")) outPath = next();
         else if (!_stricmp(a, "-compile")) compileName = next();
         else if (!_stricmp(a, "-srcdir")) srcArg = next();
@@ -1422,6 +1531,22 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         t.world[i] = t.parent[i] >= 0 ? pm::ConcatTransforms(t.world[t.parent[i]], t.local[i]) : t.local[i];
     }
 
+    std::string rigText = api ? api->rigText : std::string();
+    if (!rigPath.empty()) {
+        std::vector<char> bytes;
+        if (!ReadInput(rigPath, bytes))
+            return Fail("cannot read \"" + rigPath + "\"");
+        rigText.assign(bytes.begin(), bytes.end());
+    }
+    const bool rigMode = !rigText.empty();
+    RigScript rig;
+    if (rigMode) {
+        std::string summary;
+        if (!ParseRigScript(rigText, rig, err) || !BindRigRoles(rig, t, summary, err))
+            return Fail(err);
+        std::printf("rig script: %s\n", summary.c_str());
+    }
+
     const int pelvis = t.Find("Pelvis");
     const int lThigh = t.Find("L_Thigh"), rThigh = t.Find("R_Thigh");
     int top = t.Find("Head1");
@@ -1475,11 +1600,30 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         }
     }
 
-    // Leg chains come from the model's own $ikchain data.
+    // Leg chains come from the model's own $ikchain data, or from the rig script.
     Leg legs[2];
     const fm::mstudioikchain_t* chains =
         m.At<fm::mstudioikchain_t>(m.buf.data(), h.ikchainindex, h.numikchains);
-    for (int c = 0; chains && c < h.numikchains; ++c) {
+    for (int side = 0; rigMode && side < 2; ++side) {
+        const std::string s = side ? "R_" : "L_";
+        const int thigh = t.Find(s + "Thigh"), calf = t.Find(s + "Calf"), foot = t.Find(s + "Foot");
+        if (t.parent[calf] != thigh || t.parent[foot] != calf)
+            return Fail("the rig script's " + s + "Thigh, Calf and Foot are not one parent-child chain");
+
+        // The script's knee pole: foot to toe, else the way the model faces by its hands.
+        Vector3 pole{};
+        if (const int toe = t.Find(s + "Toe0"); toe >= 0) {
+            pole = Sub(Origin(t.world[toe]), Origin(t.world[foot]));
+        } else {
+            const Vector3 handL = Origin(t.world[t.Find("L_Hand")]), handR = Origin(t.world[t.Find("R_Hand")]);
+            if (std::fabs(handR.x - handL.x) < 3.0f)
+                pole = {handR.y > handL.y ? -10.0f : 10.0f, 0.0f, 0.0f};
+            else
+                pole = {0.0f, handR.x > handL.x ? 10.0f : -10.0f, 0.0f};
+        }
+        legs[side] = {thigh, calf, foot, {}, mmd.Find("legik", side), 1.0f, pole};
+    }
+    for (int c = 0; !rigMode && chains && c < h.numikchains; ++c) {
         if (chains[c].numlinks != 3)
             continue;
         const fm::mstudioiklink_t* link =
@@ -1517,7 +1661,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         const Vector3 thigh = Origin(t.world[g.thigh]);
         Vector3 dir = Sub(Origin(t.world[g.foot]), thigh);
         pm::VectorNormalize(dir);
-        Vector3 knee = pm::VectorRotate(g.kneeDir, t.world[g.thigh]);
+        Vector3 knee = Len(g.pole) > 1e-4f ? g.pole : pm::VectorRotate(g.kneeDir, t.world[g.thigh]);
         if (Len(knee) < 1e-4f)
             knee = Sub(Origin(t.world[g.knee]), thigh);
         g.bendSign = Dot(Cross(dir, left), knee) < 0.0f ? -1.0f : 1.0f;
@@ -1547,6 +1691,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
     // Per target bone: its MMD source and the rest alignment O that poses the
     // target's arms into the MMD rest pose. Fingers take the hand's O.
     std::vector<int> src(t.n, -1);
+    std::vector<int> fingerSide(t.n, -1);
     std::vector<matrix3x4> align(t.n);
     int mapped = 0;
     std::string absent;
@@ -1559,6 +1704,24 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                 continue;
             }
             src[i] = mmd.Find(d.mmd, d.sided ? side : -1);
+            if (std::strncmp(d.valve, "Finger", 6) == 0)
+                fingerSide[i] = side;
+            ++mapped;
+        }
+    }
+
+    // A rig whose pelvis is not the spine's parent: the travel goes on the bone above both.
+    int anchor = pelvis;
+    if (const int spine = t.Find("Spine"); rigMode && spine >= 0) {
+        std::set<int> below;
+        for (int b = pelvis; b >= 0; b = t.parent[b])
+            below.insert(b);
+        int common = spine;
+        while (common >= 0 && !below.count(common))
+            common = t.parent[common];
+        if (common >= 0 && src[common] < 0) {
+            anchor = common;
+            src[anchor] = mmd.Find("waist");
             ++mapped;
         }
     }
@@ -1588,7 +1751,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         }
         if (hand >= 0)
             for (int i = 0; i < t.n; ++i)
-                if (src[i] >= 0 && t.names[i].find(std::string("Bip01_") + s + "Finger") != std::string::npos)
+                if (src[i] >= 0 && fingerSide[i] == side)
                     align[i] = align[hand];
     }
 
@@ -1763,7 +1926,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
                     continue;
                 }
                 Vector3 pos = p >= 0 ? pm::VectorTransform(Origin(t.local[i]), W[p]) : Origin(t.local[i]);
-                if (i == pelvis)
+                if (i == anchor)
                     pos = Add(Origin(t.world[i]),
                               Mul(pm::VectorRotate(Sub(Origin(G[lower]), lowerRest), M), scale));
                 W[i] = pm::ConcatTransforms(toTarget(G[src[i]]),
@@ -1824,7 +1987,7 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
             // Valve forearms bend as hinges and their twist helpers follow the hand, so forearm
             // roll moves into the hand as far as the hand stays within kHandRoll of its rest.
             for (const Arm& arm : arms) {
-                if (arm.upper < 0 || arm.elbow < 0 || arm.hand < 0 ||
+                if (rigMode || arm.upper < 0 || arm.elbow < 0 || arm.hand < 0 ||
                     t.parent[arm.elbow] != arm.upper || t.parent[arm.hand] != arm.elbow)
                     continue;
                 const float forearm = RollAboutX(pm::ConcatTransforms(Transpose(t.local[arm.elbow]), L[arm.elbow]));
@@ -1951,7 +2114,8 @@ int RunConversion(int argc, char** argv, const ApiOptions* api = nullptr) {
         std::printf("  %ld frame%s at %d fps", count, count == 1 ? "" : "s", fps);
         if (fps != 30)
             std::printf(" (resampled from %ld MMD frames to fit the %ld-frame limit)", span + 1, limit);
-        std::printf("\n  %d MMD bones keyed, %d target bones mapped, legs by $ikchain\n", keyed, mapped);
+        std::printf("\n  %d MMD bones keyed, %d target bones mapped, legs by %s\n", keyed, mapped,
+                    rigMode ? "the rig script" : "$ikchain");
         if (!morphs.empty())
             std::printf("  %zu MMD morphs from %s -> %zu flex controllers (%s), %d morphs unmapped\n",
                         morphs.size(), faceFile ? "the motion + _face.vmd" : "the motion", face.size(),
@@ -2086,9 +2250,10 @@ int main(int argc, char** argv)
         else
         {
             if (method == "motion")
-                pulse::api::CheckMembers(request, {"motions", "model", "modelData", "fps", "rotation", "faceSet", "faceMap"});
+                pulse::api::CheckMembers(request, {"motions", "model", "modelData", "rig", "rigData", "fps", "rotation",
+                                                   "faceSet", "faceMap"});
             else if (method == "camera")
-                pulse::api::CheckMembers(request, {"motion", "model", "modelData", "fps",
+                pulse::api::CheckMembers(request, {"motion", "model", "modelData", "rig", "rigData", "fps",
                                                    "transform", "orientation", "distanceTransform",
                                                    "boundaryMin", "boundaryMax", "boundaryTransform", "cameraHeight"});
             else throw std::runtime_error("Unknown conversion method \"" + method + "\"");
@@ -2128,6 +2293,19 @@ int main(int argc, char** argv)
                     throw std::runtime_error("API member \"modelData\" is not valid base64");
                 model = "target model";
             }
+
+            // an SFM rig script for a target that is not ValveBiped: a path, or its text
+            const std::string rig = pulse::api::GetString(request, "rig");
+            options.rigText = pulse::api::GetString(request, "rigData");
+            if (!rig.empty() && !options.rigText.empty())
+                throw std::runtime_error("Give the rig script as at most one of \"rig\" or \"rigData\"");
+            if (!rig.empty())
+            {
+                std::vector<char> bytes;
+                if (!ReadInput(rig, bytes)) throw std::runtime_error("Cannot read the rig script \"" + rig + "\"");
+                options.rigText.assign(bytes.begin(), bytes.end());
+            }
+            if (options.rigText.size() > (1u << 20)) throw std::runtime_error("The rig script is over 1 MB");
 
             if (const auto fps = request.find("fps"); fps != request.end())
             {

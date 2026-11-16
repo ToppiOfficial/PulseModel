@@ -1066,6 +1066,9 @@ enum class Archetype {
     Simple,  // "simple" - $simpleprop: single "prop_root" bone, verts NOT baked
 };
 
+// $flexoptimize: Auto splits flexed materials only when the flex cache is over budget.
+enum class FlexOptimize { Auto, On, Off };
+
 // Script-level inputs consumed by the compile stage.
 struct CompileInput {
     std::string outname;
@@ -1073,6 +1076,7 @@ struct CompileInput {
     bool autoCenter = false; // $autocenter
     bool forceWriteVertexData = false; // $forcewritevertexdata
     int fitBoneWeightPoses = lim::kWeightFitPoses; // $fitboneweights [poses]: refit the 3 kept weights; 0 = off
+    FlexOptimize flexOptimize = FlexOptimize::Auto; // $flexoptimize auto|on|off
     bool legacySequenceBounds = false; // -legacysequencebounds: skin vertices per frame
     // vtx_archetype: 0 = legacy StripGroup (TF2/L4D2), 1 = full (SFM/CS:GO).
     // int, not bool, to leave room for future .vtx variants.

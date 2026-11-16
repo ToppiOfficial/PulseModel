@@ -89,6 +89,10 @@ static int Usage() {
     std::printf("                refit the 3 kept weights of vertices with 4+ influences to\n");
     std::printf("                match the full skin over [poses] random poses; on by default\n");
     std::printf("                (2048), 0 keeps the top 3 weights. Overrides $fitboneweights\n");
+    std::printf("  -flexopt auto|on|off\n");
+    std::printf("                split each flexed material into a flexed mesh and a static\n");
+    std::printf("                mesh so the flex cache is not overrun. auto (default) only\n");
+    std::printf("                splits over budget. Overrides $flexoptimize\n");
     std::printf("  -minlod <lod> discard higher-detail LODs and promote this LOD to root;\n");
     std::printf("                overrides $minlod in the script\n");
     std::printf("  -definebones  print the compiled skeleton as $definebone lines and stop\n");
@@ -171,6 +175,7 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     bool forceWriteVertexData = false;
     int fitBoneWeights = -1; // -fitboneweights pose count; -1 = not given
     bool ignoreAlwaysCollapse = false;
+    int flexOpt = -1; // -flexopt mode as a FlexOptimize value; -1 = not given
     bool legacySequenceBounds = false;
     bool definebones = false;
     bool verify = false;
@@ -234,6 +239,12 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
             forceWriteVertexData = true;
         } else if (std::strcmp(argv[i], "-ignorealwayscollapse") == 0) {
             ignoreAlwaysCollapse = true;
+        } else if (std::strcmp(argv[i], "-flexopt") == 0) {
+            const std::string value = i + 1 < argc ? argv[++i] : "";
+            if (value == "auto") flexOpt = static_cast<int>(pulse::compile::FlexOptimize::Auto);
+            else if (value == "on") flexOpt = static_cast<int>(pulse::compile::FlexOptimize::On);
+            else if (value == "off") flexOpt = static_cast<int>(pulse::compile::FlexOptimize::Off);
+            else return Fail("bad option", "-flexopt needs auto, on or off, got \"" + value + "\"");
         } else if (std::strcmp(argv[i], "-fitboneweights") == 0) {
             fitBoneWeights = pulse::limits::kWeightFitPoses;
             if (i + 1 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 1][0]))) {
@@ -315,6 +326,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         input.forceWriteVertexData = true;
     if (fitBoneWeights >= 0)
         input.fitBoneWeightPoses = fitBoneWeights;
+    if (flexOpt >= 0)
+        input.flexOptimize = static_cast<pulse::compile::FlexOptimize>(flexOpt);
     if (ignoreAlwaysCollapse)
         input.alwaysCollapse.clear();
     if (stripLods)

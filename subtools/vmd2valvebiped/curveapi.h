@@ -18,6 +18,7 @@ struct ApiOptions
     // VMDs stacked over the motion, lowest priority first; each keyed track replaces the one below.
     std::vector<std::string> layers;
     std::vector<char> modelData; // the target .mdl sent in the request, instead of a path
+    std::string rigText;         // SFM rig script for a model that is not ValveBiped
     double fps = 30;
     // Degrees about the target model's Z axis, turning the whole converted motion.
     double rotation = 0;
@@ -41,7 +42,7 @@ std::string Number(double value)
 
 void ApiCapabilities()
 {
-    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1,\"layers\":1,\"faceSet\":1,\"cameraHeight\":1,\"faceMapping\":1}");
+    pulse::api::Record("capability", "{\"tool\":\"vmd2valvebiped\",\"curves\":1,\"motion\":1,\"camera\":1,\"boundary\":1,\"rotation\":1,\"layers\":1,\"faceSet\":1,\"rig\":1,\"cameraHeight\":1,\"faceMapping\":1}");
 }
 
 std::vector<float> ApiTimes(uint32_t last, double fps)

@@ -42,6 +42,9 @@ inline constexpr int kMaxMeshes    = kUncapped; // [file] mstudiomesh_t is 116 b
 // [format] vtx::Vertex_t::origMeshVertID / mstudiovertanim_t::index are uint16
 // mesh-relative. Overflow splits across meshes (BuildOutputMeshes).
 inline constexpr int kMaxMeshVerts = 65536;
+// [engine] Flexed-vertex cache of the renderer: charged the whole vertex count of
+// every mesh with flex data (FlexCacheCharge).
+inline constexpr int kFlexCacheVerts = 65535;
 // [format] Strip group indices are uint16; strips don't share verts
 // (PostProcessStripGroup copies each), so a group can exceed its source mesh.
 // Overflow splits, not rejects.
