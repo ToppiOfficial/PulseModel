@@ -902,41 +902,6 @@ void MapJiggleBones(Ctx& ctx) {
     }
 }
 
-// $culljigglebones: a jigglebone counts as skinned when it or any descendant
-// is weighted by an active source's vertex. Must precede TagUsedBones, whose
-// procedural keep would otherwise hold the bone alive.
-void CullUnskinnedJiggleBones(Ctx& ctx) {
-    std::vector<JiggleBone>& jbs = ctx.out->jigglebones;
-    if (!ctx.in->cullJiggleBones || jbs.empty())
-        return;
-
-    std::vector<std::string> skinned;
-    for (const auto& sp : ctx.in->sources) {
-        const src::Source* psource = sp.get();
-        if (!psource->isActiveModel)
-            continue;
-        std::vector<char> used(psource->numbones, 0);
-        for (const src::SrcVertex& v : psource->vertex)
-            for (int k = 0; k < v.boneweight.numbones; ++k)
-                for (int n = v.boneweight.bone[k]; n != -1 && !used[n];
-                     n = psource->localBone[n].parent)
-                    used[n] = 1;
-        for (int j = 0; j < psource->numbones; j++)
-            if (used[j])
-                skinned.push_back(psource->localBone[j].name);
-    }
-
-    for (int i = static_cast<int>(jbs.size()) - 1; i >= 0; --i) {
-        bool isSkinned = false;
-        for (const std::string& n : skinned)
-            isSkinned |= _stricmp(n.c_str(), jbs[i].bonename.c_str()) == 0;
-        if (isSkinned)
-            continue;
-        std::printf("Culling unskinned jigglebone \"%s\"\n", jbs[i].bonename.c_str());
-        jbs.erase(jbs.begin() + i);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // MapAimAtBones (TagProceduralBones' aim-at half)
 //
@@ -11409,7 +11374,6 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
     // driver pruning must precede TagUsedBones: a driver dropped for naming an unknown morph
     // controller must not keep its bone alive.
     PruneFlexDriverBones(ctx);
-    CullUnskinnedJiggleBones(ctx);
 
     { PULSE_TIME_PASS("TagUsedBones"); TagUsedBones(ctx); }
     {
