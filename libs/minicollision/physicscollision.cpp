@@ -1,9 +1,7 @@
 // minicollision - hull mass properties and IVP compact-surface serialization.
 //
-// The math and the binary layout are ported unchanged from the original
-// PulseMDL's libs/minicollision; only the plumbing differs (see
-// minicollision.h). Do not "clean up" the arithmetic here - the constants and
-// axis permutations are what make vphysics read the blob correctly.
+// The binary layout comes from the original PulseMDL's libs/minicollision. The
+// constants and axis permutations are what make vphysics read the blob correctly.
 
 #include "minicollision.h"
 #include "convexhull.h"
@@ -30,15 +28,13 @@ struct Convex {
     float SurfaceArea() const;
     Vec3  MassCenter() const;
     void  GetAABB(Vec3& mins, Vec3& maxs) const;
-
-    // Inertia tensor diagonal about the hull's mass center
-    Vec3 InertiaDiag() const;
 };
 
 // Compound of one or more convex hulls, result of ConvertConvexToCollide.
 struct Collide {
     std::vector<Convex*> hulls;  // owned
     Vec3 massCenter;
+    Vec3 naturalCenter;  // volume centroid, kept when massCenter is overridden
     bool massCenterOverridden = false;
 
     ~Collide() {
@@ -126,36 +122,6 @@ void Convex::GetAABB(Vec3& mins, Vec3& maxs) const
     }
 }
 
-// Inertia tensor diagonal about mass center (unit density, scaled by volume
-// later). Polyhedral Mass Properties (Mirtich 1994 covariance approach).
-Vec3 Convex::InertiaDiag() const
-{
-    const auto& verts = hull.vertices;
-    const auto& idx   = hull.indices;
-    Vec3 mc = MassCenter();
-
-    float Ixx=0, Iyy=0, Izz=0, totalVol=0;
-    for (int i = 0; i < (int)idx.size(); i += 3) {
-        // Translate to mass center
-        float x0=verts[idx[i+0]].x-mc.x, y0=verts[idx[i+0]].y-mc.y, z0=verts[idx[i+0]].z-mc.z;
-        float x1=verts[idx[i+1]].x-mc.x, y1=verts[idx[i+1]].y-mc.y, z1=verts[idx[i+1]].z-mc.z;
-        float x2=verts[idx[i+2]].x-mc.x, y2=verts[idx[i+2]].y-mc.y, z2=verts[idx[i+2]].z-mc.z;
-        float vol = (x0*(y1*z2-z1*y2) + y0*(z1*x2-x1*z2) + z0*(x1*y2-y1*x2)) / 6.0f;
-        totalVol += vol;
-        // Inertia contribution per tet (Polyhedral Mass Properties, Eberly)
-        // Ixx += integral(y^2+z^2) over tet
-        Ixx += vol * (y0*y0+y0*y1+y1*y1+y0*y2+y1*y2+y2*y2 +
-                      z0*z0+z0*z1+z1*z1+z0*z2+z1*z2+z2*z2) / 10.0f;
-        Iyy += vol * (x0*x0+x0*x1+x1*x1+x0*x2+x1*x2+x2*x2 +
-                      z0*z0+z0*z1+z1*z1+z0*z2+z1*z2+z2*z2) / 10.0f;
-        Izz += vol * (x0*x0+x0*x1+x1*x1+x0*x2+x1*x2+x2*x2 +
-                      y0*y0+y0*y1+y1*y1+y0*y2+y1*y2+y2*y2) / 10.0f;
-    }
-    if (fabsf(totalVol) > 1e-10f) { Ixx/=totalVol; Iyy/=totalVol; Izz/=totalVol; }
-    // Take absolute value for signed volume correction
-    return Vec3(fabsf(Ixx), fabsf(Iyy), fabsf(Izz));
-}
-
 // ---------------------------------------------------------------------------
 // Collide helpers
 // ---------------------------------------------------------------------------
@@ -171,6 +137,7 @@ void Collide::ComputeMassCenter()
         totalVol   += v;
     }
     if (totalVol > 1e-10f) massCenter /= totalVol;
+    naturalCenter = massCenter;
 }
 
 void Collide::GetAABB(Vec3* pMins, Vec3* pMaxs) const
@@ -356,6 +323,149 @@ static int WriteCompactLedge(char* dest, const Convex* h, int gameData)
     return off;
 }
 
+// Per-axis variance of the solid about 'center' (source axes, in^2), summed over
+// every hull as one body.
+static void SecondMoments(const Collide* col, const Vec3& center, double out[3])
+{
+    double moment[3] = {0, 0, 0}, totalVol = 0;
+    for (const Convex* h : col->hulls) {
+        const auto& verts = h->hull.vertices;
+        const auto& idx   = h->hull.indices;
+        for (int i = 0; i + 2 < (int)idx.size(); i += 3) {
+            double p[3][3];
+            for (int k = 0; k < 3; k++) {
+                const HullVert& v = verts[idx[i + k]];
+                p[k][0] = (double)v.x - center.x;
+                p[k][1] = (double)v.y - center.y;
+                p[k][2] = (double)v.z - center.z;
+            }
+            double vol = (p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1])
+                        + p[0][1] * (p[1][2] * p[2][0] - p[1][0] * p[2][2])
+                        + p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0])) / 6.0;
+            totalVol += vol;
+            for (int a = 0; a < 3; a++) {
+                double s = p[0][a] * p[0][a] + p[1][a] * p[1][a] + p[2][a] * p[2][a]
+                         + p[0][a] * p[1][a] + p[0][a] * p[2][a] + p[1][a] * p[2][a];
+                moment[a] += vol * s / 10.0;
+            }
+        }
+    }
+    for (int a = 0; a < 3; a++)
+        out[a] = (std::fabs(totalVol) > 1e-12) ? moment[a] / totalVol : 0.0;
+}
+
+// Fraction of each bounding-box face covered by the solid's silhouette, sampled on
+// a grid of cell centers (source axes, indexed by the axis looked along).
+static void DragFractions(const Collide* col, const Vec3& mins, const Vec3& maxs, float out[3])
+{
+    const float lo[3] = {mins.x, mins.y, mins.z};
+    const float hi[3] = {maxs.x, maxs.y, maxs.z};
+    float size[3], minFace = -1.0f;
+    for (int a = 0; a < 3; a++) {
+        size[a] = hi[a] - lo[a];
+    }
+    for (int a = 0; a < 3; a++) {
+        float face = size[(a + 1) % 3] * size[(a + 2) % 3];
+        if (minFace < 0.0f || face < minFace) minFace = face;
+    }
+    float eps = minFace * 1e-4f;
+    eps = eps < 0.25f ? 0.25f : (eps > 128.0f ? 128.0f : eps);
+    const float baseSide = std::fmax(std::sqrt(eps), 1e-4f);
+
+    for (int axis = 0; axis < 3; axis++) {
+        const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+        float side = baseSide;
+        // bound the grid so a huge flat solid cannot allocate without limit
+        while ((double)(size[u] / side) * (double)(size[v] / side) > 1.6e7) side *= 2.0f;
+        const float hs = side * 0.5f;
+        int nu = 0, nv = 0;
+        while (lo[u] + hs + nu * side < hi[u]) nu++;
+        while (lo[v] + hs + nv * side < hi[v]) nv++;
+        out[axis] = 0.0f;
+        if (nu <= 0 || nv <= 0) continue;
+
+        std::vector<uint8_t> hit((size_t)nu * nv, 0);
+        for (const Convex* h : col->hulls) {
+            const auto& verts = h->hull.vertices;
+            const auto& idx   = h->hull.indices;
+            for (int i = 0; i + 2 < (int)idx.size(); i += 3) {
+                float pu[3], pv[3];
+                for (int k = 0; k < 3; k++) {
+                    const HullVert& vt = verts[idx[i + k]];
+                    const float c[3] = {vt.x, vt.y, vt.z};
+                    pu[k] = c[u]; pv[k] = c[v];
+                }
+                const float area = (pu[1] - pu[0]) * (pv[2] - pv[0]) - (pu[2] - pu[0]) * (pv[1] - pv[0]);
+                if (std::fabs(area) < 1e-12f) continue;  // edge-on to the view
+
+                const float minU = std::fmin(pu[0], std::fmin(pu[1], pu[2]));
+                const float maxU = std::fmax(pu[0], std::fmax(pu[1], pu[2]));
+                const float minV = std::fmin(pv[0], std::fmin(pv[1], pv[2]));
+                const float maxV = std::fmax(pv[0], std::fmax(pv[1], pv[2]));
+                int i0 = (int)std::ceil((minU - (lo[u] + hs)) / side);
+                int i1 = (int)std::floor((maxU - (lo[u] + hs)) / side);
+                int j0 = (int)std::ceil((minV - (lo[v] + hs)) / side);
+                int j1 = (int)std::floor((maxV - (lo[v] + hs)) / side);
+                if (i0 < 0) i0 = 0;
+                if (j0 < 0) j0 = 0;
+                if (i1 > nu - 1) i1 = nu - 1;
+                if (j1 > nv - 1) j1 = nv - 1;
+
+                for (int j = j0; j <= j1; j++) {
+                    const float cv = lo[v] + hs + j * side;
+                    for (int ii = i0; ii <= i1; ii++) {
+                        const float cu = lo[u] + hs + ii * side;
+                        float e[3];
+                        for (int k = 0; k < 3; k++) {
+                            const int n = (k + 1) % 3;
+                            e[k] = (pu[n] - pu[k]) * (cv - pv[k]) - (pv[n] - pv[k]) * (cu - pu[k]);
+                        }
+                        const bool neg = e[0] < 0 || e[1] < 0 || e[2] < 0;
+                        const bool pos = e[0] > 0 || e[1] > 0 || e[2] > 0;
+                        if (!(neg && pos)) hit[(size_t)j * nu + ii] = 1;
+                    }
+                }
+            }
+        }
+        size_t hits = 0;
+        for (uint8_t b : hit) hits += b;
+        out[axis] = (float)hits / (float)hit.size();
+    }
+}
+
+// Sphere + quantized box for one tree node from its IVP-space bounds. box_sizes
+// are the half-extents in 1/250ths of the node radius.
+static void FillNodeBounds(ivp_ledgetree_node_t* nd, const float mn[3], const float mx[3])
+{
+    float half[3];
+    for (int a = 0; a < 3; a++) {
+        nd->center[a] = mx[a] * 0.5f + mn[a] * 0.5f;
+        half[a] = mx[a] - nd->center[a];
+    }
+    nd->radius = std::sqrt(half[0] * half[0] + half[1] * half[1] + half[2] * half[2]);
+    const float work = nd->radius * (1.0f / 250.0f);
+    for (int a = 0; a < 3; a++) {
+        int q = (work > 0.0f) ? (int)(half[a] / work) + 1 : 0;
+        nd->box_sizes[a] = (uint8_t)(q > 255 ? 255 : q);
+    }
+}
+
+// Bounds of every vertex of the given hulls, in IVP space (meters).
+static void IvpBounds(const Convex* const* hulls, int count, float mn[3], float mx[3])
+{
+    for (int a = 0; a < 3; a++) { mn[a] = 1e30f; mx[a] = -1e30f; }
+    for (int k = 0; k < count; k++) {
+        for (const HullVert& v : hulls[k]->hull.vertices) {
+            float p[3];
+            SrcToIVP(v.x, v.y, v.z, p[0], p[1], p[2]);
+            for (int a = 0; a < 3; a++) {
+                if (p[a] < mn[a]) mn[a] = p[a];
+                if (p[a] > mx[a]) mx[a] = p[a];
+            }
+        }
+    }
+}
+
 // Write full PHY blob for a Collide into 'dest'. Returns bytes written.
 static int WriteCollide(char* dest, const Collide* col)
 {
@@ -367,29 +477,27 @@ static int WriteCollide(char* dest, const Collide* col)
     std::vector<int> ledgeSz(N);
     for (int i = 0; i < N; i++) ledgeSz[i] = LedgeSizeBytes(col->hulls[i]);
 
-    // Compute bounding sphere for the whole collide (in game units first)
     Vec3 mins, maxs;
     col->GetAABB(&mins, &maxs);
-    Vec3 center = (mins + maxs) * 0.5f;
-    // Convert bounding sphere center to IVP coords (Y-up) and meters
-    float cx_ivp, cy_ivp, cz_ivp;
-    SrcToIVP(center.x, center.y, center.z, cx_ivp, cy_ivp, cz_ivp);
-    float radiusM = ((maxs - center).Length()) * INCHES_TO_METERS;
+
+    // Whole-collide bounds in IVP space, used by the internal tree nodes
+    std::vector<const Convex*> hullPtrs(col->hulls.begin(), col->hulls.end());
+    float allMin[3], allMax[3];
+    IvpBounds(hullPtrs.data(), N, allMin, allMax);
 
     // Total IVP data size (surface + ledges + tree)
     int ledgeTotal = 0;
     for (int s : ledgeSz) ledgeTotal += s;
     int surfaceDataSize = 48 + ledgeTotal + nodeCount * 28;
 
-    // Compute inertia (weighted average across hulls)
-    Vec3 inertia(0,0,0);
-    float totalVol = 0;
-    for (Convex* h : col->hulls) {
-        float v = h->Volume();
-        inertia += h->InertiaDiag() * v;
-        totalVol += v;
-    }
-    if (totalVol > 1e-10f) inertia /= totalVol;
+    // rotation_inertia per IVP axis is sqrt(sum of the other two axes' variance^2),
+    // taken about the volume centroid even when the mass center is overridden.
+    double var[3];
+    SecondMoments(col, col->naturalCenter, var);
+    const double vx = var[0], vy = var[2], vz = var[1];  // IVP y = Src z, IVP z = Src y
+    Vec3 inertia((float)std::sqrt(vy * vy + vz * vz),
+                 (float)std::sqrt(vx * vx + vz * vz),
+                 (float)std::sqrt(vx * vx + vy * vy));
 
     float mcx_ivp, mcy_ivp, mcz_ivp;
     SrcToIVP(col->massCenter.x, col->massCenter.y, col->massCenter.z, mcx_ivp, mcy_ivp, mcz_ivp);
@@ -445,14 +553,8 @@ static int WriteCollide(char* dest, const Collide* col)
     hdr.version         = MINICOL_VERSION_IVP;
     hdr.modelType       = 0;
     hdr.surfaceSize     = surfaceDataSize;
-    // Drag areas in m^2. IVP X=Src X, IVP Y=Src Z, IVP Z=Src Y.
-    // Area perpendicular to IVP axis = product of the OTHER TWO IVP extents.
-    float hx = (maxs.x - mins.x) * 0.5f * INCHES_TO_METERS;  // IVP X extent
-    float hy = (maxs.z - mins.z) * 0.5f * INCHES_TO_METERS;  // IVP Y extent = Src Z
-    float hz = (maxs.y - mins.y) * 0.5f * INCHES_TO_METERS;  // IVP Z extent = Src Y
-    hdr.dragAxisAreas[0] = hy * hz * 3.14159f;
-    hdr.dragAxisAreas[1] = hx * hz * 3.14159f;
-    hdr.dragAxisAreas[2] = hx * hy * 3.14159f;
+    // Unitless silhouette coverage (0..1) of the bounding box face along each Source axis
+    DragFractions(col, mins, maxs, hdr.dragAxisAreas);
     hdr.axisMapSize     = 0;
     memcpy(dest + off, &hdr, sizeof(hdr)); off += sizeof(hdr); // 28
 
@@ -521,10 +623,7 @@ static int WriteCollide(char* dest, const Collide* col)
         int thisNodeAbsOff  = nodeBase + i * 28;
         nd->offset_right_node    = rightNodeAbsOff - thisNodeAbsOff;
         nd->offset_compact_ledge = 0; // internal
-        nd->center[0] = cx_ivp;
-        nd->center[1] = cy_ivp;
-        nd->center[2] = cz_ivp;
-        nd->radius = radiusM;
+        FillNodeBounds(nd, allMin, allMax);
     }
 
     // Fill leaf nodes (N-1 .. 2N-2), leaf k -> hull k
@@ -533,21 +632,14 @@ static int WriteCollide(char* dest, const Collide* col)
         int leafAbsOff    = nodeBase + leafNodeIdx * 28;
         int ledgeAbsOffK  = ledgeAbsOff[k];
 
-        Convex* h = col->hulls[k];
-        Vec3 hlo, hhi;
-        h->GetAABB(hlo, hhi);
-        Vec3 hcSrc = (hlo + hhi) * 0.5f;
-        float hradius = (hhi - hcSrc).Length() * INCHES_TO_METERS;
-        float hcx, hcy, hcz;
-        SrcToIVP(hcSrc.x, hcSrc.y, hcSrc.z, hcx, hcy, hcz);
+        const Convex* h = col->hulls[k];
+        float hMin[3], hMax[3];
+        IvpBounds(&h, 1, hMin, hMax);
 
         ivp_ledgetree_node_t* nd = NodeAt(leafNodeIdx);
         nd->offset_right_node    = 0; // leaf
         nd->offset_compact_ledge = ledgeAbsOffK - leafAbsOff;
-        nd->center[0] = hcx;
-        nd->center[1] = hcy;
-        nd->center[2] = hcz;
-        nd->radius = hradius;
+        FillNodeBounds(nd, hMin, hMax);
     }
 
     off += nodeAreaSize;

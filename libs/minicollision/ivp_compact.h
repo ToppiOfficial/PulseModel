@@ -15,7 +15,7 @@
 //   int16  version        = MINICOL_VERSION_IVP
 //   int16  modelType      = 0  (IVP compact surface, convex-only)
 //   int32  surfaceSize    = bytes after this header
-//   float  dragAxisAreas[3]
+//   float  dragAxisAreas[3]       silhouette coverage 0..1 per Source axis
 //   int32  axisMapSize    = 0
 struct phycollide_hdr_t {
     int32_t vphysicsID;
@@ -58,7 +58,7 @@ static inline void ivp_surface_set_byte_size(ivp_compact_surface_t& s, int sz) {
 //   int32  offset_compact_ledge  byte offset from THIS node to ledge; 0 = internal node
 //   float  center[3]             bounding sphere center
 //   float  radius                bounding sphere radius
-//   uint8  box_sizes[3]          quantized AABB half-extents (optional, can be 0)
+//   uint8  box_sizes[3]          AABB half-extents in 1/250ths of radius, +1
 //   uint8  free_0                padding
 struct ivp_ledgetree_node_t {
     int32_t offset_right_node;
