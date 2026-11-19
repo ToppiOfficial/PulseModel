@@ -27,7 +27,6 @@
 #include "perf.h"
 #include "pulselimits.h"
 #include "qcloader.h"
-#include "qcpackage.h"
 #include "rename.h"
 #include "writer.h"
 
@@ -35,12 +34,11 @@
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
-static constexpr const char* kScriptFormats = ".qc/.pulseqc/.qczip";
+static constexpr const char* kScriptFormats = ".qc";
 
 static int Fail(const char* what, const std::string& detail) {
     pulse::diag::RecordFatal(detail);
-    const auto* package = pulse::qcpackage::active;
-    return pulse::fatal::Fail(what, package ? package->Describe(detail) : detail);
+    return pulse::fatal::Fail(what, detail);
 }
 static const char*& g_stage = pulse::fatal::g_stage;
 
@@ -77,7 +75,7 @@ static int Usage() {
     std::printf("                any $addsearchdir; repeatable\n");
     std::printf("  -tempcontent <dir>   synonym for -filesearchdir\n");
     std::printf("  -defvar <name> <value>\n");
-    std::printf("                define a .pulseqc script variable ($name$) before the\n");
+    std::printf("                define a .qc script variable ($name$) before the\n");
     std::printf("                script runs; repeatable. The script cannot override it\n");
     std::printf("  -striplods    ignore all $lod and $shadowlod commands\n");
     std::printf("  -forcewritevertexdata\n");
@@ -304,10 +302,6 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         return Fail("unsupported script", std::string(script) +
                                               ": only " + kScriptFormats + " files are supported");
 
-    std::unique_ptr<pulse::qcpackage::Package> package;
-    if (pulse::qcpackage::Package::IsPackage(pulse::FilePath(script)))
-        package = std::make_unique<pulse::qcpackage::Package>(pulse::FilePath(script));
-
     std::string err;
     pulse::compile::CompileInput input;
     // pre-seeded so a script without $modelname still loads under -modelname
@@ -454,7 +448,7 @@ int main(int argc, char** argv) {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
                                                  "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
-                                                 "\"qczipPackage\":1,\"rename\":1}");
+                                                 "\"rename\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;
             } else if (request.at("method") == "rename") {

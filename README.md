@@ -38,7 +38,7 @@ A successful compile does not guarantee the model will load in the target game.
 ### Usage
 
 ```
-mdlcompiler <file.qc|file.qczip> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
+mdlcompiler <file.qc> [-game <dir>] [-modelname <path>] [-defvar <name> <value>]
             [-includesearchdir <dir>] [-filesearchdir <dir>] [-tempcontent <dir>]
             [-vtxformat <0|1>] [-dx80]
             [-striplods] [-minlod <lod>] [-ignorealwayscollapse] [-fitboneweights [poses]]
@@ -46,8 +46,6 @@ mdlcompiler <file.qc|file.qczip> [-game <dir>] [-modelname <path>] [-defvar <nam
             [-legacysequencebounds] [-perfmetrics] [-pause]
 mdlcompiler -renamemdl <file.mdl> <new $modelname> [-game <dir>] [-move] [-pause]
 ```
-
-`.qczip` packages contain `model.qc` at the root and optional bundled source files.
 
 | Option | Meaning |
 | --- | --- |

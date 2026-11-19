@@ -38,7 +38,7 @@ bool LoadQcScript(const char* path, compile::CompileInput& out, std::string* err
                   const ScriptVars& defvars = {}, const SearchDirs& includeDirs = {},
                   const SearchDirs& fileDirs = {}, const ScriptFiles* unsaved = nullptr);
 
-// True when the path selects QC text (.qc / .pulseqc) or a package (.qczip).
+// True when the path selects QC text (.qc).
 bool IsQcScriptPath(const char* path);
 
 // Every accepted $command name, one per line, to stdout. The kCommands table is

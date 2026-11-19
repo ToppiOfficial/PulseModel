@@ -8,7 +8,6 @@
 
 #include <cinttypes>
 #include "api.h"
-#include "qcpackage.h"
 #include "pathcompat.h"
 #include <cstdint>
 #include <cstdio>
@@ -67,7 +66,7 @@ inline uint64_t HashFile(const std::string& path) {
 
 inline std::string Key(const std::string& path) {
     std::error_code ec;
-    const auto full = std::filesystem::absolute(pulse::qcpackage::Logical(path), ec);
+    const auto full = std::filesystem::absolute(path, ec);
     return ec ? path : full.lexically_normal().string();
 }
 
@@ -81,11 +80,8 @@ inline void Note(const std::string& path, Kind kind = Kind::Source,
         return;
 
     uint64_t hash = 0;
-    const auto* package = pulse::qcpackage::active;
-    const bool member = package && package->Contains(pulse::FilePath(key));
     if (g_hashes)
-        hash = member ? package->Hash()
-             : text ? Hash(reinterpret_cast<const unsigned char*>(text->data()), text->size())
+        hash = text ? Hash(reinterpret_cast<const unsigned char*>(text->data()), text->size())
                     : HashFile(key);
     Files().emplace(key, Entry{kind, hash});
 }
@@ -122,9 +118,6 @@ inline void Print(bool complete = true) {
         std::string record = "{\"kind\":" + pulse::api::String(name);
         if (g_hashes) record += ",\"hash\":" + pulse::api::String(hash);
         record += ",\"path\":" + pulse::api::String(path);
-        const auto* package = pulse::qcpackage::active;
-        if (package && package->Contains(pulse::FilePath(path)))
-            record += ",\"archive\":" + pulse::api::String(pulse::Utf8(package->Path()));
         if (e.missing) record += ",\"missing\":true";
         if (e.dmx)
             record += ",\"modelVersion\":" + std::to_string(e.markup.modelVersion) +

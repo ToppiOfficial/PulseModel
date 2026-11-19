@@ -11,7 +11,6 @@
 #include <string>
 
 #include "api.h"
-#include "qcpackage.h"
 
 namespace pulse::diag {
 
@@ -28,7 +27,6 @@ inline Location& Current() {
 
 inline Location Resolve(const Location& origin) {
     Location at = origin;
-    at.file = pulse::qcpackage::Logical(at.file);
     return at;
 }
 
@@ -40,7 +38,7 @@ inline void Record(const char* severity, const Location& at, const std::string& 
     if (!pulse::api::Active()) return;
     pulse::api::Record("diagnostic", std::string("{\"severity\":\"") + severity +
         "\",\"file\":" + pulse::api::String(at.file) + ",\"line\":" + std::to_string(at.line) +
-        ",\"text\":" + pulse::api::String(pulse::qcpackage::active ? pulse::qcpackage::active->Describe(text) : text) + "}");
+        ",\"text\":" + pulse::api::String(text) + "}");
 }
 
 inline void WarnAt(const Location& origin, const std::string& text) {
