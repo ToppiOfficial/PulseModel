@@ -7632,6 +7632,9 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
             if (!c.Want("a bone name", sub, sh.parentBone)) return false;
         } else if (o == "maxconvex") {
             if (!c.WantInt("a piece count", sub, sh.maxConvex)) return false;
+            if (sh.maxConvex < 1 || sh.maxConvex > lim::kMaxConvexPieces)
+                return c.Fail(t.line, where + ": maxconvex must be between 1 and " +
+                                          std::to_string(lim::kMaxConvexPieces));
         } else if (!fromRender && o == "importtype") {
             if (!c.WantOption("perjoint, singlejoint or singlehull", sub, importType))
                 return false;
@@ -7648,6 +7651,9 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
             if (!c.WantFloat("a concavity", sub, sh.concavity)) return false;
         } else if (fromRender && o == "maxhulls") {
             if (!c.WantInt("a hull count", sub, sh.maxHulls)) return false;
+            if (sh.maxHulls < 0 || sh.maxHulls > lim::kMaxConvexPieces)
+                return c.Fail(t.line, where + ": maxhulls must be between 0 and " +
+                                          std::to_string(lim::kMaxConvexPieces));
         } else if (fromRender && o == "maxdepth") {
             if (!c.WantInt("a recursion depth", sub, sh.maxDepth)) return false;
             if (sh.maxDepth < 0 || sh.maxDepth > 10)
@@ -8135,7 +8141,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
         return c.Fail(cmd.line, cmd.text + " requires a source file; use $physicsmodel for generation");
 
     cm::PhysicsShape shape;
-    shape.maxConvex = 40;
+    shape.maxConvex = lim::kMaxConvexPieces;
     if (!LoadPhysicsFileShape(c, cmd, file, shape))
         return false;
     const size_t mainShape = c.in.physShapes.size();
@@ -8147,7 +8153,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
         return true;
     c.pos++;
 
-    int maxConvex = 40;
+    int maxConvex = lim::kMaxConvexPieces;
     bool remove2d = false;
     for (;;) {
         if (c.Eof())
@@ -8174,6 +8180,9 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
             if (!c.WantFloat("a drag value", sub, c.in.physDrag)) return false;
         } else if (o == "$maxconvexpieces") {
             if (!c.WantInt("a piece count", sub, maxConvex)) return false;
+            if (maxConvex < 1 || maxConvex > lim::kMaxConvexPieces)
+                return c.Fail(t.line, cmd.text + ": $maxconvexpieces must be between 1 and " +
+                                          std::to_string(lim::kMaxConvexPieces));
         } else if (o == "$remove2d") {
             remove2d = true;
         } else if (o == "$concaveperjoint") {

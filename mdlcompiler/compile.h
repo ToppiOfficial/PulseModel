@@ -752,7 +752,7 @@ struct PhysicsShape {
     // the full hull (capped at lim::kMaxHullVerts).
     float decimationFactor = 0.22f;
     float concavity = 0.04f;          // [0..1], lower = tighter fit, more pieces
-    int maxHulls = 0;                 // piece ceiling, not a target; 0 = uncapped
+    int maxHulls = 0;                 // piece ceiling, not a target; 0 = lim::kMaxConvexPieces
     int maxDepth = 4;
     // minimum weight a vertex must carry on a kept bone for its face to join
     // this body. Smooth-skinned meshes need this well below the default.

@@ -4722,9 +4722,10 @@ bool GenerateRenderShapes(const CompiledModel& m, const CompileInput& in,
         }
 
         std::vector<VHACDHull::DecomposedHull> hulls;
+        const int hullCap = shape.maxHulls > 0 ? shape.maxHulls : lim::kMaxConvexPieces;
         if (!VHACDHull::DecomposeConvex(verts.data(), static_cast<int>(verts.size() / 3),
                                         tris.data(), static_cast<int>(tris.size() / 3),
-                                        shape.concavity, shape.maxHulls,
+                                        shape.concavity, hullCap,
                                         shape.decimationFactor, hulls, 0, shape.maxDepth)) {
             if (err) *err = "PhysicsShapeFromRender \"" + shape.name +
                             "\" could not decompose the render geometry on bone \"" +
@@ -5568,9 +5569,7 @@ bool BuildCollisionModel(Ctx& ctx, std::string* err) {
     m.physSolids.push_back(std::move(solid));
     m.bones[physBone].physicsbone = 0; // single body is always physics bone 0
 
-    // $automass leaves the total at -1, which tells the engine to derive mass from volume; every
-    // solid's own mass then floors at 1 in the writer. This is stock studiomdl's behavior
-    // (SetAutoMass).
+    // $automass leaves the total at -1; the .phy writer replaces it with volume x default density.
     m.physTotalMass = in.physAutoMass ? -1.0f : in.physMass;
     m.physName = in.physName;
     m.physConcave = in.physBuildMode == PhysicsBuildMode::Auto

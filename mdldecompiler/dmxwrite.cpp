@@ -1203,18 +1203,14 @@ bool ReadLedge(const std::vector<char>& buf, size_t off, PhyHull& out) {
         return false;
     std::memcpy(&l, &buf[off], sizeof l);
     const int nTri = l.n_triangles;
-    const int nPts = static_cast<int>(l.bitfield >> 8) - nTri - 1;
     size_t ptOff = 0;
-    if (nTri <= 0 || nPts <= 0 || nPts > 0xffff ||
-        !RelOff(off, l.c_point_offset, buf.size(), ptOff) ||
+    if (nTri <= 0 || !RelOff(off, l.c_point_offset, buf.size(), ptOff) ||
         off + 16 + 16 * static_cast<size_t>(nTri) > buf.size())
         return false;
 
-    // Stock solids share one point array, so later ledges use cumulative indices.
-    // Locally written solids start each ledge at zero.
+    // Edges index the solid's point array, which several ledges can share, so a ledge's
+    // points are whichever indices its triangles use.
     std::vector<int> indices;
-    int firstPoint = 0xffff;
-    int lastPoint = -1;
     for (int t = 0; t < nTri; ++t) {
         const size_t to = off + 16 + 16 * static_cast<size_t>(t);
         int v[3];
@@ -1222,25 +1218,28 @@ bool ReadLedge(const std::vector<char>& buf, size_t off, PhyHull& out) {
             uint32_t d = 0;
             std::memcpy(&d, &buf[to + 4 + 4 * static_cast<size_t>(e)], sizeof d);
             v[e] = static_cast<int>(d & 0xffffu);
-            firstPoint = std::min(firstPoint, v[e]);
-            lastPoint = std::max(lastPoint, v[e]);
         }
         if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2])
             continue;
         indices.insert(indices.end(), {v[0], v[1], v[2]});
     }
-    if (indices.empty() || firstPoint < 0 || lastPoint - firstPoint >= nPts ||
-        ptOff + 16 * static_cast<size_t>(firstPoint + nPts) > buf.size())
+    if (indices.empty())
         return false;
 
-    out.verts.resize(nPts);
-    for (int i = 0; i < nPts; ++i) {
+    std::vector<int> localOf(0x10000, -1);
+    for (int index : indices) {
+        if (localOf[index] >= 0)
+            continue;
+        if (ptOff + 16 * (static_cast<size_t>(index) + 1) > buf.size())
+            return false;
         float k[3];
-        std::memcpy(k, &buf[ptOff + 16 * static_cast<size_t>(firstPoint + i)], sizeof k);
-        out.verts[i] = IvpToSrc(k);
+        std::memcpy(k, &buf[ptOff + 16 * static_cast<size_t>(index)], sizeof k);
+        localOf[index] = static_cast<int>(out.verts.size());
+        out.verts.push_back(IvpToSrc(k));
     }
+    const int nPts = static_cast<int>(out.verts.size());
     for (int index : indices)
-        out.tris.push_back(index - firstPoint);
+        out.tris.push_back(localOf[index]);
 
     // A hull is convex, so "outward" is just "away from the centre" - which
     // makes the export display right whatever winding the .phy was built with.

@@ -76,6 +76,17 @@ void ResolveFixedMasses(cm::CompiledModel& m) {
     m.physTotalMass = shared ? m.physTotalMass + fixedTotal : fixedTotal;
 }
 
+// $automass total: every body takes the built-in "default" surface density (2000 kg/m^3), not
+// the game's per-surfaceprop table, so no game files are read. Volumes are in^3.
+float AutoTotalMass(const cm::CompiledModel& m) {
+    constexpr float kDefaultDensity = 2000.0f;
+    constexpr float kCubicMetersPerCubicInch = 0.0254f * 0.0254f * 0.0254f;
+    float total = 0.0f;
+    for (const cm::PhysicsSolid& s : m.physSolids)
+        total += s.volume * kCubicMetersPerCubicInch * kDefaultDensity;
+    return total;
+}
+
 void KeyIntPair(std::vector<uint8_t>& buf, const char* key, int v0, int v1) {
     char tmp[256];
     std::snprintf(tmp, sizeof(tmp), "\"%s\" \"%d,%d\"\n", key, v0, v1);
@@ -107,6 +118,8 @@ std::vector<uint8_t> BuildPhy(cm::CompiledModel& m, int32_t checksum) {
     // once every solid is built. A zero total would divide by zero on a degenerate model, so it
     // falls back to 1 exactly like stock studiomdl.
     ResolveFixedMasses(m);
+    if (m.physTotalMass < 0.0f)
+        m.physTotalMass = AutoTotalMass(m);
     float totalVolume = 0.0f;
     for (const cm::PhysicsSolid& s : m.physSolids)
         totalVolume += s.volume * s.massBias;

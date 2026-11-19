@@ -155,7 +155,7 @@ inline constexpr int kMaxHitboxSetName   = 64;
 
 // --- Physics / collision ---------------------------------------------------
 inline constexpr int kMaxPhysSolids      = kMaxBones; // one per physics bone
-inline constexpr int kMaxConvexPieces    = kUncapped;
+inline constexpr int kMaxConvexPieces    = 40; // [tool] per solid; also the default
 // [format] Convex hull of V verts has 2V-4 tris; 1536 verts -> 3068 tris,
 // clearing the 12-bit triangle index below (the real ceiling here).
 inline constexpr int kMaxHullVerts       = 1536;

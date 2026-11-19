@@ -7,13 +7,18 @@
 #include "convexhull.h"
 #include "ivp_compact.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <vector>
 #include <unordered_map>
 
 namespace pulse::phys {
+
+struct SharedLayout;
 
 // ---------------------------------------------------------------------------
 // Implementation types
@@ -36,6 +41,10 @@ struct Collide {
     Vec3 massCenter;
     Vec3 naturalCenter;  // volume centroid, kept when massCenter is overridden
     bool massCenterOverridden = false;
+
+    // Multi-hull layout, planned once and shared by CollideSize and CollideWrite.
+    mutable std::shared_ptr<SharedLayout> shared;
+    mutable bool sharedPlanned = false;
 
     ~Collide() {
         for (Convex* h : hulls) delete h;
@@ -200,10 +209,13 @@ static int LedgeSizeBytes(const Convex* h)
 // loader requires size to equal exactly phycollide_hdr_t(28) + surfaceSize with
 // no slack. So the blob size must NOT be padded - any extra bytes make the
 // loader reject the whole vcollide ("missing vcollide data").
+static int SharedBlobBytes(const Collide* col);  // 0 when the solid uses the inline layout
+
 static int CalcCollideSize(const Collide* col)
 {
     int N = (int)col->hulls.size();
     if (N == 0) return 0;
+    if (int shared = SharedBlobBytes(col)) return shared;
     // blob = header(28) + surface(48) + sum(ledge sizes) + tree_nodes(28*(2N-1))
     int nodeCount = 2 * N - 1;
     int ledgeBytes = 0;
@@ -241,8 +253,48 @@ static bool HullIsValidForIVP(const ConvexHullResult& hull)
     return true;
 }
 
-// Serialize one compact ledge into 'dest'. Returns bytes written.
-static int WriteCompactLedge(char* dest, const Convex* h, int gameData)
+// pierce_index: each triangle links to the one facing most nearly the opposite way. For every
+// triangle without a partner, take the strict minimum of the normal dot product below -1e-6f
+// (first minimum wins), then link both directions. Normals are double, in IVP space.
+static void AssignPierce(const ConvexHullResult& hull, std::vector<int>& pierce)
+{
+    const int nTri = (int)hull.indices.size() / 3;
+    std::vector<double> nrm(nTri * 3);
+    for (int t = 0; t < nTri; t++) {
+        double p[3][3];
+        for (int k = 0; k < 3; k++) {
+            const HullVert& v = hull.vertices[hull.indices[t*3 + k]];
+            float ix, iy, iz;
+            SrcToIVP(v.x, v.y, v.z, ix, iy, iz);
+            p[k][0] = ix; p[k][1] = iy; p[k][2] = iz;
+        }
+        double a[3], b[3];
+        for (int c = 0; c < 3; c++) { a[c] = p[2][c] - p[0][c]; b[c] = p[1][c] - p[0][c]; }
+        double n[3] = { b[1]*a[2] - a[1]*b[2], b[2]*a[0] - a[2]*b[0], b[0]*a[1] - a[0]*b[1] };
+        const double len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        for (int c = 0; c < 3; c++) nrm[t*3 + c] = len > 0.0 ? n[c] / len : n[c];
+    }
+
+    const double kThreshold = static_cast<double>(-1.0e-6f);
+    pierce.assign(nTri, -1);
+    for (int t = 0; t < nTri; t++) {
+        if (pierce[t] >= 0) continue;
+        int found = -1;
+        double best = kThreshold;
+        for (int o = 0; o < nTri; o++) {
+            const double d = nrm[t*3]*nrm[o*3] + nrm[t*3+1]*nrm[o*3+1] + nrm[t*3+2]*nrm[o*3+2];
+            if (d < best) { best = d; found = o; }
+        }
+        if (found < 0) found = t;
+        pierce[t] = found;
+        pierce[found] = t;
+    }
+}
+
+// Serialize one compact ledge into 'dest'. Returns bytes written. With sharedPoint set the ledge
+// carries triangles only: edges index the solid's shared pool and the header points at it.
+static int WriteCompactLedge(char* dest, const Convex* h, int gameData,
+                             const std::vector<int>* sharedPoint = nullptr, int sharedPointOffset = 0)
 {
     const auto& verts = h->hull.vertices;
     const auto& idx   = h->hull.indices;
@@ -262,42 +314,21 @@ static int WriteCompactLedge(char* dest, const Convex* h, int gameData)
         }
     }
 
-    // Triangle centroids and outward normals for pierce_index computation
-    std::vector<HullVert> triCentroid(nTri), triNormal(nTri);
-    for (int t = 0; t < nTri; t++) {
-        const HullVert& a = verts[idx[t*3+0]];
-        const HullVert& b = verts[idx[t*3+1]];
-        const HullVert& c = verts[idx[t*3+2]];
-        triCentroid[t] = { (a.x+b.x+c.x)/3.0f, (a.y+b.y+c.y)/3.0f, (a.z+b.z+c.z)/3.0f };
-        float ex = b.x-a.x, ey = b.y-a.y, ez = b.z-a.z;
-        float fx = c.x-a.x, fy = c.y-a.y, fz = c.z-a.z;
-        triNormal[t] = { ey*fz - ez*fy, ez*fx - ex*fz, ex*fy - ey*fx };
-    }
+    std::vector<int> pierceOf;
+    AssignPierce(h->hull, pierceOf);
 
     // Write ledge header
     ivp_compact_ledge_t hdr;
     ivp_ledge_init(hdr, nTri, nPts);
     hdr.client_data = gameData;
+    if (sharedPoint) hdr.c_point_offset = sharedPointOffset;
     memcpy(dest, &hdr, sizeof(hdr));
     int off = sizeof(hdr);  // = 16
 
     // Write triangles
     for (int t = 0; t < nTri; t++) {
-        // pierce_index = triangle on the far side of the hull (the one whose
-        // centroid lies deepest against this triangle's outward normal); IVP
-        // uses it as the start of the pierce walk in minimize_on_other_side().
-        int pierce = t;
-        float bestDot = 1e30f;
-        for (int u = 0; u < nTri; u++) {
-            if (u == t) continue;
-            float d = triNormal[t].x * triCentroid[u].x
-                    + triNormal[t].y * triCentroid[u].y
-                    + triNormal[t].z * triCentroid[u].z;
-            if (d < bestDot) { bestDot = d; pierce = u; }
-        }
-
         ivp_compact_triangle_t tri;
-        ivp_tri_set(tri, t, pierce, 0);
+        ivp_tri_set(tri, t, pierceOf[t], 0);
         for (int e = 0; e < 3; e++) {
             int v0 = idx[t*3 + e];
             int v1 = idx[t*3 + (e+1)%3];
@@ -305,11 +336,13 @@ static int WriteCompactLedge(char* dest, const Convex* h, int gameData)
             int16_t opp = 0;
             if (it != edgeLinear.end())
                 opp = (int16_t)(it->second - (t*4 + e));
-            ivp_edge_set(tri.c_three_edges[e], (uint16_t)v0, opp);
+            const int start = sharedPoint ? (*sharedPoint)[t*3 + e] : v0;
+            ivp_edge_set(tri.c_three_edges[e], (uint16_t)start, opp);
         }
         memcpy(dest + off, &tri, sizeof(tri));
         off += sizeof(tri);
     }
+    if (sharedPoint) return off;
 
     // Write points: scale to meters (vphysics does its own axis conversion at load time)
     for (const HullVert& v : verts) {
@@ -466,6 +499,181 @@ static void IvpBounds(const Convex* const* hulls, int count, float mn[3], float 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-hull layout: terminal ledges with triangles only, one shared point pool, a balanced
+// ledge tree. All offsets are relative to the start of the compact surface.
+// ---------------------------------------------------------------------------
+
+struct TreeBuild {
+    int left = -1, right = -1, hull = -1;   // hull >= 0 marks a terminal
+    float qmn[3], qmx[3];                   // union of the quantized hull boxes below
+};
+
+struct SharedLayout {
+    std::vector<int> ledgeOff;
+    std::vector<std::vector<int>> edgePoint;  // per hull: triangle*3 + edge -> pool index
+    std::vector<float> pool;                  // xyz per pool point
+    std::vector<TreeBuild> nodes;             // preorder: left child follows its parent
+    int poolOff = 0, treeOff = 0, surfaceBytes = 0;
+};
+
+// A hull's raw box grown to the tree's 1/250-radius step, which is what a parent node covers.
+static void QuantizedBox(const float mn[3], const float mx[3], float c[3], float qmn[3], float qmx[3])
+{
+    float h[3];
+    for (int a = 0; a < 3; a++) {
+        c[a] = mx[a] * 0.5f + mn[a] * 0.5f;
+        h[a] = mx[a] - c[a];
+    }
+    const float r = std::sqrt(h[0]*h[0] + h[1]*h[1] + h[2]*h[2]);
+    const float work = r * (1.0f / 250.0f);
+    for (int a = 0; a < 3; a++) {
+        const int q = work > 0.0f ? static_cast<int>(h[a] / work) + 1 : 0;
+        const float ext = static_cast<float>(q) * work;
+        qmn[a] = c[a] - ext;
+        qmx[a] = c[a] + ext;
+    }
+}
+
+struct HullBoxes {
+    std::vector<std::array<float, 3>> center, qmn, qmx;
+};
+
+static double BoxVolume(const HullBoxes& hb, const std::vector<int>& group)
+{
+    float mn[3], mx[3];
+    for (int a = 0; a < 3; a++) { mn[a] = hb.qmn[group[0]][a]; mx[a] = hb.qmx[group[0]][a]; }
+    for (int i : group)
+        for (int a = 0; a < 3; a++) {
+            if (hb.qmn[i][a] < mn[a]) mn[a] = hb.qmn[i][a];
+            if (hb.qmx[i][a] > mx[a]) mx[a] = hb.qmx[i][a];
+        }
+    return static_cast<double>(std::fabs(mx[0] - mn[0])) * static_cast<double>(std::fabs(mx[1] - mn[1]))
+         * static_cast<double>(std::fabs(mx[2] - mn[2]));
+}
+
+// Top-down split: on each axis cut at the mean of the hull box centers, keep the cut whose two
+// groups have the smallest summed box volume. Centers exactly on the mean fill the smaller side.
+static int BuildTree(std::vector<TreeBuild>& nodes, const std::vector<int>& idx, const HullBoxes& hb)
+{
+    const int me = static_cast<int>(nodes.size());
+    nodes.emplace_back();
+    if (idx.size() == 1) {
+        nodes[me].hull = idx[0];
+        for (int a = 0; a < 3; a++) { nodes[me].qmn[a] = hb.qmn[idx[0]][a]; nodes[me].qmx[a] = hb.qmx[idx[0]][a]; }
+        return me;
+    }
+
+    std::vector<int> left, right;
+    if (idx.size() == 2) {
+        left.push_back(idx[0]);
+        right.push_back(idx[1]);
+    } else {
+        double bestCost = 0.0;
+        bool haveBest = false;
+        for (int a = 0; a < 3; a++) {
+            float sum = 0.0f;
+            for (int i : idx) sum += hb.center[i][a];
+            const float mean = sum / static_cast<float>(idx.size());
+            std::vector<int> l, r, tie;
+            for (int i : idx) {
+                if (hb.center[i][a] < mean) l.push_back(i);
+                else if (hb.center[i][a] > mean) r.push_back(i);
+                else tie.push_back(i);
+            }
+            for (int i : tie) (l.size() <= r.size() ? l : r).push_back(i);
+            if (l.empty() || r.empty()) continue;
+            const double cost = BoxVolume(hb, l) + BoxVolume(hb, r);
+            if (!haveBest || cost < bestCost) { bestCost = cost; left = l; right = r; haveBest = true; }
+        }
+        if (!haveBest) {
+            const size_t half = idx.size() / 2;
+            left.assign(idx.begin(), idx.begin() + half);
+            right.assign(idx.begin() + half, idx.end());
+        }
+    }
+
+    const int l = BuildTree(nodes, left, hb);
+    const int r = BuildTree(nodes, right, hb);
+    nodes[me].left = l;
+    nodes[me].right = r;
+    for (int a = 0; a < 3; a++) {
+        nodes[me].qmn[a] = std::fmin(nodes[l].qmn[a], nodes[r].qmn[a]);
+        nodes[me].qmx[a] = std::fmax(nodes[l].qmx[a], nodes[r].qmx[a]);
+    }
+    return me;
+}
+
+static std::shared_ptr<SharedLayout> PlanSharedLayout(const Collide* col)
+{
+    const int N = static_cast<int>(col->hulls.size());
+    if (N < 2) return nullptr;
+
+    auto plan = std::make_shared<SharedLayout>();
+    plan->ledgeOff.resize(N);
+    plan->edgePoint.resize(N);
+
+    // Pool: points in first-seen order over hulls, triangles and edges; equal floats share a slot.
+    std::map<std::array<uint32_t, 3>, int> poolIndex;
+    int off = static_cast<int>(sizeof(ivp_compact_surface_t));
+    for (int h = 0; h < N; h++) {
+        const Convex* hull = col->hulls[h];
+        const auto& verts = hull->hull.vertices;
+        const auto& idx = hull->hull.indices;
+        std::vector<std::array<float, 3>> ivp(verts.size());
+        for (size_t v = 0; v < verts.size(); v++)
+            SrcToIVP(verts[v].x, verts[v].y, verts[v].z, ivp[v][0], ivp[v][1], ivp[v][2]);
+
+        plan->ledgeOff[h] = off;
+        off += 16 + 16 * static_cast<int>(idx.size() / 3);
+        plan->edgePoint[h].resize(idx.size());
+        for (size_t k = 0; k < idx.size(); k++) {
+            std::array<uint32_t, 3> bits;
+            std::memcpy(bits.data(), ivp[idx[k]].data(), sizeof(bits));
+            auto it = poolIndex.find(bits);
+            if (it == poolIndex.end()) {
+                it = poolIndex.emplace(bits, static_cast<int>(plan->pool.size() / 3)).first;
+                plan->pool.insert(plan->pool.end(), ivp[idx[k]].begin(), ivp[idx[k]].end());
+            }
+            plan->edgePoint[h][k] = it->second;
+        }
+    }
+    if (plan->pool.size() / 3 > 65535) return nullptr;  // start_point_index is 16 bits
+
+    plan->poolOff = off;
+    plan->treeOff = off + 16 * static_cast<int>(plan->pool.size() / 3);
+    plan->surfaceBytes = plan->treeOff + (2 * N - 1) * static_cast<int>(sizeof(ivp_ledgetree_node_t));
+
+    HullBoxes hb;
+    hb.center.resize(N); hb.qmn.resize(N); hb.qmx.resize(N);
+    for (int h = 0; h < N; h++) {
+        const Convex* hull = col->hulls[h];
+        float mn[3], mx[3];
+        IvpBounds(&hull, 1, mn, mx);
+        QuantizedBox(mn, mx, hb.center[h].data(), hb.qmn[h].data(), hb.qmx[h].data());
+    }
+    std::vector<int> all(N);
+    for (int i = 0; i < N; i++) all[i] = i;
+    plan->nodes.reserve(2 * N - 1);
+    BuildTree(plan->nodes, all, hb);
+    return plan;
+}
+
+static const SharedLayout* GetSharedLayout(const Collide* col)
+{
+    if (!col->sharedPlanned) {
+        col->shared = PlanSharedLayout(col);
+        col->sharedPlanned = true;
+    }
+    return col->shared.get();
+}
+
+static int SharedBlobBytes(const Collide* col)
+{
+    const SharedLayout* plan = GetSharedLayout(col);
+    return plan ? static_cast<int>(sizeof(phycollide_hdr_t)) + plan->surfaceBytes : 0;
+}
+
 // Write full PHY blob for a Collide into 'dest'. Returns bytes written.
 static int WriteCollide(char* dest, const Collide* col)
 {
@@ -488,7 +696,8 @@ static int WriteCollide(char* dest, const Collide* col)
     // Total IVP data size (surface + ledges + tree)
     int ledgeTotal = 0;
     for (int s : ledgeSz) ledgeTotal += s;
-    int surfaceDataSize = 48 + ledgeTotal + nodeCount * 28;
+    const SharedLayout* shared = GetSharedLayout(col);
+    int surfaceDataSize = shared ? shared->surfaceBytes : 48 + ledgeTotal + nodeCount * 28;
 
     // rotation_inertia per IVP axis is sqrt(sum of the other two axes' variance^2),
     // taken about the volume centroid even when the mass center is overridden.
@@ -501,21 +710,22 @@ static int WriteCollide(char* dest, const Collide* col)
 
     float mcx_ivp, mcy_ivp, mcz_ivp;
     SrcToIVP(col->massCenter.x, col->massCenter.y, col->massCenter.z, mcx_ivp, mcy_ivp, mcz_ivp);
+    float ncx_ivp, ncy_ivp, ncz_ivp;
+    SrcToIVP(col->naturalCenter.x, col->naturalCenter.y, col->naturalCenter.z, ncx_ivp, ncy_ivp, ncz_ivp);
 
-    // upper_limit_radius and max_factor_surface_deviation are measured around
-    // the mass center (IVP_SurfaceBuilder_Ledge_Soup::insert_radius_in_compact_surface
-    // -> IVP_Compact_Ledge_Solver::calc_radius_to_given_center).
+    // upper_limit_radius and max_factor_surface_deviation are measured around the volume
+    // centroid; a forced mass center only rewrites the stored mass_center.
     float massRadiusM = 0.0f;
     float massDevM    = 0.0f;
     for (Convex* h : col->hulls) {
         const auto& verts = h->hull.vertices;
         const auto& idx   = h->hull.indices;
         for (int t = 0; t < (int)idx.size() / 3; t++) {
-            float p[3][3]; // triangle verts relative to mass center, IVP space
+            float p[3][3]; // triangle verts relative to the volume centroid, IVP space
             for (int k = 0; k < 3; k++) {
                 const HullVert& v = verts[idx[t*3 + k]];
                 SrcToIVP(v.x, v.y, v.z, p[k][0], p[k][1], p[k][2]);
-                p[k][0] -= mcx_ivp; p[k][1] -= mcy_ivp; p[k][2] -= mcz_ivp;
+                p[k][0] -= ncx_ivp; p[k][1] -= ncy_ivp; p[k][2] -= ncz_ivp;
             }
             float e1x = p[1][0]-p[0][0], e1y = p[1][1]-p[0][1], e1z = p[1][2]-p[0][2];
             float e2x = p[2][0]-p[0][0], e2y = p[2][1]-p[0][1], e2z = p[2][2]-p[0][2];
@@ -576,7 +786,8 @@ static int WriteCollide(char* dest, const Collide* col)
     // Valve layout: ledges directly follow the 48-byte surface header (keeps
     // every ledge 16-byte aligned, required by IVP's edge->triangle pointer
     // masking), ledge tree nodes go at the end.
-    surf.offset_ledgetree_root = (int32_t)sizeof(ivp_compact_surface_t) + ledgeTotal;
+    surf.offset_ledgetree_root = shared ? shared->treeOff
+                                        : (int32_t)sizeof(ivp_compact_surface_t) + ledgeTotal;
     surf.dummy[0] = 0;
     surf.dummy[1] = 0;
     surf.dummy[2] = (int32_t)MINICOL_IVPS_ID;
@@ -588,6 +799,43 @@ static int WriteCollide(char* dest, const Collide* col)
     //    surface start (dest[28]) is what matters: surface header = 48 and
     //    each ledge is a multiple of 16 bytes -> every ledge stays 16-aligned.
     // ------------------------------------------------------------------
+    if (shared) {
+        for (int k = 0; k < N; k++)
+            off += WriteCompactLedge(dest + off, col->hulls[k], col->hulls[k]->gameData,
+                                     &shared->edgePoint[k], shared->poolOff - shared->ledgeOff[k]);
+
+        const size_t poolCount = shared->pool.size() / 3;
+        for (size_t i = 0; i < poolCount; i++) {
+            ivp_compact_poly_point_t pt;
+            pt.k[0] = shared->pool[i*3];
+            pt.k[1] = shared->pool[i*3 + 1];
+            pt.k[2] = shared->pool[i*3 + 2];
+            pt.hesse_val = 0.0f;
+            memcpy(dest + off, &pt, sizeof(pt));
+            off += sizeof(pt);
+        }
+
+        for (size_t i = 0; i < shared->nodes.size(); i++) {
+            const TreeBuild& tn = shared->nodes[i];
+            ivp_ledgetree_node_t nd;
+            memset(&nd, 0, sizeof(nd));
+            if (tn.hull >= 0) {
+                const Convex* hull = col->hulls[tn.hull];
+                float hMin[3], hMax[3];
+                IvpBounds(&hull, 1, hMin, hMax);
+                nd.offset_right_node = 0;
+                nd.offset_compact_ledge = shared->ledgeOff[tn.hull] - (shared->treeOff + (int)i * 28);
+                FillNodeBounds(&nd, hMin, hMax);
+            } else {
+                nd.offset_right_node = (tn.right - (int)i) * 28;
+                FillNodeBounds(&nd, tn.qmn, tn.qmx);
+            }
+            memcpy(dest + off, &nd, sizeof(nd));
+            off += sizeof(nd);
+        }
+        return off;
+    }
+
     std::vector<int> ledgeAbsOff(N); // offsets from dest[0]
     ledgeAbsOff[0] = off;
     for (int k = 1; k < N; k++) ledgeAbsOff[k] = ledgeAbsOff[k-1] + ledgeSz[k-1];
