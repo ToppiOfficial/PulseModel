@@ -32,6 +32,7 @@
 #include "facemarkup.h"
 #include "flexreg.h"
 #include "meshedit.h"
+#include "skeletonedit.h"
 #include "fbxloader.h"
 #include "dependencies.h"
 #include "smdloader.h"
@@ -634,17 +635,12 @@ struct MeshEdit {
     std::string name; // the $rendermesh alias, for the load print
     source::MeshFilter filter;
     std::vector<std::vector<source::EditMeshOperation>> editBlocks;
-    source::SkinnedBoneCull boneCull = source::SkinnedBoneCull::None;
+    std::vector<std::vector<source::EditSkeletonOperation>> skeletonBlocks;
+    std::vector<std::pair<bool, size_t>> editOrder; // (is skeleton, block index), script order
     bool noMorph = false;
     bool skeletalAwareDecimation = false; // $use_skeletalaware_decimation
     // $decimate / $decimatemesh in script order: (factor, face tag or -1 = all)
     std::vector<std::pair<float, int>> decimates;
-    struct BoneScale {
-        std::string bone;
-        pulse::math::Vector3 scale;
-        int line = 0;
-    };
-    std::vector<BoneScale> boneScales; // $scalebone, script order
     std::string vta; // $vta: a legacy morph file for an SMD mesh
     int vtaLine = 0;
     std::vector<source::VtaFlexOption> vtaFlexes;
@@ -940,7 +936,158 @@ bool ParseEditMesh(Ctx& c, const Token& cmd, MeshEdit& edit) {
         operations.push_back(std::move(op));
     }
 
+    edit.editOrder.emplace_back(false, edit.editBlocks.size());
     edit.editBlocks.push_back(std::move(operations));
+    return true;
+}
+
+bool ParseEditSkeleton(Ctx& c, const Token& cmd, MeshEdit& edit) {
+    bool ignoreSelectWarn = false;
+    if (!c.Eof() && !c.Cur().quoted && c.Cur().line == cmd.line &&
+        Lower(c.Cur().text) == "ignoreselectwarn") {
+        ignoreSelectWarn = true;
+        ++c.pos;
+        c.MarkOption();
+    }
+
+    if (c.Eof() || c.Cur().quoted || c.Cur().text != "{")
+        return c.Fail(cmd.line, "$skeletonedit expects '{'");
+    ++c.pos;
+    c.MarkOption();
+
+    using source::SkeletonOperation;
+    std::vector<source::EditSkeletonOperation> operations;
+    for (;;) {
+        const Token* t = c.Next();
+        if (!t)
+            return c.Fail(cmd.line, "$skeletonedit is missing '}'");
+        c.MarkOption();
+        if (!t->quoted && t->text == "}")
+            break;
+        if (t->quoted)
+            return c.Fail(t->line, "$skeletonedit expects an unquoted operation");
+
+        std::string name = Lower(t->text);
+        if (!name.empty() && name.front() == '$') name.erase(0, 1);
+        source::EditSkeletonOperation op;
+        op.line = t->line;
+        op.ignoreSelectWarn = ignoreSelectWarn;
+        const std::string where = "$skeletonedit: " + t->text;
+        auto hasArg = [&] {
+            return !c.Eof() && c.Cur().line == t->line &&
+                   (c.Cur().quoted || (c.Cur().text != "}" && c.Cur().text != "{" &&
+                                      c.Cur().text.front() != '$'));
+        };
+        auto want = [&](const char* what, std::string& value) {
+            if (!hasArg()) return c.Fail(t->line, where + " expects " + what);
+            value = c.Next()->text;
+            return true;
+        };
+        auto number = [&](const char* what, float& value) {
+            if (!hasArg()) return c.Fail(t->line, where + " expects " + what);
+            if (!c.WantFloat(what, *t, value)) return false;
+            return std::isfinite(value) || c.Fail(t->line, where + " requires finite values");
+        };
+        auto vec3 = [&](const char* what, pulse::math::Vector3& v) {
+            return number(what, v.x) && number(what, v.y) && number(what, v.z);
+        };
+        // add|subtract|intersect may sit before or after the bone name
+        auto takeMode = [&] {
+            if (!hasArg() || c.Cur().quoted) return false;
+            const std::string mode = Lower(c.Cur().text);
+            if (mode != "add" && mode != "subtract" && mode != "intersect") return false;
+            ++c.pos;
+            c.MarkOption();
+            if (mode == "subtract") op.combine = source::SelectionCombine::Subtract;
+            if (mode == "intersect") op.combine = source::SelectionCombine::Intersect;
+            return true;
+        };
+        auto flag = [&](const char* word, bool& value) {
+            if (!hasArg() || c.Cur().quoted || Lower(c.Cur().text) != word) return false;
+            ++c.pos;
+            c.MarkOption();
+            value = true;
+            return true;
+        };
+
+        if (name == "selectbone" || name == "selectbonetree" || name == "selectbonesubstring") {
+            op.kind = name == "selectbone" ? SkeletonOperation::SelectBone
+                      : name == "selectbonetree" ? SkeletonOperation::SelectBoneTree
+                                                 : SkeletonOperation::SelectBoneSubstring;
+            takeMode();
+            if (!want(op.kind == SkeletonOperation::SelectBoneSubstring ? "a bone name substring"
+                                                                         : "a bone name", op.name))
+                return false;
+            if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
+            takeMode();
+        } else if (name == "invertselection") {
+            op.kind = SkeletonOperation::InvertSelection;
+        } else if (name == "selectunskinnedbones") {
+            op.kind = SkeletonOperation::SelectUnskinned;
+            while (takeMode() || flag("keepparents", op.keepParents)) {}
+        } else if (name == "realignbone") {
+            op.kind = SkeletonOperation::RealignBone;
+            while (hasArg()) {
+                if (flag("worldaxes", op.worldAxes) || flag("absolute", op.absolute) ||
+                    flag("affectchildren", op.affectChildren) || flag("affectmeshes", op.affectMeshes))
+                    continue;
+                const std::string option = c.Cur().quoted ? std::string() : Lower(c.Cur().text);
+                if (option == "origin" && !op.hasOrigin) {
+                    ++c.pos;
+                    c.MarkOption();
+                    if (!vec3("an X Y Z origin", op.origin)) return false;
+                    op.hasOrigin = true;
+                } else if (option == "angles" && !op.hasAngles) {
+                    ++c.pos;
+                    c.MarkOption();
+                    if (!vec3("a pitch yaw roll", op.angles)) return false;
+                    op.hasAngles = true;
+                } else {
+                    return c.Fail(t->line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+                }
+            }
+            if (!op.hasOrigin && !op.hasAngles)
+                return c.Fail(t->line, where + " expects origin and/or angles");
+        } else if (name == "collapsebone") {
+            op.kind = SkeletonOperation::CollapseBone;
+        } else if (name == "createbone") {
+            op.kind = SkeletonOperation::CreateBone;
+            if (!want("a bone name", op.name) || !want("a parent bone name or \"\"", op.parent) ||
+                !vec3("an X Y Z origin", op.origin) || !vec3("a pitch yaw roll", op.angles))
+                return false;
+            if (op.name.empty()) return c.Fail(t->line, where + " requires a nonempty name");
+            flag("selected", op.selectNew);
+        } else if (name == "scalebone") {
+            op.kind = SkeletonOperation::ScaleBone;
+            float factor = 1.0f;
+            if (!want("a bone name", op.name) || !number("a scale factor", factor))
+                return false;
+            if (!(factor > 0.0f))
+                return c.Fail(t->line, where + ": factor must be > 0");
+
+            bool axis[3] = {}, anyAxis = false;
+            while (hasArg()) {
+                if (flag("affectchildren", op.affectChildren)) continue;
+                const std::string a = c.Cur().quoted ? std::string() : Lower(c.Cur().text);
+                if (a != "x" && a != "y" && a != "z")
+                    return c.Fail(t->line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+                ++c.pos;
+                c.MarkOption();
+                axis[a[0] - 'x'] = anyAxis = true;
+            }
+            op.scale = {!anyAxis || axis[0] ? factor : 1.0f, !anyAxis || axis[1] ? factor : 1.0f,
+                        !anyAxis || axis[2] ? factor : 1.0f};
+        } else {
+            return c.Fail(t->line, "$skeletonedit: unknown operation \"" + t->text + "\"");
+        }
+
+        if (hasArg())
+            return c.Fail(c.Cur().line, where + ": unexpected argument \"" + c.Cur().text + "\"");
+        operations.push_back(std::move(op));
+    }
+
+    edit.editOrder.emplace_back(true, edit.skeletonBlocks.size());
+    edit.skeletonBlocks.push_back(std::move(operations));
     return true;
 }
 
@@ -1290,19 +1437,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 continue;
             }
 
-            if (o == "$skinnedbonecull") {
-                const Token* n = c.Next();
-                if (!n)
-                    return c.Fail(t->line, "$skinnedbonecull expects aggressive or tree");
-                c.MarkOption();
-                const std::string m = Lower(n->text);
-                if (m == "aggressive")
-                    edit.boneCull = source::SkinnedBoneCull::Aggressive;
-                else if (m == "tree")
-                    edit.boneCull = source::SkinnedBoneCull::Tree;
-                else
-                    return c.Fail(n->line, "$skinnedbonecull expects aggressive or tree, got \"" +
-                                               n->text + "\"");
+            if (o == "$skeletonedit") {
+                if (!ParseEditSkeleton(c, *t, edit)) return false;
                 continue;
             }
 
@@ -1342,31 +1478,6 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
                 }
                 if (factor < 1.0f)
                     edit.decimates.emplace_back(factor, tag);
-                continue;
-            }
-
-            // $scalebone <bone> <factor> [x] [y] [z] - no axes scales all three
-            if (o == "$scalebone") {
-                MeshEdit::BoneScale bs;
-                bs.line = t->line;
-                float f = 1.0f;
-                if (!c.Want("a bone name", *t, bs.bone) || !c.WantFloat("a scale factor", *t, f))
-                    return false;
-                if (!(f > 0.0f) || !std::isfinite(f))
-                    return c.Fail(t->line, where + ": $scalebone factor must be > 0");
-                bool ax[3] = {}, any = false;
-                while (!c.AtCommand() && !c.Eof() && c.Cur().line == t->line &&
-                       !(!c.Cur().quoted && c.Cur().text == "}")) {
-                    const Token* a = c.Next();
-                    c.MarkOption();
-                    const std::string k = Lower(a->text);
-                    if (k != "x" && k != "y" && k != "z")
-                        return c.Fail(a->line, where + ": $scalebone axis must be x, y or z, got \"" +
-                                                   a->text + "\"");
-                    ax[k[0] - 'x'] = any = true;
-                }
-                bs.scale = {!any || ax[0] ? f : 1.0f, !any || ax[1] ? f : 1.0f, !any || ax[2] ? f : 1.0f};
-                edit.boneScales.push_back(std::move(bs));
                 continue;
             }
 
@@ -1447,8 +1558,8 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             }
 
             return c.Fail(t->line, where + ": expected $rendermeshcmdlist, $exceptionlist, "
-                                           "$meshedit, $skinnedbonecull, $decimate, $decimatemesh, "
-                                           "$use_skeletalaware_decimation, $scalebone, $nomorph, "
+                                           "$meshedit, $skeletonedit, $decimate, $decimatemesh, "
+                                           "$use_skeletalaware_decimation, $nomorph, "
                                            "$nofacial, $vta, $vca or '}', got \"" + t->text + "\"");
         }
     }
@@ -1494,35 +1605,26 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
             return c.Fail(line, "cannot load \"" + full.string() + "\": " + loadErr);
     }
 
-    // Deepest bone first, so a parent's scale carries an already-scaled child
-    // (the child's factor stays relative to its parent, whatever the script order).
-    auto boneIndex = [&](const std::string& n) {
-        for (int i = 0; i < src->numbones; ++i)
-            if (_stricmp(src->localBone[i].name.c_str(), n.c_str()) == 0) return i;
-        return -1;
-    };
-    std::stable_sort(edit.boneScales.begin(), edit.boneScales.end(),
-                     [&](const auto& a, const auto& b) { return boneIndex(a.bone) > boneIndex(b.bone); });
-    for (const MeshEdit::BoneScale& bs : edit.boneScales)
-        if (!source::ScaleBone(*src, bs.bone, bs.scale))
-            return c.Fail(bs.line, "$rendermesh \"" + name + "\": $scalebone: no bone \"" + bs.bone +
-                                       "\" in \"" + file + "\"");
-
     for (const auto& [factor, tag] : edit.decimates) {
         PULSE_PERF("rendermesh", "$decimate");
         source::SimplifyFaces(*src, *src, factor, c.in.archetype == cm::Archetype::Static,
                               nullptr, tag, edit.skeletalAwareDecimation);
     }
 
-    for (const auto& block : edit.editBlocks) {
-        PULSE_PERF("rendermesh", "$meshedit");
+    // $meshedit and $skeletonedit blocks run interleaved, in script order
+    for (const auto& [isSkeleton, index] : edit.editOrder) {
         std::string editError;
         int errorLine = cmd.line;
-        if (!source::ApplyEditMesh(*src, c.in.mats, block, &editError, &errorLine))
-            return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
+        if (isSkeleton) {
+            PULSE_PERF("rendermesh", "$skeletonedit");
+            if (!source::ApplyEditSkeleton(*src, edit.skeletonBlocks[index], &editError, &errorLine))
+                return c.Fail(errorLine, "$rendermesh \"" + name + "\": " + editError);
+        } else {
+            PULSE_PERF("rendermesh", "$meshedit");
+            if (!source::ApplyEditMesh(*src, c.in.mats, edit.editBlocks[index], &editError, &errorLine))
+                return c.Fail(errorLine, "$rendermesh \"" + name + "\": $meshedit: " + editError);
+        }
     }
-    // after $meshedit, so bones skinned only by deleted geometry are culled too
-    { PULSE_PERF("rendermesh", "CullUnskinnedBones"); source::CullUnskinnedBones(*src, edit.boneCull); }
     src->editStreams.clear();
     src->editMeshes.clear();
     src->vertexEditMesh.clear();

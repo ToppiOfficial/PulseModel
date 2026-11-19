@@ -108,23 +108,10 @@ struct WrinkleScaleOption {
 // after every source is loaded, so it overwrites whatever the file itself carried or generated.
 void ApplyWrinkleScales(Source& src, std::vector<WrinkleScaleOption>& opts);
 
-// $skinnedbonecull <aggressive|tree> - drop every bone no vertex of this source
-// weights, on top of (and before) the compile stage's own collapse pass. Tree
-// keeps the parent chain of a skinned bone, so the hierarchy above it survives;
-// Aggressive keeps only the skinned bones themselves and folds each dropped
-// parent's transform into what is left below it.
-enum class SkinnedBoneCull { None, Tree, Aggressive };
-
-void CullUnskinnedBones(Source& src, SkinnedBoneCull mode);
-
 // Merge selected vertices across UV seams, within a material and identical
 // bone weights. sharpEdges preserves normal splits at each merged centroid.
 void WeldVertices(Source& src, std::vector<char>& selection,
                   float distance = 0.0001f, bool sharpEdges = false);
-
-// $scalebone: scale a bone's subtree in its bind-space axes, deforming skinned
-// vertices by their subtree weight and moving descendant bone origins. False if no such bone.
-bool ScaleBone(Source& src, const std::string& bone, const Vector3& scale);
 
 // Reverse normals, morph normal deltas and triangle winding.
 void FlipNormals(Source& src);
