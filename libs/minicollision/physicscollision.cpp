@@ -566,10 +566,10 @@ static int WriteCollide(char* dest, const Collide* col)
     surf.mass_center[0]       = mcx_ivp;
     surf.mass_center[1]       = mcy_ivp;
     surf.mass_center[2]       = mcz_ivp;
-    // IVP Y = Src Z, IVP Z = Src Y -> permute inertia diagonal accordingly
-    surf.rotation_inertia[0]  = inertia.x * INCHES_TO_METERS_SQ;  // IVP Ixx = Src Ixx
-    surf.rotation_inertia[1]  = inertia.z * INCHES_TO_METERS_SQ;  // IVP Iyy = Src Izz
-    surf.rotation_inertia[2]  = inertia.y * INCHES_TO_METERS_SQ;  // IVP Izz = Src Iyy
+    // inertia is already in IVP axis order
+    surf.rotation_inertia[0]  = inertia.x * INCHES_TO_METERS_SQ;
+    surf.rotation_inertia[1]  = inertia.y * INCHES_TO_METERS_SQ;
+    surf.rotation_inertia[2]  = inertia.z * INCHES_TO_METERS_SQ;
     surf.upper_limit_radius   = massRadiusM;
     surf.bitfield = (uint32_t)devFactor; // max_factor_surface_deviation in bits [0..7]
     ivp_surface_set_byte_size(surf, surfaceDataSize);
