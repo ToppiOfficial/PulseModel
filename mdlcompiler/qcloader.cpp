@@ -5901,6 +5901,7 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
 
     cm::ProceduralBoneTrigger tr;
     tr.absolutePose = absolutePose;
+    tr.driverDelta = !absolutePose;
     tr.tolerance = DegToRad(tolDeg);
     pm::AngleQuaternion({DegToRad(driverRotDeg.x), DegToRad(driverRotDeg.y),
                          DegToRad(driverRotDeg.z)}, tr.trigger);
@@ -5922,7 +5923,7 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
     return true;
 }
 
-// $driverbone <helper> <driver> [relative|absolute] [poseanim <file>] {
+// $driverbone <helper> <driver> [local|absolute] [poseanim <file>] {
 //     basepos <x y z>                                        optional, default 0
 //     trigger <tolerance> <driver rot x y z> <helper rot x y z> <helper pos x y z>
 //     ...
@@ -5934,16 +5935,21 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
 // `absolute` (the default, and the VRD's own convention) reads the helper pose
 // as parent-relative in full: an all-zero trigger puts the bone AT its parent's
 // origin and basepos has to carry the bind pose.
-// `relative` reads it as a DELTA from the bind pose, which MapProceduralBones
-// folds in once the skeleton is final - an all-zero trigger leaves the bone at
-// rest and basepos is a plain shared offset. Governs `trigger` lines only.
+// `local` reads the driver rotation and the helper pose as DELTAS from their
+// bind poses, which MapProceduralBones folds in once the skeleton is final - an
+// all-zero trigger is the rest pose and basepos is a plain shared offset.
+// Governs `trigger` lines only.
+//
+// `influence_input <f>` (default 1, > 0) scales the driver's rotation from its bind
+// pose before the triggers are tested; `influence_output <f>` (default 1, >= 0)
+// scales the helper pose from its bind pose. Both apply to every trigger.
 //
 // Both rotations and the position can also be sampled out of an animation named
 // by `poseanim <file>`:
 //     posetrigger <tolerance> <frame>
 // reads the driver's and the helper's local pose from that frame. A frame is
 // parent-relative in full, so a `posetrigger` is always absolute no matter the
-// block mode - one block can mix relative `trigger`s with sampled ones.
+// block mode - one block can mix local `trigger`s with sampled ones.
 bool CmdDriverBone(Ctx& c, const Token& cmd) {
     cm::ProceduralBone pb;
     if (!c.Want("a helper bone name", cmd, pb.helpername) ||
@@ -5967,8 +5973,8 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
             poseLine = t.line;
             continue;
         }
-        if (o != "relative" && o != "absolute")
-            return c.Fail(t.line, "$driverbone: expected relative, absolute, poseanim "
+        if (o != "local" && o != "absolute")
+            return c.Fail(t.line, "$driverbone: expected local, absolute, poseanim "
                                   "or '{', got \"" + t.text + "\"");
         blockAbsolute = o == "absolute";
     }
@@ -6013,9 +6019,20 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
                 return false;
             continue;
         }
+        if (o == "influence_input" || o == "influence_output") {
+            const Token sub{"$driverbone " + o, t.line, false};
+            float& f = o == "influence_input" ? pb.influenceInput : pb.influenceOutput;
+            if (!c.WantFloat("a strength", sub, f))
+                return false;
+            if (o == "influence_input" ? f <= 0.0f : f < 0.0f)
+                return c.Fail(t.line, "$driverbone " + o + " must be " +
+                                      (o == "influence_input" ? "> 0" : ">= 0"));
+            continue;
+        }
         if (o != "trigger")
-            return c.Fail(t.line, "$driverbone: expected trigger, posetrigger, "
-                                  "basepos or '}', got \"" + t.text + "\"");
+            return c.Fail(t.line, "$driverbone: expected trigger, posetrigger, basepos, "
+                                  "influence_input, influence_output or '}', got \"" +
+                                  t.text + "\"");
 
         const Token sub{"$driverbone trigger", t.line, false};
         Raw r{sub};

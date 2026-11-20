@@ -1065,6 +1065,57 @@ void WarnAimAtFlickRisk(const Ctx& ctx) {
 // optimized out). A missing DRIVER is an error: the constraint has nothing to
 // read, and silently dropping it would hide a real skeleton problem.
 // ---------------------------------------------------------------------------
+// bind * (conj(bind) * q) scaled by `factor`. False when the scaled rotation passes 180 degrees,
+// which the engine cannot tell apart from the opposite turn.
+static bool ScaleRotationFromBind(const Quaternion& bind, const Quaternion& q, float factor,
+                                  Quaternion& out) {
+    const Quaternion bindInv{-bind.x, -bind.y, -bind.z, bind.w};
+    Quaternion delta, scaled;
+    pm::QuaternionMult(bindInv, q, delta);
+
+    const float mag = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    const float angle = 2.0f * std::atan2(mag, std::fabs(delta.w));
+    if (angle * factor > 3.14159265f + 1e-3f)
+        return false;
+
+    pm::QuaternionScale(delta, factor, scaled);
+    pm::QuaternionMult(bind, scaled, out);
+    return true;
+}
+
+// Every trigger is absolute parent-relative here, so both sides are rescaled around their bind
+// poses. A driver turning input-times less is a trigger and tolerance 1/input times larger.
+static bool ApplyProceduralInfluence(ProceduralBone& pb, const Quaternion& driverBind,
+                                     const Quaternion& helperBind, const Vector3& helperBindPos,
+                                     std::string* err) {
+    for (ProceduralBoneTrigger& tr : pb.triggers) {
+        if (pb.influenceInput != 1.0f) {
+            Quaternion scaled;
+            if (!ScaleRotationFromBind(driverBind, tr.trigger, 1.0f / pb.influenceInput, scaled)) {
+                if (err) *err = "animconstraint \"" + pb.helpername +
+                                "\": influence_input pushes a trigger past 180 degrees";
+                return false;
+            }
+            tr.trigger = scaled;
+            tr.tolerance /= pb.influenceInput;
+        }
+
+        if (pb.influenceOutput != 1.0f) {
+            Quaternion scaled;
+            if (!ScaleRotationFromBind(helperBind, tr.quat, pb.influenceOutput, scaled)) {
+                if (err) *err = "animconstraint \"" + pb.helpername +
+                                "\": influence_output pushes a trigger past 180 degrees";
+                return false;
+            }
+            tr.quat = scaled;
+            tr.pos = {helperBindPos.x + (tr.pos.x - helperBindPos.x) * pb.influenceOutput,
+                      helperBindPos.y + (tr.pos.y - helperBindPos.y) * pb.influenceOutput,
+                      helperBindPos.z + (tr.pos.z - helperBindPos.z) * pb.influenceOutput};
+        }
+    }
+    return true;
+}
+
 bool MapProceduralBones(Ctx& ctx, std::string* err) {
     std::vector<ProceduralBone>& pbs = ctx.out->proceduralbones;
 
@@ -1107,7 +1158,15 @@ bool MapProceduralBones(Ctx& ctx, std::string* err) {
         Quaternion bindQuat;
         pm::AngleQuaternion(ctx.out->bones[pb.helper].rot, bindQuat);
         const Vector3& bindPos = ctx.out->bones[pb.helper].pos;
+        Quaternion driverBindQuat;
+        pm::AngleQuaternion(ctx.out->bones[pb.driver].rot, driverBindQuat);
         for (ProceduralBoneTrigger& tr : pb.triggers) {
+            if (tr.driverDelta) {
+                Quaternion driverAbs;
+                pm::QuaternionMult(driverBindQuat, tr.trigger, driverAbs);
+                tr.trigger = driverAbs;
+                tr.driverDelta = false;
+            }
             if (tr.absolutePose)
                 continue;
             Quaternion remapped;
@@ -1115,6 +1174,10 @@ bool MapProceduralBones(Ctx& ctx, std::string* err) {
             tr.quat = remapped;
             tr.pos = {bindPos.x + tr.pos.x, bindPos.y + tr.pos.y, bindPos.z + tr.pos.z};
         }
+
+        if ((pb.influenceInput != 1.0f || pb.influenceOutput != 1.0f) &&
+            !ApplyProceduralInfluence(pb, driverBindQuat, bindQuat, bindPos, err))
+            return false;
     }
     return true;
 }
@@ -1676,6 +1739,8 @@ void ResolveProceduralParentCollapse(Ctx& ctx, int k) {
             continue;
         if (isAuthoredParent(pb.driverparentname, pb.drivername, pb.strictName)) {
             for (ProceduralBoneTrigger& tr : pb.triggers) {
+                if (tr.driverDelta)
+                    continue; // folded against the final parent later
                 Quaternion q;
                 pm::QuaternionMult(lq, tr.trigger, q);
                 tr.trigger = q;

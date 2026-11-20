@@ -196,8 +196,10 @@ struct ProceduralBoneTrigger {
     // 1/tolerance, computed in double.
     float tolerance = 0.0f;
     // driver orientation that fully activates this trigger, relative to the
-    // driver's parent.
+    // driver's parent. With driverDelta it is authored as a delta from the
+    // driver's bind pose until MapProceduralBones folds the bind pose in.
     Quaternion trigger{0.0f, 0.0f, 0.0f, 1.0f};
+    bool driverDelta = false;
     // helper pose at full influence, relative to the helper's parent. Authored
     // as a DELTA from the helper's bind pose; MapProceduralBones folds the bind
     // pose in, so from that pass onward these are absolute parent-relative.
@@ -205,7 +207,7 @@ struct ProceduralBoneTrigger {
     Quaternion quat{0.0f, 0.0f, 0.0f, 1.0f};
     // pos/quat are already parent-relative in full, so skip the bind-pose fold.
     // Per-trigger: one $driverbone block can mix `trigger` (the block's
-    // relative/absolute mode) with `posetrigger` (always absolute).
+    // local/absolute mode) with `posetrigger` (always absolute).
     bool absolutePose = false;
 };
 
@@ -230,6 +232,11 @@ struct ProceduralBone {
     // false lets a name match a skeleton bone's dotted suffix ("Bip01_R_Thigh"
     // resolves "ValveBiped.Bip01_R_Thigh") - the VRD form only.
     bool strictName = true;
+
+    // $driverbone only. input scales the driver's rotation from bind, output
+    // scales the helper pose from bind. 1.0 is skipped entirely.
+    float influenceInput = 1.0f;
+    float influenceOutput = 1.0f;
 
     std::vector<ProceduralBoneTrigger> triggers;
 };
