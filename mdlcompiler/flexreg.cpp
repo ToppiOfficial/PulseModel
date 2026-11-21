@@ -882,13 +882,90 @@ bool RigDeltaIsStereo(const source::FlexRig& rig, const std::string& deltaName) 
     return stereo;
 }
 
+bool BodiesHaveMorph(const cm::CompileInput& in, const std::string& name) {
+    for (const auto& part : in.bodyparts) {
+        for (const auto& model : part.models) {
+            if (!model.source)
+                continue;
+            for (const source::SrcFlexKey& key : model.source->flexkeys)
+                if (_stricmp(key.name.c_str(), name.c_str()) == 0)
+                    return true;
+        }
+    }
+    return false;
+}
+
+// $flex2way / $flexnway: each morph becomes its own raw control with a one-control corrective, so
+// the DMX remap path emits the 2WAY/NWAY ops, the multi_ controller and the UI entry. An explicit
+// range is always set so both controller-creation paths agree on it.
+bool AppendAuthoredRemaps(const cm::CompileInput& in, const ManualFlex& manual,
+                          source::FlexRig& rig, std::string* err) {
+    for (const ManualFlex::Remap& authored : manual.remaps) {
+        const std::string where =
+            std::string(authored.nway ? "$flexnway" : "$flex2way") + " \"" + authored.name + "\"";
+
+        for (const source::ControllerRemap& existing : rig.remaps) {
+            if (_stricmp(existing.name.c_str(), authored.name.c_str()) != 0)
+                continue;
+            if (err) *err = where + ": the imported rig already defines this controller";
+            return false;
+        }
+
+        source::ControllerRemap remap;
+        remap.name = authored.name;
+        remap.flexgroup = authored.group;
+        remap.type = authored.nway ? source::RemapType::NWay : source::RemapType::TwoWay;
+        remap.hasMinMax = true;
+        remap.min = authored.min;
+        remap.max = authored.max;
+
+        for (const std::string& morph : authored.morphs) {
+            if (!BodiesHaveMorph(in, morph)) {
+                if (err) *err = where + ": \"" + morph +
+                                "\" names no morph target in any render mesh";
+                return false;
+            }
+
+            bool driven = false;
+            for (const source::FlexRig::Corrective& cor : rig.correctives)
+                driven = driven || _stricmp(cor.delta.c_str(), morph.c_str()) == 0;
+            for (const source::SrcFlexRule& rule : rig.rules)
+                driven = driven || _stricmp(rule.name.c_str(), morph.c_str()) == 0;
+            if (driven) {
+                if (err) *err = where + ": morph \"" + morph +
+                                "\" is already driven by the imported rig";
+                return false;
+            }
+
+            for (const ManualFlex::Rule& rule : manual.rules) {
+                if (rule.localvar || _stricmp(rule.name.c_str(), morph.c_str()) != 0)
+                    continue;
+                if (err) *err = where + ": morph \"" + morph +
+                                "\" already has a $flexrule or $flexcorrective";
+                return false;
+            }
+
+            source::FlexRig::Corrective corrective;
+            corrective.delta = morph;
+            corrective.combination.push_back(static_cast<int>(rig.controls.size()));
+
+            rig.controls.push_back({morph});
+            remap.rawControls.push_back(morph);
+            rig.correctives.push_back(std::move(corrective));
+        }
+
+        rig.remaps.push_back(std::move(remap));
+    }
+    return true;
+}
+
 // $datamodelflexes: stamp the imported rig onto every render mesh that carries
 // morphs. Correctives arrive keyed by delta-state NAME, so a rig read out of one
 // file binds to the flexkeys of another; a corrective naming a morph this mesh
 // does not have is simply dropped. A mesh with no morphs contributes no
 // flexdescs, so it gets nothing - otherwise its remaps would be registered a
 // second time.
-void ApplyDataModelFlex(cm::CompileInput& in, const source::FlexRig& rig) {
+void ApplyDataModelFlex(cm::CompileInput& in, const source::FlexRig& rig, bool deriveStereo) {
     if (rig.empty())
         return;
     for (auto& part : in.bodyparts) {
@@ -901,12 +978,11 @@ void ApplyDataModelFlex(cm::CompileInput& in, const source::FlexRig& rig) {
             src->dmeFlexRules = rig.rules;
             src->hasDmeFlexRules = rig.hasRules;
 
-            // The rig owns the controls, so it owns the L/R delta split too: a
-            // delta driven by a stereo control gets the <name>L/<name>R desc
-            // pair, matching the left_/right_ controllers the remap creates.
-            // The mesh's own combination operator only decides this when no rig
-            // was imported (same file -> same answer either way).
-            if (!rig.remaps.empty()) {
+            // An imported rig owns the controls, so it owns the L/R delta split
+            // too: a delta driven by a stereo control gets the <name>L/<name>R
+            // desc pair, matching the left_/right_ controllers the remap creates.
+            // Without one, the mesh's own combination operator decides.
+            if (deriveStereo) {
                 for (source::SrcFlexKey& key : src->flexkeys)
                     key.stereo = RigDeltaIsStereo(rig, key.name);
             }
@@ -1085,7 +1161,10 @@ bool ApplyDominations(cm::CompileInput& in, const ManualFlex& manual, std::strin
 
 bool RegisterFlex(cm::CompileInput& in, const ManualFlex& manual, std::string* err,
                   const FaceMarkup* face) {
-    ApplyDataModelFlex(in, manual.datamodel);
+    source::FlexRig rig = manual.datamodel;
+    if (!AppendAuthoredRemaps(in, manual, rig, err))
+        return false;
+    ApplyDataModelFlex(in, rig, !manual.datamodel.remaps.empty());
     if (!ApplyStereoSplits(in, manual, err))
         return false;
 

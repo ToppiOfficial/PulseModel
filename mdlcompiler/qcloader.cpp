@@ -3858,6 +3858,60 @@ bool CmdFlexController(Ctx& c, const Token& cmd) {
     return true;
 }
 
+// $flex2way <group> [range <min> <max>] <controller> <morphNeg> <morphPos>
+// $flexnway <group> [range <min> <max>] <controller> <morph> <morph> <morph> [<morph>...]
+// One slider driving existing morph targets: 2WAY splits it into a negative and a positive morph,
+// NWAY sweeps a window across the morphs in order. Range defaults to -1..1 (2way) and 0..1 (nway).
+bool ParseFlexRemap(Ctx& c, const Token& cmd, bool nway) {
+    ManualFlex::Remap remap;
+    remap.nway = nway;
+    remap.min = nway ? 0.0f : -1.0f;
+    if (!c.Want("a controller group", cmd, remap.group))
+        return false;
+
+    if (!c.AtCommand() && !c.Cur().quoted && _stricmp(c.Cur().text.c_str(), "range") == 0) {
+        c.Next();
+        c.MarkOption();
+        if (!c.WantFloat("a range min", cmd, remap.min) ||
+            !c.WantFloat("a range max", cmd, remap.max))
+            return false;
+    }
+
+    if (!c.Want("a controller name", cmd, remap.name))
+        return false;
+    while (!c.AtCommand())
+        remap.morphs.push_back(c.Next()->text);
+
+    const std::string where = cmd.text + " \"" + remap.name + "\"";
+    if (nway && remap.morphs.size() < 3)
+        return c.Fail(cmd.line, where + " expects at least three morphs (for two, use $flex2way)");
+    if (!nway && remap.morphs.size() != 2)
+        return c.Fail(cmd.line, where + " expects exactly two morphs: the negative, then the "
+                                "positive");
+
+    for (const ManualFlex::Remap& other : c.manual.remaps) {
+        if (_stricmp(other.name.c_str(), remap.name.c_str()) == 0)
+            return c.Fail(cmd.line, where + ": controller already defined by another remap");
+    }
+    for (size_t i = 0; i < remap.morphs.size(); ++i) {
+        bool repeated = false;
+        for (size_t j = 0; j < i && !repeated; ++j)
+            repeated = _stricmp(remap.morphs[i].c_str(), remap.morphs[j].c_str()) == 0;
+        for (const ManualFlex::Remap& other : c.manual.remaps)
+            for (const std::string& m : other.morphs)
+                repeated = repeated || _stricmp(m.c_str(), remap.morphs[i].c_str()) == 0;
+        if (repeated)
+            return c.Fail(cmd.line, where + ": morph \"" + remap.morphs[i] +
+                                    "\" is already driven by a remap");
+    }
+
+    c.manual.remaps.push_back(std::move(remap));
+    return true;
+}
+
+bool CmdFlex2Way(Ctx& c, const Token& cmd) { return ParseFlexRemap(c, cmd, false); }
+bool CmdFlexNWay(Ctx& c, const Token& cmd) { return ParseFlexRemap(c, cmd, true); }
+
 // $flexlocalvar <name> [<name>...]  (the `localvar` model option): reserves a
 // flexdesc that drives no geometry, so $flexrule can share intermediate values.
 bool CmdFlexLocalVar(Ctx& c, const Token& cmd) {
@@ -4249,6 +4303,9 @@ bool ApplyMorphRenames(Ctx& c) {
         }
         for (ManualFlex::StereoSplit& s : c.manual.stereoSplits)
             swapName(s.name);
+        for (ManualFlex::Remap& remap : c.manual.remaps)
+            for (std::string& morph : remap.morphs)
+                swapName(morph);
         for (source::FlexRig::Corrective& cor : c.manual.datamodel.correctives)
             swapName(cor.delta);
         for (source::SrcFlexRule& r : c.manual.datamodel.rules) {
@@ -9652,6 +9709,8 @@ constexpr Command kCommands[] = {
     {"$collisiontext", CmdCollisionText},
     {"$boneflexdriver", CmdBoneFlexDriver},
     {"$flexcontroller", CmdFlexController},
+    {"$flex2way", CmdFlex2Way},
+    {"$flexnway", CmdFlexNWay},
     {"$flexlocalvar", CmdFlexLocalVar},
     {"$flexrule", CmdFlexRule},
     {"$flexcorrective", CmdFlexCorrective},

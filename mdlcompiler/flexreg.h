@@ -61,7 +61,18 @@ struct ManualFlex {
         float factor = 0.0f;
     };
 
+    // $flex2way / $flexnway: one slider driving `morphs` through 2WAY / NWAY ops
+    struct Remap {
+        bool nway = false;
+        std::string name;
+        std::string group = "default";
+        float min = 0.0f;
+        float max = 1.0f;
+        std::vector<std::string> morphs; // NWAY: slider order
+    };
+
     std::vector<Controller> controllers;
+    std::vector<Remap> remaps;
     std::vector<Rule> rules; // ORDER-SIGNIFICANT
     std::vector<StereoSplit> stereoSplits;
     std::vector<Domination> dominations;
