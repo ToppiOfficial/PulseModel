@@ -432,13 +432,23 @@ struct AnimBoneTransform {
     bool originSet = false, anglesSet = false;
 };
 
+// One `discardchannels` entry. Axes are STUDIO_X|Y|Z bits (1, 2, 4).
+// A named bone with no axes is dropped from the clip entirely (wholeBone).
+struct ChannelDiscard {
+    std::string bone; // "" = every bone
+    int posAxes = 0;
+    int rotAxes = 0;
+    bool wholeBone = false;
+};
+
 // per-animation command
 struct AnimCmd {
     enum Kind { Weights, Subtract, Reverse, FixupLoop, Angle, Align, Match,
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
                 IkFixup, LocalHierarchy, Derivative, NoAnim, LinearDelta,
-                Compress, CounterRotate, ForceBonePosRot, MatchPosition } kind = Weights;
+                Compress, CounterRotate, ForceBonePosRot, MatchPosition,
+                DiscardChannels } kind = Weights;
     int weightlistIndex = 0; // Weights: index into CompileInput::weightlists+1 space
     int numframes = 0;       // NumFrames: the length to clip or pad to
     int subtractAnim = -1;   // Subtract: index into CompiledModel::anims
@@ -491,6 +501,7 @@ struct AnimCmd {
     Vector3 counterAngles;
     bool forceDoPos = false, forceDoRot = false, forceRotLocal = false;
     Vector3 forcePos, forceRot;
+    std::vector<ChannelDiscard> discards; // DiscardChannels
 };
 
 // one extracted motion segment - written as mstudiomovement_t. Produced by motion extraction, one
@@ -1367,7 +1378,8 @@ struct CompileInput {
                 MatchBlend, WorldspaceBlend, AppendAnim, BoneDriver,
                 Motion, RefMotion, CopyPose, TransformBone, NumFrames,
                 IkFixup, LocalHierarchy, Derivative, NoAnim, LinearDelta,
-                Compress, CounterRotate, ForceBonePosRot, MatchPosition } kind = Weights;
+                Compress, CounterRotate, ForceBonePosRot, MatchPosition,
+                DiscardChannels } kind = Weights;
             std::string name;   // Weights: weightlist; Subtract/Align/Match: animation
                                 // CopyPose: an animation OR a sequence
             int frame = 0;      // Subtract: reference frame
@@ -1406,6 +1418,7 @@ struct CompileInput {
             Vector3 counterAngles;
             bool forceDoPos = false, forceDoRot = false, forceRotLocal = false;
             Vector3 forcePos, forceRot;
+            std::vector<ChannelDiscard> discards; // DiscardChannels
         };
         std::vector<InCmd> cmds;
         // clip trim (`frame <a> <b>` / `framestart <a>`). endframe -1 = run to

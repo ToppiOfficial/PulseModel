@@ -543,6 +543,14 @@ std::string Lower(std::string s) {
     return s;
 }
 
+// Spellings shared by every X Y Z offset / pitch yaw roll option.
+bool IsOriginWord(const std::string& w) {
+    return _stricmp(w.c_str(), "origin") == 0 || _stricmp(w.c_str(), "position") == 0;
+}
+bool IsAnglesWord(const std::string& w) {
+    return _stricmp(w.c_str(), "angles") == 0 || _stricmp(w.c_str(), "rotation") == 0;
+}
+
 std::string UnsavedKey(const fs::path& path) {
     std::error_code ec;
     const fs::path full = fs::absolute(path, ec);
@@ -1014,12 +1022,12 @@ bool ParseEditSkeleton(Ctx& c, const Token& cmd, MeshEdit& edit) {
                     flag("affectchildren", op.affectChildren) || flag("affectmeshes", op.affectMeshes))
                     continue;
                 const std::string option = c.Cur().quoted ? std::string() : Lower(c.Cur().text);
-                if (option == "origin" && !op.hasOrigin) {
+                if (IsOriginWord(option) && !op.hasOrigin) {
                     ++c.pos;
                     c.MarkOption();
                     if (!vec3("an X Y Z origin", op.origin)) return false;
                     op.hasOrigin = true;
-                } else if (option == "angles" && !op.hasAngles) {
+                } else if (IsAnglesWord(option) && !op.hasAngles) {
                     ++c.pos;
                     c.MarkOption();
                     if (!vec3("a pitch yaw roll", op.angles)) return false;
@@ -2644,6 +2652,32 @@ const char* UnsupportedAnimOption(const std::string& o) {
 int LookupControl(const std::string& s); // defined below, used by the align family
 bool ParseIkRule(Ctx& c, const Token& cmd, std::vector<cm::CompileInput::InIkRule>& out);
 
+// Reads the x/y/z tokens after an origin/angles word as STUDIO_X|Y|Z bits (1, 2, 4).
+// Tokens may be combined (xy) or separate; all three when none are written.
+int ReadAxisBits(Ctx& c) {
+    int bits = 0;
+    while (!c.AtCommand() && !c.Cur().quoted) {
+        int word = 0;
+        for (char ch : c.Cur().text) {
+            const int bit = (ch == 'x' || ch == 'X')   ? 1
+                            : (ch == 'y' || ch == 'Y') ? 2
+                            : (ch == 'z' || ch == 'Z') ? 4
+                                                       : 0;
+            if (!bit) {
+                word = 0;
+                break;
+            }
+            word |= bit;
+        }
+        if (!word)
+            break;
+        bits |= word;
+        c.pos++;
+        c.MarkOption();
+    }
+    return bits ? bits : 7;
+}
+
 // Apply one animation-option token to `a` (studiomdl ParseAnimationToken, the
 // backend-supported subset). The option keyword must already be consumed - `t`
 // is that token; any arguments are read from the stream here. Returns:
@@ -2780,16 +2814,16 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         a.cmds.push_back(std::move(cmd));
         return 1;
     }
-    // forceboneposrot <bone> [pos x y z] [rot x y z [local]]: overwrite a bone's
-    // local pos and/or rotation every frame. rot is world-space unless `local`
-    // is given or the bone is rootless.
+    // forceboneposrot <bone> [origin x y z] [angles x y z [local]]: overwrite a
+    // bone's local pos and/or rotation every frame. Angles are world-space unless
+    // `local` is given or the bone is rootless.
     if (_stricmp(o.c_str(), "forceboneposrot") == 0) {
         cm::CompileInput::InAnim::InCmd cmd;
         cmd.kind = cm::CompileInput::InAnim::InCmd::ForceBonePosRot;
         if (!c.Want("a bone name", t, cmd.alignBone))
             return -1;
         if (!c.AtCommand() && !c.Cur().quoted &&
-            _stricmp(c.Cur().text.c_str(), "pos") == 0) {
+            IsOriginWord(c.Cur().text)) {
             c.Next();
             c.MarkOption();
             cmd.forceDoPos = true;
@@ -2799,7 +2833,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                 return -1;
         }
         if (!c.AtCommand() && !c.Cur().quoted &&
-            _stricmp(c.Cur().text.c_str(), "rot") == 0) {
+            IsAnglesWord(c.Cur().text)) {
             c.Next();
             c.MarkOption();
             cmd.forceDoRot = true;
@@ -2903,7 +2937,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
 
     // per-animation transform. These replace the model-wide origin/rotation/
     // scale for this animation only.
-    if (_stricmp(o.c_str(), "origin") == 0) {
+    if (IsOriginWord(o)) {
         if (!c.WantFloat("an X offset", t, a.adjust.x) ||
             !c.WantFloat("a Y offset", t, a.adjust.y) ||
             !c.WantFloat("a Z offset", t, a.adjust.z))
@@ -2920,7 +2954,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         a.rotationSet = true;
         return 1;
     }
-    if (_stricmp(o.c_str(), "angles") == 0) {
+    if (IsAnglesWord(o)) {
         float p = 0.0f, y = 0.0f, r = 0.0f;
         if (!c.WantFloat("a pitch", t, p) || !c.WantFloat("a yaw", t, y) ||
             !c.WantFloat("a roll", t, r))
@@ -3063,7 +3097,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
             if (c.AtCommand() || c.Eof() || c.Cur().quoted || c.Cur().line != t.line)
                 break;
             const std::string n = c.Cur().text;
-            if (_stricmp(n.c_str(), "origin") == 0) {
+            if (IsOriginWord(n)) {
                 if (bt.originSet) {
                     c.Fail(c.Cur().line, "transformbone: origin written twice");
                     return -1;
@@ -3075,7 +3109,7 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
                     !c.WantFloat("a Z offset", t, bt.origin.z))
                     return -1;
                 bt.originSet = true;
-            } else if (_stricmp(n.c_str(), "angles") == 0) {
+            } else if (IsAnglesWord(n)) {
                 if (bt.anglesSet) {
                     c.Fail(c.Cur().line, "transformbone: angles written twice");
                     return -1;
@@ -3344,6 +3378,65 @@ int ApplyAnimOption(Ctx& c, const Token& t, cm::CompileInput::InAnim& a) {
         a.cmds.push_back(std::move(cmd));
         return 1;
     }
+    // discardchannels { anim origin|angles <axes> | bone <name> [origin <axes>] [angles <axes>] }
+    // `anim` hits every bone; a `bone` with no clause drops that bone from the clip.
+    // Axes are x/y/z or a combination, all three when omitted. Not a stock option.
+    if (_stricmp(o.c_str(), "discardchannels") == 0) {
+        cm::CompileInput::InAnim::InCmd cmd;
+        cmd.kind = cm::CompileInput::InAnim::InCmd::DiscardChannels;
+        if (c.AtCommand() || c.Cur().quoted || c.Cur().text != "{") {
+            c.Fail(t.line, "discardchannels expects '{'");
+            return -1;
+        }
+        c.pos++;
+
+        for (;;) {
+            if (c.AtCommand()) {
+                c.Fail(t.line, "discardchannels is missing '}'");
+                return -1;
+            }
+            const Token e = c.toks[c.pos++];
+            if (!e.quoted && e.text == "}")
+                break;
+            c.MarkOption();
+
+            cm::ChannelDiscard d;
+            if (!e.quoted && _stricmp(e.text.c_str(), "anim") == 0) {
+                if (c.AtCommand() || c.Cur().quoted ||
+                    !(IsOriginWord(c.Cur().text) || IsAnglesWord(c.Cur().text))) {
+                    c.Fail(e.line, "discardchannels anim expects origin or angles");
+                    return -1;
+                }
+                const bool position = IsOriginWord(c.Cur().text);
+                c.pos++;
+                c.MarkOption();
+                (position ? d.posAxes : d.rotAxes) = ReadAxisBits(c);
+            } else if (!e.quoted && _stricmp(e.text.c_str(), "bone") == 0) {
+                if (!c.Want("a bone name", t, d.bone))
+                    return -1;
+                while (!c.AtCommand() && !c.Cur().quoted &&
+                       (IsOriginWord(c.Cur().text) || IsAnglesWord(c.Cur().text))) {
+                    const bool position = IsOriginWord(c.Cur().text);
+                    c.pos++;
+                    c.MarkOption();
+                    (position ? d.posAxes : d.rotAxes) |= ReadAxisBits(c);
+                }
+                d.wholeBone = !d.posAxes && !d.rotAxes;
+            } else {
+                c.Fail(e.line, "discardchannels: unknown entry \"" + e.text +
+                               "\" (expected anim or bone)");
+                return -1;
+            }
+            cmd.discards.push_back(std::move(d));
+        }
+
+        if (cmd.discards.empty()) {
+            c.Fail(t.line, "discardchannels is empty");
+            return -1;
+        }
+        a.cmds.push_back(std::move(cmd));
+        return 1;
+    }
     if (_stricmp(o.c_str(), "cmdlist") == 0) {
         std::string name;
         if (!c.Want("a $cmdlist name", t, name))
@@ -3380,6 +3473,7 @@ bool CmdCmdList(Ctx& c, const Token& cmd) {
     const bool savedRaw = c.rawCollect;
     c.rawCollect = true;
     bool braced = false;
+    int depth = 0; // option blocks nested in the body, such as discardchannels { }
     if (!c.Eof() && !c.Cur().quoted && c.Cur().text == "{") {
         braced = true;
         c.pos++;
@@ -3390,11 +3484,15 @@ bool CmdCmdList(Ctx& c, const Token& cmd) {
                 c.rawCollect = savedRaw;
                 return c.Fail(cmd.line, "$cmdlist \"" + name + "\" is missing '}'");
             }
-            if (!c.Cur().quoted && c.Cur().text == "}") { c.pos++; break; }
+            if (!c.Cur().quoted && c.Cur().text == "}" && depth == 0) { c.pos++; break; }
         } else if (c.AtCommand()) {
             break;
         }
         const Token t = c.toks[c.pos++];
+        if (!t.quoted && t.text == "{")
+            depth++;
+        else if (!t.quoted && t.text == "}")
+            depth--;
         if (!t.quoted && _stricmp(t.text.c_str(), "cmdlist") == 0) {
             c.rawCollect = savedRaw;
             return c.Fail(t.line, "$cmdlist \"" + name + "\" cannot nest a cmdlist");
@@ -3997,7 +4095,7 @@ bool CmdEyeball(Ctx& c, const Token& cmd) {
         } else if (o == "material") {
             if (!c.Want("a material name", cmd, entry.eyeball.material)) return false;
             haveMaterial = true;
-        } else if (o == "origin") {
+        } else if (IsOriginWord(o)) {
             if (!c.WantFloat("an origin x", cmd, entry.eyeball.origin.x) ||
                 !c.WantFloat("an origin y", cmd, entry.eyeball.origin.y) ||
                 !c.WantFloat("an origin z", cmd, entry.eyeball.origin.z))
@@ -5140,13 +5238,13 @@ bool CmdTransformModel(Ctx& c, const Token& cmd) {
         // errors read "$transformmodel origin expects ..."
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
-        if (!t.quoted && _stricmp(t.text.c_str(), "origin") == 0) {
+        if (!t.quoted && IsOriginWord(t.text)) {
             float x = 0, y = 0, z = 0;
             if (!c.WantFloat("an X offset", sub, x) || !c.WantFloat("a Y offset", sub, y) ||
                 !c.WantFloat("a Z offset", sub, z))
                 return false;
             c.in.adjust = {x, y, z};
-        } else if (!t.quoted && _stricmp(t.text.c_str(), "angles") == 0) {
+        } else if (!t.quoted && IsAnglesWord(t.text)) {
             // degrees, (pitch, yaw, roll) - the roll composes with the built-in
             // +90 yaw exactly like .pulsemdl's rotatemodel
             float x = 0, y = 0, z = 0;
@@ -5261,8 +5359,8 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
         return false;
 
     static const char* kClauses[] = {
-        "inherit", "bone",   "origin",   "position",  "angles",    "rotate",  "rigid",
-        "absolute", "world_align", "flexgroup", "flexmorph", "material"};
+        "inherit", "bone",   "origin",   "position",  "offset",  "angles",    "rotation", "rotate",
+        "rigid",   "absolute", "world_align", "flexgroup", "flexmorph", "material"};
     auto isClause = [](const Token& t) {
         if (t.quoted)
             return false;
@@ -5329,15 +5427,14 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
         } else if (!t.quoted && _stricmp(t.text.c_str(), "bone") == 0) {
             if (!c.Want("a bone name", sub, a.bone))
                 return false;
-        } else if (!t.quoted && (_stricmp(t.text.c_str(), "origin") == 0 ||
-                                 _stricmp(t.text.c_str(), "position") == 0)) {
+        } else if (!t.quoted &&
+                   (IsOriginWord(t.text) || _stricmp(t.text.c_str(), "offset") == 0)) {
             if (!c.WantFloat("an X offset", sub, a.origin.x) ||
                 !c.WantFloat("a Y offset", sub, a.origin.y) ||
                 !c.WantFloat("a Z offset", sub, a.origin.z))
                 return false;
             a.hasOriginOverride = true;
-        } else if (!t.quoted && (_stricmp(t.text.c_str(), "angles") == 0 ||
-                                 _stricmp(t.text.c_str(), "rotate") == 0)) {
+        } else if (!t.quoted && (IsAnglesWord(t.text) || _stricmp(t.text.c_str(), "rotate") == 0)) {
             // Read up to 3 values; omitted components keep their inherited
             // angles or the zero default.
             for (float* d : {&a.anglesDeg.x, &a.anglesDeg.y, &a.anglesDeg.z}) {
@@ -5376,8 +5473,8 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
                 return false;
         } else {
             return c.Fail(t.line, "$attachment \"" + a.name +
-                                  "\": expected inherit, bone, origin/position, "
-                                  "angles/rotate, rigid, absolute, world_align, "
+                                  "\": expected inherit, bone, origin/position/offset, "
+                                  "angles/rotation/rotate, rigid, absolute, world_align, "
                                   "flexgroup, flexmorph or material, got \"" +
                                   t.text + "\"");
         }
@@ -5661,8 +5758,8 @@ bool CmdRealignBone(Ctx& c, const Token& cmd) {
         const Token option = c.toks[c.pos++];
         c.MarkOption();
         const std::string word = Lower(option.text);
-        if (!option.quoted && (word == "origin" || word == "angles")) {
-            const bool origin = word == "origin";
+        if (!option.quoted && (IsOriginWord(word) || IsAnglesWord(word))) {
+            const bool origin = IsOriginWord(word);
             bool& present = origin ? edit.hasOrigin : edit.hasAngles;
             if (present) return c.Fail(option.line, "$realignbone: " + word + " written twice");
 
@@ -7187,7 +7284,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
         const std::string o = Lower(t.text);
         const Token sub{cmd.text + " " + t.text, t.line, false};
 
-        if (!t.quoted && o == "angles") {
+        if (!t.quoted && IsAnglesWord(o)) {
             if (!c.WantFloat("a pitch", sub, hb.angOffset.x) ||
                 !c.WantFloat("a yaw", sub, hb.angOffset.y) ||
                 !c.WantFloat("a roll", sub, hb.angOffset.z))

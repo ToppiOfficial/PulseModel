@@ -6404,6 +6404,52 @@ static bool CheckAnimFrame(const Anim& a, int frame, const char* what,
     return true;
 }
 
+// discardchannels: a dropped channel is reset to the bone's rest value (zero for a delta clip), which
+// the compressor writes as no data. A bone dropped whole also loses its weight, so it stays out of
+// the sequence's blend as well.
+static void ApplyDiscardChannels(CompiledModel& m, Anim& panim) {
+    const bool isDelta = (panim.flags & STUDIO_DELTA) != 0;
+    const size_t frames = std::min(static_cast<size_t>(panim.numframes), panim.sanim.size());
+
+    for (const AnimCmd& cmd : panim.cmds) {
+        if (cmd.kind != AnimCmd::DiscardChannels)
+            continue;
+
+        for (const ChannelDiscard& d : cmd.discards) {
+            int first = 0;
+            int last = static_cast<int>(m.bones.size()) - 1;
+            if (!d.bone.empty()) {
+                first = last = FindGlobalBone(m, d.bone);
+                if (first == -1) {
+                    pulse::diag::Warnf("discardchannels: unknown bone \"%s\" in %s - ignored\n",
+                                       d.bone.c_str(), panim.name.c_str());
+                    continue;
+                }
+            }
+
+            for (int j = first; j <= last; j++) {
+                const int posAxes = d.wholeBone ? 7 : d.posAxes;
+                const int rotAxes = d.wholeBone ? 7 : d.rotAxes;
+                if (d.wholeBone) {
+                    panim.weight[j] = 0.0f;
+                    panim.posweight[j] = 0.0f;
+                }
+
+                for (size_t n = 0; n < frames; n++) {
+                    src::SrcBonePose& pose = panim.sanim[n][j];
+                    for (int axis = 0; axis < 3; axis++) {
+                        const int bit = 1 << axis;
+                        if (posAxes & bit)
+                            (&pose.pos.x)[axis] = isDelta ? 0.0f : (&m.bones[j].pos.x)[axis];
+                        if (rotAxes & bit)
+                            (&pose.rot.x)[axis] = isDelta ? 0.0f : (&m.bones[j].rot.x)[axis];
+                    }
+                }
+            }
+        }
+    }
+}
+
 bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std::string* err) {
     CompiledModel& m = *ctx.out;
 
@@ -7020,6 +7066,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 }
                 break;
             }
+            case AnimCmd::DiscardChannels:
+                break; // applied once the clip is otherwise finished, see below
             case AnimCmd::MatchPosition: {
                 if (!(panim.flags & STUDIO_DELTA)) {
                     if (err) *err = "matchposition in " + panim.name + " needs a subtract before it";
@@ -7377,6 +7425,8 @@ bool ProcessAnimations(Ctx& ctx, const std::vector<WeightList>& weightlists, std
                 panim.sanim[mm][k].rot = panim.sanim[nn][k].rot;
             }
         }
+
+        ApplyDiscardChannels(m, panim);
     }
 
     // merge weightlists into sequences (max over the blend grid's anims)
@@ -10191,6 +10241,13 @@ static std::string AnimSignature(const Anim& a) {
         SigVal(s, c.ikfixup.end);
         SigVal(s, c.ikfixup.contact);
         SigStr(s, c.parentBone); // LocalHierarchy; the rest reuses driver*/alignBone
+        SigVal(s, static_cast<uint32_t>(c.discards.size()));
+        for (const ChannelDiscard& d : c.discards) {
+            SigStr(s, d.bone);
+            SigVal(s, d.posAxes);
+            SigVal(s, d.rotAxes);
+            SigVal(s, d.wholeBone);
+        }
     }
     SigVal(s, static_cast<uint32_t>(a.ikrules.size()));
     for (const IkRule& r : a.ikrules) {
@@ -10974,6 +11031,10 @@ bool Compile(CompileInput& input, CompiledModel& out, std::string* err) {
                 cmd.kind = AnimCmd::MatchPosition;
                 cmd.alignBone = ic.alignBone;
                 cmd.motiontype = ic.motiontype;
+                break;
+            case InCmd::DiscardChannels:
+                cmd.kind = AnimCmd::DiscardChannels;
+                cmd.discards = ic.discards;
                 break;
             case InCmd::FixupLoop:
                 cmd.kind = AnimCmd::FixupLoop;
