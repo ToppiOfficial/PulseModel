@@ -1494,6 +1494,59 @@ void InsertPredefinedBones(Ctx& ctx, bool bUnlocked) {
     }
 }
 
+// Re-expresses procedural triggers/poses in a new parent's frame. L = inv(newParent) * oldParent
+// (both boneToPose), so world placement is unchanged. `isAuthoredParent(namedParent, childName,
+// strict)` says whether that child's authored data is relative to the parent being replaced.
+template <typename IsAuthoredParent>
+void ReframeProceduralData(CompiledModel& m, const matrix3x4& L, const std::string& newparent,
+                           IsAuthoredParent isAuthoredParent) {
+    Quaternion lq;
+    Vector3 lpos;
+    pm::MatrixAngles(L, lq, lpos);
+
+    for (ProceduralBone& pb : m.proceduralbones) {
+        if (FindProcBone(m, pb.helpername, pb.strictName) == -1)
+            continue;
+        if (isAuthoredParent(pb.driverparentname, pb.drivername, pb.strictName)) {
+            for (ProceduralBoneTrigger& tr : pb.triggers) {
+                if (tr.driverDelta)
+                    continue; // folded against the final parent later
+                Quaternion q;
+                pm::QuaternionMult(lq, tr.trigger, q);
+                tr.trigger = q;
+            }
+            pb.driverparentname = newparent;
+        }
+        if (isAuthoredParent(pb.helperparentname, pb.helpername, pb.strictName)) {
+            for (ProceduralBoneTrigger& tr : pb.triggers) {
+                if (tr.absolutePose) {
+                    Vector3 pos;
+                    pm::MatrixAngles(pm::ConcatTransforms(
+                                         L, pm::QuaternionMatrix(tr.quat, tr.pos)),
+                                     tr.quat, pos);
+                    tr.pos = pos;
+                } else {
+                    // still a helper-local delta: only its offset changes frame
+                    tr.pos = pm::VectorRotate(tr.pos, L);
+                }
+            }
+            pb.helperparentname = newparent;
+        }
+    }
+
+    for (AimAtBone& ab : m.aimatbones) {
+        if (FindProcBone(m, ab.bonename, ab.strictName) == -1)
+            continue;
+        if (!isAuthoredParent(ab.parentname, ab.bonename, ab.strictName))
+            continue;
+        ab.aimvector = pm::VectorRotate(ab.aimvector, L);
+        ab.upvector = pm::VectorRotate(ab.upvector, L);
+        if (!ab.autobasepos) // autobasepos is seeded from the final rest pose
+            ab.basepos = pm::VectorTransform(ab.basepos, L);
+        ab.parentname = newparent;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EnforceHierarchy: $hierarchy relinks a bone's parent. It runs after boneToPose is built and
 // RebuildLocalPose re-derives the locals afterwards, so the bone keeps its world placement and only
@@ -1514,6 +1567,24 @@ bool EnforceHierarchy(Ctx& ctx, std::string* err) {
         if (k == -1) {
             if (err) *err = "unknown bone: \"" + fh.child + "\" in forced hierarchy";
             return false;
+        }
+
+        // Procedural data authored against the old parent moves to the new parent's frame.
+        const int o = m.bones[k].parent;
+        if (o != j) {
+            matrix3x4 identity{};
+            identity.m[0][0] = identity.m[1][1] = identity.m[2][2] = 1.0f;
+            const matrix3x4 L = pm::ConcatTransforms(
+                j >= 0 ? pm::MatrixInvert(m.bones[j].boneToPose) : identity,
+                o >= 0 ? m.bones[o].boneToPose : identity);
+            const std::string oldName = o >= 0 ? m.bones[o].name : std::string();
+            auto isAuthoredParent = [&](const std::string& named, const std::string& child,
+                                        bool strict) {
+                return FindProcBone(m, child, strict) == k &&
+                       (named.empty() || _stricmp(named.c_str(), oldName.c_str()) == 0);
+            };
+            ReframeProceduralData(m, L, j >= 0 ? m.bones[j].name : std::string(),
+                                  isAuthoredParent);
         }
         m.bones[k].parent = j;
     }
@@ -1710,19 +1781,15 @@ bool BoneHasChildren(const CompiledModel& m, int k) {
 void ResolveProceduralParentCollapse(Ctx& ctx, int k) {
     CompiledModel& m = *ctx.out;
     const std::string gone = m.bones[k].name;
-    const std::string newparent =
-        m.bones[k].parent >= 0 ? m.bones[m.bones[k].parent].name : std::string();
+    const int kparent = m.bones[k].parent;
+    const std::string newparent = kparent >= 0 ? m.bones[kparent].name : std::string();
 
     // pos/rot are not filled until RebuildLocalPose and rawLocal goes stale
     // once an ancestor collapses, so derive the local off boneToPose.
-    const int kparent = m.bones[k].parent;
     const matrix3x4 L =
         kparent >= 0 ? pm::ConcatTransforms(pm::MatrixInvert(m.bones[kparent].boneToPose),
                                             m.bones[k].boneToPose)
                      : m.bones[k].boneToPose;
-    Quaternion lq;
-    Vector3 lpos;
-    pm::MatrixAngles(L, lq, lpos);
 
     // true when the collapsing bone is what the authored data is relative to:
     // the named parent, or the current skeleton parent when none was named.
@@ -1733,48 +1800,7 @@ void ResolveProceduralParentCollapse(Ctx& ctx, int k) {
         const int c = FindProcBone(m, child, strict);
         return c >= 0 && m.bones[c].parent == k;
     };
-
-    for (ProceduralBone& pb : m.proceduralbones) {
-        if (FindProcBone(m, pb.helpername, pb.strictName) == -1)
-            continue;
-        if (isAuthoredParent(pb.driverparentname, pb.drivername, pb.strictName)) {
-            for (ProceduralBoneTrigger& tr : pb.triggers) {
-                if (tr.driverDelta)
-                    continue; // folded against the final parent later
-                Quaternion q;
-                pm::QuaternionMult(lq, tr.trigger, q);
-                tr.trigger = q;
-            }
-            pb.driverparentname = newparent;
-        }
-        if (isAuthoredParent(pb.helperparentname, pb.helpername, pb.strictName)) {
-            for (ProceduralBoneTrigger& tr : pb.triggers) {
-                if (tr.absolutePose) {
-                    Vector3 pos;
-                    pm::MatrixAngles(pm::ConcatTransforms(
-                                         L, pm::QuaternionMatrix(tr.quat, tr.pos)),
-                                     tr.quat, pos);
-                    tr.pos = pos;
-                } else {
-                    // still a helper-local delta: only its offset changes frame
-                    tr.pos = pm::VectorRotate(tr.pos, L);
-                }
-            }
-            pb.helperparentname = newparent;
-        }
-    }
-
-    for (AimAtBone& ab : m.aimatbones) {
-        if (FindProcBone(m, ab.bonename, ab.strictName) == -1)
-            continue;
-        if (!isAuthoredParent(ab.parentname, ab.bonename, ab.strictName))
-            continue;
-        ab.aimvector = pm::VectorRotate(ab.aimvector, L);
-        ab.upvector = pm::VectorRotate(ab.upvector, L);
-        if (!ab.autobasepos) // autobasepos is seeded from the final rest pose
-            ab.basepos = pm::VectorTransform(ab.basepos, L);
-        ab.parentname = newparent;
-    }
+    ReframeProceduralData(m, L, newparent, isAuthoredParent);
 }
 
 void CollapseBones(Ctx& ctx) {
