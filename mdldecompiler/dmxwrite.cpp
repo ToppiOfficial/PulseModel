@@ -317,9 +317,9 @@ float LodSwitchPoint(const std::vector<char>& buf, const Mdl& m, int lod) {
     return 0.0f;
 }
 
-// $lod facial/nofacial. The compiler flags a strip group STRIPGROUP_IS_FLEXED
-// when facial animation is on for that LOD; the flags byte sits at the same
-// offset in both strip-group layouts, so `stride` is the only version split.
+// $lod facial/nofacial. A strip group with the flexed or delta-flexed bit marks
+// facial animation on for that LOD; the flags byte sits at the same offset in
+// both strip-group layouts, so `stride` is the only version split.
 bool LodUsesFacial(const std::vector<char>& buf, const Mdl& m, size_t stride, int lod) {
     const auto* fh = reinterpret_cast<const vtx::FileHeader_t*>(buf.data());
     const char* end = buf.data() + buf.size();
@@ -362,7 +362,7 @@ bool LodUsesFacial(const std::vector<char>& buf, const Mdl& m, size_t stride, in
                 for (int g = 0; g < meshes[k].numStripGroups; ++g) {
                     const auto& sg = *reinterpret_cast<const vtx::LegacyStripGroupHeader_t*>(
                         sgRaw + stride * static_cast<size_t>(g));
-                    if (sg.flags & vtx::STRIPGROUP_IS_FLEXED)
+                    if (sg.flags & (vtx::STRIPGROUP_IS_FLEXED | vtx::STRIPGROUP_IS_DELTA_FLEXED))
                         return true;
                 }
             }

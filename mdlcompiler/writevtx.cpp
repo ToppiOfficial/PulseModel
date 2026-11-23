@@ -182,6 +182,7 @@ struct Builder {
     int maxBonesPerFace = 9;
     int maxBonesPerStrip = 53;
     int numBones = 0;
+    bool legacyVtx = true;
     std::vector<VtxModel> models;
 
     fmt::studiohdr_t* hdr() { return reinterpret_cast<fmt::studiohdr_t*>(mdlBuf->data()); }
@@ -679,12 +680,13 @@ void ProcessStripGroup(Builder& b, StripGroup* pStripGroup, bool bIsHWSkinned, b
         maxBonesPerStrip = 1;
     }
 
-    // ComputeStripGroupFlags: a flexed group sets BOTH the
-    // software-flex and hardware-delta-flex bits
+    // A flexed group sets delta-flexed; the legacy layout also sets the plain
+    // flexed bit, which the format 1 header does not define.
     pStripGroup->flags = 0;
     if (bIsFlexed) {
-        pStripGroup->flags |= fmt::vtx::STRIPGROUP_IS_FLEXED;
         pStripGroup->flags |= fmt::vtx::STRIPGROUP_IS_DELTA_FLEXED;
+        if (b.legacyVtx)
+            pStripGroup->flags |= fmt::vtx::STRIPGROUP_IS_FLEXED;
     }
     if (bIsHWSkinned)
         pStripGroup->flags |= fmt::vtx::STRIPGROUP_IS_HWSKINNED;
@@ -845,6 +847,7 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
     Builder b;
     b.m = &m;
     b.mdlBuf = &mdlBuf;
+    b.legacyVtx = legacyVtx;
     // dx80: tighter hardware limit (more, smaller strips) and no hardware flex.
     b.maxBonesPerStrip = dx80 ? 16 : 53;
     const bool hwFlex = !dx80;
