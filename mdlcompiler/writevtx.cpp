@@ -926,9 +926,8 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
                                                                  : nullptr;
 
             VtxMesh& newMesh = b.models[t.modelIdx].modelLODs[lodID].meshes[t.meshID];
-            // ComputeMeshFlags: a non-zero materialtype
-            // means the eyeball pass claimed this mesh. MESH_IS_TEETH needs
-            // $mouth teeth material matching, which is not implemented.
+            // A non-zero materialtype means the eyeball pass claimed this mesh. MESH_IS_TEETH is
+            // never set: its trigger is a non-zero .mdl texture flag, and those are written as 0.
             newMesh.flags = pStudioMesh->materialtype != 0 ? kMeshIsEyes : 0;
 
             // removemodel / removemesh leave the mesh header in place with no strip groups: the
@@ -1413,9 +1412,9 @@ std::vector<uint8_t> BuildVtx(cm::CompiledModel& m, std::vector<uint8_t>& mdlBuf
         }
     }
 
-    // ZeroNumBones, gated on g_staticprop && !g_bLegacyVTX It hits every vert and strip of every
-    // strip group, so walking the flat verts/strips blocks is the same set.
-    if (!legacyVtx && (phdr->flags & fmt::STUDIOHDR_FLAGS_STATIC_PROP)) {
+    // Static props: zero bone counts on every vert and strip, in both vtx formats. Walking the
+    // flat verts/strips blocks covers every strip group.
+    if (phdr->flags & fmt::STUDIOHDR_FLAGS_STATIC_PROP) {
         for (int i = 0; i < totalVerts; i++)
             (reinterpret_cast<fmt::vtx::Vertex_t*>(out.data() + vertsOffset) + i)->numBones = 0;
         for (int i = 0; i < totalStrips; i++) {
