@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
     <linearGradient id="blue" x2="1" y2="1">
       <stop stop-color="#82a7cb"/>
@@ -9,14 +9,14 @@
       <stop offset="1" stop-color="#bfc8d5"/>
     </linearGradient>
   </defs>
-  <path fill="url(#blue)" fill-rule="evenodd" stroke="url(#silver)" stroke-width="2.5"
-        stroke-linejoin="round"
-        d="M27.5 3h9l3 7 5 2 6-3 6 6-3 6 2 5 7 3v9l-7 3-2 5 3 6-6 6-6-3-5 2-3 7h-9l-3-7-5-2-6 3-6-6 3-6-2-5-7-3v-9l7-3 2-5-3-6 6-6 6 3 5-2Z
-           M49.5 33.5a17.5 17.5 0 1 0-35 0 17.5 17.5 0 1 0 35 0Z"/>
-  <path fill="url(#silver)" d="m32 19 12.5 7v15L32 48.5 19.5 41V26Z"/>
-  <path fill="url(#blue)" d="m22 26.7 10-5.6 10 5.6-10 5.6Z"/>
-  <path fill="#82a7cb" d="m21.5 29 9.5 5.3v11.3l-9.5-5.7Z"/>
-  <path fill="#557fa8" d="m33 34.3 9.5-5.3v10.9L33 45.6Z"/>
-  <path fill="none" stroke="#edf1f7" stroke-width="1.4" stroke-linecap="round"
-        stroke-linejoin="round" d="m21.5 35 3 1.5 1.4-3.5 1.7 7.4 1.1-2.8 1.5.7"/>
+  <path fill="url(#blue)" fill-rule="evenodd"
+        d="M398.0 156.4Q408.4 152.3 413.8 138.5L453.5 44.3L570.5 44.3L610.2 138.5Q615.6 152.3 626.0 156.4L699.0 185.9Q713.0 191.0 719.4 188.0L803.9 146.3L877.7 220.1L836.0 304.6Q833.0 311.0 838.1 325.0L867.6 398.0Q871.7 408.4 885.5 413.8L979.7 453.5L979.7 570.5L885.5 610.2Q871.7 615.6 867.6 626.0L838.1 699.0Q833.0 713.0 836.0 719.4L877.7 803.9L803.9 877.7L719.4 836.0Q713.0 833.0 699.0 838.1L626.0 867.6Q615.6 871.7 610.2 885.5L570.5 979.7L453.5 979.7L413.8 885.5Q408.4 871.7 398.0 867.6L325.0 838.1Q311.0 833.0 304.6 836.0L220.1 877.7L146.3 803.9L188.0 719.4Q191.0 713.0 185.9 699.0L156.4 626.0Q152.3 615.6 138.5 610.2L44.3 570.5L44.3 453.5L138.5 413.8Q152.3 408.4 156.4 398.0L185.9 325.0Q191.0 311.0 188.0 304.6L146.3 220.1L220.1 146.3L304.6 188.0Q311.0 191.0 325.0 185.9ZM812 512a300 300 0 1 0-600 0 300 300 0 1 0 600 0Z"/>
+  <path fill="url(#silver)" fill-rule="evenodd"
+        d="M812 512a300 300 0 1 0-600 0 300 300 0 1 0 600 0ZM772 512a260 260 0 1 1-520 0 260 260 0 1 1 520 0Z"/>
+  <path fill="url(#silver)" d="M512 280 712 392V632L512 752 312 632V392Z"/>
+  <path fill="url(#blue)" d="M352 404 512 313 672 404 512 493Z"/>
+  <path fill="#82a7cb" d="M344 440 496 522V706L344 613Z"/>
+  <path fill="#557fa8" d="M528 522 680 440V613L528 706Z"/>
+  <path fill="none" stroke="#edf1f7" stroke-width="22" stroke-linecap="round"
+        stroke-linejoin="round" d="M342 535 388 558 414 503 438 624 458 577 484 589"/>
 </svg>
