@@ -5,6 +5,7 @@
 
 #include "dmxrig.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -294,56 +295,88 @@ void WalkAttachments(const dmx::Element* dag, float scale, cm::CompileInput& in,
 // root."hitboxSetList" -> DmeHitboxSetList."hitboxSetList" -> DmeHitboxSet ("hitboxList" of
 // DmeHitbox). An EMPTY set is skipped - a stray "default" set would suppress the compile stage's
 // auto-generation.
-void AddHitboxes(const dmx::Element* root, cm::CompileInput& in) {
+//
+// Each set is judged alone: a new name is imported whole, and a set whose name is already declared
+// only gains the hitboxes on bones it has none for. `merge` carries an assembly's set renames.
+cm::HitBox HitboxOf(const dmx::Element* box, const cm::CompileInput& in) {
+    cm::HitBox hb;
+    if (const std::string* bone = box->GetString("boneName"))
+        hb.bonename = *bone;
+    hb.group = box->GetInt("groupId", 0);
+    // scaled like 's scale_vertex, so DMX hitboxes respect $scale
+    const dmx::Vector3 lo = box->GetVector3("minBounds");
+    const dmx::Vector3 hi = box->GetVector3("maxBounds");
+    hb.bmin = {lo.x * in.scale, lo.y * in.scale, lo.z * in.scale};
+    hb.bmax = {hi.x * in.scale, hi.y * in.scale, hi.z * in.scale};
+    hb.capsuleRadius = box->GetFloat("radius", -1.0f); // <= 0 = a box
+    if (hb.capsuleRadius > 0.0f) hb.capsuleRadius *= in.scale;
+    hb.angOffset = ToVec(box->GetVector3("orientation"));
+    // the DmeHitbox element's own name is not the hitbox name - stock studiomdl leaves
+    // these unnamed, like an $hbox with no `name`
+    return hb;
+}
+
+void AddHitboxes(const dmx::Element* root, cm::CompileInput& in, const HitboxImport* merge) {
     const dmx::Element* list = root->GetElement("hitboxSetList");
     if (!list)
         return;
     const std::vector<dmx::ElementPtr>* sets = list->GetElementArray("hitboxSetList");
     if (!sets || sets->empty())
         return;
-    if (!in.hitboxsets.empty()) {
-        pulse::diag::Warnf("DMX hitboxSetList ignored - hitbox sets are already "
-                             "defined ($hboxset or an earlier $datamodeljoints)\n");
-        return;
-    }
-
     for (const dmx::Element* set : *sets) {
         if (!set) continue;
         const std::vector<dmx::ElementPtr>* boxes = set->GetElementArray("hitboxList");
         if (!boxes || boxes->empty())
             continue;
-        if (in.hitboxsets.size() >= static_cast<size_t>(lim::kMaxHitboxSets)) {
-            pulse::diag::Warnf("too many hitbox sets, ignoring \"%s\"\n",
-                         set->name.c_str());
+
+        std::string name = set->name;
+        if (merge)
+            for (const auto& rename : merge->renames)
+                if (_stricmp(rename.first.c_str(), name.c_str()) == 0) {
+                    name = rename.second;
+                    break;
+                }
+
+        cm::HitboxSet* existing = nullptr;
+        for (cm::HitboxSet& have : in.hitboxsets)
+            if (_stricmp(have.name.c_str(), name.c_str()) == 0) {
+                existing = &have;
+                break;
+            }
+
+        if (!existing && in.hitboxsets.size() >= static_cast<size_t>(lim::kMaxHitboxSets)) {
+            pulse::diag::Warnf("too many hitbox sets, ignoring \"%s\"\n", name.c_str());
             break;
         }
 
-        cm::HitboxSet hs;
-        hs.name = set->name;
+        cm::HitboxSet fresh;
+        cm::HitboxSet& hs = existing ? *existing : fresh;
+        hs.name = name;
+        int conflicts = 0;
         for (const dmx::Element* box : *boxes) {
             if (!box) continue;
+            cm::HitBox hb = HitboxOf(box, in);
+            if (existing) {
+                const bool taken = std::any_of(hs.hitboxes.begin(), hs.hitboxes.end(), [&](const cm::HitBox& other) {
+                    return _stricmp(other.bonename.c_str(), hb.bonename.c_str()) == 0;
+                });
+                if (taken) {
+                    ++conflicts;
+                    continue;
+                }
+            }
             if (hs.hitboxes.size() >= static_cast<size_t>(lim::kMaxHitboxesPerSet)) {
                 pulse::diag::Warnf("too many hitboxes for hitbox set \"%s\", max %d\n",
                              hs.name.c_str(), lim::kMaxHitboxesPerSet);
                 break;
             }
-            cm::HitBox hb;
-            if (const std::string* bone = box->GetString("boneName"))
-                hb.bonename = *bone;
-            hb.group = box->GetInt("groupId", 0);
-            // scaled like 's scale_vertex, so DMX hitboxes respect $scale
-            const dmx::Vector3 lo = box->GetVector3("minBounds");
-            const dmx::Vector3 hi = box->GetVector3("maxBounds");
-            hb.bmin = {lo.x * in.scale, lo.y * in.scale, lo.z * in.scale};
-            hb.bmax = {hi.x * in.scale, hi.y * in.scale, hi.z * in.scale};
-            hb.capsuleRadius = box->GetFloat("radius", -1.0f); // <= 0 = a box
-            if (hb.capsuleRadius > 0.0f) hb.capsuleRadius *= in.scale;
-            hb.angOffset = ToVec(box->GetVector3("orientation"));
-            // the DmeHitbox element's own name is not the hitbox name - stock studiomdl leaves
-            // these unnamed, like an $hbox with no `name`
             hs.hitboxes.push_back(std::move(hb));
         }
-        in.hitboxsets.push_back(std::move(hs));
+        if (conflicts)
+            pulse::diag::Warnf("%d hitbox(es) of the imported set \"%s\" are already defined there and were ignored\n",
+                               conflicts, name.c_str());
+        if (!existing)
+            in.hitboxsets.push_back(std::move(fresh));
     }
 }
 
@@ -372,7 +405,8 @@ void WalkDag(const dmx::Element* dag, float scale, cm::CompileInput& in, bool ji
 } // namespace
 
 bool LoadDmxJoints(const dmx::Datamodel& dm, cm::CompileInput& in, bool jigglebones,
-                   bool proceduralbones, bool hitboxes, bool attachments, std::string* err) {
+                   bool proceduralbones, bool hitboxes, bool attachments, std::string* err,
+                   const HitboxImport* hitboxImport) {
     const dmx::Element* root = dm.root;
     if (!root) {
         if (err) *err = "DMX has no root element";
@@ -397,7 +431,7 @@ bool LoadDmxJoints(const dmx::Datamodel& dm, cm::CompileInput& in, bool jigglebo
         }
     }
     if (hitboxes)
-        AddHitboxes(root, in);
+        AddHitboxes(root, in, hitboxImport);
     return true;
 }
 

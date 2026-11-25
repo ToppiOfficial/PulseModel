@@ -9,6 +9,8 @@
 #define PULSEMDL_DMXRIG_H
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "compile.h"
 #include "dmx/dmx.h"
@@ -18,11 +20,17 @@ namespace pulse::loader {
 // Append requested markup to `in`. `jigglebones`/`proceduralbones`/`attachments` walk the skeleton
 // dag tree (DmeJiggleBone, DmeQuatInterpBone+DmeAimAtBone, DmeAttachment); `hitboxes` reads the
 // root's hitboxSetList. First definition of a name wins, so an earlier $jigglebone beats the DMX;
-// any hitbox set already declared makes the DMX list a no-op (all-or-nothing). Imported attachments
+// a hitbox set whose name is already declared only gains the hitboxes on bones it has none for. Imported attachments
 // are tagged kAttachIsFromSource and must stay ordered after scripted ones.
+// `renames` maps a hitbox set's name in the file (first) to its name here (second) before the sets
+// are matched by name.
+struct HitboxImport {
+    std::vector<std::pair<std::string, std::string>> renames;
+};
+
 bool LoadDmxJoints(const pulse::dmx::Datamodel& dm, compile::CompileInput& in,
                    bool jigglebones, bool proceduralbones, bool hitboxes,
-                   bool attachments, std::string* err);
+                   bool attachments, std::string* err, const HitboxImport* hitboxImport = nullptr);
 
 } // namespace pulse::loader
 

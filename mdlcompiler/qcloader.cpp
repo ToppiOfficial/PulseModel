@@ -1628,7 +1628,7 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
 
 // Imports the chosen markup categories of a rig DMX. Shared by both loaders.
 bool ApplyDataModelJoints(Ctx& c, int line, const std::string& file, bool jiggle, bool procedural,
-                          bool hitboxes, bool attachments) {
+                          bool hitboxes, bool attachments, const HitboxImport* hitboxImport) {
     const Token cmd{"$datamodeljoints", line, false};
     const std::string resolved = WithDmxExtension(file);
     const std::string what = "joints (" + RigImportList({{jiggle, "jigglebones"},
@@ -1639,7 +1639,7 @@ bool ApplyDataModelJoints(Ctx& c, int line, const std::string& file, bool jiggle
     auto dm = LoadRigDmx(c, cmd, resolved, what);
     if (!dm)
         return false;
-    if (!LoadDmxJoints(*dm, c.in, jiggle, procedural, hitboxes, attachments, &err))
+    if (!LoadDmxJoints(*dm, c.in, jiggle, procedural, hitboxes, attachments, &err, hitboxImport))
         return c.Fail(cmd.line, "$datamodeljoints \"" + file + "\": " + err);
 
     return true;

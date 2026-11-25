@@ -450,7 +450,7 @@ std::string NodeLabel(const Document& document, Uid uid) {
 }
 
 void Warn(const Document& document, const Problem& problem) {
-    pulse::diag::WarnAt({}, NodeLabel(document, problem.node) + ": " + problem.message + " The rule was left out.");
+    pulse::diag::WarnAt({}, NodeLabel(document, problem.node) + ": " + problem.message + " No rule is written for it.");
 }
 
 } // namespace
@@ -492,7 +492,7 @@ bool RegisterFlexGraph(const Document& document, cm::CompileInput& in, std::stri
         }
     }
 
-    // The panel declares local vars; one that cannot be written as a rule name or repeats another is left out.
+    // The panel declares local vars; one that cannot be written as a rule name or repeats another is ignored.
     std::vector<std::string> localvars;
     for (const auto& name : document.flexLocalVars) {
         if (!NameUsable(name) || emitter.morphNames.contains(Lowered(name))) continue;

@@ -38,6 +38,12 @@ struct Load {
         c.nodeLabels.push_back(label);
         return static_cast<int>(c.nodeLabels.size()) - 1;
     }
+
+    // A warning that names the node it came from.
+    void Warn(int line, const std::string& text) {
+        const std::string& label = c.nodeLabels[static_cast<size_t>(line)];
+        pulse::diag::WarnAt({}, label.empty() ? text : label + ": " + text);
+    }
 };
 
 using Pass = bool (*)(Load&);
@@ -286,8 +292,8 @@ bool Meshes(Load& l) {
         const md::RenderMeshEdit& source = entry.edit;
         const int line = l.Node("Meshes: " + Quoted(source.name));
         const md::SourceFile* file = l.d.findSource(entry.source);
-        if (!file)
-            return c.Fail(line, "the mesh has no source");
+        if (!file || !file->bytes)
+            return c.Fail(line, file ? "the source has no data" : "the mesh has no source");
         if (c.rendermeshes.count(source.name))
             return c.Fail(line, "duplicate $rendermesh \"" + source.name + "\"");
 
@@ -335,7 +341,7 @@ bool Groups(Load& l) {
                 const md::MeshEntry* mesh = l.d.findMesh(uid);
                 if (!mesh) return c.Fail(line, where + ": a choice names a mesh that no longer exists");
                 if (!mesh->enabled) {
-                    pulse::diag::WarnAt({}, where + ": mesh \"" + mesh->edit.name + "\" is disabled and is left out");
+                    l.Warn(line, "mesh \"" + mesh->edit.name + "\" is disabled and is skipped");
                     continue;
                 }
 
@@ -555,7 +561,7 @@ bool BoneMarkups(Load& l) {
         } else if (const auto* procedural = std::get_if<md::ProceduralSettings>(&node.value)) {
             if (procedural->mode == md::ProceduralMode::Driver) {
                 if (procedural->driver.empty()) {
-                    pulse::diag::WarnAt({}, "Bone Markup " + Quoted(node.bone) + " has no driver bone and was skipped");
+                    l.Warn(line, "no driver bone, skipped");
                     continue;
                 }
                 if (procedural->triggers.empty())
@@ -579,7 +585,7 @@ bool BoneMarkups(Load& l) {
                 ok = ApplyProceduralBone(c, line, std::move(pb));
             } else {
                 if (procedural->target.empty()) {
-                    pulse::diag::WarnAt({}, "Bone Markup " + Quoted(node.bone) + " has no aim target and was skipped");
+                    l.Warn(line, "no aim target, skipped");
                     continue;
                 }
                 cm::AimAtBone ab;
@@ -599,7 +605,7 @@ bool BoneMarkups(Load& l) {
                 return _stricmp(chain.name.c_str(), ik->chain.c_str()) == 0;
             });
             if (duplicate) {
-                pulse::diag::WarnAt({}, "duplicate ikchain \"" + ik->chain + "\" ignored");
+                l.Warn(line, "duplicate ikchain \"" + ik->chain + "\" ignored");
                 continue;
             }
 
@@ -966,8 +972,7 @@ bool Physics(Load& l) {
                        (_stricmp(p.a.c_str(), pair->second.c_str()) == 0 && _stricmp(p.b.c_str(), pair->first.c_str()) == 0);
             });
             if (pairs.size() == before)
-                pulse::diag::WarnAt({}, "$physicsnocollide \"" + pair->first + "\" \"" + pair->second +
-                                            "\" matches no $physicscollide above it - ignored");
+                l.Warn(line, "no collide pair of \"" + pair->first + "\" and \"" + pair->second + "\" above it to remove");
         }
     }
     if (c.in.physShapes.size() == shapesBefore)
@@ -989,8 +994,11 @@ bool Prefabs(Load& l) {
         if (node.kind == md::PrefabKind::Joints) {
             if (!node.jigglebones && !node.proceduralbones && !node.hitboxes && !node.attachments)
                 continue;
+            HitboxImport hitboxes;
+            for (const md::HitboxSetRename& rename : node.hitboxSetRenames)
+                if (rename.enabled && rename.complete()) hitboxes.renames.emplace_back(rename.from, rename.to);
             if (!ApplyDataModelJoints(c, line, VirtualName(*file), node.jigglebones, node.proceduralbones,
-                                      node.hitboxes, node.attachments))
+                                      node.hitboxes, node.attachments, &hitboxes))
                 return false;
         } else if (!ApplyDataModelPhysics(c, line, VirtualName(*file))) {
             return false;
@@ -1002,8 +1010,8 @@ bool Prefabs(Load& l) {
 // Flex graph, wrinkle scales and morph splits
 // ---------------------------------------------------------------------------
 
-// A wrinkle or split that names no morph of the model is left out with a warning, as the Model
-// Assembler leaves it out; the graph itself registers once the bodies' morph descs exist.
+// A wrinkle or split that names no morph of the model is ignored with a warning, as the Model
+// Assembler ignores it; the graph itself registers once the bodies' morph descs exist.
 bool Flex(Load& l) {
     Ctx& c = l.c;
     const md::Document& d = l.d;
@@ -1027,7 +1035,7 @@ bool Flex(Load& l) {
     for (const md::FlexWrinkle& wrinkle : d.flexWrinkles) {
         const std::string* morph = spelled(wrinkle.morph);
         if (!morph) {
-            pulse::diag::WarnAt({}, "Wrinkle scale " + Quoted(wrinkle.morph) + " names no morph of the model and was left out");
+            l.Warn(l.Node("Wrinkle Scale: " + Quoted(wrinkle.morph)), "names no morph of the model and is ignored");
             continue;
         }
         source::WrinkleScaleOption option;
@@ -1039,7 +1047,7 @@ bool Flex(Load& l) {
     for (const md::FlexSplit& split : d.flexSplits) {
         const std::string* morph = spelled(split.morph);
         if (!morph) {
-            pulse::diag::WarnAt({}, "Morph split " + Quoted(split.morph) + " names no morph of the model and was left out");
+            l.Warn(l.Node("Morph Split: " + Quoted(split.morph)), "names no morph of the model and is ignored");
             continue;
         }
         const bool listed = std::ranges::any_of(c.manual.stereoSplits, [&](const auto& entry) {
@@ -1106,7 +1114,7 @@ bool LoadMdlAsm(const char* rawPath, compile::CompileInput& out, std::string* er
     c.sourceDirStack.push_back(c.scriptDir);
     c.nodeLabels.push_back(std::string());
     for (const md::SourceFile& source : document.sources)
-        c.memorySources[VirtualName(source)] = source.bytes;
+        if (source.bytes) c.memorySources[VirtualName(source)] = source.bytes;
     out.mdlPath = rawPath;
 
     Load load{c, document};

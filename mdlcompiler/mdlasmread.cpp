@@ -482,6 +482,15 @@ PrefabNode readPrefab(core::BinaryReader& in)
     node.proceduralbones = in.read<bool>();
     node.hitboxes = in.read<bool>();
     node.attachments = in.read<bool>();
+    if (in.remaining())
+        for (auto renames = in.count(25); renames; --renames) {
+            HitboxSetRename rename;
+            rename.uid = in.read<Uid>();
+            rename.enabled = in.read<bool>();
+            rename.from = in.text();
+            rename.to = in.text();
+            node.hitboxSetRenames.push_back(std::move(rename));
+        }
     if (!node.uid) throw std::runtime_error("Invalid prefab ID.");
     return node;
 }
@@ -914,8 +923,8 @@ void visitFolderMembers(Document& document, Visit&& visit)
     for (auto& node : document.boneMarkups) visit(node, FolderKind::BoneMarkup);
 }
 
-// Reads a count-prefixed list of records. A record that fails stops the compile: dropping it would
-// change the model without saying so.
+// Reads a count-prefixed list of records. A record that fails stops the compile: Studio writes only
+// valid data, so a bad record means the file is not one it saved.
 template<class Parse>
 void readRecords(core::BinaryReader& in, const char* area, Parse&& parse)
 {

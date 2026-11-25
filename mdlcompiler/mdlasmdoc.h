@@ -438,6 +438,15 @@ struct BoneMarkupNode
 // pick what it imports; all off imports nothing), Physics is `$datamodelphysics`. Both follow their file.
 enum class PrefabKind : std::uint32_t { Joints, Physics };
 
+// $renamehboxset on a Joints entry: a hitbox set of its file imported under another name.
+struct HitboxSetRename
+{
+    Uid uid = 0;
+    bool enabled = true;
+    std::string from, to;
+    bool complete() const { return !from.empty() && !to.empty(); }
+};
+
 struct PrefabNode
 {
     Uid uid = 0;
@@ -446,6 +455,7 @@ struct PrefabNode
     PrefabKind kind = PrefabKind::Joints;
     Uid source = 0;
     bool jigglebones = true, proceduralbones = true, hitboxes = true, attachments = true;
+    std::vector<HitboxSetRename> hitboxSetRenames;
 
     bool imports() const { return enabled && source; }
 };

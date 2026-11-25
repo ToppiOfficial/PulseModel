@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include "dmxrig.h"
 #include "scriptctx.h"
 
 namespace pulse::loader::detail {
@@ -59,7 +60,7 @@ bool ApplyPhysShape(Ctx& c, int line, const std::string& mode, const std::string
                     const std::string& importType, cm::PhysicsShape& sh);
 bool ApplyPhysShapeAdd(Ctx& c, int line, cm::PhysicsShape sh);
 bool ApplyDataModelJoints(Ctx& c, int line, const std::string& file, bool jiggle, bool procedural,
-                          bool hitboxes, bool attachments);
+                          bool hitboxes, bool attachments, const HitboxImport* hitboxImport = nullptr);
 bool ApplyDataModelPhysics(Ctx& c, int line, const std::string& file);
 
 // The passes that need the whole script read; run once after the last command.
