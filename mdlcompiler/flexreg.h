@@ -15,6 +15,7 @@
 #ifndef PULSEMDL_FLEXREG_H
 #define PULSEMDL_FLEXREG_H
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -82,6 +83,9 @@ struct ManualFlex {
     // carries a matching morph before any registration runs, so from there on
     // the pass is the same as when a source carried its own rig.
     source::FlexRig datamodel;
+
+    // A front end's own flex content, registered after the lists above once every body is in.
+    std::function<bool(compile::CompileInput&, std::string*)> custom;
 };
 
 // Walk in.bodyparts and build the global flex tables on `in`. Only sources

@@ -7,6 +7,8 @@
 #include "qcloader.h"
 #include "api.h"
 #include "diagnostic.h"
+#include "scriptctx.h"
+#include "scriptapply.h"
 
 #include <algorithm>
 #include <cctype>
@@ -38,12 +40,7 @@
 
 namespace pulse::loader {
 
-namespace cm = pulse::compile;
-namespace lim = pulse::limits;
-namespace pm = pulse::math;
-namespace fs = std::filesystem;
-
-namespace {
+namespace detail {
 
 // Animation/sequence flags mirrored from format/mdl.h.
 constexpr int kStudioLooping = 0x0001;
@@ -77,18 +74,6 @@ constexpr int kStudioAlPose = 0x4000;
 // Tokenizer
 // ---------------------------------------------------------------------------
 
-struct Token {
-    std::string text;
-    int line = 0;
-    bool quoted = false; // came from "..." - so a quoted "loop" is a filename
-    // the text came out of a $name$ expansion (a variable or a macro
-    // parameter). Only conditions care: an expanded operand is a literal value,
-    // never the name of another variable to look up.
-    bool expanded = false;
-    bool expression = false; // a $definevariable "( ... )" value, parens included
-    int apiSource = -1;
-    int column = 0; // 0-based byte offset in its line, for bare words
-};
 
 // keyvalues1 lexing: whitespace-separated words, "quoted strings", `//` `;` `#`
 // line comments (the latter two only at a token start, and `;` also ends a word,
@@ -205,278 +190,6 @@ bool Tokenize(const std::string& s, const std::string& file, const std::string& 
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Parse context
-// ---------------------------------------------------------------------------
-
-struct Ctx;
-// Resolves any $include or conditional ($if/$switch) at the read cursor in place,
-// so both are transparent at any nesting depth - a handler reading its own braced
-// body gets them resolved too. Defined under the helpers it needs.
-void ResolveDirectives(Ctx& c);
-
-struct Ctx {
-    cm::CompileInput& in;
-    fs::path scriptDir; // root script's directory
-    std::string file;
-    std::vector<std::string> apiSources;
-    const ScriptFiles* unsaved = nullptr;
-    std::string rootFile; // `file` for the root script; an $include changes `file`, not this
-    std::vector<Token> toks;
-    size_t pos = 0;
-    std::string* err = nullptr;
-    fs::path curDir; // dir of the file currently being parsed ($include is relative to it)
-    std::vector<std::string> includeStack; // cycle guard, LIFO with includeFrames
-    // one open $include region: pos>=endPos restores file/curDir and pops the
-    // cycle-guard entry. endPos is an absolute index, kept live by SpliceAt.
-    struct IncludeFrame { size_t endPos; std::string savedFile; fs::path savedDir; };
-    std::vector<IncludeFrame> includeFrames;
-    bool abortErr = false;        // a hard $include error; stops parsing at the next read
-    bool keepGoing = false;       // analyze: skip a failed command and read on
-    bool hadError = false;        // keepGoing skipped something; the script cannot compile
-    std::vector<Token> options;   // option words of the running command, see MarkOption
-    bool resolvingInclude = false; // reentrancy guard for ResolveIncludes
-    // set while a block is captured raw ($if/$switch branch, macro or cmdlist
-    // body): a $include there is stored verbatim and resolved when executed, not
-    // during capture.
-    bool rawCollect = false;
-    std::vector<fs::path> includeDirs; // $addincludesearchdir
-    std::vector<fs::path> sourceDirStack; // root script dir plus nested $pushd dirs
-    std::vector<fs::path> searchDirs;  // $addsearchdir, for source files - never mixed with includeDirs
-    // -includesearchdir / -filesearchdir: searched only after the script's own
-    // dirs, so a script command always wins.
-    std::vector<fs::path> launchIncludeDirs;
-    std::vector<fs::path> launchSearchDirs;
-    std::map<std::string, source::Source*> rendermeshes; // $rendermesh name -> loaded source
-    // filename -> shared source. A bodied $rendermesh is excluded: its edits must not leak to other refs.
-    std::map<std::string, source::Source*> sourceCache;
-    // full path -> parsed DMX. Read-only input, so the same file feeding several
-    // loads (each $rendermesh reopens it) is read and parsed once.
-    std::map<std::string, std::shared_ptr<pulse::dmx::Datamodel>> dmxCache;
-    source::MaterialTable physMats; // collision-only materials, kept out of the model's texture table
-    bool dataModelPhysics = false;  // a $datamodelphysics supplied the collision shapes
-    int shapelessPhysicsModelLine = 0; // $physicsmodel with no $physicsshape, warned at the end
-    std::map<std::string, int> namedAnims; // $animation name -> index into in.anims
-    std::map<std::string, std::vector<Token>> cmdlists; // $cmdlist name -> body tokens
-    std::map<std::string, std::vector<Token>> lodCmdlists; // $lodcmdlist, keyed lowercased
-    std::map<std::string, std::vector<Token>> rendermeshCmdlists; // $rendermeshcmdlist, keyed lowercased
-    struct Variable {
-        std::string text;
-        std::vector<Token> tokens;
-        bool list = false;
-    };
-    std::map<std::string, Variable> variables; // case-sensitive, shared across $include
-    struct Macro {
-        std::vector<std::string> params;
-        std::map<std::string, std::string> defaults;
-        std::vector<Token> body;
-    };
-    std::map<std::string, Macro> macros; // keyed lowercased
-    int macroExpansions = 0; // runaway-recursion guard
-    std::vector<std::string> lockedVars; // -defvar names; locked against $definevariable
-    bool scriptBreak = false; // $break, sticky through every $include parent
-
-    float defaultFps = 30.0f;
-    float defaultMotionRollback = 0.3f; // seed for a new anim's motionrollback
-    float defaultFadeIn = 0.2f;
-    float defaultFadeOut = 0.2f;
-    bool lcaseSequences = false;
-    std::vector<std::string> allowedActivities; // $allowactivityname, exact-case
-    bool unlockDefineBones = false;
-    int activeHitboxSet = -1;
-
-    // $attachment, held raw: its matrix needs the model's final default rotation,
-    // not known until every source and $transformmodel angle has been seen
-    struct PendingAttachment {
-        std::string name;
-        std::string bone; // empty = model space, anchored to root bone
-        pm::Vector3 origin{};
-        pm::Vector3 anglesDeg{};
-        bool hasAngles = false;
-        pm::matrix3x4 inheritedLocal;
-        bool hasInheritedLocal = false;
-        bool hasOriginOverride = false;
-        int type = 0;  // kAttachIs* bits
-        int flags = 0; // kAttachFlag* bits, written to disk
-        bool filled = true; // false = $declareattachment slot awaiting its definition
-        bool noscale = false; // $illumposition: origin taken raw, not scaled like a vertex
-        // vertex selectors: origin becomes an offset from their averaged position
-        std::vector<std::string> flexgroups;
-        std::vector<std::string> flexmorphs;
-        std::vector<std::string> materials;
-    };
-    std::vector<PendingAttachment> attachments;
-
-    // top-level $wrinklescale: merged into every $rendermesh loaded after it
-    std::vector<source::WrinkleScaleOption> wrinkleScales;
-
-    // $renamemorph, applied once the script is parsed so placement never matters
-    struct MorphRename {
-        std::string from;
-        std::string to;
-        int line = 0;
-    };
-    std::vector<MorphRename> morphRenames;
-
-    // $flexcontroller/$flexlocalvar/$flexrule/$flexcorrective, held until the
-    // bodygroup list is final - registration order can't run command by command
-    ManualFlex manual;
-
-    // $eyeball/$mouth/$eyelid, held for the same reason; one list across all
-    // three because their relative order is load-bearing (indices, flexdescs)
-    FaceMarkup face;
-
-    // Insert tokens at `at`, keeping open include-region boundaries in sync so
-    // a macro/conditional/include splice inside an included file cannot desync
-    // the frame that restores curDir/file when its region ends.
-    void SpliceAt(size_t at, const std::vector<Token>& src) {
-        toks.insert(toks.begin() + at, src.begin(), src.end());
-        for (IncludeFrame& f : includeFrames)
-            if (f.endPos > at)
-                f.endPos += src.size();
-    }
-
-    bool Eof() { ResolveDirectives(*this); return abortErr || pos >= toks.size(); }
-    const Token& Cur() { ResolveDirectives(*this); return toks[pos]; }
-
-    // True when -defvar owns this variable name (case-sensitive, like the
-    // variable table itself).
-    bool IsLockedVar(const std::string& name) const {
-        for (const std::string& v : lockedVars)
-            if (v == name)
-                return true;
-        return false;
-    }
-
-    bool Fail(int line, const std::string& msg) {
-        if (abortErr) return false; // keep the first $include error, not a cascade
-        if (!err) return false;
-
-        const pulse::diag::Location at = pulse::diag::Resolve({Path(), line});
-        *err = file + "(" + std::to_string(line) + "): " + msg;
-        pulse::diag::NoteFailure(*err, at, msg);
-        return false;
-    }
-
-    // Absolute path of the file being parsed.
-    std::string Path() const { return pulse::Utf8(fs::absolute(curDir / file).lexically_normal()); }
-
-    // Analyze: the token at `at` is an option word of the running command, so it can be told
-    // apart from values. Sent when the command ends; DropOption undoes a mark that turned out a value.
-    void MarkOption(size_t at) {
-        if (!keepGoing || at >= toks.size()) return;
-        const Token& t = toks[at];
-        if (t.quoted || t.expanded || t.apiSource < 0 || t.text.empty()) return;
-        const unsigned char first = static_cast<unsigned char>(t.text[0]);
-        const bool negated = first == '-' && t.text.size() > 1 &&
-            std::isalpha(static_cast<unsigned char>(t.text[1]));
-        if (std::isalpha(first) || first == '_' || negated)
-            options.push_back(t);
-    }
-    void MarkOption() { MarkOption(pos - 1); }
-    void DropOption(const Token& t) {
-        if (!options.empty() && options.back().line == t.line && options.back().column == t.column)
-            options.pop_back();
-    }
-
-    // A failed command's last option word may be the one it rejected, so that one is left out.
-    void ReportOptions(bool succeeded) {
-        if (!succeeded && !options.empty()) options.pop_back();
-        for (const Token& t : options)
-            pulse::api::Record("option", "{\"file\":" + pulse::api::String(apiSources[static_cast<size_t>(t.apiSource)]) +
-                ",\"line\":" + std::to_string(t.line) + ",\"column\":" + std::to_string(t.column) +
-                ",\"text\":" + pulse::api::String(t.text) + "}");
-        options.clear();
-    }
-
-    // Next token, or null at end of file.
-    const Token* Next() { return Eof() ? nullptr : &toks[pos++]; }
-
-    // True when the next token starts a new command (or the file ended) - the
-    // terminator for an unbraced option list.
-    bool AtCommand() { return Eof() || (!Cur().quoted && Cur().text[0] == '$'); }
-
-    // A required value token. Rejects a following $command so a missing
-    // argument reports itself instead of eating the next line.
-    bool Want(const char* what, const Token& cmd, std::string& value) {
-        if (AtCommand())
-            return Fail(cmd.line, cmd.text + " expects " + what);
-        value = toks[pos++].text;
-        return true;
-    }
-
-    bool WantFloat(const char* what, const Token& cmd, float& value) {
-        std::string s;
-        if (!Want(what, cmd, s))
-            return false;
-        try {
-            size_t used = 0;
-            const float v = std::stof(s, &used);
-            if (used != s.size())
-                throw std::invalid_argument("trailing characters");
-            value = v;
-        } catch (const std::exception&) {
-            return Fail(cmd.line, cmd.text + " expects " + what + ", got \"" + s + "\"");
-        }
-        return true;
-    }
-
-    // A required word from a fixed set, such as a mode name.
-    bool WantOption(const char* what, const Token& cmd, std::string& value) {
-        if (!Want(what, cmd, value)) return false;
-        MarkOption();
-        return true;
-    }
-
-    bool WantInt(const char* what, const Token& cmd, int& value) {
-        std::string s;
-        if (!Want(what, cmd, s))
-            return false;
-        try {
-            size_t used = 0;
-            const int v = std::stoi(s, &used);
-            if (used != s.size())
-                throw std::invalid_argument("trailing characters");
-            value = v;
-        } catch (const std::exception&) {
-            return Fail(cmd.line, cmd.text + " expects " + what + ", got \"" + s + "\"");
-        }
-        return true;
-    }
-
-    // Like WantInt but any token starting with "." (".", "..", ...) is the
-    // unset placeholder -> -1 (the ikrule `range` frame markers).
-    bool WantFrame(const char* what, const Token& cmd, int& value) {
-        std::string s;
-        if (!Want(what, cmd, s))
-            return false;
-        if (!s.empty() && s[0] == '.') { value = -1; return true; }
-        try {
-            size_t used = 0;
-            const int v = std::stoi(s, &used);
-            if (used != s.size())
-                throw std::invalid_argument("trailing characters");
-            value = v;
-        } catch (const std::exception&) {
-            return Fail(cmd.line, cmd.text + " expects " + what + ", got \"" + s + "\"");
-        }
-        return true;
-    }
-
-    // True when the next token parses cleanly as a base-10 integer - used for
-    // studiomdl's optional trailing activity weight.
-    bool NextIsInt() {
-        if (Eof() || Cur().quoted) return false;
-        const std::string& s = Cur().text;
-        try {
-            size_t used = 0;
-            (void)std::stoi(s, &used);
-            return used == s.size();
-        } catch (const std::exception&) {
-            return false;
-        }
-    }
-};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -509,6 +222,8 @@ bool FailMissing(Ctx& c, int line, const std::string& what, const std::vector<fs
 // Empty return = nowhere, and `tried` then holds every candidate.
 fs::path FindSourceFile(const Ctx& c, const std::string& filename,
                         std::vector<fs::path>* tried) {
+    if (c.memorySources.count(filename))
+        return pulse::FilePath(filename);
     const fs::path rel = pulse::FilePath(filename);
     std::vector<fs::path> cands;
     if (rel.is_absolute()) {
@@ -619,24 +334,6 @@ bool IsSmdPath(const std::string& s) {
 bool IsFbxPath(const std::string& s) {
     return s.size() >= 4 && _stricmp(s.c_str() + s.size() - 4, ".fbx") == 0;
 }
-
-// The edits one $rendermesh { } body asks for (meshedit.h).
-struct MeshEdit {
-    std::string name; // the $rendermesh alias, for the load print
-    source::MeshFilter filter;
-    std::vector<std::vector<source::EditMeshOperation>> editBlocks;
-    std::vector<std::vector<source::EditSkeletonOperation>> skeletonBlocks;
-    std::vector<std::pair<bool, size_t>> editOrder; // (is skeleton, block index), script order
-    bool noMorph = false;
-    bool skeletalAwareDecimation = false; // $use_skeletalaware_decimation
-    // $decimate / $decimatemesh in script order: (factor, face tag or -1 = all)
-    std::vector<std::pair<float, int>> decimates;
-    std::string vta; // $vta: a legacy morph file for an SMD mesh
-    int vtaLine = 0;
-    std::vector<source::VtaFlexOption> vtaFlexes;
-    std::string vca, vcaName; // $vca: the same file played back as one NWAY run
-    int vcaLine = 0;
-};
 
 void RequestEditStream(source::MeshFilter& filter, const std::string& name,
                        source::EditStreamKind kind, int component) {
@@ -1091,14 +788,20 @@ bool ParseEditSkeleton(Ctx& c, const Token& cmd, MeshEdit& edit) {
 // caller builds from it is still built fresh and stays private.
 std::shared_ptr<pulse::dmx::Datamodel> LoadDmxCached(Ctx& c, const fs::path& full,
                                                      std::string* err) {
-    pulse::dependencies::Note(full.string());
+    const auto embedded = c.memorySources.find(full.string());
+    if (embedded == c.memorySources.end())
+        pulse::dependencies::Note(full.string());
     const std::string key = Lower(full.string());
     auto it = c.dmxCache.find(key);
     if (it != c.dmxCache.end())
         return it->second;
     std::shared_ptr<pulse::dmx::Datamodel> dm;
     { PULSE_PERF("load", "dmx parse");
-      dm = pulse::dmx::Datamodel::Load(full.string().c_str(), err); }
+      if (embedded != c.memorySources.end())
+          dm = pulse::dmx::Datamodel::LoadFromMemory(
+              reinterpret_cast<const uint8_t*>(embedded->second->data()), embedded->second->size(), err);
+      else
+          dm = pulse::dmx::Datamodel::Load(full.string().c_str(), err); }
     if (dm && pulse::dependencies::g_enabled) {
         pulse::dependencies::Markup markup;
         markup.modelVersion = dm->format_version;
@@ -1335,9 +1038,14 @@ bool CmdModelName(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a model name", cmd, name))
         return false;
+    return ApplyModelName(c, cmd.line, name);
+}
+
+// Sets the output name, extension stripped. Shared by both loaders.
+bool ApplyModelName(Ctx& c, int line, const std::string& name) {
     c.in.outname = StripExtension(name);
     if (c.in.outname.empty())
-        return c.Fail(cmd.line, "$modelname is empty");
+        return c.Fail(line, "$modelname is empty");
     return true;
 }
 
@@ -1554,12 +1262,19 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
         }
     }
 
+    return ApplyRenderMesh(c, cmd.line, name, file, edit);
+}
+
+// Loads the source and runs the edits of one $rendermesh. `startLine` is the command's line.
+// Shared by the .qc and .mdlasm loaders.
+bool ApplyRenderMesh(Ctx& c, int startLine, const std::string& name, const std::string& file,
+                     MeshEdit& edit) {
     // Always passes the edit, even an empty one: that is what marks the load as a
     // render mesh, and a render mesh always gets its own Source. $nomorph is the
     // load gate itself - with no morph parse there are no delta shapes, flexkeys
     // or balance data to drop later.
     pulse::perf::Timer tLoad("rendermesh", "LoadSource");
-    source::Source* src = LoadSource(c, WithSourceExtension(c, file), cmd.line,
+    source::Source* src = LoadSource(c, WithSourceExtension(c, file), startLine,
                                      /*morphSource=*/!edit.noMorph, &edit);
     tLoad.Stop();
     if (!src)
@@ -1604,7 +1319,7 @@ bool CmdRenderMesh(Ctx& c, const Token& cmd) {
     // $meshedit and $skeletonedit blocks run interleaved, in script order
     for (const auto& [isSkeleton, index] : edit.editOrder) {
         std::string editError;
-        int errorLine = cmd.line;
+        int errorLine = startLine;
         if (isSkeleton) {
             PULSE_PERF("rendermesh", "$skeletonedit");
             if (!source::ApplyEditSkeleton(*src, edit.skeletonBlocks[index], &editError, &errorLine))
@@ -1638,6 +1353,44 @@ source::Source* MergeRenderMeshes(Ctx& c, const std::vector<source::Source*>& re
     c.in.sources.push_back(std::move(merged));
     return c.in.sources.back().get();
 }
+
+// One choice of a $modelgroup: the render meshes it draws (fused when several) under `studio`, or
+// a name derived from `defName` / the mesh names. Shared by the .qc and .mdlasm loaders.
+bool ApplyModelChoice(Ctx& c, int line, const std::string& where,
+                      const std::vector<source::Source*>& refs,
+                      const std::vector<std::string>& refNames,
+                      const std::vector<std::string>& defName, bool named,
+                      const std::string& studio, cm::CompileInput::InBodyPart& part) {
+    if (refs.empty())
+        return c.Fail(line, where + ": mesh expects a $rendermesh name or .smd/.dmx/.fbx file");
+
+    cm::CompileInput::InModel model;
+    model.name = named ? studio
+                       : cm::ChoiceName(defName.empty() ? refNames : defName);
+    if (model.name.empty())
+        return c.Fail(line, where + ": mesh name is empty");
+    // mstudiomodel_t::name is a 64-byte inline field, so the writer cuts
+    // anything longer - say so here, where the line number is known
+    if (model.name.size() > 63 && c.nodeLabels.empty())
+        std::fprintf(stderr,
+                     "warning: %s line %d: model name \"%s\" is %zu chars, "
+                     "truncated to \"%.63s\" - use `name <display>` to shorten it\n",
+                     c.file.c_str(), line, model.name.c_str(), model.name.size(),
+                     model.name.c_str());
+    else if (model.name.size() > 63)
+        std::fprintf(stderr, "warning: %s: model name \"%s\" is %zu chars, truncated to \"%.63s\"\n",
+                     c.Where(line).c_str(), model.name.c_str(), model.name.size(),
+                     model.name.c_str());
+    // one render mesh is drawn as it loaded; several are fused into a
+    // private Source of their own (meshedit.h)
+    model.source = refs.size() == 1 ? refs[0]
+                                    : MergeRenderMeshes(c, refs, model.name, line);
+    if (!model.source)
+        return false;
+    part.models.push_back(std::move(model));
+    return true;
+}
+
 
 // $modelgroup/$model <name> <refs...> or { mesh <refs...> | blank ... }.
 // Refs are render-mesh aliases or explicit .dmx/.smd/.fbx files.
@@ -1713,30 +1466,7 @@ bool CmdModelGroup(Ctx& c, const Token& cmd) {
             refs.push_back(src);
             refNames.push_back(r.text);
         }
-        if (refs.empty())
-            return c.Fail(line, where + ": mesh expects a $rendermesh name or .smd/.dmx/.fbx file");
-
-        cm::CompileInput::InModel model;
-        model.name = named ? studio
-                           : cm::ChoiceName(defName.empty() ? refNames : defName);
-        if (model.name.empty())
-            return c.Fail(line, where + ": mesh name is empty");
-        // mstudiomodel_t::name is a 64-byte inline field, so the writer cuts
-        // anything longer - say so here, where the line number is known
-        if (model.name.size() > 63)
-            std::fprintf(stderr,
-                         "warning: %s line %d: model name \"%s\" is %zu chars, "
-                         "truncated to \"%.63s\" - use `name <display>` to shorten it\n",
-                         c.file.c_str(), line, model.name.c_str(), model.name.size(),
-                         model.name.c_str());
-        // one render mesh is drawn as it loaded; several are fused into a
-        // private Source of their own (meshedit.h)
-        model.source = refs.size() == 1 ? refs[0]
-                                        : MergeRenderMeshes(c, refs, model.name, line);
-        if (!model.source)
-            return false;
-        part.models.push_back(std::move(model));
-        return true;
+        return ApplyModelChoice(c, line, where, refs, refNames, defName, named, studio, part);
     };
 
     const Token* brace = c.Next();
@@ -1893,6 +1623,13 @@ bool CmdDataModelJoints(Ctx& c, const Token& cmd) {
     if (!jiggle && !procedural && !hitboxes && !attachments)
         jiggle = procedural = hitboxes = attachments = true; // no list = the whole rig
 
+    return ApplyDataModelJoints(c, cmd.line, file, jiggle, procedural, hitboxes, attachments);
+}
+
+// Imports the chosen markup categories of a rig DMX. Shared by both loaders.
+bool ApplyDataModelJoints(Ctx& c, int line, const std::string& file, bool jiggle, bool procedural,
+                          bool hitboxes, bool attachments) {
+    const Token cmd{"$datamodeljoints", line, false};
     const std::string resolved = WithDmxExtension(file);
     const std::string what = "joints (" + RigImportList({{jiggle, "jigglebones"},
                                                          {procedural, "proceduralbones"},
@@ -5480,6 +5217,11 @@ bool CmdAttachment(Ctx& c, const Token& cmd) {
         }
     }
 
+    return ApplyAttachment(c, std::move(a));
+}
+
+// Queues one attachment, filling a $declareattachment slot of its name. Shared by both loaders.
+bool ApplyAttachment(Ctx& c, Ctx::PendingAttachment a) {
     // no bone -> the transform is model space, which is exactly what the
     // absolute flag means (kAttachIsAbsolute: "local is in model space").
     // Selectors are the exception: they derive a bone from the vertices.
@@ -5700,9 +5442,14 @@ bool CmdDefineBone(Ctx& c, const Token& cmd) {
             return false;
     }
 
+    return ApplyDefineBone(c, cmd.line, std::move(ib));
+}
+
+// Appends one $definebone. Shared by both loaders.
+bool ApplyDefineBone(Ctx& c, int line, cm::ImportBone ib) {
     c.in.importbones.push_back(std::move(ib));
     if (c.in.importbones.size() > static_cast<size_t>(pulse::limits::kMaxBones))
-        return c.Fail(cmd.line, "too many $definebone entries");
+        return c.Fail(line, "too many $definebone entries");
     return true;
 }
 
@@ -5784,15 +5531,20 @@ bool CmdRealignBone(Ctx& c, const Token& cmd) {
         }
     }
 
+    return ApplyRealignBone(c, cmd.line, name, edit);
+}
+
+// Adds one $realignbone edit to its bone. Shared by both loaders.
+bool ApplyRealignBone(Ctx& c, int line, const std::string& name, const cm::BoneRealignEdit& edit) {
     if (edit.affectChildren && !edit.hasOrigin && !edit.hasAngles)
-        return c.Fail(cmd.line, "$realignbone: affectchildren requires origin or angles");
+        return c.Fail(line, "$realignbone: affectchildren requires origin or angles");
 
     cm::BoneMarkup& markup = FindOrAddMarkup(c, name);
     const bool manual = edit.hasOrigin || edit.hasAngles;
     if (!markup.realigns.empty()) {
         const cm::BoneRealignEdit& prev = markup.realigns.back();
         if (manual != (prev.hasOrigin || prev.hasAngles))
-            return c.Fail(cmd.line, "$realignbone: \"" + name + "\" mixes automatic alignment "
+            return c.Fail(line, "$realignbone: \"" + name + "\" mixes automatic alignment "
                           "with origin/angles edits (line " + std::to_string(prev.line) + ")");
         if (!manual) markup.realigns.clear();
     }
@@ -6032,6 +5784,11 @@ bool CmdJiggleBone(Ctx& c, const Token& cmd) {
             return false;
     }
 
+    return ApplyJiggleBone(c, cmd.line, std::move(jb));
+}
+
+// Adds one jigglebone; a repeated bone is replaced in place. Shared by both loaders.
+bool ApplyJiggleBone(Ctx& c, int line, cm::JiggleBone jb) {
     for (cm::JiggleBone& prev : c.in.jigglebones) {
         if (_stricmp(prev.bonename.c_str(), jb.bonename.c_str()) == 0) {
             prev = std::move(jb); // last definition wins, in place
@@ -6040,7 +5797,7 @@ bool CmdJiggleBone(Ctx& c, const Token& cmd) {
     }
     c.in.jigglebones.push_back(std::move(jb));
     if (c.in.jigglebones.size() > static_cast<size_t>(pulse::limits::kMaxJiggleBones))
-        return c.Fail(cmd.line, "too many jigglebones");
+        return c.Fail(line, "too many jigglebones");
     return true;
 }
 
@@ -6273,9 +6030,14 @@ bool CmdDriverBone(Ctx& c, const Token& cmd) {
                         blockAbsolute || r.frame >= 0))
             return false;
     }
+    return ApplyProceduralBone(c, cmd.line, std::move(pb));
+}
+
+// Adds one $driverbone. Shared by both loaders.
+bool ApplyProceduralBone(Ctx& c, int line, cm::ProceduralBone pb) {
     c.in.proceduralbones.push_back(std::move(pb));
     if (c.in.proceduralbones.size() > static_cast<size_t>(pulse::limits::kMaxProceduralBones))
-        return c.Fail(cmd.line, "too many procedural bones");
+        return c.Fail(line, "too many procedural bones");
     return true;
 }
 
@@ -6302,9 +6064,14 @@ bool CmdDriverAimAt(Ctx& c, const Token& cmd) {
     pm::VectorNormalize(ab.upvector);
     pm::VectorNormalize(ab.aimvector);
 
+    return ApplyAimAtBone(c, cmd.line, std::move(ab));
+}
+
+// Adds one $driveraimat. Shared by both loaders.
+bool ApplyAimAtBone(Ctx& c, int line, cm::AimAtBone ab) {
     c.in.aimatbones.push_back(std::move(ab));
     if (c.in.aimatbones.size() > static_cast<size_t>(pulse::limits::kMaxProceduralBones))
-        return c.Fail(cmd.line, "too many procedural bones");
+        return c.Fail(line, "too many procedural bones");
     return true;
 }
 
@@ -6617,6 +6384,14 @@ bool CmdIllumPosition(Ctx& c, const Token& cmd) {
     if (!c.AtCommand())
         return c.Fail(cmd.line, "$illumposition: unexpected \"" + c.Cur().text + "\"");
 
+    return ApplyIllumPosition(c, cmd.line, pos, bone);
+}
+
+// The position as written, plus the bone it follows (empty = static). Shared by both loaders.
+bool ApplyIllumPosition(Ctx& c, int line, const pm::Vector3& pos, const std::string& bone) {
+    if (c.in.illumpositionSet)
+        return c.Fail(line, "duplicate $illumposition");
+
     c.in.illumposition = pos;
     c.in.illumpositionSet = true;
 
@@ -6685,7 +6460,11 @@ bool CmdRenameMaterial(Ctx& c, const Token& cmd) {
     if (!c.Want("a material name", cmd, from) ||
         !c.Want("a replacement material", cmd, to))
         return false;
+    return ApplyRenameMaterial(c, cmd.line, from, to);
+}
 
+// Rewrites the texture named `from`, exact match first, then a substring. Shared by both loaders.
+bool ApplyRenameMaterial(Ctx& c, int line, const std::string& from, std::string to) {
     to = StripExtension(to); // names are stored extension-stripped
     for (auto& tex : c.in.mats.textures) {
         if (_stricmp(tex.name.c_str(), from.c_str()) == 0) {
@@ -6701,7 +6480,7 @@ bool CmdRenameMaterial(Ctx& c, const Token& cmd) {
             return true;
         }
     }
-    return c.Fail(cmd.line, "$renamematerial: \"" + from + "\" is not a material of this model");
+    return c.Fail(line, "$renamematerial: \"" + from + "\" is not a material of this model");
 }
 
 // $overridematerial <name> - point every loaded texture at one material. The
@@ -6725,17 +6504,21 @@ bool CmdCollapseMaterial(Ctx& c, const Token& cmd) {
     if (!c.Want("a material name", cmd, from) ||
         !c.Want("a material to collapse to", cmd, to))
         return false;
+    return ApplyCollapseMaterial(c, cmd.line, from, to);
+}
 
+// Merges `from` into `to` for every face that loads afterwards. Shared by both loaders.
+bool ApplyCollapseMaterial(Ctx& c, int line, std::string from, std::string to) {
     from = StripExtension(from);
     to = StripExtension(to);
     if (_stricmp(from.c_str(), to.c_str()) == 0)
-        return c.Fail(cmd.line, "$collapsematerial: \"" + from + "\" collapses to itself");
+        return c.Fail(line, "$collapsematerial: \"" + from + "\" collapses to itself");
     for (const auto& tex : c.in.mats.textures) {
         const size_t slash = tex.name.find_last_of("/\\");
         const std::string base = slash == std::string::npos ? tex.name : tex.name.substr(slash + 1);
         if (tex.material >= 0 && (_stricmp(tex.name.c_str(), from.c_str()) == 0 ||
                                   _stricmp(base.c_str(), from.c_str()) == 0))
-            return c.Fail(cmd.line, "$collapsematerial: \"" + from +
+            return c.Fail(line, "$collapsematerial: \"" + from +
                                     "\" is already loaded; place it before the $body/$model that uses it");
     }
     c.in.mats.collapse.emplace_back(from, to);
@@ -7013,6 +6796,18 @@ bool CmdLod(Ctx& c, const Token& cmd) {
             return c.Fail(t.line, cmd.text + ": unknown option \"" + t.text + "\"");
         }
     }
+
+    return ApplyLod(c, cmd.line, std::move(lod));
+}
+
+// Appends one $lod / $shadowlod block; the shadow LOD must stay last. Shared by both loaders.
+bool ApplyLod(Ctx& c, int line, cm::ScriptLod lod) {
+    for (const cm::ScriptLod& prev : c.in.scriptLods)
+        if (prev.IsShadow())
+            return c.Fail(line, "$shadowlod must be the last LOD and there can be only one");
+    // +1 for the implicit root LOD, which no $lod block writes
+    if (c.in.scriptLods.size() + 2 > static_cast<size_t>(pulse::limits::kMaxNumLods))
+        return c.Fail(line, "too many $lod blocks");
 
     c.in.scriptLods.push_back(std::move(lod));
     return true;
@@ -7301,6 +7096,11 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
         }
     }
 
+    return ApplyHbox(c, cmd.line, set, std::move(hb));
+}
+
+// Scales the box like a vertex and appends it to its set. Shared by both loaders.
+bool ApplyHbox(Ctx& c, int line, cm::HitboxSet& set, cm::HitBox hb) {
     // scaled at parse time, where stock studiomdl calls scale_vertex
     hb.bmin = {hb.bmin.x * c.in.scale, hb.bmin.y * c.in.scale, hb.bmin.z * c.in.scale};
     hb.bmax = {hb.bmax.x * c.in.scale, hb.bmax.y * c.in.scale, hb.bmax.z * c.in.scale};
@@ -7308,7 +7108,7 @@ bool ParseHbox(Ctx& c, const Token& cmd, cm::HitboxSet& set) {
 
     set.hitboxes.push_back(std::move(hb));
     if (set.hitboxes.size() > static_cast<size_t>(pulse::limits::kMaxHitboxesPerSet))
-        return c.Fail(cmd.line, "too many $hbox entries in set \"" + set.name + "\"");
+        return c.Fail(line, "too many $hbox entries in set \"" + set.name + "\"");
     return true;
 }
 
@@ -7338,9 +7138,14 @@ bool CmdHitboxSet(Ctx& c, const Token& cmd) {
         }
     }
 
+    return ApplyHitboxSet(c, cmd.line, std::move(set));
+}
+
+// Appends a finished set and makes it the target of following bare $hbox lines. Shared by both loaders.
+bool ApplyHitboxSet(Ctx& c, int line, cm::HitboxSet set) {
     c.in.hitboxsets.push_back(std::move(set));
     if (c.in.hitboxsets.size() > static_cast<size_t>(pulse::limits::kMaxHitboxSets))
-        return c.Fail(cmd.line, "too many hitbox sets");
+        return c.Fail(line, "too many hitbox sets");
     c.activeHitboxSet = static_cast<int>(c.in.hitboxsets.size() - 1);
     return true;
 }
@@ -7492,9 +7297,14 @@ bool CmdIkChain(Ctx& c, const Token& cmd) {
         }
     }
 
+    return ApplyIkChain(c, cmd.line, std::move(chain));
+}
+
+// Adds one $ikchain. Shared by both loaders.
+bool ApplyIkChain(Ctx& c, int line, cm::IkChain chain) {
     c.in.ikchains.push_back(std::move(chain));
     if (c.in.ikchains.size() > static_cast<size_t>(pulse::limits::kMaxIkChains))
-        return c.Fail(cmd.line, "too many ik chains");
+        return c.Fail(line, "too many ik chains");
     return true;
 }
 
@@ -7505,10 +7315,15 @@ bool CmdIkAutoplayLock(Ctx& c, const Token& cmd) {
         !c.WantFloat("a position weight", cmd, lock.flPosWeight) ||
         !c.WantFloat("a rotation weight", cmd, lock.flLocalQWeight))
         return false;
+    return ApplyIkAutoplayLock(c, cmd.line, std::move(lock));
+}
+
+// Adds one $ikautoplaylock. Shared by both loaders.
+bool ApplyIkAutoplayLock(Ctx& c, int line, cm::IkLock lock) {
     c.in.ikautoplaylocks.push_back(std::move(lock));
     if (c.in.ikautoplaylocks.size() >
         static_cast<size_t>(pulse::limits::kMaxIkAutoplayLocks))
-        return c.Fail(cmd.line, "too many ik autoplay locks");
+        return c.Fail(line, "too many ik autoplay locks");
     return true;
 }
 
@@ -7731,10 +7546,9 @@ bool WantVec3(Ctx& c, const Token& cmd, pm::Vector3& v) {
            c.WantFloat("a Z value", cmd, v.z);
 }
 
-bool LoadPhysicsFileShape(Ctx& c, const Token& cmd, const std::string& ref,
-                          cm::PhysicsShape& sh) {
+bool LoadPhysicsFileShape(Ctx& c, int line, const std::string& ref, cm::PhysicsShape& sh) {
     const std::string file = WithSourceExtension(c, ref);
-    sh.source = LoadSource(c, file, cmd.line, false, nullptr, source::LoadKind::Collision);
+    sh.source = LoadSource(c, file, line, false, nullptr, source::LoadKind::Collision);
     if (!sh.source)
         return false;
     sh.name = pulse::FilePath(file).stem().string();
@@ -7824,13 +7638,23 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         }
     }
 
+    return ApplyPhysShape(c, cmd.line, mode, ref, importType, sh);
+}
+
+// Validates one $physicsshape fromfile / fromrendermesh / fromrender and resolves its sources.
+// `importType` is perjoint, singlejoint or singlehull. Shared by both loaders.
+bool ApplyPhysShape(Ctx& c, int line, const std::string& mode, const std::string& ref,
+                    const std::string& importType, cm::PhysicsShape& sh) {
+    const bool fromRender = mode != "fromfile";
+    const bool fromMesh = mode == "fromrendermesh";
+    const std::string where = "$physicsshape " + mode;
     if (sh.importScale <= 0.0f)
-        return c.Fail(cmd.line, where + ": importscale must be greater than 0");
+        return c.Fail(line, where + ": importscale must be greater than 0");
 
     if (fromMesh) {
         auto it = c.rendermeshes.find(ref);
         if (it == c.rendermeshes.end())
-            return c.Fail(cmd.line, where + ": references unknown rendermesh \"" +
+            return c.Fail(line, where + ": references unknown rendermesh \"" +
                                     ref + "\"");
         sh.source = it->second;
     }
@@ -7857,20 +7681,20 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
         }
         if (sh.extraSkinnedBones.size() >
             static_cast<size_t>(pulse::limits::kMaxExtraSkinnedBones))
-            return c.Fail(cmd.line, where + ": too many extrabone entries (max " +
+            return c.Fail(line, where + ": too many extrabone entries (max " +
                                     std::to_string(pulse::limits::kMaxExtraSkinnedBones) + ")");
         // the filter excludes rather than selects, so a name that resolves to
         // nothing would silently fail to exclude anything
         for (const std::string& name : sh.exceptionMeshNames) {
             auto it = c.rendermeshes.find(name);
             if (it == c.rendermeshes.end())
-                return c.Fail(cmd.line, where + ": filters unknown rendermesh \"" + name + "\"");
+                return c.Fail(line, where + ": filters unknown rendermesh \"" + name + "\"");
             sh.exceptionSources.push_back(it->second);
         }
         return true;
     }
 
-    if (!LoadPhysicsFileShape(c, cmd, ref, sh))
+    if (!LoadPhysicsFileShape(c, line, ref, sh))
         return false;
 
     // perjoint = keep the source's own rigging (the only mode that can produce
@@ -7881,10 +7705,10 @@ bool ParsePhysShape(Ctx& c, const Token& cmd, const std::string& mode,
     else if (importType == "singlejoint") sh.importType = cm::PhysicsImportType::ToOneBone;
     else if (importType == "singlehull")  sh.importType = cm::PhysicsImportType::OneBoneOnly;
     else
-        return c.Fail(cmd.line, where + ": unknown importtype \"" + importType +
+        return c.Fail(line, where + ": unknown importtype \"" + importType +
                                 "\" (expected perjoint/singlejoint/singlehull)");
     if (sh.importType != cm::PhysicsImportType::Skinned && sh.parentBone.empty())
-        return c.Fail(cmd.line, where + ": importtype " + importType +
+        return c.Fail(line, where + ": importtype " + importType +
                                 " but no parentbone");
     return true;
 }
@@ -8090,6 +7914,15 @@ bool ParsePhysMarkup(Ctx& c, const Token& cmd, cm::PhysicsMarkup& mk) {
     return true;
 }
 
+// Appends one finished shape. Shared by both loaders.
+bool ApplyPhysShapeAdd(Ctx& c, int line, cm::PhysicsShape sh) {
+    c.in.physShapes.push_back(std::move(sh));
+    if (c.in.physShapes.size() > static_cast<size_t>(pulse::limits::kMaxPhysShapes))
+        return c.Fail(line, "too many physics shapes (max " +
+                            std::to_string(pulse::limits::kMaxPhysShapes) + ")");
+    return true;
+}
+
 bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
     if (!WantOpenBrace(c, cmd, cmd.text))
         return false;
@@ -8115,10 +7948,8 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
                 sh.kind = cm::PhysicsShapeKind::Primitive;
                 if (!ParsePhysPrimitive(c, sub, sh))
                     return false;
-                c.in.physShapes.push_back(std::move(sh));
-                if (c.in.physShapes.size() > static_cast<size_t>(pulse::limits::kMaxPhysShapes))
-                    return c.Fail(t.line, "too many physics shapes (max " +
-                                          std::to_string(pulse::limits::kMaxPhysShapes) + ")");
+                if (!ApplyPhysShapeAdd(c, t.line, std::move(sh)))
+                    return false;
                 continue;
             }
             if (mode != "fromfile" && mode != "fromrendermesh" && mode != "fromrender")
@@ -8140,10 +7971,8 @@ bool CmdPhysicsModel(Ctx& c, const Token& cmd) {
                                          : cm::PhysicsShapeKind::FromRender;
             if (!ParsePhysShape(c, t, mode, ref, sh))
                 return false;
-            c.in.physShapes.push_back(std::move(sh));
-            if (c.in.physShapes.size() > static_cast<size_t>(pulse::limits::kMaxPhysShapes))
-                return c.Fail(t.line, "too many physics shapes (max " +
-                                      std::to_string(pulse::limits::kMaxPhysShapes) + ")");
+            if (!ApplyPhysShapeAdd(c, t.line, std::move(sh)))
+                return false;
         } else if (o == "$physicsjoint") {
             // find-or-create by bone: a bone gets one entry however many
             // $physicsjoint lines name it, so the parser sees the axes already
@@ -8295,7 +8124,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
 
     cm::PhysicsShape shape;
     shape.maxConvex = lim::kMaxConvexPieces;
-    if (!LoadPhysicsFileShape(c, cmd, file, shape))
+    if (!LoadPhysicsFileShape(c, cmd.line, file, shape))
         return false;
     const size_t mainShape = c.in.physShapes.size();
     c.in.physShapes.push_back(std::move(shape));
@@ -8443,7 +8272,7 @@ bool CmdLegacyCollision(Ctx& c, const Token& cmd, cm::PhysicsBuildMode mode) {
             cm::PhysicsShape extraShape;
             extraShape.maxConvex = maxConvex;
             extraShape.remove2d = remove2d;
-            if (!LoadPhysicsFileShape(c, sub, extra, extraShape)) return false;
+            if (!LoadPhysicsFileShape(c, sub.line, extra, extraShape)) return false;
             c.in.physShapes.push_back(std::move(extraShape));
         } else if (o == "$generate" || o == "$generatemodel" || o == "$generatejoint" ||
                    o == "$addgeneratechild") {
@@ -8478,6 +8307,12 @@ bool CmdDataModelPhysics(Ctx& c, const Token& cmd) {
     std::string file;
     if (!c.Want("a source filename", cmd, file))
         return false;
+    return ApplyDataModelPhysics(c, cmd.line, file);
+}
+
+// Reads the collision shapes of a DMX as one concave shape. Shared by both loaders.
+bool ApplyDataModelPhysics(Ctx& c, int line, const std::string& file) {
+    const Token cmd{"$datamodelphysics", line, false};
     if (c.in.physBuildMode != cm::PhysicsBuildMode::Auto)
         return c.Fail(cmd.line, "$datamodelphysics cannot be combined with $collisionmodel "
                                 "or $collisionjoints");
@@ -10043,7 +9878,9 @@ bool FinishScript(Ctx& c, cm::CompileInput& out, std::string* err) {
     return true;
 }
 
-} // namespace
+} // namespace detail
+
+using namespace detail;
 
 void PrintCommandNames() {
     for (const Command& k : kCommands) {

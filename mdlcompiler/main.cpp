@@ -26,6 +26,8 @@
 #include "pathcompat.h"
 #include "perf.h"
 #include "pulselimits.h"
+#include "mdlasmdoc.h"
+#include "mdlasmload.h"
 #include "qcloader.h"
 #include "rename.h"
 #include "writer.h"
@@ -34,7 +36,7 @@
 
 // Defined by CMake from TOOL_VERSION, same value the .exe version resource gets.
 static constexpr const char* kAppVersion = PULSEMODEL_VERSION;
-static constexpr const char* kScriptFormats = ".qc";
+static constexpr const char* kScriptFormats = ".qc or .mdlasm";
 
 static int Fail(const char* what, const std::string& detail) {
     pulse::diag::RecordFatal(detail);
@@ -298,7 +300,8 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
 
-    if (!pulse::loader::IsQcScriptPath(script))
+    const bool assembly = pulse::loader::IsMdlAsmPath(script);
+    if (!assembly && !pulse::loader::IsQcScriptPath(script))
         return Fail("unsupported script", std::string(script) +
                                               ": only " + kScriptFormats + " files are supported");
 
@@ -308,8 +311,23 @@ static int RunCompile(int argc, char** argv, const ApiCall* api = nullptr) {
     input.outname = modelname;
     input.stripLods = stripLods;
     g_stage = "script load";
-    const bool loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
-                                                    api ? &api->unsaved : nullptr);
+    bool loaded;
+    if (assembly && analyze) {
+        // A model assembly is binary, so analyze only checks that it decodes.
+        pulse::dependencies::Note(script, pulse::dependencies::Kind::Script);
+        try {
+            pulse::mdlasm::LoadDocument(script);
+            loaded = true;
+        } catch (const std::exception& error) {
+            err = std::string(script) + ": " + error.what();
+            loaded = false;
+        }
+    } else if (assembly) {
+        loaded = pulse::loader::LoadMdlAsm(script, input, &err);
+    } else {
+        loaded = pulse::loader::LoadQcScript(script, input, &err, defvars, includeDirs, fileDirs,
+                                             api ? &api->unsaved : nullptr);
+    }
     if (analyze) pulse::dependencies::Print(loaded);
     if (!loaded)
         return Fail("script error", err);
@@ -447,7 +465,7 @@ int main(int argc, char** argv) {
             if (request.at("method") == "catalog") {
                 pulse::api::CheckMembers(request, {});
                 pulse::api::Record("capability", "{\"api\":2,\"catalog\":1,\"analyze\":1,\"compile\":1,"
-                                                 "\"files\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
+                                                 "\"files\":1,\"mdlasm\":1,\"diagnostics\":1,\"warnings\":1,\"branches\":1,\"dependencies\":1,"
                                                  "\"rename\":1}");
                 pulse::loader::PrintCommandNames();
                 rc = 0;

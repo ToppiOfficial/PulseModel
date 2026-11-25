@@ -850,6 +850,8 @@ bool RegisterManualLists(cm::CompileInput& in, const ManualFlex& manual, std::st
             return false;
         }
     }
+    if (manual.custom && !manual.custom(in, err))
+        return false;
     return true;
 }
 
