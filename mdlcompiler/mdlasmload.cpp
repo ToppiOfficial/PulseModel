@@ -601,54 +601,60 @@ bool BoneMarkups(Load& l) {
                 if (std::ranges::none_of(procedural->triggers, &md::ProceduralTrigger::enabled))
                     return c.Fail(line, "$driverbone \"" + node.bone + "\": no enabled triggers");
 
-                cm::ProceduralBone pb;
-                pb.helpername = node.bone;
-                pb.drivername = procedural->driver;
-                if (procedural->influenceInput > 0.0f) pb.influenceInput = procedural->influenceInput;
-                if (procedural->influenceOutput >= 0.0f) pb.influenceOutput = procedural->influenceOutput;
+                // `helper` -1 is the entry's own bone; each bone reads its own pose from every trigger.
                 const Token at{"$driverbone trigger", line, false};
-                for (const md::ProceduralTrigger& trigger : procedural->triggers) {
-                    if (!trigger.enabled) continue;
+                const auto build = [&](const std::string& name, float influenceOutput, int helper,
+                                       cm::ProceduralBone& pb) {
+                    pb.helpername = name;
+                    pb.drivername = procedural->driver;
+                    if (procedural->influenceInput > 0.0f) pb.influenceInput = procedural->influenceInput;
+                    if (influenceOutput >= 0.0f) pb.influenceOutput = influenceOutput;
+                    for (const md::ProceduralTrigger& trigger : procedural->triggers) {
+                        if (!trigger.enabled) continue;
 
-                    // The base position joins the trigger position before the model scale.
-                    const pm::Vector3 pos{procedural->basePosition.x + trigger.helperPosition.x,
-                                          procedural->basePosition.y + trigger.helperPosition.y,
-                                          procedural->basePosition.z + trigger.helperPosition.z};
-                    if (!AddTrigger(c, at, pb, trigger.tolerance, trigger.driverAngles, trigger.helperAngles, pos,
-                                    !procedural->local))
-                        return false;
-                    if (trigger.kind != md::TriggerKind::Twist) continue;
-
-                    // AddTrigger drops a trigger past the cap, so only a pushed one is twisted.
-                    for (const float sign : {1.0f, -1.0f}) {
-                        const size_t before = pb.triggers.size();
-                        if (!AddTrigger(c, at, pb, trigger.tolerance, trigger.driverAngles, trigger.helperAngles, pos,
+                        // The base position joins the trigger position before the model scale.
+                        const md::HelperPose helperPose = trigger.helperPose(helper);
+                        const pm::Vector3 pos{procedural->basePosition.x + helperPose.position.x,
+                                              procedural->basePosition.y + helperPose.position.y,
+                                              procedural->basePosition.z + helperPose.position.z};
+                        if (!AddTrigger(c, at, pb, trigger.tolerance, trigger.driverAngles, helperPose.angles, pos,
                                         !procedural->local))
                             return false;
-                        if (pb.triggers.size() == before) break;
+                        if (trigger.kind != md::TriggerKind::Twist) continue;
 
-                        auto& twisted = pb.triggers.back();
-                        const float helperSign = trigger.invertHelperTwist ? -sign : sign;
-                        const pm::Quaternion turn = TwistRotation(trigger.twistAxis, sign * trigger.twistAngle);
-                        const pm::Quaternion helperTurn =
-                            TwistRotation(trigger.twistAxis, helperSign * trigger.twistAngle);
-                        const pm::Quaternion pose = twisted.trigger, helper = twisted.quat;
-                        pm::QuaternionMult(pose, turn, twisted.trigger);
-                        pm::QuaternionMult(helper, helperTurn, twisted.quat);
+                        // AddTrigger drops a trigger past the cap, so only a pushed one is twisted.
+                        for (const float sign : {1.0f, -1.0f}) {
+                            const size_t before = pb.triggers.size();
+                            if (!AddTrigger(c, at, pb, trigger.tolerance, trigger.driverAngles, helperPose.angles, pos,
+                                            !procedural->local))
+                                return false;
+                            if (pb.triggers.size() == before) break;
+
+                            auto& twisted = pb.triggers.back();
+                            const float helperSign = trigger.invertHelperTwist ? -sign : sign;
+                            const pm::Quaternion turn = TwistRotation(trigger.twistAxis, sign * trigger.twistAngle);
+                            const pm::Quaternion helperTurn =
+                                TwistRotation(trigger.twistAxis, helperSign * trigger.twistAngle);
+                            const pm::Quaternion pose = twisted.trigger, turnedHelper = twisted.quat;
+                            pm::QuaternionMult(pose, turn, twisted.trigger);
+                            if (trigger.twistHelpers) pm::QuaternionMult(turnedHelper, helperTurn, twisted.quat);
+                        }
                     }
-                }
+                    return true;
+                };
 
-                // Further helpers copy the rule with their own influence out, after the entry's own bone.
-                std::vector<cm::ProceduralBone> extras;
-                for (const md::ProceduralHelper& helper : procedural->helpers) {
+                // The entry's bone, then each additional bone with its own pose and influence out.
+                cm::ProceduralBone pb;
+                if (!build(node.bone, procedural->influenceOutput, -1, pb)) return false;
+                ok = ApplyProceduralBone(c, line, std::move(pb));
+                for (size_t i = 0; ok && i < procedural->helpers.size(); ++i) {
+                    const md::ProceduralHelper& helper = procedural->helpers[i];
                     if (helper.bone.empty()) continue;
 
-                    cm::ProceduralBone& extra = extras.emplace_back(pb);
-                    extra.helpername = helper.bone;
-                    extra.influenceOutput = helper.influenceOutput >= 0.0f ? helper.influenceOutput : 1.0f;
+                    cm::ProceduralBone extra;
+                    if (!build(helper.bone, helper.influenceOutput, int(i), extra)) return false;
+                    ok = ApplyProceduralBone(c, line, std::move(extra));
                 }
-                ok = ApplyProceduralBone(c, line, std::move(pb));
-                for (cm::ProceduralBone& extra : extras) ok = ok && ApplyProceduralBone(c, line, std::move(extra));
             } else {
                 if (procedural->target.empty()) {
                     l.Warn(line, "no aim target, skipped");

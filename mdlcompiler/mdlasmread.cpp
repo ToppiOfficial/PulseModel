@@ -1155,6 +1155,16 @@ BoneMarkupNode readBoneMarkup(core::BinaryReader& in)
                 helper.influenceOutput = in.read<float>();
                 if (!(helper.influenceOutput >= 0.0f)) helper.influenceOutput = 1.0f;
             }
+
+        // Files saved before per-bone trigger poses end here.
+        if (in.remaining() >= procedural.triggers.size() * sizeof(std::uint64_t))
+            for (auto& trigger : procedural.triggers)
+                for (auto remaining = in.count(6 * sizeof(float)); remaining; --remaining)
+                    trigger.additionalPoses.push_back({readVector(in), readVector(in)});
+
+        // Files saved before the twist helpers switch end here.
+        if (in.remaining() >= procedural.triggers.size())
+            for (auto& trigger : procedural.triggers) trigger.twistHelpers = in.read<bool>();
         break;
     }
     case BoneMarkupKind::Ik: {
