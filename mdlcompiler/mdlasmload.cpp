@@ -1121,8 +1121,19 @@ bool Animations(Load& l) {
         }
     }
 
+    for (const md::AnimScriptInclude& include : script.includeModels)
+        if (!ApplyIncludeModel(c, l.Node(AnimNodeLabel(l.d, include.node)), "Include Model", include.path))
+            return false;
+
     for (const md::AnimScriptSequence& entry : script.sequences) {
         cm::CompileInput::InSequence seq = entry.sequence;
+        if (seq.isDeclare) {
+            if (seq.name.empty())
+                return c.Fail(l.Node(AnimNodeLabel(l.d, entry.node)), "the declared sequence has no name");
+            ApplyDeclareSequence(c, std::move(seq.name));
+            continue;
+        }
+
         std::vector<int> blends;
         if (seq.blendAnims.empty())
             blends.push_back(at[static_cast<size_t>(seq.animIndex)]);

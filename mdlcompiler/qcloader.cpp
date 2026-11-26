@@ -3346,34 +3346,44 @@ bool CmdDeclareAnimation(Ctx& c, const Token& cmd) {
 }
 
 // $declaresequence <name>: empty override slot.
-bool CmdDeclareSequence(Ctx& c, const Token& cmd) {
+void ApplyDeclareSequence(Ctx& c, std::string name) {
     cm::CompileInput::InSequence seq;
     seq.fadeintime = c.defaultFadeIn;
     seq.fadeouttime = c.defaultFadeOut;
-    if (!c.Want("a name", cmd, seq.name))
-        return false;
+    seq.name = std::move(name);
     seq.isDeclare = true;
     seq.flags |= kStudioOverride;
     c.in.sequences.push_back(std::move(seq));
+}
+
+bool CmdDeclareSequence(Ctx& c, const Token& cmd) {
+    std::string name;
+    if (!c.Want("a name", cmd, name))
+        return false;
+    ApplyDeclareSequence(c, std::move(name));
     return true;
 }
 
 // $includemodel "path/name.mdl": borrow an already-compiled model's sequences. Stored
 // "models/"-prefixed and nothing is read at compile time - the engine links it on load. Suppresses
 // the automatic "reference" bind-pose sequence a script with no $sequence would otherwise get.
+bool ApplyIncludeModel(Ctx& c, int line, const std::string& command, const std::string& name) {
+    // must name a .mdl - a source .dmx/.smd or a bare name would compile fine
+    // and leave a reference the engine silently fails to resolve
+    if (name.size() < 4 || _stricmp(name.c_str() + name.size() - 4, ".mdl") != 0)
+        return c.Fail(line, command + ": \"" + name + "\" must end in .mdl");
+    if (c.in.includeModels.size() >= static_cast<size_t>(lim::kMaxIncludeModels))
+        return c.Fail(line, command + ": too many entries (max " +
+                            std::to_string(lim::kMaxIncludeModels) + ")");
+    c.in.includeModels.push_back("models/" + name);
+    return true;
+}
+
 bool CmdIncludeModel(Ctx& c, const Token& cmd) {
     std::string name;
     if (!c.Want("a compiled .mdl path", cmd, name))
         return false;
-    // must name a .mdl - a source .dmx/.smd or a bare name would compile fine
-    // and leave a reference the engine silently fails to resolve
-    if (name.size() < 4 || _stricmp(name.c_str() + name.size() - 4, ".mdl") != 0)
-        return c.Fail(cmd.line, cmd.text + ": \"" + name + "\" must end in .mdl");
-    if (c.in.includeModels.size() >= static_cast<size_t>(lim::kMaxIncludeModels))
-        return c.Fail(cmd.line, cmd.text + ": too many entries (max " +
-                                std::to_string(lim::kMaxIncludeModels) + ")");
-    c.in.includeModels.push_back("models/" + name);
-    return true;
+    return ApplyIncludeModel(c, cmd.line, cmd.text, name);
 }
 
 // ikrule <chain> <type> [type-args] [options]. Fills InIkRule, whose chain/type are resolved later

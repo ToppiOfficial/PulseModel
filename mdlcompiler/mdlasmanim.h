@@ -27,12 +27,20 @@ struct AnimScriptAnim
 struct AnimScriptSequence
 {
     compile::CompileInput::InSequence sequence;
-    Uid node = 0;               // the Sequence node
+    Uid node = 0;               // the Sequence or Declare Sequence node
     std::vector<Uid> members;   // every node the sequence draws on, for the highlight
+};
+
+struct AnimScriptInclude
+{
+    std::string path; // below models/, as `$includemodel` takes it
+    Uid node = 0;
 };
 
 struct AnimScript
 {
+    // In Animation Out order, which is the order the included models are merged in.
+    std::vector<AnimScriptInclude> includeModels;
     std::vector<compile::WeightList> weightLists;
     std::vector<compile::PoseParam> poseParams;
     // Transition node names; a sequence's entry and exit node are 1-based indexes into this list.

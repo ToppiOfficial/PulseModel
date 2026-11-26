@@ -637,10 +637,8 @@ AnimProps readAnimProps(core::BinaryReader& in)
     props.disableAnimBlocks = in.read<bool>();
     props.firstSectionLocal = in.read<bool>();
     props.noStallFrames = in.read<float>();
-    for (auto remaining = in.count(8); remaining; --remaining) {
-        const auto bytes = in.text();
-        core::parseRecord(bytes, [&](core::BinaryReader& record) { props.ikRules.push_back(readIkRule(record)); });
-    }
+    // Records only grow at the end, so list slots whose entries are nodes now stay, always empty.
+    for (auto remaining = in.count(8); remaining; --remaining) in.text();
     requireFinite({props.fps, props.startLoopPercent, props.motionRollback, props.origin.x, props.origin.y, props.origin.z,
                    props.angles.x, props.angles.y, props.angles.z, props.scale, props.noStallFrames});
     return props;
@@ -718,7 +716,7 @@ AnimSequenceData readAnimSequence(core::BinaryReader& in)
     data.anim = readAnimProps(in);
     data.activity = in.text();
     data.activityWeight = in.read<std::int32_t>();
-    data.activityModifiers = readStrings(in);
+    readStrings(in);
     data.hidden = in.read<bool>();
     data.autoPlay = in.read<bool>();
     data.realTime = in.read<bool>();
@@ -750,16 +748,13 @@ AnimSequenceData readAnimSequence(core::BinaryReader& in)
         data.animTags.push_back(std::move(tag));
     }
     for (auto remaining = in.count(8); remaining; --remaining) {
-        compile::IkLock lock;
-        lock.name = in.text();
-        lock.flPosWeight = in.read<float>();
-        lock.flLocalQWeight = in.read<float>();
-        data.ikLocks.push_back(std::move(lock));
+        in.text();
+        in.read<float>();
+        in.read<float>();
     }
 
     requireFinite({data.fadeIn, data.fadeOut, data.exitPhase});
     for (const auto& tag : data.animTags) requireFinite({tag.cycle});
-    for (const auto& lock : data.ikLocks) requireFinite({lock.flPosWeight, lock.flLocalQWeight});
     return data;
 }
 
@@ -767,7 +762,7 @@ AnimNode readAnimNode(core::BinaryReader& in)
 {
     AnimNode node;
     node.uid = in.read<Uid>();
-    node.type = readEnum<AnimNodeType>(in, std::uint32_t(AnimNodeType::PoseParam));
+    node.type = readEnum<AnimNodeType>(in, std::uint32_t(AnimNodeType::DeclareSequence));
     node.x = in.read<float>();
     node.y = in.read<float>();
     node.muted = in.read<bool>();
@@ -847,6 +842,18 @@ AnimNode readAnimNode(core::BinaryReader& in)
         requireFinite({node.layer.start, node.layer.peak, node.layer.tail, node.layer.end});
         break;
     case AnimNodeType::PoseParam:
+    case AnimNodeType::ActivityModifier:
+    case AnimNodeType::IncludeModel:
+    case AnimNodeType::DeclareSequence:
+        break;
+    case AnimNodeType::IkLock:
+        node.ikLock.name = in.text();
+        node.ikLock.flPosWeight = in.read<float>();
+        node.ikLock.flLocalQWeight = in.read<float>();
+        requireFinite({node.ikLock.flPosWeight, node.ikLock.flLocalQWeight});
+        break;
+    case AnimNodeType::IkRule:
+        core::parseRecord(in.text(), [&](core::BinaryReader& record) { node.ikRule = readIkRule(record); });
         break;
     }
     return node;

@@ -58,6 +58,10 @@ bool ApplyPoseParameter(Ctx& c, int line, const cm::PoseParam& param);
 bool ApplyAnimation(Ctx& c, int line, cm::CompileInput::InAnim anim);
 int AddImpliedAnimation(Ctx& c, cm::CompileInput::InAnim anim);
 bool ApplySequence(Ctx& c, int line, cm::CompileInput::InSequence seq, std::vector<int> blends, bool inherit);
+// $includemodel (a compiled .mdl below models/) and $declaresequence (an override slot an included model fills).
+// `command` is how the script spelled the command, for the messages.
+bool ApplyIncludeModel(Ctx& c, int line, const std::string& command, const std::string& name);
+void ApplyDeclareSequence(Ctx& c, std::string name);
 // Loads `file` (an embedded source's virtual name or a path) as an animation source.
 source::Source* LoadAnimationSource(Ctx& c, int line, const std::string& file);
 

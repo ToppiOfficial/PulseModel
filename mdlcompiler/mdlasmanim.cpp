@@ -23,6 +23,7 @@ constexpr int kRealtime = 0x0100;
 constexpr int kLocal = 0x0200;
 constexpr int kHidden = 0x0400;
 constexpr int kCyclePose = 0x0080;
+constexpr int kOverride = 0x0800;
 constexpr int kWorld = 0x4000;
 constexpr int kNoForceLoop = 0x8000;
 constexpr int kWorldAndRelative = 0x20000;
@@ -54,10 +55,15 @@ int linkedInputCount(const Document& document, Uid uid, int first = 0)
     return int(std::ranges::count_if(document.animLinks, [&](const AnimLink& link) { return link.to == uid && link.toSocket >= first; }));
 }
 
-// The first input of a Blend's clip list; the inputs before it are its pose axes.
+// The first input of an ordered list: a Blend's clips, an Animation's or Sequence's entries.
 int animOrderedFirst(AnimNodeType type)
 {
-    return type == AnimNodeType::Blend ? 2 : 0;
+    switch (type) {
+    case AnimNodeType::Blend:
+    case AnimNodeType::Animation: return 2;
+    case AnimNodeType::Sequence: return 3;
+    default: return 0;
+    }
 }
 
 // The input socket that takes a Pose Param node: `which` is the axis of a Blend or Walk, 0 for the others.
@@ -87,6 +93,20 @@ const AnimNode* inputNode(const Document& document, const AnimNode& node, int so
 
     const auto* source = document.findAnimNode(link->from);
     return source && !source->muted ? source : nullptr;
+}
+
+// The entries of one type a Sequence or Animation lists, in order; muted ones are left out.
+std::vector<Uid> animEntries(const Document& document, const AnimNode& node, AnimNodeType type)
+{
+    if (node.type != AnimNodeType::Sequence && node.type != AnimNodeType::Animation) return {};
+
+    const int first = animOrderedFirst(node.type);
+    std::vector<Uid> found;
+    for (int i = 0; i < linkedInputCount(document, node.uid, first); ++i) {
+        const auto* source = inputNode(document, node, first + i);
+        if (source && source->type == type) found.push_back(source->uid);
+    }
+    return found;
 }
 
 
@@ -152,8 +172,12 @@ public:
             const auto* node = document_.findAnimNode(link->from);
             if (!node || node->muted) continue;
 
-            if (node->type == AnimNodeType::Animation) namedAnim(*node);
-            else sequenceOf(*node);
+            switch (node->type) {
+            case AnimNodeType::IncludeModel: script_.includeModels.push_back({node->name, node->uid}); break;
+            case AnimNodeType::DeclareSequence: declared(*node); break;
+            case AnimNodeType::Animation: namedAnim(*node); break;
+            default: sequenceOf(*node); break;
+            }
         }
 
         // Layers name other sequences; those are written after the listed ones.
@@ -314,7 +338,13 @@ private:
         anim.disableAnimblocks = props.disableAnimBlocks;
         anim.isFirstSectionLocal = props.firstSectionLocal;
         anim.numNostallFrames = props.noStallFrames;
-        anim.ikrules = props.ikRules;
+    }
+
+    std::vector<AnimIkRule> ikRules(const AnimNode& node) const
+    {
+        std::vector<AnimIkRule> rules;
+        for (const Uid uid : animEntries(document_, node, AnimNodeType::IkRule)) rules.push_back(document_.findAnimNode(uid)->ikRule);
+        return rules;
     }
 
     void checkProps(const AnimNode& node, const AnimProps& props)
@@ -393,6 +423,7 @@ private:
         compile::CompileInput::InAnim anim;
         anim.name = node.name;
         applyProps(anim, node.animation);
+        anim.ikrules = ikRules(node);
         checkProps(node, node.animation);
 
         const auto* weights = inputNode(document_, node, 1);
@@ -469,6 +500,22 @@ private:
         sequence(*root, layers);
     }
 
+    // A `$declaresequence` slot: a name and the override flag, which lets an included model's sequence of that
+    // name take the slot.
+    void declared(const AnimNode& node)
+    {
+        AnimScriptSequence out;
+        out.sequence.name = node.name;
+        out.sequence.isDeclare = true;
+        out.sequence.flags = kOverride;
+        out.node = node.uid;
+        out.members = {node.uid};
+
+        for (const auto& existing : script_.sequences)
+            if (sameName(existing.sequence.name, node.name)) problem(node.uid, "Another sequence is named \"" + node.name + "\".");
+        script_.sequences.push_back(std::move(out));
+    }
+
     void sequence(const AnimNode& root, const std::vector<const AnimNode*>& layers)
     {
         const auto& data = root.sequence;
@@ -508,10 +555,11 @@ private:
             seq.activityname = data.activity;
             seq.actweight = data.activityWeight != 0 ? data.activityWeight : -1;
         }
-        for (const auto& modifier : data.activityModifiers) seq.activitymodifiers.push_back(lowered(modifier));
+        for (const Uid uid : animEntries(document_, root, AnimNodeType::ActivityModifier))
+            seq.activitymodifiers.push_back(lowered(document_.findAnimNode(uid)->name));
         seq.events = data.events;
         seq.animtags = data.animTags;
-        seq.iklocks = data.ikLocks;
+        for (const Uid uid : animEntries(document_, root, AnimNodeType::IkLock)) seq.iklocks.push_back(document_.findAnimNode(uid)->ikLock);
 
         if (!data.entryNode.empty() || !data.exitNode.empty()) {
             seq.entrynode = xnode(data.entryNode.empty() ? data.exitNode : data.entryNode);
@@ -693,6 +741,7 @@ private:
         if (index == 0) {
             anim.name = "@" + seq.name;
             applyProps(anim, root.sequence.anim);
+            anim.ikrules = ikRules(root);
             checkProps(root, root.sequence.anim);
 
             const auto* weights = inputNode(document_, root, 1);

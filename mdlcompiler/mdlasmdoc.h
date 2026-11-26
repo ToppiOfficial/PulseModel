@@ -598,11 +598,14 @@ using AnimIkRule = compile::CompileInput::InIkRule;
 
 enum class AnimNodeType : std::uint32_t
 {
-    Out, Clip, Animation, Sequence, WeightList, Command, Blend, Walk, Layer, PoseParam
+    Out, Clip, Animation, Sequence, WeightList, Command, Blend, Walk, Layer, PoseParam, ActivityModifier, IkLock, IkRule,
+    IncludeModel, DeclareSequence
 };
 
 // What a socket carries. Animation is a named `$animation`, usable wherever a clip is and as a reference.
-enum class AnimSocket : std::uint8_t { Clip, ClipSet, Animation, Weights, Sequence, Pose };
+// Modifier, IkLock and IkRule are entries a Sequence or Animation lists; one entry node can feed several.
+// Model and Declare feed only Animation Out: an `$includemodel` and a `$declaresequence` slot.
+enum class AnimSocket : std::uint8_t { Clip, ClipSet, Animation, Weights, Sequence, Pose, Modifier, IkLock, IkRule, Model, Declare };
 
 // A DMX clip: which embedded source, which clip inside it, and the frames taken from it.
 struct AnimClipData
@@ -632,7 +635,6 @@ struct AnimProps
     float scale = 1.0f;
     bool disableAnimBlocks = false, firstSectionLocal = false;
     float noStallFrames = 0.0f;
-    std::vector<AnimIkRule> ikRules;
 };
 
 enum class AnimDeltaMode : std::uint32_t { None, Delta, PreDelta };
@@ -642,7 +644,6 @@ struct AnimSequenceData
     AnimProps anim;
     std::string activity;
     int activityWeight = 0; // 0 writes none
-    std::vector<std::string> activityModifiers;
     bool hidden = false, autoPlay = false, realTime = false, snap = false, post = false;
     bool worldSpace = false, worldRelative = false;
     AnimDeltaMode delta = AnimDeltaMode::None;
@@ -653,7 +654,6 @@ struct AnimSequenceData
     bool reversible = false;
     std::vector<compile::SeqEvent> events;
     std::vector<compile::SeqAnimTag> animTags;
-    std::vector<compile::IkLock> ikLocks;
 };
 
 struct AnimWeightEntry
@@ -713,7 +713,8 @@ struct AnimNode
     float x = 0, y = 0;
     bool muted = false, collapsed = false;
     // Animation, Sequence, Clip, Weight List and Blend: the name other nodes and the compiler know it by.
-    // Pose Param: the declared pose parameter it stands for.
+    // Pose Param: the declared pose parameter it stands for. Activity Modifier: the modifier itself.
+    // Include Model: the .mdl path below models/. Declare Sequence: the included sequence it declares.
     std::string name;
 
     AnimClipData clip;
@@ -724,6 +725,8 @@ struct AnimNode
     AnimBlendData blend;
     AnimWalkData walk;
     AnimLayerData layer;
+    compile::IkLock ikLock; // its `name` is the IK chain
+    AnimIkRule ikRule;
 };
 
 // One declared pose parameter (`$poseparameter`). The order is the index the compiled model gives it.
