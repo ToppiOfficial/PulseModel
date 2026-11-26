@@ -255,6 +255,16 @@ bool NoRealign(Load& l) {
     return true;
 }
 
+// The Bone Hierarchy nodes in list order; EnforceHierarchy applies them once the bone table exists.
+bool Hierarchies(Load& l) {
+    for (const md::HierarchyNode& node : l.d.hierarchies) {
+        if (!node.targetsBone()) continue;
+
+        l.c.in.forcedHierarchy.push_back({node.bone, node.parent});
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Render meshes and model groups
 // ---------------------------------------------------------------------------
@@ -627,7 +637,18 @@ bool BoneMarkups(Load& l) {
                         pm::QuaternionMult(helper, helperTurn, twisted.quat);
                     }
                 }
+
+                // Further helpers copy the rule with their own influence out, after the entry's own bone.
+                std::vector<cm::ProceduralBone> extras;
+                for (const md::ProceduralHelper& helper : procedural->helpers) {
+                    if (helper.bone.empty()) continue;
+
+                    cm::ProceduralBone& extra = extras.emplace_back(pb);
+                    extra.helpername = helper.bone;
+                    extra.influenceOutput = helper.influenceOutput >= 0.0f ? helper.influenceOutput : 1.0f;
+                }
                 ok = ApplyProceduralBone(c, line, std::move(pb));
+                for (cm::ProceduralBone& extra : extras) ok = ok && ApplyProceduralBone(c, line, std::move(extra));
             } else {
                 if (procedural->target.empty()) {
                     l.Warn(line, "no aim target, skipped");
@@ -1199,6 +1220,7 @@ constexpr Pass kPasses[] = {
     BoneDefinitions,
     RealignBones,
     NoRealign,
+    Hierarchies,
     Meshes,
     Groups,
     Lods,

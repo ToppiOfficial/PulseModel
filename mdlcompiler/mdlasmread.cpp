@@ -46,6 +46,7 @@ constexpr std::uint32_t MaterialsChunk = tag('M', 'M', 'R', 'K');
 constexpr std::uint32_t BonesChunk = tag('B', 'D', 'E', 'F');
 
 constexpr std::uint32_t RealignsChunk = tag('R', 'L', 'G', 'N');
+constexpr std::uint32_t HierarchiesChunk = tag('H', 'R', 'C', 'H');
 
 constexpr std::uint32_t AttachmentsChunk = tag('A', 'T', 'T', 'C');
 
@@ -395,6 +396,18 @@ BoneDefinition readBoneDefinition(core::BinaryReader& in)
         if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
             throw std::runtime_error("Invalid bone transform.");
     return bone;
+}
+
+HierarchyNode readHierarchy(core::BinaryReader& in)
+{
+    HierarchyNode node;
+    node.uid = in.read<Uid>();
+    if (!node.uid) throw std::runtime_error("Invalid hierarchy id.");
+
+    node.enabled = in.read<bool>();
+    node.bone = in.text();
+    node.parent = in.text();
+    return node;
 }
 
 RealignNode readRealign(core::BinaryReader& in)
@@ -1133,6 +1146,15 @@ BoneMarkupNode readBoneMarkup(core::BinaryReader& in)
         // Files saved before the inverted helper twist end here.
         if (in.remaining() >= procedural.triggers.size())
             for (auto& trigger : procedural.triggers) trigger.invertHelperTwist = in.read<bool>();
+
+        // Files saved before further helper bones end here.
+        if (in.remaining() >= sizeof(std::uint64_t))
+            for (auto remaining = in.count(sizeof(std::uint64_t) + sizeof(float)); remaining; --remaining) {
+                auto& helper = procedural.helpers.emplace_back();
+                helper.bone = in.text();
+                helper.influenceOutput = in.read<float>();
+                if (!(helper.influenceOutput >= 0.0f)) helper.influenceOutput = 1.0f;
+            }
         break;
     }
     case BoneMarkupKind::Ik: {
@@ -1186,6 +1208,7 @@ void attachFolders(Document& document, const std::vector<StoredFolder>& stored)
         case FolderKind::BoneDefinition:
             assign(document.bones, folder.uid, members);
             assign(document.realigns, folder.uid, members);
+            assign(document.hierarchies, folder.uid, members);
             break;
         case FolderKind::Attachment: assign(document.attachments, folder.uid, members); break;
         case FolderKind::HitboxSet: assign(document.hitboxSets, folder.uid, members); break;
@@ -1270,6 +1293,7 @@ void visitFolderMembers(Document& document, Visit&& visit)
     for (auto& node : document.groups) visit(node, FolderKind::ModelGroup);
     for (auto& node : document.bones) visit(node, FolderKind::BoneDefinition);
     for (auto& node : document.realigns) visit(node, FolderKind::BoneDefinition);
+    for (auto& node : document.hierarchies) visit(node, FolderKind::BoneDefinition);
     for (auto& node : document.attachments) visit(node, FolderKind::Attachment);
     for (auto& node : document.hitboxSets) visit(node, FolderKind::HitboxSet);
     for (auto& node : document.physicsNodes) visit(node, FolderKind::Physics);
@@ -1309,7 +1333,7 @@ bool known(std::uint32_t type)
            type == BoneMarkupChunk || type == EyeballsChunk || type == EyelidsChunk || type == PrefabsChunk ||
            type == LodsChunk || type == LodSettingsChunk || type == FlexNodesChunk || type == FlexLinksChunk ||
            type == FlexWrinklesChunk || type == FlexVarsChunk || type == FlexSplitsChunk || type == AnimNodesChunk ||
-           type == AnimLinksChunk || type == PoseParamsChunk || type == RealignsChunk;
+           type == AnimLinksChunk || type == PoseParamsChunk || type == RealignsChunk || type == HierarchiesChunk;
 }
 
 Document readDocument(core::ChunkReader& reader)
@@ -1380,6 +1404,10 @@ Document readDocument(core::ChunkReader& reader)
                 readRecords(in, "bone definition", [&](core::BinaryReader& record) { document.bones.push_back(readBoneDefinition(record)); });
             } else if (chunk.type == RealignsChunk) {
                 readRecords(in, "realign", [&](core::BinaryReader& record) { document.realigns.push_back(readRealign(record)); });
+            } else if (chunk.type == HierarchiesChunk) {
+                readRecords(in, "hierarchy", [&](core::BinaryReader& record) {
+                    document.hierarchies.push_back(readHierarchy(record));
+                });
             } else if (chunk.type == PhysicsNodesChunk) {
                 readRecords(in, "physics", [&](core::BinaryReader& record) { document.physicsNodes.push_back(readPhysicsNode(record)); });
             } else if (chunk.type == BoneMarkupChunk) {
@@ -1487,6 +1515,7 @@ Document readDocument(core::ChunkReader& reader)
     keepOwnSwitch(document.groups);
     keepOwnSwitch(document.bones);
     keepOwnSwitch(document.realigns);
+    keepOwnSwitch(document.hierarchies);
     keepOwnSwitch(document.attachments);
     keepOwnSwitch(document.hitboxSets);
     keepOwnSwitch(document.physicsNodes);

@@ -1568,6 +1568,11 @@ bool EnforceHierarchy(Ctx& ctx, std::string* err) {
             if (err) *err = "unknown bone: \"" + fh.child + "\" in forced hierarchy";
             return false;
         }
+        // the resort below cannot catch a bone that is its own parent
+        if (j == k) {
+            if (err) *err = "bone \"" + fh.child + "\" cannot be its own parent in forced hierarchy";
+            return false;
+        }
 
         // Procedural data authored against the old parent moves to the new parent's frame.
         const int o = m.bones[k].parent;

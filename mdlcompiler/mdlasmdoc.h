@@ -211,6 +211,18 @@ struct RealignNode
     bool targetsBone() const { return enabled && !bone.empty(); }
 };
 
+// One `$hierarchy`: `bone` moves under `parent` (a root when empty). The nodes apply in list order.
+struct HierarchyNode
+{
+    Uid uid = 0;
+    std::string bone, parent;
+    bool enabled = true;
+    Uid folder = 0;
+    bool userEnabled = true;
+
+    bool targetsBone() const { return enabled && !bone.empty(); }
+};
+
 struct Attachment
 {
     Uid uid = 0;
@@ -417,6 +429,14 @@ struct ProceduralTrigger
 // Driver: `$driverbone`, the node's bone is the helper. AimAt: `$driveraimat`.
 enum class ProceduralMode : std::uint32_t { Driver, AimAt };
 
+// A further helper of a Driver entry. It compiles to its own `$driverbone` with the entry's driver, triggers and
+// influence in, and its own influence out. An empty bone is skipped.
+struct ProceduralHelper
+{
+    std::string bone;
+    float influenceOutput = 1.0f;
+};
+
 struct ProceduralSettings
 {
     ProceduralMode mode = ProceduralMode::Driver;
@@ -426,6 +446,7 @@ struct ProceduralSettings
     // Scale the driver's rotation and the helper's pose from their bind poses. Input above 0, output 0 or more.
     float influenceInput = 1.0f, influenceOutput = 1.0f;
     std::vector<ProceduralTrigger> triggers;
+    std::vector<ProceduralHelper> helpers;
 
     std::string target;
     math::Vector3 up{0, 0, 1}, aim{1, 0, 0};
@@ -777,6 +798,7 @@ struct Document
     MaterialMarkup materials;
     std::vector<BoneDefinition> bones;
     std::vector<RealignNode> realigns;
+    std::vector<HierarchyNode> hierarchies;
     std::vector<Attachment> attachments;
     std::vector<Eyeball> eyeballs; // order is the eyeball index
     std::vector<EyelidNode> eyelids;
