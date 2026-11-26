@@ -395,6 +395,12 @@ struct JiggleSettings
 };
 
 
+// Twist compiles three triggers: the pose, then the driver turned by +twistAngle and -twistAngle degrees about its
+// own twistAxis, each with the helper pose turned the same way about the helper's own twistAxis, or the opposite
+// way with invertHelperTwist.
+enum class TriggerKind : std::uint32_t { Pose, Twist };
+enum class TwistAxis : std::uint32_t { X, Y, Z };
+
 // One `trigger` line of `$driverbone`: rotations are RadianEuler degrees (x roll, y pitch, z yaw), the
 // helper position is in model units.
 struct ProceduralTrigger
@@ -402,6 +408,10 @@ struct ProceduralTrigger
     bool enabled = true;
     float tolerance = 90;
     math::Vector3 driverAngles, helperAngles, helperPosition;
+    TriggerKind kind = TriggerKind::Pose;
+    TwistAxis twistAxis = TwistAxis::X;
+    float twistAngle = 100;
+    bool invertHelperTwist = false;
 };
 
 // Driver: `$driverbone`, the node's bone is the helper. AimAt: `$driveraimat`.

@@ -49,6 +49,14 @@ struct Load {
 
 using Pass = bool (*)(Load&);
 
+// The turn a twist trigger appends to the driver and helper about their own axes.
+// Converts through double like DegToRad.
+pm::Quaternion TwistRotation(md::TwistAxis axis, float degrees) {
+    const float half = static_cast<float>(degrees * 3.14159265358979323846 / 180.0) * 0.5f, s = std::sin(half);
+    return {axis == md::TwistAxis::X ? s : 0.0f, axis == md::TwistAxis::Y ? s : 0.0f,
+            axis == md::TwistAxis::Z ? s : 0.0f, std::cos(half)};
+}
+
 // Position plus (pitch, yaw, roll) degrees as the bind-pose matrix $definebone reads.
 pm::matrix3x4 Sextet(const pm::Vector3& origin, const pm::Vector3& angles) {
     pm::matrix3x4 out;
@@ -599,6 +607,25 @@ bool BoneMarkups(Load& l) {
                     if (!AddTrigger(c, at, pb, trigger.tolerance, trigger.driverAngles, trigger.helperAngles, pos,
                                     !procedural->local))
                         return false;
+                    if (trigger.kind != md::TriggerKind::Twist) continue;
+
+                    // AddTrigger drops a trigger past the cap, so only a pushed one is twisted.
+                    for (const float sign : {1.0f, -1.0f}) {
+                        const size_t before = pb.triggers.size();
+                        if (!AddTrigger(c, at, pb, trigger.tolerance, trigger.driverAngles, trigger.helperAngles, pos,
+                                        !procedural->local))
+                            return false;
+                        if (pb.triggers.size() == before) break;
+
+                        auto& twisted = pb.triggers.back();
+                        const float helperSign = trigger.invertHelperTwist ? -sign : sign;
+                        const pm::Quaternion turn = TwistRotation(trigger.twistAxis, sign * trigger.twistAngle);
+                        const pm::Quaternion helperTurn =
+                            TwistRotation(trigger.twistAxis, helperSign * trigger.twistAngle);
+                        const pm::Quaternion pose = twisted.trigger, helper = twisted.quat;
+                        pm::QuaternionMult(pose, turn, twisted.trigger);
+                        pm::QuaternionMult(helper, helperTurn, twisted.quat);
+                    }
                 }
                 ok = ApplyProceduralBone(c, line, std::move(pb));
             } else {

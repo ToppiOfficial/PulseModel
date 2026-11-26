@@ -1120,6 +1120,19 @@ BoneMarkupNode readBoneMarkup(core::BinaryReader& in)
         // Files saved before the trigger switches end here.
         if (in.remaining() >= procedural.triggers.size())
             for (auto& trigger : procedural.triggers) trigger.enabled = in.read<bool>();
+
+        // Files saved before twist triggers end here.
+        if (in.remaining() >= procedural.triggers.size() * 12)
+            for (auto& trigger : procedural.triggers) {
+                trigger.kind = readEnum<TriggerKind>(in, std::uint32_t(TriggerKind::Twist));
+                trigger.twistAxis = readEnum<TwistAxis>(in, std::uint32_t(TwistAxis::Z));
+                trigger.twistAngle = in.read<float>();
+                if (!std::isfinite(trigger.twistAngle)) throw std::runtime_error("Invalid twist angle.");
+            }
+
+        // Files saved before the inverted helper twist end here.
+        if (in.remaining() >= procedural.triggers.size())
+            for (auto& trigger : procedural.triggers) trigger.invertHelperTwist = in.read<bool>();
         break;
     }
     case BoneMarkupKind::Ik: {
