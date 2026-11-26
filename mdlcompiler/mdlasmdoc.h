@@ -27,7 +27,7 @@ namespace pulse::mdlasm {
 
 namespace limits = pulse::limits;
 
-inline constexpr int kFormatVersion = 3;
+inline constexpr int kFormatVersion = 4;
 
 using Uid = std::uint64_t;
 
@@ -180,12 +180,10 @@ struct BoneDefinition
         bool active = false, unlocked = false, preAligned = false;
     } bind;
 
-    compile::BoneRealignEdit realignment;
     Uid uid = 0;
     std::string bone, legacyName;
     bool enabled = true;
     bool boneMerge = true;
-    bool realign = false;
     bool doNotCollapse = false, alwaysCollapse = false, noRealign = false;
     Uid folder = 0;
     bool userEnabled = true;
@@ -194,9 +192,23 @@ struct BoneDefinition
     bool marksBone() const { return targetsBone() && boneMerge; }
     bool keepsBone() const { return targetsBone() && (boneMerge || doNotCollapse); }
     bool collapsesBone() const { return targetsBone() && alwaysCollapse; }
-    bool editsBindPose() const { return targetsBone() && (bind.active || (realign && !noRealign)); }
+    bool editsBindPose() const { return targetsBone() && bind.active; }
     bool hasOrderedEdits() const { return editsBindPose() || (targetsBone() && noRealign); }
     bool affectsSkeleton() const { return keepsBone() || collapsesBone() || hasOrderedEdits(); }
+};
+
+// One `$realignbone` edit. The nodes apply in list order after every `$definebone`; a Bone Definition with No
+// realign then drops every one on its bone, as `$norealign` does.
+struct RealignNode
+{
+    Uid uid = 0;
+    std::string name, bone;
+    bool enabled = true;
+    compile::BoneRealignEdit edit;
+    Uid folder = 0;
+    bool userEnabled = true;
+
+    bool targetsBone() const { return enabled && !bone.empty(); }
 };
 
 struct Attachment
@@ -387,6 +399,7 @@ struct JiggleSettings
 // helper position is in model units.
 struct ProceduralTrigger
 {
+    bool enabled = true;
     float tolerance = 90;
     math::Vector3 driverAngles, helperAngles, helperPosition;
 };
@@ -753,6 +766,7 @@ struct Document
     std::vector<ModelGroup> groups;
     MaterialMarkup materials;
     std::vector<BoneDefinition> bones;
+    std::vector<RealignNode> realigns;
     std::vector<Attachment> attachments;
     std::vector<Eyeball> eyeballs; // order is the eyeball index
     std::vector<EyelidNode> eyelids;

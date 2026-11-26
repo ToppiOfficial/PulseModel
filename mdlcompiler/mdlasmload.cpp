@@ -214,20 +214,35 @@ bool BoneDefinitions(Load& l) {
                 return false;
         }
 
-        if (bone.noRealign) {
-            cm::BoneMarkup& markup = FindOrAddMarkup(c, bone.bone);
-            markup.noRealign = true;
-            markup.realigns.clear();
-        } else if (bone.realign) {
-            cm::BoneRealignEdit edit = bone.realignment;
-            edit.line = line;
-            if (!ApplyRealignBone(c, line, bone.bone, edit))
-                return false;
-        }
-
         if (bone.boneMerge) FindOrAddMarkup(c, bone.bone).isBonemerge = true;
         if (bone.doNotCollapse) FindOrAddMarkup(c, bone.bone).doNotCollapse = true;
         if (bone.alwaysCollapse) c.in.alwaysCollapse.push_back(bone.bone);
+    }
+    return true;
+}
+
+// The Realign Bone nodes in list order, each from the result of the one before on its bone.
+bool RealignBones(Load& l) {
+    for (const md::RealignNode& node : l.d.realigns) {
+        if (!node.targetsBone()) continue;
+
+        const int line = l.Node("Realign Bone: " + Quoted(node.name.empty() ? node.bone : node.name));
+        cm::BoneRealignEdit edit = node.edit;
+        edit.line = line;
+        if (!ApplyRealignBone(l.c, line, node.bone, edit))
+            return false;
+    }
+    return true;
+}
+
+// After every realign, so a Bone Definition's No realign drops the realigns of its bone.
+bool NoRealign(Load& l) {
+    for (const md::BoneDefinition& bone : l.d.bones) {
+        if (!bone.targetsBone() || !bone.noRealign) continue;
+
+        cm::BoneMarkup& markup = FindOrAddMarkup(l.c, bone.bone);
+        markup.noRealign = true;
+        markup.realigns.clear();
     }
     return true;
 }
@@ -565,8 +580,8 @@ bool BoneMarkups(Load& l) {
                     l.Warn(line, "no driver bone, skipped");
                     continue;
                 }
-                if (procedural->triggers.empty())
-                    return c.Fail(line, "$driverbone \"" + node.bone + "\": no triggers");
+                if (std::ranges::none_of(procedural->triggers, &md::ProceduralTrigger::enabled))
+                    return c.Fail(line, "$driverbone \"" + node.bone + "\": no enabled triggers");
 
                 cm::ProceduralBone pb;
                 pb.helpername = node.bone;
@@ -575,6 +590,8 @@ bool BoneMarkups(Load& l) {
                 if (procedural->influenceOutput >= 0.0f) pb.influenceOutput = procedural->influenceOutput;
                 const Token at{"$driverbone trigger", line, false};
                 for (const md::ProceduralTrigger& trigger : procedural->triggers) {
+                    if (!trigger.enabled) continue;
+
                     // The base position joins the trigger position before the model scale.
                     const pm::Vector3 pos{procedural->basePosition.x + trigger.helperPosition.x,
                                           procedural->basePosition.y + trigger.helperPosition.y,
@@ -1153,6 +1170,8 @@ constexpr Pass kPasses[] = {
     MaterialCollapses,
     MaterialDirectories,
     BoneDefinitions,
+    RealignBones,
+    NoRealign,
     Meshes,
     Groups,
     Lods,

@@ -45,6 +45,8 @@ constexpr std::uint32_t MaterialsChunk = tag('M', 'M', 'R', 'K');
 
 constexpr std::uint32_t BonesChunk = tag('B', 'D', 'E', 'F');
 
+constexpr std::uint32_t RealignsChunk = tag('R', 'L', 'G', 'N');
+
 constexpr std::uint32_t AttachmentsChunk = tag('A', 'T', 'T', 'C');
 
 constexpr std::uint32_t HitboxesChunk = tag('H', 'B', 'O', 'X');
@@ -385,8 +387,27 @@ BoneDefinition readBoneDefinition(core::BinaryReader& in)
     bind.realignOrigin = readVector(in);
     bind.realignAngles = readVector(in);
 
-    auto& edit = bone.realignment;
-    bone.realign = in.read<bool>();
+    if (in.remaining()) bone.doNotCollapse = in.read<bool>();
+    if (in.remaining()) bone.alwaysCollapse = in.read<bool>();
+    if (in.remaining()) bone.noRealign = in.read<bool>();
+
+    for (const auto& v : {bind.origin, bind.angles, bind.realignOrigin, bind.realignAngles})
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
+            throw std::runtime_error("Invalid bone transform.");
+    return bone;
+}
+
+RealignNode readRealign(core::BinaryReader& in)
+{
+    RealignNode node;
+    node.uid = in.read<Uid>();
+    if (!node.uid) throw std::runtime_error("Invalid realign id.");
+
+    node.name = in.text();
+    node.enabled = in.read<bool>();
+    node.bone = in.text();
+
+    auto& edit = node.edit;
     edit.hasOrigin = in.read<bool>();
     edit.hasAngles = in.read<bool>();
     edit.origin = readVector(in);
@@ -396,14 +417,10 @@ BoneDefinition readBoneDefinition(core::BinaryReader& in)
     edit.affectChildren = in.read<bool>();
     edit.ignoreAnimation = in.read<bool>();
 
-    if (in.remaining()) bone.doNotCollapse = in.read<bool>();
-    if (in.remaining()) bone.alwaysCollapse = in.read<bool>();
-    if (in.remaining()) bone.noRealign = in.read<bool>();
-
-    for (const auto& v : {bind.origin, bind.angles, bind.realignOrigin, bind.realignAngles, edit.origin, edit.angles})
+    for (const auto& v : {edit.origin, edit.angles})
         if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
-            throw std::runtime_error("Invalid bone transform.");
-    return bone;
+            throw std::runtime_error("Invalid realign transform.");
+    return node;
 }
 
 Attachment readAttachment(core::BinaryReader& in)
@@ -1099,6 +1116,10 @@ BoneMarkupNode readBoneMarkup(core::BinaryReader& in)
             if (!(procedural.influenceInput > 0.0f)) procedural.influenceInput = 1.0f;
             if (!(procedural.influenceOutput >= 0.0f)) procedural.influenceOutput = 1.0f;
         }
+
+        // Files saved before the trigger switches end here.
+        if (in.remaining() >= procedural.triggers.size())
+            for (auto& trigger : procedural.triggers) trigger.enabled = in.read<bool>();
         break;
     }
     case BoneMarkupKind::Ik: {
@@ -1149,7 +1170,10 @@ void attachFolders(Document& document, const std::vector<StoredFolder>& stored)
         switch (folder.kind) {
         case FolderKind::Mesh: assign(document.meshes, folder.uid, members); break;
         case FolderKind::ModelGroup: assign(document.groups, folder.uid, members); break;
-        case FolderKind::BoneDefinition: assign(document.bones, folder.uid, members); break;
+        case FolderKind::BoneDefinition:
+            assign(document.bones, folder.uid, members);
+            assign(document.realigns, folder.uid, members);
+            break;
         case FolderKind::Attachment: assign(document.attachments, folder.uid, members); break;
         case FolderKind::HitboxSet: assign(document.hitboxSets, folder.uid, members); break;
         case FolderKind::Physics: assign(document.physicsNodes, folder.uid, members); break;
@@ -1232,6 +1256,7 @@ void visitFolderMembers(Document& document, Visit&& visit)
     for (auto& node : document.meshes) visit(node, FolderKind::Mesh);
     for (auto& node : document.groups) visit(node, FolderKind::ModelGroup);
     for (auto& node : document.bones) visit(node, FolderKind::BoneDefinition);
+    for (auto& node : document.realigns) visit(node, FolderKind::BoneDefinition);
     for (auto& node : document.attachments) visit(node, FolderKind::Attachment);
     for (auto& node : document.hitboxSets) visit(node, FolderKind::HitboxSet);
     for (auto& node : document.physicsNodes) visit(node, FolderKind::Physics);
@@ -1271,7 +1296,7 @@ bool known(std::uint32_t type)
            type == BoneMarkupChunk || type == EyeballsChunk || type == EyelidsChunk || type == PrefabsChunk ||
            type == LodsChunk || type == LodSettingsChunk || type == FlexNodesChunk || type == FlexLinksChunk ||
            type == FlexWrinklesChunk || type == FlexVarsChunk || type == FlexSplitsChunk || type == AnimNodesChunk ||
-           type == AnimLinksChunk || type == PoseParamsChunk;
+           type == AnimLinksChunk || type == PoseParamsChunk || type == RealignsChunk;
 }
 
 Document readDocument(core::ChunkReader& reader)
@@ -1283,7 +1308,7 @@ Document readDocument(core::ChunkReader& reader)
     std::set<Uid> hitboxIds;
     const std::uint32_t version = reader.documentVersion();
 
-    if (version < 3)
+    if (version < 4)
         throw std::runtime_error("This model assembly uses an older format. Open and save it in PulseStudio.");
 
     for (const auto& chunk : reader.chunks()) {
@@ -1340,6 +1365,8 @@ Document readDocument(core::ChunkReader& reader)
                 readRecords(in, "material markup", [&](core::BinaryReader& record) { readMaterialRecord(record, document.materials); });
             } else if (chunk.type == BonesChunk) {
                 readRecords(in, "bone definition", [&](core::BinaryReader& record) { document.bones.push_back(readBoneDefinition(record)); });
+            } else if (chunk.type == RealignsChunk) {
+                readRecords(in, "realign", [&](core::BinaryReader& record) { document.realigns.push_back(readRealign(record)); });
             } else if (chunk.type == PhysicsNodesChunk) {
                 readRecords(in, "physics", [&](core::BinaryReader& record) { document.physicsNodes.push_back(readPhysicsNode(record)); });
             } else if (chunk.type == BoneMarkupChunk) {
@@ -1446,6 +1473,7 @@ Document readDocument(core::ChunkReader& reader)
     keepOwnSwitch(document.meshes);
     keepOwnSwitch(document.groups);
     keepOwnSwitch(document.bones);
+    keepOwnSwitch(document.realigns);
     keepOwnSwitch(document.attachments);
     keepOwnSwitch(document.hitboxSets);
     keepOwnSwitch(document.physicsNodes);
