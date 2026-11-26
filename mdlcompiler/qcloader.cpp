@@ -3300,9 +3300,29 @@ bool CmdAnimationCommon(Ctx& c, const Token& cmd, bool bindpose) {
     if (!ParseAnimBody(c, cmd, name, a))
         return false;
 
-    c.namedAnims[name] = static_cast<int>(c.in.anims.size());
-    c.in.anims.push_back(std::move(a));
+    return ApplyAnimation(c, cmd.line, std::move(a));
+}
+
+// A finished $animation: registered by name so a $sequence can name it.
+bool ApplyAnimation(Ctx& c, int line, cm::CompileInput::InAnim anim) {
+    if (c.namedAnims.count(anim.name))
+        return c.Fail(line, "duplicate animation name \"" + anim.name + "\"");
+
+    c.namedAnims[anim.name] = static_cast<int>(c.in.anims.size());
+    c.in.anims.push_back(std::move(anim));
     return true;
+}
+
+// An implied animation, written into the list but never named; returns its index.
+int AddImpliedAnimation(Ctx& c, cm::CompileInput::InAnim anim) {
+    c.in.anims.push_back(std::move(anim));
+    return static_cast<int>(c.in.anims.size()) - 1;
+}
+
+// The animation a `$animation`-style source name loads as: the virtual name of an embedded file or a path.
+source::Source* LoadAnimationSource(Ctx& c, int line, const std::string& file) {
+    return LoadSource(c, WithSourceExtension(c, file), line, /*morphSource=*/false, /*edit=*/nullptr,
+                      source::LoadKind::Animation);
 }
 
 bool CmdAnimation(Ctx& c, const Token& cmd) { return CmdAnimationCommon(c, cmd, false); }
@@ -4602,10 +4622,20 @@ bool CmdSequenceCommon(Ctx& c, const Token& cmd, bool bindpose) {
     if (blends.empty())
         return c.Fail(cmd.line, cmd.text + " \"" + seq.name + "\" has no animations");
 
-    // stock CopyAnimationSettings: implied blend anims after the
-    // first inherit anim 0's fps, transform and whole ordered command list.
-    // Named animation references keep their own settings.
-    for (size_t i = 1; i < blends.size(); i++) {
+    return ApplySequence(c, cmd.line, std::move(seq), std::move(blends), /*inherit=*/true);
+}
+
+// A finished $sequence. `blends` are indexes into the animation list, the first receiving the options. With
+// `inherit` the implied blend anims after the first take anim 0's settings, as stock CopyAnimationSettings does:
+// its fps, transform and whole ordered command list. Named animation references keep their own settings.
+bool ApplySequence(Ctx& c, int line, cm::CompileInput::InSequence seq, std::vector<int> blends, bool inherit) {
+    for (const auto& s : c.in.sequences)
+        if (_stricmp(s.name.c_str(), seq.name.c_str()) == 0)
+            return c.Fail(line, "duplicate sequence name \"" + seq.name + "\"");
+    if (blends.empty())
+        return c.Fail(line, "sequence \"" + seq.name + "\" has no animations");
+
+    for (size_t i = 1; inherit && i < blends.size(); i++) {
         cm::CompileInput::InAnim& dst = c.in.anims[blends[i]];
         if (dst.name.empty() || dst.name[0] != '@')
             continue;
@@ -7384,10 +7414,36 @@ bool CmdWeightList(Ctx& c, const Token& cmd) {
     wl.name = name;
     if (!ParseWeightEntries(c, cmd, name, wl.entries))
         return false;
-    c.in.weightlists.push_back(std::move(wl));
-    // slot 0 is the default list, so the named lists share kMaxWeightlists - 1
+    return ApplyWeightList(c, cmd.line, std::move(wl));
+}
+
+// The semantic half of $weightlist: one list per name, and the named lists share
+// kMaxWeightlists - 1 because slot 0 is the default list.
+bool ApplyWeightList(Ctx& c, int line, cm::WeightList list) {
+    for (const auto& e : c.in.weightlists)
+        if (_stricmp(e.name.c_str(), list.name.c_str()) == 0)
+            return c.Fail(line, "duplicate weightlist \"" + list.name + "\"");
+    c.in.weightlists.push_back(std::move(list));
     if (c.in.weightlists.size() > static_cast<size_t>(pulse::limits::kMaxWeightlists) - 1)
-        return c.Fail(cmd.line, "too many weightlists");
+        return c.Fail(line, "too many weightlists");
+    return true;
+}
+
+// A fully stated $poseparameter; a name declared before is updated in place, as LookupPoseParameter does.
+bool ApplyPoseParameter(Ctx& c, int line, const cm::PoseParam& param) {
+    cm::PoseParam* pp = nullptr;
+    for (auto& e : c.in.poseparams)
+        if (_stricmp(e.name.c_str(), param.name.c_str()) == 0) { pp = &e; break; }
+    if (!pp) {
+        c.in.poseparams.push_back(param);
+    } else {
+        pp->min = param.min;
+        pp->max = param.max;
+        pp->flags = param.flags;
+        pp->loop = param.loop;
+    }
+    if (c.in.poseparams.size() > static_cast<size_t>(pulse::limits::kMaxPoseParam))
+        return c.Fail(line, "too many pose parameters");
     return true;
 }
 

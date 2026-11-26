@@ -50,6 +50,17 @@ bool AddTrigger(Ctx& c, const Token& cmd, cm::ProceduralBone& pb, float tolDeg,
                 const pm::Vector3& driverRotDeg, const pm::Vector3& helperRotDeg,
                 const pm::Vector3& pos, bool absolutePose);
 
+// Animations and sequences. ApplyAnimation registers a named $animation, AddImpliedAnimation one only a $sequence
+// owns (it returns the index into the animation list). ApplySequence takes the indexes of its blend animations;
+// `inherit` copies anim 0's settings onto the implied ones after it, as the .qc reader does.
+bool ApplyWeightList(Ctx& c, int line, cm::WeightList list);
+bool ApplyPoseParameter(Ctx& c, int line, const cm::PoseParam& param);
+bool ApplyAnimation(Ctx& c, int line, cm::CompileInput::InAnim anim);
+int AddImpliedAnimation(Ctx& c, cm::CompileInput::InAnim anim);
+bool ApplySequence(Ctx& c, int line, cm::CompileInput::InSequence seq, std::vector<int> blends, bool inherit);
+// Loads `file` (an embedded source's virtual name or a path) as an animation source.
+source::Source* LoadAnimationSource(Ctx& c, int line, const std::string& file);
+
 // A $lod / $shadowlod block, and the model lookup its rules use: a render mesh name, a source
 // file name or a fused choice by its name.
 bool ApplyLod(Ctx& c, int line, cm::ScriptLod lod);

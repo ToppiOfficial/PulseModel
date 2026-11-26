@@ -14,6 +14,7 @@
 
 #include "dependencies.h"
 #include "diagnostic.h"
+#include "mdlasmanim.h"
 #include "mdlasmdoc.h"
 #include "mdlasmflex.h"
 #include "pathcompat.h"
@@ -1064,6 +1065,77 @@ bool Flex(Load& l) {
 }
 
 
+// ---------------------------------------------------------------------------
+// Animation Graph
+// ---------------------------------------------------------------------------
+
+// The name a diagnostic gives a graph node.
+std::string AnimNodeLabel(const md::Document& d, md::Uid uid) {
+    const md::AnimNode* node = d.findAnimNode(uid);
+    if (!node || node->name.empty())
+        return "Animation Graph";
+    return "Animation Graph " + Quoted(node->name);
+}
+
+bool Animations(Load& l) {
+    Ctx& c = l.c;
+    if (l.d.animNodes.empty() && l.d.poseParameters.empty())
+        return true;
+
+    const md::AnimScript script = md::emitAnimScript(l.d);
+    if (!script.problems.empty()) {
+        const md::Problem& first = script.problems.front();
+        return c.Fail(l.Node(AnimNodeLabel(l.d, first.node)), first.message);
+    }
+
+    for (const cm::WeightList& list : script.weightLists)
+        if (!ApplyWeightList(c, l.Node("Weight List " + Quoted(list.name)), list))
+            return false;
+    for (const cm::PoseParam& param : script.poseParams)
+        if (!ApplyPoseParameter(c, l.Node("Pose Parameter " + Quoted(param.name)), param))
+            return false;
+    c.in.xnodes = script.xnodes;
+
+    // Animations first, so a sequence can name them; `at` maps an emitted animation to its place in the list.
+    std::vector<int> at(script.anims.size(), -1);
+    for (size_t i = 0; i < script.anims.size(); ++i) {
+        cm::CompileInput::InAnim anim = script.anims[i].anim;
+        const int node = l.Node(AnimNodeLabel(l.d, script.anims[i].node));
+
+        if (script.anims[i].source) {
+            const md::SourceFile* source = l.d.findSource(script.anims[i].source);
+            if (!source)
+                return c.Fail(node, "the animation source is missing");
+            anim.source = LoadAnimationSource(c, node, VirtualName(*source));
+            if (!anim.source)
+                return false;
+        }
+
+        if (!anim.name.empty() && anim.name[0] == '@') {
+            at[i] = AddImpliedAnimation(c, std::move(anim));
+        } else {
+            const std::string name = anim.name;
+            if (!ApplyAnimation(c, node, std::move(anim)))
+                return false;
+            at[i] = c.namedAnims[name];
+        }
+    }
+
+    for (const md::AnimScriptSequence& entry : script.sequences) {
+        cm::CompileInput::InSequence seq = entry.sequence;
+        std::vector<int> blends;
+        if (seq.blendAnims.empty())
+            blends.push_back(at[static_cast<size_t>(seq.animIndex)]);
+        for (const int index : seq.blendAnims)
+            blends.push_back(at[static_cast<size_t>(index)]);
+        seq.blendAnims.clear();
+
+        if (!ApplySequence(c, l.Node(AnimNodeLabel(l.d, entry.node)), std::move(seq), std::move(blends), /*inherit=*/false))
+            return false;
+    }
+    return true;
+}
+
 // The passes, in the order the commands need.
 constexpr Pass kPasses[] = {
     Definition,
@@ -1078,6 +1150,7 @@ constexpr Pass kPasses[] = {
     Attachments,
     Hitboxes,
     BoneMarkups,
+    Animations,
     Physics,
     Prefabs,
     Flex,

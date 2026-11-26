@@ -592,6 +592,155 @@ struct Folder
     Uid parent = 0;
 };
 
+
+using AnimCommand = compile::CompileInput::InAnim::InCmd;
+using AnimIkRule = compile::CompileInput::InIkRule;
+
+enum class AnimNodeType : std::uint32_t
+{
+    Out, Clip, Animation, Sequence, WeightList, Command, Blend, Walk, Layer, PoseParam
+};
+
+// What a socket carries. Animation is a named `$animation`, usable wherever a clip is and as a reference.
+enum class AnimSocket : std::uint8_t { Clip, ClipSet, Animation, Weights, Sequence, Pose };
+
+// A DMX clip: which embedded source, which clip inside it, and the frames taken from it.
+struct AnimClipData
+{
+    Uid source = 0;
+    std::string clip;      // `blockname`; empty takes the first clip that is not the bind pose
+    bool bindPose = false; // no source: the model's bind pose
+    int startFrame = 0;
+    int endFrame = -1;     // -1 runs to the end of the clip
+};
+
+// The options of one `$animation`, shared by the Animation node and the Sequence node (its blend anim 0).
+struct AnimProps
+{
+    float fps = 30.0f;
+    bool loop = false, snap = false, post = false, noForceLoop = false;
+    bool fudgeLoop = false, noAutoIk = false, noCull = false, ignoreScale = false;
+    int startLoop = 0;
+    float startLoopPercent = 0.0f;
+    int motionType = 0;
+    float motionRollback = 0.3f;
+    int numFrames = 0; // 0 keeps the clip's own length
+    bool originSet = false;
+    math::Vector3 origin;
+    bool anglesSet = false;
+    math::Vector3 angles; // pitch, yaw, roll in degrees, as `angles` and `rotate` read them
+    float scale = 1.0f;
+    bool disableAnimBlocks = false, firstSectionLocal = false;
+    float noStallFrames = 0.0f;
+    std::vector<AnimIkRule> ikRules;
+};
+
+enum class AnimDeltaMode : std::uint32_t { None, Delta, PreDelta };
+
+struct AnimSequenceData
+{
+    AnimProps anim;
+    std::string activity;
+    int activityWeight = 0; // 0 writes none
+    std::vector<std::string> activityModifiers;
+    bool hidden = false, autoPlay = false, realTime = false, snap = false, post = false;
+    bool worldSpace = false, worldRelative = false;
+    AnimDeltaMode delta = AnimDeltaMode::None;
+    float fadeIn = 0.2f, fadeOut = 0.2f, exitPhase = 0.0f;
+    std::string poseCycle, rootDriver;
+    // `node` when both names are equal; `transition` otherwise, reversible for `rtransition`.
+    std::string entryNode, exitNode;
+    bool reversible = false;
+    std::vector<compile::SeqEvent> events;
+    std::vector<compile::SeqAnimTag> animTags;
+    std::vector<compile::IkLock> ikLocks;
+};
+
+struct AnimWeightEntry
+{
+    std::string bone;
+    float weight = 0.0f;
+    float posWeight = 0.0f;
+    bool posSet = false; // false: the position weight follows the weight
+};
+
+struct AnimWeightData
+{
+    std::vector<AnimWeightEntry> entries;
+};
+
+// One pose parameter axis of a Blend node. `calc` measures the range from an attachment instead of min and max.
+struct AnimBlendAxis
+{
+    std::string name;
+    float min = 0.0f, max = 1.0f;
+    bool wrap = false;
+    float loop = 0.0f;
+    bool calc = false;
+    std::string attachment;
+    int control = 0;
+};
+
+struct AnimBlendData
+{
+    int axes = 1; // 1 or 2
+    AnimBlendAxis axis[2];
+    int blendWidth = 0; // 0 lets the compiler choose
+    std::string reference, compare, center;
+};
+
+// A 3x3 grid whose cells are the nine directions; `move` names the two pose parameters.
+struct AnimWalkData
+{
+    std::string xName = "move_x", yName = "move_y";
+    float min = -1.0f, max = 1.0f;
+    bool swapAxes = false;
+};
+
+struct AnimLayerData
+{
+    bool add = false; // addlayer; otherwise blendlayer
+    float start = 0, peak = 0, tail = 0, end = 0;
+    bool xfade = false, spline = false, noBlend = false, local = false;
+    bool usePose = false;
+    std::string poseParameter;
+};
+
+struct AnimNode
+{
+    Uid uid = 0;
+    AnimNodeType type = AnimNodeType::Clip;
+    float x = 0, y = 0;
+    bool muted = false, collapsed = false;
+    // Animation, Sequence, Clip, Weight List and Blend: the name other nodes and the compiler know it by.
+    // Pose Param: the declared pose parameter it stands for.
+    std::string name;
+
+    AnimClipData clip;
+    AnimProps animation;
+    AnimSequenceData sequence;
+    AnimWeightData weights;
+    AnimCommand command;
+    AnimBlendData blend;
+    AnimWalkData walk;
+    AnimLayerData layer;
+};
+
+// One declared pose parameter (`$poseparameter`). The order is the index the compiled model gives it.
+struct AnimPoseParameter
+{
+    Uid uid = 0;
+    std::string name;
+    float min = 0.0f, max = 1.0f;
+};
+
+struct AnimLink
+{
+    Uid from = 0, to = 0;
+    int fromSocket = 0, toSocket = 0;
+};
+
+
 struct Document
 {
     std::string game;
@@ -616,6 +765,9 @@ struct Document
     std::vector<FlexWrinkle> flexWrinkles;
     std::vector<FlexSplit> flexSplits;
     std::vector<std::string> flexLocalVars;
+    std::vector<AnimNode> animNodes;
+    std::vector<AnimLink> animLinks;
+    std::vector<AnimPoseParameter> poseParameters;
     std::vector<Folder> folders;
 
     // Chunk tags this reader does not know and skipped; reported so nothing is dropped silently.
@@ -625,6 +777,7 @@ struct Document
     const MeshEntry* findMesh(Uid uid) const;
     const Folder* findFolder(Uid uid) const;
     const FlexNode* findFlexNode(Uid uid) const;
+    const AnimNode* findAnimNode(Uid uid) const;
     HitboxSet* findHitboxSet(Uid uid);
     bool folderActive(Uid folder) const;
     // Sets every node's `enabled` from its own switch and its folders'.

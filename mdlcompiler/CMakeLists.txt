@@ -3,10 +3,10 @@
 add_executable(mdlcompiler main.cpp api.h dmxloader.cpp dmxvalidate.cpp dmxrig.cpp smdloader.cpp
                fbxloader.cpp meshedit.cpp skeletonedit.cpp compile.cpp facemarkup.cpp rename.cpp
                flexreg.cpp qcloader.cpp writemdl.cpp writevtx.cpp writephy.cpp
-               mdlasmfile.cpp mdlasmread.cpp mdlasmload.cpp mdlasmflex.cpp)
+               mdlasmfile.cpp mdlasmread.cpp mdlasmload.cpp mdlasmflex.cpp mdlasmanim.cpp)
 
 # Each tool owns its own version; there is no project-wide one.
-set(TOOL_VERSION 1.20.2)
+set(TOOL_VERSION 1.22.0)
 string(REPLACE "." "," TOOL_VERSION_COMMA "${TOOL_VERSION}")
 target_compile_definitions(mdlcompiler PRIVATE PULSEMODEL_VERSION="${TOOL_VERSION}")
 

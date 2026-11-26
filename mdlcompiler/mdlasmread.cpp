@@ -79,6 +79,11 @@ constexpr std::uint32_t FlexVarsChunk = tag('F', 'L', 'X', 'V');
 
 constexpr std::uint32_t FlexSplitsChunk = tag('F', 'L', 'X', 'S');
 
+constexpr std::uint32_t AnimNodesChunk = tag('A', 'N', 'O', 'D');
+
+constexpr std::uint32_t AnimLinksChunk = tag('A', 'L', 'N', 'K');
+constexpr std::uint32_t PoseParamsChunk = tag('P', 'P', 'R', 'M');
+
 enum class MaterialRecord : std::uint32_t { Directory, Rename, Collapse };
 
 // Enumerations stored as u32 are range checked so a bad value fails its record, not the file.
@@ -567,6 +572,309 @@ LodSettings readLodSettings(core::BinaryReader& in)
     return settings;
 }
 
+void requireFinite(std::initializer_list<float> values)
+{
+    for (const float value : values)
+        if (!std::isfinite(value)) throw std::runtime_error("Invalid animation value.");
+}
+
+AnimIkRule readIkRule(core::BinaryReader& in)
+{
+    AnimIkRule rule;
+    rule.chain = in.text();
+    rule.type = in.text();
+    rule.touchBone = in.text();
+    rule.attachment = in.text();
+    rule.height = in.read<float>();
+    rule.floor = in.read<float>();
+    rule.radius = in.read<float>();
+    rule.heightSet = in.read<bool>();
+    rule.floorSet = in.read<bool>();
+    rule.radiusSet = in.read<bool>();
+    rule.slot = in.read<std::int32_t>();
+    rule.slotSet = in.read<bool>();
+    rule.contact = in.read<std::int32_t>();
+    rule.startframe = in.read<std::int32_t>();
+    rule.peakframe = in.read<std::int32_t>();
+    rule.tailframe = in.read<std::int32_t>();
+    rule.endframe = in.read<std::int32_t>();
+    rule.usesequence = in.read<bool>();
+    rule.usesource = in.read<bool>();
+    rule.fakeorigin = readVector(in);
+    rule.fakerotate = readVector(in);
+    rule.fakeoriginSet = in.read<bool>();
+    rule.fakerotateSet = in.read<bool>();
+    rule.autosteps = in.read<bool>();
+    rule.autostepsCount = in.read<std::int32_t>();
+    rule.autostepsBone = in.text();
+    requireFinite({rule.height, rule.floor, rule.radius, rule.fakeorigin.x, rule.fakeorigin.y, rule.fakeorigin.z,
+                   rule.fakerotate.x, rule.fakerotate.y, rule.fakerotate.z});
+    return rule;
+}
+
+AnimProps readAnimProps(core::BinaryReader& in)
+{
+    AnimProps props;
+    props.fps = in.read<float>();
+    props.loop = in.read<bool>();
+    props.snap = in.read<bool>();
+    props.post = in.read<bool>();
+    props.noForceLoop = in.read<bool>();
+    props.fudgeLoop = in.read<bool>();
+    props.noAutoIk = in.read<bool>();
+    props.noCull = in.read<bool>();
+    props.ignoreScale = in.read<bool>();
+    props.startLoop = in.read<std::int32_t>();
+    props.startLoopPercent = in.read<float>();
+    props.motionType = in.read<std::int32_t>();
+    props.motionRollback = in.read<float>();
+    props.numFrames = in.read<std::int32_t>();
+    props.originSet = in.read<bool>();
+    props.origin = readVector(in);
+    props.anglesSet = in.read<bool>();
+    props.angles = readVector(in);
+    props.scale = in.read<float>();
+    props.disableAnimBlocks = in.read<bool>();
+    props.firstSectionLocal = in.read<bool>();
+    props.noStallFrames = in.read<float>();
+    for (auto remaining = in.count(8); remaining; --remaining) {
+        const auto bytes = in.text();
+        core::parseRecord(bytes, [&](core::BinaryReader& record) { props.ikRules.push_back(readIkRule(record)); });
+    }
+    requireFinite({props.fps, props.startLoopPercent, props.motionRollback, props.origin.x, props.origin.y, props.origin.z,
+                   props.angles.x, props.angles.y, props.angles.z, props.scale, props.noStallFrames});
+    return props;
+}
+
+AnimCommand readAnimCommand(core::BinaryReader& in)
+{
+    AnimCommand cmd;
+    cmd.kind = readEnum<AnimCommand::Kind>(in, std::uint32_t(AnimCommand::DiscardChannels));
+    cmd.name = in.text();
+    cmd.frame = in.read<std::int32_t>();
+    cmd.numframes = in.read<std::int32_t>();
+    cmd.presubtract = in.read<bool>();
+    cmd.fixupStart = in.read<std::int32_t>();
+    cmd.fixupEnd = in.read<std::int32_t>();
+    cmd.angle = in.read<float>();
+    cmd.alignBone = in.text();
+    cmd.motiontype = in.read<std::int32_t>();
+    cmd.srcframe = in.read<std::int32_t>();
+    cmd.destframe = in.read<std::int32_t>();
+    cmd.driverAxis = in.read<std::int32_t>();
+    cmd.driverValue = in.read<float>();
+    cmd.driverAll = in.read<bool>();
+    cmd.driverStart = in.read<std::int32_t>();
+    cmd.driverPeak = in.read<std::int32_t>();
+    cmd.driverTail = in.read<std::int32_t>();
+    cmd.driverEnd = in.read<std::int32_t>();
+    cmd.matchPre = in.read<std::int32_t>();
+    cmd.matchPost = in.read<std::int32_t>();
+    cmd.motionEndFrame = in.read<std::int32_t>();
+    cmd.worldLoops = in.read<bool>();
+    cmd.copyBindPose = in.read<bool>();
+    cmd.copyEndFrame = in.read<std::int32_t>();
+    cmd.fadeIn = in.read<float>();
+    cmd.fadeOut = in.read<float>();
+    cmd.copyPos = in.read<bool>();
+    cmd.copyRot = in.read<bool>();
+    cmd.xform.bone = in.text();
+    cmd.xform.origin = readVector(in);
+    cmd.xform.angles.x = in.read<float>();
+    cmd.xform.angles.y = in.read<float>();
+    cmd.xform.angles.z = in.read<float>();
+    cmd.xform.originSet = in.read<bool>();
+    cmd.xform.anglesSet = in.read<bool>();
+    core::parseRecord(in.text(), [&](core::BinaryReader& record) { cmd.ikfixup = readIkRule(record); });
+    cmd.derivativeScale = in.read<float>();
+    cmd.keepDuration = in.read<bool>();
+    cmd.splineDelta = in.read<bool>();
+    cmd.compressFrames = in.read<std::int32_t>();
+    cmd.counterHasTarget = in.read<bool>();
+    cmd.counterAngles = readVector(in);
+    cmd.forceDoPos = in.read<bool>();
+    cmd.forceDoRot = in.read<bool>();
+    cmd.forceRotLocal = in.read<bool>();
+    cmd.forcePos = readVector(in);
+    cmd.forceRot = readVector(in);
+    for (auto remaining = in.count(8); remaining; --remaining) {
+        compile::ChannelDiscard discard;
+        discard.bone = in.text();
+        discard.posAxes = in.read<std::int32_t>();
+        discard.rotAxes = in.read<std::int32_t>();
+        discard.wholeBone = in.read<bool>();
+        cmd.discards.push_back(std::move(discard));
+    }
+    requireFinite({cmd.angle, cmd.driverValue, cmd.fadeIn, cmd.fadeOut, cmd.xform.origin.x, cmd.xform.origin.y,
+                   cmd.xform.origin.z, cmd.xform.angles.x, cmd.xform.angles.y, cmd.xform.angles.z, cmd.derivativeScale,
+                   cmd.counterAngles.x, cmd.counterAngles.y, cmd.counterAngles.z, cmd.forcePos.x, cmd.forcePos.y,
+                   cmd.forcePos.z, cmd.forceRot.x, cmd.forceRot.y, cmd.forceRot.z});
+    return cmd;
+}
+
+AnimSequenceData readAnimSequence(core::BinaryReader& in)
+{
+    AnimSequenceData data;
+    data.anim = readAnimProps(in);
+    data.activity = in.text();
+    data.activityWeight = in.read<std::int32_t>();
+    data.activityModifiers = readStrings(in);
+    data.hidden = in.read<bool>();
+    data.autoPlay = in.read<bool>();
+    data.realTime = in.read<bool>();
+    data.snap = in.read<bool>();
+    data.post = in.read<bool>();
+    data.worldSpace = in.read<bool>();
+    data.worldRelative = in.read<bool>();
+    data.delta = readEnum<AnimDeltaMode>(in, std::uint32_t(AnimDeltaMode::PreDelta));
+    data.fadeIn = in.read<float>();
+    data.fadeOut = in.read<float>();
+    data.exitPhase = in.read<float>();
+    data.poseCycle = in.text();
+    data.rootDriver = in.text();
+    data.entryNode = in.text();
+    data.exitNode = in.text();
+    data.reversible = in.read<bool>();
+
+    for (auto remaining = in.count(8); remaining; --remaining) {
+        compile::SeqEvent event;
+        event.name = in.text();
+        event.frame = in.read<std::int32_t>();
+        event.options = in.text();
+        data.events.push_back(std::move(event));
+    }
+    for (auto remaining = in.count(8); remaining; --remaining) {
+        compile::SeqAnimTag tag;
+        tag.name = in.text();
+        tag.cycle = in.read<float>();
+        data.animTags.push_back(std::move(tag));
+    }
+    for (auto remaining = in.count(8); remaining; --remaining) {
+        compile::IkLock lock;
+        lock.name = in.text();
+        lock.flPosWeight = in.read<float>();
+        lock.flLocalQWeight = in.read<float>();
+        data.ikLocks.push_back(std::move(lock));
+    }
+
+    requireFinite({data.fadeIn, data.fadeOut, data.exitPhase});
+    for (const auto& tag : data.animTags) requireFinite({tag.cycle});
+    for (const auto& lock : data.ikLocks) requireFinite({lock.flPosWeight, lock.flLocalQWeight});
+    return data;
+}
+
+AnimNode readAnimNode(core::BinaryReader& in)
+{
+    AnimNode node;
+    node.uid = in.read<Uid>();
+    node.type = readEnum<AnimNodeType>(in, std::uint32_t(AnimNodeType::PoseParam));
+    node.x = in.read<float>();
+    node.y = in.read<float>();
+    node.muted = in.read<bool>();
+    node.collapsed = in.read<bool>();
+    node.name = in.text();
+    if (!node.uid) throw std::runtime_error("Invalid animation node ID.");
+    requireFinite({node.x, node.y});
+
+    switch (node.type) {
+    case AnimNodeType::Out:
+        break;
+    case AnimNodeType::Clip:
+        node.clip.source = in.read<Uid>();
+        node.clip.clip = in.text();
+        node.clip.bindPose = in.read<bool>();
+        node.clip.startFrame = in.read<std::int32_t>();
+        node.clip.endFrame = in.read<std::int32_t>();
+        break;
+    case AnimNodeType::Animation:
+        node.animation = readAnimProps(in);
+        break;
+    case AnimNodeType::Sequence:
+        node.sequence = readAnimSequence(in);
+        break;
+    case AnimNodeType::WeightList:
+        for (auto remaining = in.count(8); remaining; --remaining) {
+            AnimWeightEntry entry;
+            entry.bone = in.text();
+            entry.weight = in.read<float>();
+            entry.posWeight = in.read<float>();
+            entry.posSet = in.read<bool>();
+            requireFinite({entry.weight, entry.posWeight});
+            node.weights.entries.push_back(std::move(entry));
+        }
+        break;
+    case AnimNodeType::Command:
+        node.command = readAnimCommand(in);
+        break;
+    case AnimNodeType::Blend:
+        node.blend.axes = std::clamp(in.read<std::int32_t>(), 1, 2);
+        for (auto& axis : node.blend.axis) {
+            axis.name = in.text();
+            axis.min = in.read<float>();
+            axis.max = in.read<float>();
+            axis.wrap = in.read<bool>();
+            axis.loop = in.read<float>();
+            axis.calc = in.read<bool>();
+            axis.attachment = in.text();
+            axis.control = in.read<std::int32_t>();
+            requireFinite({axis.min, axis.max, axis.loop});
+        }
+        node.blend.blendWidth = in.read<std::int32_t>();
+        node.blend.reference = in.text();
+        node.blend.compare = in.text();
+        node.blend.center = in.text();
+        break;
+    case AnimNodeType::Walk:
+        node.walk.xName = in.text();
+        node.walk.yName = in.text();
+        node.walk.min = in.read<float>();
+        node.walk.max = in.read<float>();
+        node.walk.swapAxes = in.read<bool>();
+        requireFinite({node.walk.min, node.walk.max});
+        break;
+    case AnimNodeType::Layer:
+        node.layer.add = in.read<bool>();
+        node.layer.start = in.read<float>();
+        node.layer.peak = in.read<float>();
+        node.layer.tail = in.read<float>();
+        node.layer.end = in.read<float>();
+        node.layer.xfade = in.read<bool>();
+        node.layer.spline = in.read<bool>();
+        node.layer.noBlend = in.read<bool>();
+        node.layer.local = in.read<bool>();
+        node.layer.usePose = in.read<bool>();
+        node.layer.poseParameter = in.text();
+        requireFinite({node.layer.start, node.layer.peak, node.layer.tail, node.layer.end});
+        break;
+    case AnimNodeType::PoseParam:
+        break;
+    }
+    return node;
+}
+
+AnimPoseParameter readPoseParameter(core::BinaryReader& in)
+{
+    AnimPoseParameter param;
+    param.uid = in.read<Uid>();
+    param.name = in.text();
+    param.min = in.read<float>();
+    param.max = in.read<float>();
+    if (!param.uid) throw std::runtime_error("Invalid pose parameter ID.");
+    requireFinite({param.min, param.max});
+    return param;
+}
+
+AnimLink readAnimLink(core::BinaryReader& in)
+{
+    AnimLink link;
+    link.from = in.read<Uid>();
+    link.fromSocket = in.read<std::int32_t>();
+    link.to = in.read<Uid>();
+    link.toSocket = in.read<std::int32_t>();
+    if (!link.from || !link.to || link.fromSocket < 0 || link.toSocket < 0) throw std::runtime_error("Invalid animation link.");
+    return link;
+}
+
 FlexNode readFlexNode(core::BinaryReader& in)
 {
     FlexNode node;
@@ -955,7 +1263,8 @@ bool known(std::uint32_t type)
            type == PhysicsSettingsChunk || type == PhysicsNodesChunk || type == FoldersChunk ||
            type == BoneMarkupChunk || type == EyeballsChunk || type == EyelidsChunk || type == PrefabsChunk ||
            type == LodsChunk || type == LodSettingsChunk || type == FlexNodesChunk || type == FlexLinksChunk ||
-           type == FlexWrinklesChunk || type == FlexVarsChunk || type == FlexSplitsChunk;
+           type == FlexWrinklesChunk || type == FlexVarsChunk || type == FlexSplitsChunk || type == AnimNodesChunk ||
+           type == AnimLinksChunk || type == PoseParamsChunk;
 }
 
 Document readDocument(core::ChunkReader& reader)
@@ -1081,6 +1390,21 @@ Document readDocument(core::ChunkReader& reader)
                     if (!std::isfinite(split.factor)) throw std::runtime_error("Invalid morph split factor.");
                     document.flexSplits.push_back(std::move(split));
                 });
+            } else if (chunk.type == AnimNodesChunk) {
+                readRecords(in, "animation node", [&](core::BinaryReader& record) {
+                    auto node = readAnimNode(record);
+                    if (document.findAnimNode(node.uid)) throw std::runtime_error("Duplicate animation node ID.");
+                    document.animNodes.push_back(std::move(node));
+                });
+            } else if (chunk.type == AnimLinksChunk) {
+                readRecords(in, "animation link", [&](core::BinaryReader& record) { document.animLinks.push_back(readAnimLink(record)); });
+            } else if (chunk.type == PoseParamsChunk) {
+                readRecords(in, "pose parameter", [&](core::BinaryReader& record) {
+                    auto param = readPoseParameter(record);
+                    if (std::ranges::any_of(document.poseParameters, [&](const auto& other) { return other.uid == param.uid; }))
+                        throw std::runtime_error("Duplicate pose parameter ID.");
+                    document.poseParameters.push_back(std::move(param));
+                });
             }
             in.finish();
         });
@@ -1142,6 +1466,12 @@ const Folder* Document::findFolder(Uid uid) const
 {
     const auto found = std::ranges::find(folders, uid, &Folder::uid);
     return found == folders.end() ? nullptr : &*found;
+}
+
+const AnimNode* Document::findAnimNode(Uid uid) const
+{
+    const auto found = std::ranges::find(animNodes, uid, &AnimNode::uid);
+    return found == animNodes.end() ? nullptr : &*found;
 }
 
 const FlexNode* Document::findFlexNode(Uid uid) const
