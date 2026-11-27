@@ -195,6 +195,7 @@ private:
             switch (node->type) {
             case AnimNodeType::IncludeModel: include(*node); break;
             case AnimNodeType::DeclareSequence: declared(*node); break;
+            case AnimNodeType::DeclareAnimation: declaredAnim(*node); break;
             case AnimNodeType::Animation: namedAnim(*node); break;
             default: sequenceOf(*node); break;
             }
@@ -536,6 +537,24 @@ private:
         script_.sequences.push_back(std::move(out));
     }
 
+    // A `$declareanimation` slot: an empty override animation an included model's animation of that name fills.
+    // Written once however many Outs and sequences name it.
+    int declaredAnim(const AnimNode& node)
+    {
+        const auto found = named_.find(node.uid);
+        if (found != named_.end()) return found->second;
+
+        compile::CompileInput::InAnim anim;
+        anim.name = node.name;
+        anim.isDeclare = true;
+        anim.flags = kOverride;
+
+        for (const auto& existing : script_.anims)
+            if (sameName(existing.anim.name, node.name)) problem(node.uid, "Another animation is named \"" + node.name + "\".");
+        script_.anims.push_back({std::move(anim), node.uid, 0});
+        return named_[node.uid] = int(script_.anims.size()) - 1;
+    }
+
     void sequence(const AnimNode& root, const std::vector<const AnimNode*>& layers)
     {
         const auto& data = root.sequence;
@@ -579,6 +598,10 @@ private:
             seq.activitymodifiers.push_back(lowered(document_.findAnimNode(uid)->name));
         seq.events = data.events;
         seq.animtags = data.animTags;
+        for (const Uid uid : animEntries(document_, root, AnimNodeType::KeyValues)) {
+            if (!seq.keyvalues.empty()) seq.keyvalues += '\n';
+            seq.keyvalues += document_.findAnimNode(uid)->text;
+        }
         for (const Uid uid : animEntries(document_, root, AnimNodeType::IkLock)) seq.iklocks.push_back(document_.findAnimNode(uid)->ikLock);
 
         if (!data.entryNode.empty() || !data.exitNode.empty()) {
@@ -594,15 +617,17 @@ private:
             const auto& l = layer->layer;
 
             std::vector<const AnimNode*> inner;
+            // A declared slot is layered by name; the included model's sequence fills it.
             const auto* target = inputNode(document_, *layer, 1);
-            const auto* targetRoot = target ? rootOf(*target, inner) : nullptr;
-            if (!targetRoot) {
+            const bool declaredTarget = target && target->type == AnimNodeType::DeclareSequence;
+            const auto* targetRoot = target && !declaredTarget ? rootOf(*target, inner) : nullptr;
+            if (!targetRoot && !declaredTarget) {
                 problem(layer->uid, "Connect the sequence to layer.");
                 continue;
             }
-            if (targetRoot->uid == root.uid) problem(layer->uid, "A sequence cannot layer itself.");
+            if (targetRoot && targetRoot->uid == root.uid) problem(layer->uid, "A sequence cannot layer itself.");
 
-            entry.sequence = targetRoot->name;
+            entry.sequence = declaredTarget ? target->name : targetRoot->name;
             if (l.add) {
                 if (l.local) {
                     entry.flags |= kAlLocal;
@@ -630,7 +655,7 @@ private:
             out.members.push_back(layer->uid);
             for (const Uid uid : animUpstream(document_, layer->uid)) out.members.push_back(uid);
 
-            if (!emitted_.contains(targetRoot->uid)) pending_.push_back(targetRoot->uid);
+            if (targetRoot && !emitted_.contains(targetRoot->uid)) pending_.push_back(targetRoot->uid);
         }
 
         std::ranges::sort(out.members);
@@ -746,6 +771,7 @@ private:
     int cell(const AnimNode& root, compile::CompileInput::InSequence& seq, const AnimNode& source, int index, int firstIndex)
     {
         if (source.type == AnimNodeType::Animation) return namedAnim(source);
+        if (source.type == AnimNodeType::DeclareAnimation) return declaredAnim(source);
 
         std::vector<const AnimNode*> commands;
         const auto* clip = chain(source, commands);

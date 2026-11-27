@@ -792,7 +792,7 @@ AnimNode readAnimNode(core::BinaryReader& in)
 {
     AnimNode node;
     node.uid = in.read<Uid>();
-    node.type = readEnum<AnimNodeType>(in, std::uint32_t(AnimNodeType::DeclareSequence));
+    node.type = readEnum<AnimNodeType>(in, std::uint32_t(AnimNodeType::KeyValues));
     node.x = in.read<float>();
     node.y = in.read<float>();
     node.muted = in.read<bool>();
@@ -816,6 +816,7 @@ AnimNode readAnimNode(core::BinaryReader& in)
         break;
     case AnimNodeType::Sequence:
         node.sequence = readAnimSequence(in);
+        if (in.remaining()) in.text();
         break;
     case AnimNodeType::WeightList:
         for (auto remaining = in.count(8); remaining; --remaining) {
@@ -875,6 +876,10 @@ AnimNode readAnimNode(core::BinaryReader& in)
     case AnimNodeType::ActivityModifier:
     case AnimNodeType::IncludeModel:
     case AnimNodeType::DeclareSequence:
+    case AnimNodeType::DeclareAnimation:
+        break;
+    case AnimNodeType::KeyValues:
+        node.text = in.text();
         break;
     case AnimNodeType::IkLock:
         node.ikLock.name = in.text();

@@ -676,13 +676,18 @@ using AnimIkRule = compile::CompileInput::InIkRule;
 enum class AnimNodeType : std::uint32_t
 {
     Out, Clip, Animation, Sequence, WeightList, Command, Blend, Walk, Layer, PoseParam, ActivityModifier, IkLock, IkRule,
-    IncludeModel, DeclareSequence
+    IncludeModel, DeclareSequence, DeclareAnimation, KeyValues
 };
 
 // What a socket carries. Animation is a named `$animation`, usable wherever a clip is and as a reference.
 // Modifier, IkLock and IkRule are entries a Sequence or Animation lists; one entry node can feed several.
-// Model and Declare feed only Animation Out: an `$includemodel` and a `$declaresequence` slot.
-enum class AnimSocket : std::uint8_t { Clip, ClipSet, Animation, Weights, Sequence, Pose, Modifier, IkLock, IkRule, Model, Declare };
+// KeyValues is a Sequence entry: a `keyvalues` block, joined in list order when a Sequence lists several.
+// Model and Declare feed Animation Out: an `$includemodel` and a `$declaresequence` slot, which a Layer may also
+// name. DeclareAnim is a `$declareanimation` slot, usable wherever a named animation fills a sequence or grid.
+enum class AnimSocket : std::uint8_t
+{
+    Clip, ClipSet, Animation, Weights, Sequence, Pose, Modifier, IkLock, IkRule, Model, Declare, DeclareAnim, KeyValues
+};
 
 // A DMX clip: which embedded source, which clip inside it, and the frames taken from it.
 struct AnimClipData
@@ -804,6 +809,7 @@ struct AnimNode
     AnimLayerData layer;
     compile::IkLock ikLock; // its `name` is the IK chain
     AnimIkRule ikRule;
+    std::string text; // Key Values: the block contents, kept verbatim
 };
 
 // One declared pose parameter (`$poseparameter`). The order is the index the compiled model gives it.

@@ -2748,6 +2748,285 @@ void WriteSequences(Qc& q, const Mdl& m) {
     }
 }
 
+// IkRules as data: the same rules and frames, with the IK_WORLD and IK_UNLATCH
+// rules the script has no spelling for named "world" and "unlatch".
+nlohmann::json IkRuleRecords(const Mdl& m, const fm::mstudioanimdesc_t& a) {
+    nlohmann::json out = nlohmann::json::array();
+    const fm::mstudioikrule_t* rules = m.At<fm::mstudioikrule_t>(&a, a.ikruleindex, a.numikrules);
+    if (!rules)
+        rules = m.BlockIkRules(a);
+    if (!rules)
+        return out;
+    const std::vector<std::string> chains = IkChainNames(m);
+    const std::vector<std::string> boneNames = BoneNames(m);
+    const float lastframe = static_cast<float>(a.numframes - 1);
+    auto pick = [](const std::vector<std::string>& v, int i) {
+        return (i >= 0 && static_cast<size_t>(i) < v.size()) ? v[i] : std::string();
+    };
+    for (int k = 0; k < a.numikrules; ++k) {
+        const fm::mstudioikrule_t& r = rules[k];
+        nlohmann::json rule;
+        rule["chain"] = pick(chains, r.chain);
+        rule["bone"] = "";
+        rule["attachment"] = "";
+        switch (r.type) {
+            case fm::IK_SELF: rule["type"] = "touch"; rule["bone"] = pick(boneNames, r.bone); break;
+            case fm::IK_GROUND: rule["type"] = "footstep"; break;
+            case fm::IK_RELEASE: rule["type"] = "release"; break;
+            case fm::IK_ATTACHMENT:
+                rule["type"] = "attachment";
+                rule["attachment"] = std::string(m.Str(&r, r.szattachmentindex));
+                break;
+            case fm::IK_UNLATCH: rule["type"] = "unlatch"; break;
+            case fm::IK_WORLD: rule["type"] = "world"; break;
+            default: rule["type"] = std::to_string(r.type); break;
+        }
+        rule["height"] = r.height;
+        rule["radius"] = r.radius;
+        rule["floor"] = r.floor;
+        rule["contact"] = r.contact >= 0.0f ? static_cast<int>(std::lround(r.contact * lastframe)) : -1;
+        rule["range"] = {std::lround(r.start * lastframe), std::lround(r.peak * lastframe),
+                         std::lround(r.tail * lastframe), std::lround(r.end * lastframe)};
+        out.push_back(std::move(rule));
+    }
+    return out;
+}
+
+// The animation side as -api records, for front ends that rebuild it as nodes:
+// the values WriteAnimations, WriteSequences, WriteWeightLists and WritePoseParams
+// spell, plus the clip file each animation went to. Call after WriteAnimationFiles.
+void RecordAnimationData(const Mdl& m, const std::string& dir) {
+    if (!pulse::api::Active())
+        return;
+    const fm::studiohdr_t& h = *m.hdr;
+    auto pick = [](const std::vector<std::string>& v, int i) {
+        return (i >= 0 && static_cast<size_t>(i) < v.size()) ? v[i] : std::string();
+    };
+    const std::string animDir = dir + "/anims";
+    auto clipFile = [&](const std::string& name) {
+        const std::string path = animDir + "/" + name + AnimExt();
+        std::error_code ec;
+        return std::filesystem::is_regular_file(path, ec) ? AbsolutePath(path) : std::string();
+    };
+
+    const fm::mstudioposeparamdesc_t* pp = m.At<fm::mstudioposeparamdesc_t>(
+        m.buf.data(), h.localposeparamindex, h.numlocalposeparameters);
+    for (int i = 0; pp && i < h.numlocalposeparameters; ++i) {
+        nlohmann::json r;
+        r["name"] = std::string(m.Str(&pp[i], pp[i].sznameindex));
+        r["start"] = pp[i].start;
+        r["end"] = pp[i].end;
+        r["loop"] = (pp[i].flags & fm::STUDIO_LOOPING) ? pp[i].loop : 0.0f;
+        pulse::api::Record("poseparameter", r.dump());
+    }
+
+    // Entries for a named list's resolver (roots 0, children inherit), so a list
+    // the script writes as $defaultweightlist reads back the same as a named one.
+    const WeightLists weights = GatherWeightLists(m);
+    const fm::mstudiobone_t* bones = m.At<fm::mstudiobone_t>(m.buf.data(), h.boneindex, h.numbones);
+    const std::vector<std::string> boneNames = BoneNames(m);
+    for (const auto& l : weights.lists) {
+        nlohmann::json r;
+        r["name"] = l.first;
+        r["default"] = weights.DefaultApplies();
+        r["entries"] = nlohmann::json::array();
+        for (int b = 0; bones && b < h.numbones; ++b) {
+            const int32_t p = bones[b].parent;
+            const float pred = (p >= 0 && p < b) ? l.second[p] : 0.0f;
+            if (l.second[b] != pred || l.second[b] == 0.0f)
+                r["entries"].push_back({{"bone", boneNames[b]}, {"weight", l.second[b]}});
+        }
+        pulse::api::Record("weightlist", r.dump());
+    }
+
+    const fm::mstudioanimdesc_t* anims =
+        m.At<fm::mstudioanimdesc_t>(m.buf.data(), h.localanimindex, h.numlocalanim);
+    const std::vector<AnimRef> refs = anims ? AnimRefs(m) : std::vector<AnimRef>{};
+    const int base = anims ? SubtractBase(m, refs) : -1;
+    if (anims && NeedsBindPoseAnim(m, base)) {
+        const std::string name = BindPoseName(refs);
+        pulse::api::Record("bindpose", nlohmann::json{{"name", name}, {"file", clipFile(name)}}.dump());
+    }
+    for (int i = 0; anims && i < h.numlocalanim; ++i) {
+        const fm::mstudioanimdesc_t& a = anims[i];
+        nlohmann::json r;
+        r["index"] = i;
+        r["name"] = refs[i].name;
+        r["implied"] = refs[i].implied;
+        r["declared"] = (a.flags & fm::STUDIO_OVERRIDE) != 0;
+        if (a.flags & fm::STUDIO_OVERRIDE) {
+            pulse::api::Record("animation", r.dump());
+            continue;
+        }
+        r["file"] = clipFile(refs[i].name);
+        r["frames"] = a.numframes;
+        r["fps"] = a.fps;
+        r["loop"] = (a.flags & fm::STUDIO_LOOPING) != 0;
+        r["noforceloop"] = (a.flags & fm::STUDIO_NOFORCELOOP) != 0;
+        r["snap"] = (a.flags & fm::STUDIO_SNAP) != 0;
+        r["post"] = (a.flags & fm::STUDIO_POST) != 0;
+        r["subtract"] = (a.flags & fm::STUDIO_DELTA) ? SubtractNameFor(refs, base, i) : std::string();
+        r["walkframes"] = nlohmann::json::array();
+        const fm::mstudiomovement_t* mv = m.At<fm::mstudiomovement_t>(&a, a.movementindex, a.nummovements);
+        for (int k = 0; mv && k < a.nummovements; ++k) {
+            int32_t controls = 0;
+            for (const auto& c : kMotionControls)
+                controls |= mv[k].motionflags & c.bit;
+            if (controls)
+                r["walkframes"].push_back({{"end", mv[k].endframe}, {"motion", controls}});
+        }
+        r["noanimblock"] = false;
+        r["nostallframes"] = 0;
+        if (h.numanimblocks > 1) {
+            const BlockUse u = AnimBlockUse(m, a);
+            r["noanimblock"] = !u.external;
+            if (u.external && u.localSections > 0)
+                r["nostallframes"] = u.localSections * a.sectionframes;
+        }
+        r["ikrules"] = IkRuleRecords(m, a);
+        pulse::api::Record("animation", r.dump());
+    }
+
+    const fm::mstudioseqdesc_t* seqs =
+        m.At<fm::mstudioseqdesc_t>(m.buf.data(), h.localseqindex, h.numlocalseq);
+    const std::vector<std::string> poses = PoseParamNames(m);
+    const std::vector<std::string> nodes = NodeNames(m);
+    const std::vector<std::string> chains = IkChainNames(m);
+    const std::vector<std::string> labels = SequenceLabels(m);
+    for (int i = 0; seqs && i < h.numlocalseq; ++i) {
+        const fm::mstudioseqdesc_t& s = seqs[i];
+        nlohmann::json r;
+        r["index"] = i;
+        r["name"] = labels[i];
+        r["declared"] = (s.flags & fm::STUDIO_OVERRIDE) != 0;
+        if (s.flags & fm::STUDIO_OVERRIDE) {
+            pulse::api::Record("sequence", r.dump());
+            continue;
+        }
+
+        const int g0 = s.groupsize[0] > 0 ? s.groupsize[0] : 1;
+        const int g1 = s.groupsize[1] > 0 ? s.groupsize[1] : 1;
+        const int16_t* grid = m.At<int16_t>(&s, s.animindexindex, g0 * g1);
+        int32_t animFlags = 0;
+        r["anims"] = nlohmann::json::array();
+        for (int k = 0; grid && k < g0 * g1; ++k) {
+            const bool known = anims && grid[k] >= 0 && grid[k] < static_cast<int>(refs.size());
+            r["anims"].push_back(known ? static_cast<int>(grid[k]) : -1);
+            if (known)
+                animFlags |= anims[grid[k]].flags;
+        }
+        r["blendwidth"] = g0 * g1 > 1 ? g0 : 0;
+        const int anim0 = (grid && g0 * g1 > 0) ? grid[0] : -1;
+        const float lastframe = (anims && anim0 >= 0 && anim0 < h.numlocalanim)
+                                    ? static_cast<float>(anims[anim0].numframes - 1)
+                                    : 0.0f;
+
+        // the same flag split WriteSequences makes
+        r["activity"] = std::string(m.Str(&s, s.szactivitynameindex));
+        r["actweight"] = s.actweight;
+        const int32_t f = s.flags & ~animFlags;
+        r["snap"] = (f & fm::STUDIO_SNAP) != 0;
+        r["autoplay"] = (f & fm::STUDIO_AUTOPLAY) != 0;
+        r["hidden"] = (f & fm::STUDIO_HIDDEN) != 0;
+        r["realtime"] = (f & fm::STUDIO_REALTIME) != 0;
+        r["worldrelative"] = (f & fm::STUDIO_WORLD_AND_RELATIVE) != 0;
+        r["worldspace"] = !(f & fm::STUDIO_WORLD_AND_RELATIVE) && (f & fm::STUDIO_WORLD);
+        r["delta"] = (s.flags & fm::STUDIO_DELTA) && (s.flags & fm::STUDIO_POST);
+        r["predelta"] = (s.flags & fm::STUDIO_DELTA) && !(s.flags & fm::STUDIO_POST);
+        r["post"] = !(s.flags & fm::STUDIO_DELTA) && (f & fm::STUDIO_POST) &&
+                    !(f & (fm::STUDIO_WORLD | fm::STUDIO_WORLD_AND_RELATIVE));
+        r["rootdriver"] = (f & fm::STUDIO_ROOTXFORM) ? pick(boneNames, s.rootDriverIndex) : std::string();
+        r["posecycle"] = (s.flags & fm::STUDIO_CYCLEPOSE) ? pick(poses, s.cycleposeindex) : std::string();
+        r["fadein"] = s.fadeintime;
+        r["fadeout"] = s.fadeouttime;
+
+        r["blends"] = nlohmann::json::array();
+        for (int p = 0; p < 2; ++p)
+            if (s.paramindex[p] >= 0)
+                r["blends"].push_back({{"name", pick(poses, s.paramindex[p])},
+                                       {"start", s.paramstart[p]},
+                                       {"end", s.paramend[p]}});
+
+        r["layers"] = nlohmann::json::array();
+        const fm::mstudioautolayer_t* al = m.At<fm::mstudioautolayer_t>(&s, s.autolayerindex, s.numautolayers);
+        for (int k = 0; al && k < s.numautolayers; ++k) {
+            nlohmann::json layer;
+            layer["sequence"] = pick(labels, al[k].iSequence);
+            layer["local"] = (al[k].flags & fm::STUDIO_AL_LOCAL) != 0;
+            layer["xfade"] = (al[k].flags & fm::STUDIO_AL_XFADE) != 0;
+            layer["spline"] = (al[k].flags & fm::STUDIO_AL_SPLINE) != 0;
+            layer["noblend"] = (al[k].flags & fm::STUDIO_AL_NOBLEND) != 0;
+            layer["pose"] = (al[k].flags & fm::STUDIO_AL_POSE) ? pick(poses, al[k].iPose) : std::string();
+            const bool ramp = al[k].start || al[k].peak || al[k].tail || al[k].end;
+            layer["add"] = !ramp && (al[k].flags & ~fm::STUDIO_AL_LOCAL) == 0;
+            const float sc = (al[k].flags & fm::STUDIO_AL_POSE) ? 1.0f : lastframe;
+            layer["range"] = {al[k].start * sc, al[k].peak * sc, al[k].tail * sc, al[k].end * sc};
+            r["layers"].push_back(std::move(layer));
+        }
+
+        r["iklocks"] = nlohmann::json::array();
+        const fm::mstudioiklock_t* locks = m.At<fm::mstudioiklock_t>(&s, s.iklockindex, s.numiklocks);
+        for (int k = 0; locks && k < s.numiklocks; ++k)
+            r["iklocks"].push_back({{"chain", pick(chains, locks[k].chain)},
+                                    {"pos", locks[k].flPosWeight},
+                                    {"local", locks[k].flLocalQWeight}});
+
+        r["events"] = nlohmann::json::array();
+        const fm::mstudioevent_t* ev = m.At<fm::mstudioevent_t>(&s, s.eventindex, s.numevents);
+        for (int k = 0; ev && k < s.numevents; ++k) {
+            const std::string id = (ev[k].type & fm::NEW_EVENT_STYLE)
+                                       ? std::string(m.Str(&ev[k], ev[k].szeventindex))
+                                       : std::to_string(ev[k].event);
+            const std::string options(ev[k].options, strnlen(ev[k].options, sizeof ev[k].options));
+            r["events"].push_back({{"name", id},
+                                   {"frame", std::lround(ev[k].cycle * lastframe)},
+                                   {"options", options}});
+        }
+
+        r["animtags"] = nlohmann::json::array();
+        const fm::mstudioanimtag_t* tag = m.At<fm::mstudioanimtag_t>(&s, s.animtagindex, s.numanimtags);
+        for (int k = 0; tag && k < s.numanimtags; ++k)
+            r["animtags"].push_back({{"name", std::string(m.Str(&tag[k], tag[k].sztagindex))},
+                                     {"cycle", tag[k].cycle}});
+
+        r["modifiers"] = nlohmann::json::array();
+        const fm::mstudioactivitymodifier_t* am =
+            m.At<fm::mstudioactivitymodifier_t>(&s, s.activitymodifierindex, s.numactivitymodifiers);
+        for (int k = 0; am && k < s.numactivitymodifiers; ++k)
+            r["modifiers"].push_back(std::string(m.Str(&am[k], am[k].sznameindex)));
+
+        std::string keyvalues;
+        if (s.keyvaluesize > 0)
+            if (const char* kv = m.At<char>(&s, s.keyvalueindex, s.keyvaluesize))
+                keyvalues.assign(kv, strnlen(kv, s.keyvaluesize));
+        r["keyvalues"] = keyvalues;
+
+        r["entrynode"] = s.localentrynode ? pick(nodes, s.localentrynode - 1) : std::string();
+        r["exitnode"] = s.localexitnode ? pick(nodes, s.localexitnode - 1) : std::string();
+        r["reversible"] = s.localentrynode != s.localexitnode && (s.nodeflags & 1);
+
+        std::string list;
+        const float* w = m.At<float>(&s, s.weightlistindex, h.numbones);
+        if (w && !weights.DefaultApplies())
+            list = weights.NameFor(std::vector<float>(w, w + h.numbones));
+        r["weightlist"] = list;
+        pulse::api::Record("sequence", r.dump());
+    }
+
+    // below models/, as WriteIncludeModels spells it
+    const fm::mstudiomodelgroup_t* g =
+        m.At<fm::mstudiomodelgroup_t>(m.buf.data(), h.includemodelindex, h.numincludemodels);
+    for (int i = 0; g && i < h.numincludemodels; ++i) {
+        std::string n = m.Str(&g[i], g[i].sznameindex);
+        std::string lower = n.substr(0, 7);
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (lower == "models/")
+            n.erase(0, 7);
+        pulse::api::Record("includemodel", nlohmann::json{{"path", n}}.dump());
+    }
+}
+
 void WriteHitboxes(Qc& q, const Mdl& m) {
     const fm::studiohdr_t& h = *m.hdr;
     const fm::mstudiohitboxset_t* sets =
@@ -3074,6 +3353,7 @@ int DecompileOne(const std::string& in, const std::string& root, const char* out
     if (!g_noanim)
         STAGE(WriteAnimationFiles, m, in, dir);
     const auto tAnim1 = Clock::now();
+    STAGE(RecordAnimationData, m, dir);
 
     if (g_declareseq)
         STAGE(WriteDeclareSequenceFile, m, dir);
@@ -3195,7 +3475,7 @@ static int RunApi(char* program) {
     pulse::api::Begin("mdldecompiler");
     const nlohmann::json request = pulse::api::ReadRequest();
     const std::string method = request.at("method").get<std::string>();
-    pulse::api::Record("capability", "{\"api\":2,\"decompile\":1,\"outputs\":1}");
+    pulse::api::Record("capability", "{\"api\":2,\"decompile\":1,\"outputs\":1,\"animation\":1}");
 
     if (method == "capabilities") {
         pulse::api::CheckMembers(request, {});
