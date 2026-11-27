@@ -27,7 +27,7 @@ namespace pulse::mdlasm {
 
 namespace limits = pulse::limits;
 
-inline constexpr int kFormatVersion = 4;
+inline constexpr int kFormatVersion = 5;
 
 using Uid = std::uint64_t;
 
@@ -164,10 +164,27 @@ struct MaterialRule
     bool complete() const { return !from.empty() && !to.empty(); }
 };
 
+// Material Markup nodes; a disabled node is kept in the file but not compiled.
+struct MaterialPath
+{
+    Uid uid = 0;
+    bool enabled = true;
+    std::string path;
+};
+
+struct MaterialRuleNode
+{
+    Uid uid = 0;
+    bool enabled = true;
+    std::string from, to;
+
+    bool active() const { return enabled && !from.empty() && !to.empty(); }
+};
+
 struct MaterialMarkup
 {
-    std::vector<std::string> directories;
-    std::vector<MaterialRule> renames, collapses;
+    std::vector<MaterialPath> directories;
+    std::vector<MaterialRuleNode> renames, collapses;
 };
 
 struct BoneDefinition

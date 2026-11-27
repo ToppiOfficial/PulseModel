@@ -13,7 +13,7 @@ namespace pulse::mdlasm::core {
 namespace {
 
 constexpr std::uint64_t kHeaderBytes = 32, kEntryBytes = 40;
-constexpr std::uint32_t kSupportedCodec = 1, kContainerVersion = 1, kNewestDocument = 4;
+constexpr std::uint32_t kSupportedCodec = 1, kContainerVersion = 1, kNewestDocument = 5;
 constexpr std::array<char, 8> kSignature{'M', 'D', 'L', 'A', 'S', 'M', '\0', '\0'};
 // The most one chunk may declare; an embedded source is a single chunk.
 constexpr std::uint64_t kMaxChunkBytes = std::uint64_t(2) << 30;

@@ -170,8 +170,8 @@ bool RenderDefinition(Load& l) {
 
 // Before any source loads: a collapse is resolved as faces load.
 bool MaterialCollapses(Load& l) {
-    for (const md::MaterialRule& rule : l.d.materials.collapses) {
-        if (!rule.complete()) continue;
+    for (const md::MaterialRuleNode& rule : l.d.materials.collapses) {
+        if (!rule.active()) continue;
 
         const int line = l.Node("Material Markup: collapse " + Quoted(rule.from));
         if (!ApplyCollapseMaterial(l.c, line, rule.from, rule.to))
@@ -181,15 +181,15 @@ bool MaterialCollapses(Load& l) {
 }
 
 bool MaterialDirectories(Load& l) {
-    for (const std::string& directory : l.d.materials.directories)
-        l.c.in.cdmaterials.push_back(directory);
+    for (const md::MaterialPath& directory : l.d.materials.directories)
+        if (directory.enabled) l.c.in.cdmaterials.push_back(directory.path);
     return true;
 }
 
 // After every source has loaded: a rename rewrites a loaded texture.
 bool MaterialRenames(Load& l) {
-    for (const md::MaterialRule& rule : l.d.materials.renames) {
-        if (!rule.complete()) continue;
+    for (const md::MaterialRuleNode& rule : l.d.materials.renames) {
+        if (!rule.active()) continue;
 
         const int line = l.Node("Material Markup: rename " + Quoted(rule.from));
         if (!ApplyRenameMaterial(l.c, line, rule.from, rule.to))

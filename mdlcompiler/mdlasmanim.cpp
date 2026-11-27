@@ -110,6 +110,15 @@ std::vector<Uid> animEntries(const Document& document, const AnimNode& node, Ani
 }
 
 
+// The Animation Out nodes in compile order, which is their order in the document.
+std::vector<Uid> animOuts(const Document& document)
+{
+    std::vector<Uid> outs;
+    for (const auto& node : document.animNodes)
+        if (node.type == AnimNodeType::Out) outs.push_back(node.uid);
+    return outs;
+}
+
 } // namespace
 
 bool animCommandHasReference(const AnimCommand& command)
@@ -158,27 +167,7 @@ public:
     {
         declareParameters();
 
-        const AnimNode* out = nullptr;
-        for (const auto& node : document_.animNodes)
-            if (node.type == AnimNodeType::Out) out = &node;
-        if (!out) return std::move(script_);
-
-        std::vector<const AnimLink*> listed;
-        for (const auto& link : document_.animLinks)
-            if (link.to == out->uid) listed.push_back(&link);
-        std::ranges::stable_sort(listed, [](const AnimLink* a, const AnimLink* b) { return a->toSocket < b->toSocket; });
-
-        for (const auto* link : listed) {
-            const auto* node = document_.findAnimNode(link->from);
-            if (!node || node->muted) continue;
-
-            switch (node->type) {
-            case AnimNodeType::IncludeModel: script_.includeModels.push_back({node->name, node->uid}); break;
-            case AnimNodeType::DeclareSequence: declared(*node); break;
-            case AnimNodeType::Animation: namedAnim(*node); break;
-            default: sequenceOf(*node); break;
-            }
-        }
+        for (const Uid out : animOuts(document_)) listOut(out);
 
         // Layers name other sequences; those are written after the listed ones.
         while (!pending_.empty()) {
@@ -191,6 +180,37 @@ public:
 
 private:
     void problem(Uid node, std::string message) { script_.problems.push_back({node, std::move(message)}); }
+
+    void listOut(Uid out)
+    {
+        std::vector<const AnimLink*> listed;
+        for (const auto& link : document_.animLinks)
+            if (link.to == out) listed.push_back(&link);
+        std::ranges::stable_sort(listed, [](const AnimLink* a, const AnimLink* b) { return a->toSocket < b->toSocket; });
+
+        for (const auto* link : listed) {
+            const auto* node = document_.findAnimNode(link->from);
+            if (!node || node->muted) continue;
+
+            switch (node->type) {
+            case AnimNodeType::IncludeModel: include(*node); break;
+            case AnimNodeType::DeclareSequence: declared(*node); break;
+            case AnimNodeType::Animation: namedAnim(*node); break;
+            default: sequenceOf(*node); break;
+            }
+        }
+    }
+
+    // One Include Model node linked to several Outs is included once.
+    void include(const AnimNode& node)
+    {
+        const bool listed = std::ranges::any_of(script_.includeModels, [&](const AnimScriptInclude& include) { return include.node == node.uid; });
+        if (listed) {
+            problem(node.uid, "The model is included more than once.");
+            return;
+        }
+        script_.includeModels.push_back({node.name, node.uid});
+    }
 
     int weightList(const AnimNode& node)
     {

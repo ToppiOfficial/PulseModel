@@ -1288,10 +1288,18 @@ void readSingle(core::BinaryReader& in, Parse&& parse)
 
 void readMaterialRecord(core::BinaryReader& in, MaterialMarkup& materials)
 {
-    switch (readEnum<MaterialRecord>(in, std::uint32_t(MaterialRecord::Collapse))) {
-    case MaterialRecord::Directory: materials.directories.push_back(in.text()); break;
-    case MaterialRecord::Rename: materials.renames.push_back({in.text(), in.text()}); break;
-    case MaterialRecord::Collapse: materials.collapses.push_back({in.text(), in.text()}); break;
+    const auto type = readEnum<MaterialRecord>(in, std::uint32_t(MaterialRecord::Collapse));
+    MaterialRuleNode node;
+    node.from = in.text();
+    if (type != MaterialRecord::Directory) node.to = in.text();
+    node.uid = in.read<Uid>();
+    node.enabled = in.read<bool>();
+    if (!node.uid) throw std::runtime_error("Invalid material markup id.");
+
+    switch (type) {
+    case MaterialRecord::Directory: materials.directories.push_back({node.uid, node.enabled, std::move(node.from)}); break;
+    case MaterialRecord::Rename: materials.renames.push_back(std::move(node)); break;
+    case MaterialRecord::Collapse: materials.collapses.push_back(std::move(node)); break;
     }
 }
 
@@ -1355,7 +1363,7 @@ Document readDocument(core::ChunkReader& reader)
     std::set<Uid> hitboxIds;
     const std::uint32_t version = reader.documentVersion();
 
-    if (version < 4)
+    if (version < 5)
         throw std::runtime_error("This model assembly uses an older format. Open and save it in PulseStudio.");
 
     for (const auto& chunk : reader.chunks()) {
